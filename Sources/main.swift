@@ -39,7 +39,7 @@ struct SavedSession: Codable {
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
-    let entry: Entry
+    @Published var entry: Entry
     @Published var title: String
     @Published var messages: [Message]
     @Published var draft: String
@@ -295,6 +295,30 @@ final class Store: ObservableObject {
         }
         return true
     }
+    func deleteSession(_ s: Session) {
+        let deleted = folder.appendingPathComponent("Deleted Sessions")
+        do {
+            try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(s.saved)
+            try data.write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
+        } catch {
+            let alert = NSAlert(); alert.messageText = "Could not delete conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
+        }
+        stop(s)
+        AppDelegate.shared?.closeSessionWindow(s)
+        sessions.removeAll { $0.id == s.id }; save()
+    }
+    func restoreDeleted() -> Session? {
+        let dir = folder.appendingPathComponent("Deleted Sessions")
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        for file in files.sorted(by: { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }) {
+            guard let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(SavedSession.self, from: data), !sessions.contains(where: { $0.id == saved.id }) else { continue }
+            let s = Session(saved); sessions.append(s)
+            if !entries.contains(where: { $0.id == s.entry.id }) { entries.append(s.entry) }
+            save(); return s
+        }
+        return nil
+    }
     func updateExplicitStatus(_ s: Session) {
         func option(_ names: String) -> String? {
             guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)(?:" + names + ")(?:=|\\s+)([^\\s]+)") else { return nil }
@@ -485,7 +509,7 @@ final class LineNumberRuler: NSRulerView {
     override func draw(_ dirtyRect: NSRect) { drawHashMarksAndLabels(in: dirtyRect) }
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let text, let layout = text.layoutManager, let container = text.textContainer else { return }
-        NSColor(calibratedWhite: 0.11, alpha: 1).setFill(); bounds.fill()
+        NSColor.controlBackgroundColor.setFill(); bounds.fill()
         NSColor.gray.withAlphaComponent(0.25).setStroke()
         let edge = NSBezierPath(); edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY)); edge.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY)); edge.lineWidth = 0.5; edge.stroke()
         layout.ensureLayout(for: container)
@@ -512,7 +536,47 @@ final class LineNumberRuler: NSRulerView {
     }
 }
 
+final class InputClipView: NSClipView {
+    override func mouseDown(with event: NSEvent) {
+        if let text = documentView as? ConversationTextView { text.focusInput() }
+        else { super.mouseDown(with: event) }
+    }
+}
+final class ConversationScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        guard let text = documentView as? ConversationTextView else { return }
+        let height = contentView.bounds.height
+        if text.minSize.height != height { text.minSize.height = height }
+        if text.frame.height < height { text.setFrameSize(NSSize(width: text.frame.width, height: height)) }
+    }
+}
 final class ConversationTextView: NSTextView {
+    func focusInput() {
+        window?.makeFirstResponder(self)
+        setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
+        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.systemBlue]
+        insertionPointColor = .systemBlue
+        scrollRangeToVisible(selectedRange())
+    }
+    func isInputWhitespace(_ point: NSPoint) -> Bool {
+        guard let layout = layoutManager, let container = textContainer else { return true }
+        layout.ensureLayout(for: container)
+        if string.isEmpty { return true }
+        let extra = layout.extraLineFragmentRect
+        let bottom = extra.height > 0 ? extra.minY : layout.usedRect(for: container).maxY
+        return point.y >= bottom + textContainerOrigin.y
+    }
+    override func mouseDown(with event: NSEvent) {
+        if isInputWhitespace(convert(event.locationInWindow, from: nil)) { focusInput(); return }
+        super.mouseDown(with: event)
+    }
+    override func insertText(_ value: Any, replacementRange: NSRange) {
+        if selectedRange().location < inputStart || (replacementRange.location != NSNotFound && replacementRange.location < inputStart) {
+            focusInput(); super.insertText(value, replacementRange: selectedRange()); return
+        }
+        super.insertText(value, replacementRange: replacementRange)
+    }
     var userBlocks: [NSRange] = []
     func refreshDecorations() { needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
@@ -567,9 +631,10 @@ struct ScrollingConversation: NSViewRepresentable {
     var lineNumbers: Bool = true
     func makeCoordinator() -> Coordinator { Coordinator(session) }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
+        let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
+        scroll.contentView = InputClipView()
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder; scroll.backgroundColor = NSColor(calibratedWhite: 0.09, alpha: 1)
+        scroll.borderType = .noBorder; scroll.backgroundColor = NSColor.textBackgroundColor
         let text = ConversationTextView(frame: scroll.contentView.bounds)
         text.minSize = NSSize(width: 0, height: 600)
         text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -580,7 +645,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.importsGraphics = false; text.allowsUndo = true
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.textContainerInset = NSSize(width: 12, height: 12)
-        text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor(calibratedWhite: 0.09, alpha: 1)
+        text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
         text.setAccessibilityLabel("Conversation and message input. Return sends. Command Return inserts a new line.")
         text.submit = {
@@ -648,7 +713,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let follow = firstRender || (scroll.map { $0.contentView.bounds.maxY >= text.bounds.height - 70 } ?? true)
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
-            let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.white, .paragraphStyle: paragraph]
+            let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
             let document = NSMutableAttributedString(string: "")
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
@@ -745,7 +810,13 @@ struct SidebarSession: View {
     var selected: Bool
     var action: () -> Void
     var body: some View {
-        Button(action: action) { HStack(spacing: 8) { Circle().fill(session.busy ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6); Text(session.title).lineLimit(1); Spacer() }.padding(.vertical, 3).padding(.horizontal, 6).background(selected ? Color.accentColor.opacity(0.15) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 7)) }.buttonStyle(.plain)
+        Button(action: action) { HStack(spacing: 8) { Circle().fill(session.busy ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6); Text(session.title).lineLimit(1); Spacer() }.padding(.vertical, 3).padding(.horizontal, 6).background(selected ? Color.accentColor.opacity(0.15) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 7)) }.buttonStyle(.plain).contextMenu {
+            Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
+            Button("Show Window", action: action)
+            Button("Close Window") { AppDelegate.shared.closeSessionWindow(session) }
+            Divider()
+            Button("Delete Conversation", role: .destructive) { Store.shared.deleteSession(session) }
+        }
     }
 }
 struct RootView: View {
@@ -758,7 +829,11 @@ struct RootView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(store.entries) { entry in
                             VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 6) { Text(entry.name).fontWeight(store.sessions.contains { $0.entry.id == entry.id } ? .bold : .regular); Text(entry.directory).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(entry.directory); Spacer(); Button { AppDelegate.shared.newSession(entry, state: state) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New session") }
+                                HStack(spacing: 6) { Text(entry.name).fontWeight(store.sessions.contains { $0.entry.id == entry.id } ? .bold : .regular); Text(entry.directory).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(entry.directory); Spacer(); Button { AppDelegate.shared.newSession(entry, state: state) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New session") }.contextMenu {
+                                    Button("Configure…") { AppDelegate.shared.configureEntry(entry) }
+                                    Button("New Session") { AppDelegate.shared.newSession(entry, state: state) }
+                                    Button("Delete Entry", role: .destructive) { store.entries.removeAll { $0.id == entry.id }; store.save() }.disabled(store.sessions.contains { $0.entry.id == entry.id })
+                                }
                                 ForEach(store.sessions.filter { $0.entry.id == entry.id }) { session in
                                     SidebarSession(session: session, selected: state.selected == session.id) { AppDelegate.shared.select(session, state: state) }
                                 }
@@ -801,6 +876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var windows: [(NSWindow, WindowState)] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        NSApp.appearance = nil
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
     }
     func buildMenu() {
@@ -809,6 +885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ","); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
+        f.addItem(withTitle: "Restore Deleted Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
         for (name, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
@@ -823,6 +900,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Converse"; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow"); windows.append((window, state)); window.makeKeyAndOrderFront(nil)
+    }
+    func closeSessionWindow(_ session: Session) {
+        for (window, state) in windows where state.selected == session.id { window.performClose(nil) }
+    }
+    @objc func restoreDeletedConversation() {
+        guard let session = Store.shared.restoreDeleted() else { return }
+        if windows.isEmpty { newWindow() }
+        if let (_, state) = windows.last { select(session, state: state) }
+    }
+    func configurationForm(title: String, values: [(String, String)], save: ([String]) -> Void) {
+        let alert = NSAlert(); alert.messageText = title
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 350, height: CGFloat(values.count * 44)))
+        var fields = [NSTextField]()
+        for (index, item) in values.enumerated() {
+            let y = CGFloat((values.count - index - 1) * 44)
+            let label = NSTextField(labelWithString: item.0); label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor; label.frame = NSRect(x: 0, y: y + 25, width: 350, height: 16)
+            let field = NSTextField(string: item.1); field.frame = NSRect(x: 0, y: y, width: 350, height: 24)
+            view.addSubview(label); view.addSubview(field); fields.append(field)
+        }
+        alert.accessoryView = view; alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = fields.first
+        if alert.runModal() == .alertFirstButtonReturn { save(fields.map { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }) }
+    }
+    func configureEntry(_ entry: Entry) {
+        configurationForm(title: "Configure " + entry.name, values: [("Name", entry.name), ("Command", entry.command), ("Working directory", entry.directory)]) { values in
+            guard values.allSatisfy({ !$0.isEmpty }), let index = Store.shared.entries.firstIndex(where: { $0.id == entry.id }) else { return }
+            Store.shared.entries[index].name = values[0]; Store.shared.entries[index].command = values[1]; Store.shared.entries[index].directory = values[2]; Store.shared.save()
+        }
+    }
+    func configureSession(_ session: Session) {
+        guard !session.busy else { return }
+        configurationForm(title: "Configure conversation", values: [("Conversation name", session.title), ("Command", session.entry.command), ("Working directory", session.entry.directory)]) { values in
+            guard values.allSatisfy({ !$0.isEmpty }) else { return }
+            session.title = values[0]; session.entry.command = values[1]; session.entry.directory = values[2]; Store.shared.save()
+        }
     }
     func newSession(_ entry: Entry, state: WindowState) { let s = Store.shared.create(entry); state.selected = s.id }
     func select(_ session: Session, state: WindowState) {
@@ -861,8 +973,21 @@ func selfTest() {
     native.setSelectedRange(NSRange(location: native.inputStart, length: 0))
     native.insertText("a long editable message", replacementRange: native.selectedRange())
     check(s.draft == "a long editable message", "Native text view accepts typing and saves draft")
+    check(native.isInputWhitespace(NSPoint(x: 20, y: 450)), "Blank space below transcript is recognized as input")
+    native.setSelectedRange(NSRange(location: 0, length: 0))
+    let blankClick = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 20, y: 450), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+    native.mouseDown(with: blankClick)
+    check(native.selectedRange().location == (native.string as NSString).length, "Clicking blank pane space places the caret at current input")
+    native.insertText(" after click", replacementRange: native.selectedRange())
+    check(s.draft.hasSuffix(" after click"), "Typing after a blank-space click edits the draft")
+    native.setSelectedRange(NSRange(location: 0, length: 0))
+    native.insertText(" via input method", replacementRange: NSRange(location: 0, length: 0))
+    check(s.draft.hasSuffix(" via input method") && native.string.hasPrefix("Visit https://example.com"), "Input-method text redirects to the draft without editing history")
+    let tall = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 950))
+    tall.documentView = native; tall.tile()
+    check(native.minSize.height == tall.contentView.bounds.height && native.frame.height >= tall.contentView.bounds.height, "Editable document fills a viewport taller than 600 points")
     check(native.typingAttributes[.foregroundColor] as? NSColor == NSColor.systemBlue, "Draft typing is blue")
-    check(native.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.white, "Submitted transcript is white")
+    check(native.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.textColor, "Submitted transcript follows system text color")
     check(!native.string.contains("YOU") && !native.string.contains("MUSE"), "Transcript has no speaker labels")
     let nativeLinkRange = (native.string as NSString).range(of: "https://example.com")
     check(nativeLinkRange.location != NSNotFound && native.textStorage?.attribute(.link, at: nativeLinkRange.location, effectiveRange: nil) != nil, "Native transcript renders clickable URLs")
@@ -992,6 +1117,11 @@ func selfTest() {
         let access = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .access(":read-only"), serverArguments: ["--provider", "echo"])
         check(access.status.access.lowercased().contains("read"), "Real Muse permission-profile setter persists access without a model turn")
     } catch { check(false, "Muse session effort setter: " + error.localizedDescription) }
+    let disposable = store.create(entry); disposable.title = "Recovery check"; disposable.draft = "keep this draft"
+    store.deleteSession(disposable)
+    check(!store.sessions.contains { $0.id == disposable.id }, "Deleting a conversation removes it from the active sidebar")
+    let restored = store.restoreDeleted()
+    check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     print("All checks passed")
 }
 if CommandLine.arguments.contains("--probe-muse-quota") {

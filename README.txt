@@ -12,7 +12,8 @@ Existing sessions keep their original settings. Changes apply to new sessions.
 
 The entire right pane is a native scrolling Mac text document.
 Type at the bottom. Return sends; Command-Return inserts a newline (Shift-Return also works).
-Draft text is blue; submitted input becomes italic white; replies are regular white on a dark background.
+Draft text is blue; submitted input becomes italic in the system text color.
+The app follows the Mac's light/dark appearance.
 No speaker labels, prompts, or extra spacing. The window follows typing.
 Subtle rules enclose each input block. The top-right line numbers checkbox
 controls a narrow gutter of logical line numbers; it defaults on and is remembered.
@@ -91,3 +92,12 @@ setters; new sessions retain choices for their first turn. Global config is unto
 reset times using its built-in usage view in an invisible, no-session-log terminal.
 No model prompt is sent. Automatic quota refresh is cached for five minutes; /usage
 and the refresh button request fresh data. Failures are explicit, not zero usage.
+
+INPUT AND SIDEBAR SHORTCUTS
+Click blank space below the transcript to focus the current input. The editable
+view fills tall windows, and normal Mac input methods work after clicking history.
+Right-click a conversation for Configure, Show Window, Close Window, or Delete
+Conversation. Configure uses a compact name/command/directory dialog. Header menus
+configure assistant entries for future conversations. Closing keeps work running;
+deleting stops it and saves a recovery snapshot. File > Restore Deleted Conversation
+restores the latest deleted transcript and draft. Attachments are retained.

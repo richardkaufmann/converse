@@ -11,12 +11,14 @@ A native Mac home for Muse, Claude Code, and Codex: the immediacy of a shell wit
 Click **+** next to an assistant to start a session. Settings (**⌘,**) configures its name, command line, working directory, and adapter. Each entry can have multiple independent conversations.
 
 - **Return** sends. **⌘Return** inserts a newline; Shift-Return also works.
-- Your draft is **blue**. Submitted input becomes *italic* in the default color, enclosed by subtle separator rules.
+- Your draft is **blue**. Submitted input becomes *italic* in the default system text color, enclosed by subtle separator rules. The app follows macOS light/dark appearance.
 - Output is plain text, with clickable links. Successful tool chatter is hidden; the assistant's answer remains visible. Tool failures remain visible, and Muse's workspace root/trust diagnostics are hidden.
 - Gaps of ten seconds or more before answer text get grey markers such as `[10 sec]` or `[10.5 minutes]`. Timing starts at Send, then follows visible answer text; hidden tool events do not reset it.
 - Paste screenshots with **⌘V**, or attach images with the paperclip. Attachments are saved as PNG files and supplied to the assistant.
 - The **line numbers** checkbox controls a narrow logical-line gutter. It defaults on and remembers your choice.
-- Input stays at the bottom; the window follows typing. Older text stays selectable and protected from edits.
+- Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
+
+Right-click a conversation in the sidebar for **Configure**, **Show Window**, **Close Window**, or **Delete Conversation**. Configure is a compact dialog for its name, command, and directory; it is disabled while work runs. Assistant headers have their own Configure and New Session actions. Closing keeps the session alive. Deleting stops active work, removes the conversation from the sidebar, and keeps a recovery snapshot; **File → Restore Deleted Conversation** restores its transcript and draft. Attachment files are retained for recovery.
 
 **File → New Window** (**⌘N**) opens another two-pane window. Selecting a session already visible in another window brings that window forward. Closing a window leaves active work running. Quit warns about active commands.
 
