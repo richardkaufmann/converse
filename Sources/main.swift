@@ -17,6 +17,12 @@ struct Message: Codable, Identifiable {
     var images: [String] = []
     var delays: [DelayMark]? = nil
 }
+struct ToolStatus: Codable {
+    var model = "not reported"
+    var effort = "CLI default"
+    var access = "CLI default"
+    var usage = "not reported"
+}
 struct SavedSession: Codable {
     var id: UUID
     var entry: Entry
@@ -26,6 +32,7 @@ struct SavedSession: Codable {
     var attachments: [String]
     var remoteID: String?
     var started: Bool
+    var toolStatus: ToolStatus? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -36,6 +43,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var attachments: [String]
     @Published var busy = false
     @Published var status = "Ready"
+    @Published var toolStatus = ToolStatus()
     var remoteID: String?
     var started: Bool
     var lastOutputAt: TimeInterval?
@@ -46,12 +54,13 @@ final class Session: ObservableObject, Identifiable {
     var textSelection: NSRange?
     init(_ saved: SavedSession) {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
+        toolStatus = saved.toolStatus ?? ToolStatus()
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(), entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession] }
 final class Store: ObservableObject {
@@ -111,7 +120,13 @@ final class Store: ObservableObject {
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         var args: [String] = []
+        updateExplicitStatus(s)
         var prompt = text
+        if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
+            let zone = TimeZone.current
+            let formatter = ISO8601DateFormatter(); formatter.timeZone = zone
+            prompt += "\n\n[Local context from Converse: time zone \(zone.identifier) (\(zone.abbreviation() ?? "local")); local time at send \(formatter.string(from: Date())). Use this time zone for dates and times unless I request another.]"
+        }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         switch s.entry.engine {
         case "muse":
@@ -135,7 +150,7 @@ final class Store: ObservableObject {
         p.currentDirectoryURL = URL(fileURLWithPath: directory)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS:" + (env["PATH"] ?? "/usr/bin:/bin")
-        env["TERM"] = "dumb"; env["NO_COLOR"] = "1"; p.environment = env
+        env["TZ"] = TimeZone.current.identifier; env["TERM"] = "dumb"; env["NO_COLOR"] = "1"; p.environment = env
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
         s.process = p; save()
         do { try p.run() } catch {
@@ -169,6 +184,38 @@ final class Store: ObservableObject {
             }
         }
     }
+    func updateExplicitStatus(_ s: Session) {
+        func option(_ names: String) -> String? {
+            guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)(?:" + names + ")(?:=|\\s+)([^\\s]+)") else { return nil }
+            let command = s.entry.command as NSString
+            guard let match = regex.firstMatch(in: s.entry.command, range: NSRange(location: 0, length: command.length)) else { return nil }
+            return command.substring(with: match.range(at: 1)).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }
+        if let model = option("--model|-m") { s.toolStatus.model = model + " (requested)" }
+        if let effort = option("--reasoning-effort|--effort") { s.toolStatus.effort = effort + " (requested)" }
+        if let access = option("--permission-profile|--approval-mode|--permission-mode|--sandbox|-s") { s.toolStatus.access = access + " (requested)" }
+    }
+    func updateReportedStatus(_ obj: [String: Any], session s: Session) {
+        let payload = obj["payload"] as? [String: Any] ?? obj
+        if let model = payload["model"] as? String { s.toolStatus.model = model }
+        if let message = obj["message"] as? [String: Any], let model = message["model"] as? String { s.toolStatus.model = model }
+        for key in ["reasoning_effort", "reasoningEffort", "effort"] {
+            if let effort = payload[key] as? String { s.toolStatus.effort = effort }
+        }
+        for key in ["permissionMode", "permission_mode", "permission_profile", "approval_mode", "sandbox"] {
+            if let access = payload[key] as? String { s.toolStatus.access = access }
+        }
+        let models = payload["models"] as? [[String: Any]] ?? []
+        if let model = models.compactMap({ $0["model"] as? String }).first { s.toolStatus.model = model }
+        let usage = payload["usage"] as? [String: Any] ?? payload
+        var input = usage["input_tokens"] as? Int
+        var output = usage["output_tokens"] as? Int
+        if !models.isEmpty {
+            input = models.reduce(0) { $0 + ($1["input_tokens"] as? Int ?? 0) }
+            output = models.reduce(0) { $0 + ($1["output_tokens"] as? Int ?? 0) }
+        }
+        if let input, let output { s.toolStatus.usage = "\(input.formatted()) in / \(output.formatted()) out" }
+    }
     static func visibleText(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("muse: workspace root:") || trimmed.hasPrefix("muse: workspace trust:") { return "" }
@@ -183,12 +230,12 @@ final class Store: ObservableObject {
         return raw
     }
     static func delayLabel(_ seconds: Double) -> String {
-        if seconds < 60 { return "[\(Int(seconds.rounded())) seconds]" }
+        if seconds < 60 { return "[\(Int(seconds.rounded())) sec]" }
         if seconds < 3600 { return String(format: "[%.1f minutes]", seconds / 60) }
         return String(format: "[%.1f hours]", seconds / 3600)
     }
     func markOutput(_ s: Session, index: Int, offset: Int, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
-        if let previous = s.lastOutputAt, now - previous > 10 {
+        if let previous = s.lastOutputAt, now - previous >= 10 {
             var marks = s.messages[index].delays ?? []
             marks.append(DelayMark(offset: offset, seconds: now - previous))
             s.messages[index].delays = marks
@@ -199,13 +246,14 @@ final class Store: ObservableObject {
         let text = Store.visibleText(raw)
         guard !text.isEmpty else { return }
         s.messages.append(Message(role: "activity", text: text))
-        markOutput(s, index: s.messages.count - 1, offset: 0)
+        // Tool activity is retained for diagnostics, but does not reset visible-answer timing.
     }
     func consume(_ line: String, session s: Session, responseID: UUID) {
         guard !line.isEmpty else { return }
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
+        updateReportedStatus(obj, session: s)
         var text: String?; var replace = false; var delta = false
         let type = obj["type"] as? String ?? ""
         if s.entry.engine == "muse" {
@@ -213,10 +261,15 @@ final class Store: ObservableObject {
             let kind = obj["payload_type"] as? String ?? ""
             if kind.hasPrefix("run.terminal") { text = payload["text"] as? String; replace = true
                 if let reason = payload["reason"] as? String { s.messages.append(Message(role: "notice", text: reason)) }
-            } else if kind.contains("text.delta") || kind.contains("text_delta") { text = payload["delta"] as? String ?? payload["text"] as? String; delta = true }
-            else if kind.contains("tool") || kind.contains("approval") || kind.contains("failed") {
+            } else if kind == "run.output.delta" || kind.contains("text.delta") || kind.contains("text_delta") { text = payload["delta"] as? String ?? payload["text"] as? String; delta = true }
+            else if kind.contains("tool"), let raw = payload["text"] as? String,
+                    let data = raw.data(using: .utf8), let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                    let code = result["exit_code"] as? Int, code != 0 {
+                s.messages.append(Message(role: "notice", text: Store.visibleText(raw)))
+            }
+            else if kind.contains("failed") || kind.contains("approval") {
                 let description = payload["reason"] as? String ?? payload["text"] as? String ?? payload["tool_name"] as? String
-                if let description { activity(description, session: s) }
+                if let description { s.messages.append(Message(role: "notice", text: description)) }
             }
         } else if s.entry.engine == "claude" {
             if let sid = obj["session_id"] as? String { s.remoteID = sid }
@@ -496,7 +549,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 document.append(NSAttributedString(attachment: attachment)); append("\n")
             }
             text.userBlocks = []
-            for message in session.messages where !message.text.isEmpty || !message.images.isEmpty {
+            for message in session.messages where message.role != "activity" && (!message.text.isEmpty || !message.images.isEmpty) {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body = NSMutableAttributedString(string: visible + "\n", attributes: base)
@@ -548,10 +601,20 @@ struct Conversation: View {
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
                 if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
                 if session.busy { ProgressView().controlSize(.small); Button("Stop") { Store.shared.stop(session) } }
-                Text(session.status).font(.caption).foregroundStyle(.secondary)
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
+            Divider()
+            HStack(spacing: 12) {
+                Text(session.status)
+                Text("Model: " + session.toolStatus.model)
+                Text("Effort: " + session.toolStatus.effort)
+                Text("Access: " + session.toolStatus.access)
+                Spacer(minLength: 0)
+                Text("Last turn: " + session.toolStatus.usage)
+            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .help("Values come from CLI events or explicit command flags. CLI default means the tool has not reported its resolved setting. Usage is token usage for the last turn, not remaining account quota. Local time zone: " + TimeZone.current.identifier)
         }.background(Color(nsColor: .textBackgroundColor))
     }
 }
@@ -708,12 +771,22 @@ func selfTest() {
     check(Store.visibleText(#"{"chunk_id":"exec-1","command":"date","output":"Monday\n","terminal_status":"completed"}"#) == "Monday", "Tool JSON unwraps to command output")
     timed.lastOutputAt = ProcessInfo.processInfo.systemUptime - 20
     store.consume(#"{"payload_type":"run.terminal.completed","payload":{"text":"First line"}}"#, session: timed, responseID: r)
-    check(timed.messages[0].delays?.count == 1 && timed.messages[0].delays?[0].offset == 0 && Store.delayLabel(timed.messages[0].delays![0].seconds) == "[20 seconds]", "First response shows delay since Return")
+    check(timed.messages[0].delays?.count == 1 && timed.messages[0].delays?[0].offset == 0 && Store.delayLabel(timed.messages[0].delays![0].seconds) == "[20 sec]", "First response shows delay since Return")
     timed.lastOutputAt = ProcessInfo.processInfo.systemUptime - 630
     store.consume(#"{"payload_type":"text.delta","payload":{"delta":" Next line"}}"#, session: timed, responseID: r)
     check(timed.messages[0].delays?.count == 2 && timed.messages[0].delays?[1].offset == 10 && Store.delayLabel(630) == "[10.5 minutes]", "Later output gaps get inline minute markers")
     store.consume(#"{"payload_type":"text.delta","payload":{"delta":" quickly"}}"#, session: timed, responseID: r)
     check(timed.messages[0].delays?.count == 2, "Short gaps produce no marker")
+    let exact = Session(entry: entry); exact.messages = [Message(role: "assistant", text: "Answer")]; exact.lastOutputAt = 100
+    store.activity("hidden tool output", session: exact)
+    check(exact.lastOutputAt == 100, "Hidden tool output does not reset response delay")
+    store.markOutput(exact, index: 0, offset: 0, now: 110)
+    check(exact.messages[0].delays?.first?.seconds == 10 && Store.delayLabel(10) == "[10 sec]", "Delay threshold includes exactly ten seconds")
+    let timedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let timedCoordinator = ScrollingConversation.Coordinator(exact); timedCoordinator.render(timedView)
+    check(timedView.string == "[10 sec] Answer\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
+    store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
+    check(exact.toolStatus.model == "test-model" && exact.toolStatus.effort == "high" && exact.toolStatus.access == "on-request" && exact.toolStatus.usage == "120 in / 30 out", "Status reflects reported model, effort, access and usage")
     let c = Session(entry: Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
     c.messages.append(Message(id: r, role: "assistant", text: ""))
     store.consume(#"{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Hello"}]}}"#, session: c, responseID: r)

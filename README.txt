@@ -64,6 +64,10 @@ Sources/main.swift contains the app, session engine, adapters, and checks.
 The current UI is macOS only. An iPad client and remote session service are future work.
 
 Output cleanup: Muse workspace root/trust diagnostics are hidden, including in saved
-conversations. Tool JSON envelopes display their output text. Gaps over ten seconds
+conversations. Successful tool activity is hidden; failures remain visible. Gaps of ten seconds or more
 before new text display a grey elapsed-time marker. Timing starts when Return sends
-a message and resets when visible output arrives. Saved markers survive restarts.
+a message and resets when visible answer text arrives, not on tool activity. Saved markers survive restarts.
+
+The bottom status line shows reported model, effort, access and last-turn token usage.
+Unreported settings are marked CLI default or not reported. This is not account quota.
+The assistant receives the Mac local time zone and send time as context.

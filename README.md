@@ -12,8 +12,8 @@ Click **+** next to an assistant to start a session. Settings (**⌘,**) configu
 
 - **Return** sends. **⌘Return** inserts a newline; Shift-Return also works.
 - Your draft is **blue**. Submitted input becomes *italic* in the default color, enclosed by subtle separator rules.
-- Output is plain text, with clickable links. Tool-result JSON envelopes are unwrapped to show their output, and Muse's workspace root/trust diagnostics are hidden.
-- Gaps longer than ten seconds before visible output get grey markers such as `[20 seconds]` or `[10.5 minutes]`.
+- Output is plain text, with clickable links. Successful tool chatter is hidden; the assistant's answer remains visible. Tool failures remain visible, and Muse's workspace root/trust diagnostics are hidden.
+- Gaps of ten seconds or more before answer text get grey markers such as `[10 sec]` or `[10.5 minutes]`. Timing starts at Send, then follows visible answer text; hidden tool events do not reset it.
 - Paste screenshots with **⌘V**, or attach images with the paperclip. Attachments are saved as PNG files and supplied to the assistant.
 - The **line numbers** checkbox controls a narrow logical-line gutter. It defaults on and remembers your choice.
 - Input stays at the bottom; the window follows typing. Older text stays selectable and protected from edits.
@@ -21,6 +21,10 @@ Click **+** next to an assistant to start a session. Settings (**⌘,**) configu
 **File → New Window** (**⌘N**) opens another two-pane window. Selecting a session already visible in another window brings that window forward. Closing a window leaves active work running. Quit warns about active commands.
 
 Conversations, drafts, and attachments survive relaunches. Bold assistant names indicate that sessions exist; green dots indicate active work.
+
+A compact bottom status line shows the current state, model, reasoning effort, access setting, and last-turn input/output token counts. Values come from structured CLI events or explicit command flags. Unreported values are labeled honestly as `not reported` or `CLI default`; token usage is not remaining account quota. Status values persist with the conversation and refresh on new turns.
+
+The Mac's local time zone and send time are supplied as context to the assistant, and the child process receives the matching `TZ`. Local time is preferred unless another time zone is requested.
 
 ## Build and run
 
