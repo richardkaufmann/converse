@@ -101,3 +101,6 @@ Conversation. Configure uses a compact name/command/directory dialog. Header men
 configure assistant entries for future conversations. Closing keeps work running;
 deleting stops it and saves a recovery snapshot. File > Restore Deleted Conversation
 restores the latest deleted transcript and draft. Attachments are retained.
+
+Delete Conversation keeps the window open and selects another conversation when
+available. Only the separate Close Window action closes the window.

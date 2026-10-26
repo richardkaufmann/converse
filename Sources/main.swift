@@ -305,8 +305,9 @@ final class Store: ObservableObject {
             let alert = NSAlert(); alert.messageText = "Could not delete conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
         }
         stop(s)
-        AppDelegate.shared?.closeSessionWindow(s)
-        sessions.removeAll { $0.id == s.id }; save()
+        sessions.removeAll { $0.id == s.id }
+        AppDelegate.shared?.sessionWasDeleted(s)
+        save()
     }
     func restoreDeleted() -> Session? {
         let dir = folder.appendingPathComponent("Deleted Sessions")
@@ -901,6 +902,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "Converse"; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow"); windows.append((window, state)); window.makeKeyAndOrderFront(nil)
     }
+    func sessionWasDeleted(_ session: Session) {
+        let remaining = Store.shared.sessions
+        let next = remaining.first(where: { $0.entry.id == session.entry.id }) ?? remaining.first
+        for (_, state) in windows where state.selected == session.id { state.selected = next?.id }
+    }
     func closeSessionWindow(_ session: Session) {
         for (window, state) in windows where state.selected == session.id { window.performClose(nil) }
     }
@@ -1117,9 +1123,16 @@ func selfTest() {
         let access = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .access(":read-only"), serverArguments: ["--provider", "echo"])
         check(access.status.access.lowercased().contains("read"), "Real Muse permission-profile setter persists access without a model turn")
     } catch { check(false, "Muse session effort setter: " + error.localizedDescription) }
+    _ = NSApplication.shared
+    let deleteDelegate = AppDelegate(); AppDelegate.shared = deleteDelegate
+    let deleteWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let deleteState = WindowState()
+    deleteDelegate.windows = [(deleteWindow, deleteState)]
     let disposable = store.create(entry); disposable.title = "Recovery check"; disposable.draft = "keep this draft"
+    deleteState.selected = disposable.id
     store.deleteSession(disposable)
     check(!store.sessions.contains { $0.id == disposable.id }, "Deleting a conversation removes it from the active sidebar")
+    check(deleteDelegate.windows.count == 1 && deleteState.selected != disposable.id && deleteState.selected != nil, "Delete Conversation keeps the window open and selects another session")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     print("All checks passed")
