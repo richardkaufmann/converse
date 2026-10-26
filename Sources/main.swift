@@ -517,7 +517,7 @@ final class LineNumberRuler: NSRulerView {
         let string = text.string as NSString
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.gray]
-        var offset = 0; var number = 1
+        var offset = 0; var number = 1; var previousY: CGFloat?
         repeat {
             let lineRect: NSRect
             if offset < string.length {
@@ -526,12 +526,14 @@ final class LineNumberRuler: NSRulerView {
             } else { lineRect = layout.extraLineFragmentRect }
             let label = NSAttributedString(string: String(number), attributes: attrs)
             let y = origin + lineRect.minY + max(0, (lineRect.height - label.size().height) / 2)
-            if y + lineRect.height >= bounds.minY && y <= bounds.maxY {
+            let newRow = previousY == nil || abs(lineRect.minY - previousY!) > 0.5
+            if newRow && y + lineRect.height >= bounds.minY && y <= bounds.maxY {
                 label.draw(at: NSPoint(x: ruleThickness - label.size().width - 9, y: y))
             }
             if offset >= string.length { break }
             let range = string.lineRange(for: NSRange(location: offset, length: 0))
-            offset = NSMaxRange(range); number += 1
+            offset = NSMaxRange(range)
+            if newRow { number += 1; previousY = lineRect.minY }
             if offset == string.length && !text.string.hasSuffix("\n") { break }
         } while offset <= string.length
     }
@@ -577,6 +579,48 @@ final class ConversationTextView: NSTextView {
             focusInput(); super.insertText(value, replacementRange: selectedRange()); return
         }
         super.insertText(value, replacementRange: replacementRange)
+    }
+    struct CopyBlock {
+        let range: NSRange
+        let role: String
+        let source: String
+        let formatted: NSAttributedString
+    }
+    var copyBlocks: [CopyBlock] = []
+    func copyBlock(_ index: Int, to pasteboard: NSPasteboard) {
+        guard copyBlocks.indices.contains(index) else { return }
+        let block = copyBlocks[index]
+        pasteboard.clearContents()
+        pasteboard.setString(block.source, forType: .string)
+        if let rtf = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+            pasteboard.setData(rtf, forType: .rtf)
+        }
+        if let html = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.html]) {
+            pasteboard.setData(html, forType: .html)
+        }
+    }
+    @objc private func copyConversationBlock(_ sender: NSMenuItem) { copyBlock(sender.tag, to: .general) }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        guard let layout = layoutManager, let container = textContainer, !copyBlocks.isEmpty else { return menu }
+        var point = convert(event.locationInWindow, from: nil)
+        point.x -= textContainerOrigin.x; point.y -= textContainerOrigin.y
+        let glyph = layout.glyphIndex(for: point, in: container)
+        let character = glyph < layout.numberOfGlyphs ? layout.characterIndexForGlyph(at: glyph) : (string as NSString).length
+        let clicked = copyBlocks.lastIndex { $0.range.location <= character } ?? 0
+        var prompt = clicked
+        while prompt > 0 && copyBlocks[prompt].role != "user" { prompt -= 1 }
+        var response = copyBlocks[clicked].role == "assistant" ? clicked : prompt + 1
+        while response < copyBlocks.count && copyBlocks[response].role != "assistant" { response += 1 }
+        var items: [NSMenuItem] = []
+        for (title, index) in [("Copy this prompt", prompt), ("Copy this response", response)] {
+            guard copyBlocks.indices.contains(index), copyBlocks[index].role == (title == "Copy this prompt" ? "user" : "assistant") else { continue }
+            let item = NSMenuItem(title: title, action: #selector(copyConversationBlock(_:)), keyEquivalent: "")
+            item.target = self; item.tag = index; items.append(item)
+        }
+        if !items.isEmpty { menu.insertItem(.separator(), at: 0) }
+        for item in items.reversed() { menu.insertItem(item, at: 0) }
+        return menu
     }
     var userBlocks: [NSRange] = []
     func refreshDecorations() { needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
@@ -674,6 +718,7 @@ struct ScrollingConversation: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         let session: Session
         var signature = ""
+        var markdownCache: [UUID: (String, NSAttributedString)] = [:]
         var rendering = false
         init(_ session: Session) { self.session = session }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
@@ -727,12 +772,19 @@ struct ScrollingConversation: NSViewRepresentable {
                 document.append(NSAttributedString(attachment: attachment)); append("\n")
             }
             text.userBlocks = []
+            text.copyBlocks = []
             for message in session.messages where message.role != "activity" && (!message.text.isEmpty || !message.images.isEmpty) {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
-                let body = NSMutableAttributedString(string: visible + "\n", attributes: base)
+                let body: NSMutableAttributedString
+                if message.role == "assistant" {
+                    if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
+                    else { body = MarkdownText.render(visible); markdownCache[message.id] = (visible, NSAttributedString(attributedString: body)) }
+                } else { body = NSMutableAttributedString(string: visible + "\n", attributes: base) }
                 for mark in (message.delays ?? []).sorted(by: { $0.offset > $1.offset }) {
-                    let at = min(max(0, mark.offset), (visible as NSString).length)
+                    let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
+                    let renderedOffset = message.role == "assistant" && sourceOffset > 0 ? MarkdownText.render((visible as NSString).substring(to: sourceOffset)).length : sourceOffset
+                    let at = min(renderedOffset, body.length)
                     body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
                 }
                 if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
@@ -746,6 +798,10 @@ struct ScrollingConversation: NSViewRepresentable {
                     body.addAttribute(.font, value: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 16), toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
                 }
                 document.append(body)
+                if message.role == "user" || message.role == "assistant" {
+                    let formatted = message.role == "assistant" ? MarkdownText.render(visible) : NSAttributedString(string: visible, attributes: body.attributes(at: 0, effectiveRange: nil))
+                    text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
+                }
                 for path in message.images { image(path) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
@@ -1070,6 +1126,30 @@ func selfTest() {
     local.messages[local.messages.count - 1].text = "A different length status reply"
     localCoordinator.render(localView)
     check(localView.selectedRange().location == (localView.string as NSString).length, "Asynchronous local replies leave the cursor at current input")
+    let markdown = MarkdownText.render("## Key decisions\n\n**Bold** and `code` with [a link](https://example.com).\n\n| Decision | Recommendation |\n| --- | --- |\n| Repo | **public** |\n| Language | Python |\n\n- First item\n\n```swift\nlet literal = \"**not bold**\"\n```\n")
+    check(!markdown.string.contains("| ---") && !markdown.string.contains("##") && markdown.string.contains("• First item"), "Markdown headings, lists and table syntax render without delimiters")
+    let boldRange = (markdown.string as NSString).range(of: "Bold")
+    let boldFont = markdown.attribute(.font, at: boldRange.location, effectiveRange: nil) as? NSFont
+    check(boldFont.map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } == true, "Markdown emphasis produces a bold font")
+    let tableRange = (markdown.string as NSString).range(of: "Recommendation")
+    let tableStyle = markdown.attribute(.paragraphStyle, at: tableRange.location, effectiveRange: nil) as? NSParagraphStyle
+    check(tableStyle?.textBlocks.first is NSTextTableBlock, "Markdown pipe tables become native Mac table cells")
+    let linkRange = (markdown.string as NSString).range(of: "a link")
+    check(markdown.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL == URL(string: "https://example.com"), "Markdown link labels keep clickable URL attributes")
+    check(markdown.string.contains("**not bold**") && !markdown.string.contains("```"), "Fenced code is literal and loses fence markers")
+    let tableSession = Session(entry: entry)
+    tableSession.messages = [Message(role: "assistant", text: "| A | B |\n| --- | --- |\n| one | two |")]
+    let tableView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let tableCoordinator = ScrollingConversation.Coordinator(tableSession)
+    tableView.delegate = tableCoordinator; tableCoordinator.render(tableView); tableView.focusInput()
+    tableView.insertText("next input", replacementRange: tableView.selectedRange())
+    let inputStyle = tableView.textStorage?.attribute(.paragraphStyle, at: tableView.inputStart, effectiveRange: nil) as? NSParagraphStyle
+    check(tableSession.draft == "next input" && inputStyle?.textBlocks.isEmpty != false, "Input after a rendered table stays outside table cells")
+    let copyBoard = NSPasteboard.withUniqueName()
+    tableView.copyBlock(0, to: copyBoard)
+    let copiedRTF = copyBoard.data(forType: .rtf).flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+    check(copyBoard.string(forType: .string)?.contains("| --- |") == true && copiedRTF?.string.contains("one") == true && copyBoard.data(forType: .html) != nil, "Whole-response copy exports original Markdown and rich RTF/HTML")
+    copyBoard.releaseGlobally()
     let c = Session(entry: Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
     c.messages.append(Message(id: r, role: "assistant", text: ""))
     store.consume(#"{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Hello"}]}}"#, session: c, responseID: r)

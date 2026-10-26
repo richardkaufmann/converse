@@ -23,7 +23,7 @@ Command-A while in the draft selects just the draft.
 Paste a screenshot with Command-V while the text window has focus, or use the paperclip.
 Images are saved as PNG files; their filenames are included in the prompt. Muse and Codex also receive native image arguments. Claude can read the attachment directory.
 Click HTTP/HTTPS links to open them in your default browser.
-Text is selectable and supports copy. Basic inline Markdown formatting is supported; this is not a full Markdown renderer.
+Text is selectable and supports copy. Assistant Markdown renders native headings, emphasis, lists, code, quotes, links and pipe tables. Right-click for Copy this prompt or Copy this response. Rich-text targets receive RTF/HTML formatting; plain-text targets receive original Markdown, without delay markers.
 The app icon is a high-top tennis shoe — Converse.
 
 Command-N / File > New Window opens another two-pane window.
