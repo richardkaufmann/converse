@@ -71,3 +71,13 @@ a message and resets when visible answer text arrives, not on tool activity. Sav
 The bottom status line shows reported model, effort, access and last-turn token usage.
 Unreported settings are marked CLI default or not reported. This is not account quota.
 The assistant receives the Mac local time zone and send time as context.
+
+MUSE STATUS QUERIES AND LOCAL COMMANDS
+Opening a Muse session queries its retained metadata with session/read and usage/read.
+No turn is submitted; no writer lease, resume, or model request is created.
+The log supplies last-turn and cumulative session tokens. Saved effort is labeled
+(config) when Muse has no retained effort override. Account quota is displayed only
+when observed by Muse, with its observation time; tokens are not account quota.
+/model and /models query model details; /usage queries usage; /status refreshes all
+metadata; /help lists commands; /stop interrupts. These run locally without a prompt.
+The refresh button queries again. Live read-only probing is Muse-specific.

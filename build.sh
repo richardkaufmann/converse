@@ -4,7 +4,7 @@ cd "${0:A:h}"
 mkdir -p Converse.app/Contents/MacOS Converse.app/Contents/Resources
 swift Sources/Icon.swift Converse.iconset
 iconutil -c icns Converse.iconset -o Converse.app/Contents/Resources/Converse.icns
-swiftc Sources/main.swift -O -o Converse.app/Contents/MacOS/Converse -framework AppKit -framework SwiftUI -framework WebKit
+swiftc Sources/main.swift Sources/MuseStatus.swift -O -o Converse.app/Contents/MacOS/Converse -framework AppKit -framework SwiftUI -framework WebKit
 cat > Converse.app/Contents/Info.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

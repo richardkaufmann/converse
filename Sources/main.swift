@@ -22,6 +22,8 @@ struct ToolStatus: Codable {
     var effort = "CLI default"
     var access = "CLI default"
     var usage = "not reported"
+    var totalUsage: String? = nil
+    var quota: String? = nil
 }
 struct SavedSession: Codable {
     var id: UUID
@@ -46,6 +48,9 @@ final class Session: ObservableObject, Identifiable {
     @Published var toolStatus = ToolStatus()
     var remoteID: String?
     var started: Bool
+    var probingStatus = false
+    var statusCallbacks: [() -> Void] = []
+    var statusDetails = ""
     var lastOutputAt: TimeInterval?
     var streamedText = false
     var process: Process?
@@ -107,6 +112,7 @@ final class Store: ObservableObject {
         } catch { s.messages.append(Message(role: "notice", text: "Could not attach image: \(error.localizedDescription)")) }
     }
     func send(_ s: Session) {
+        if handleLocalCommand(s) { return }
         guard !s.busy, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
         var isDir: ObjCBool = false
@@ -180,9 +186,59 @@ final class Store: ObservableObject {
                 if p.terminationStatus == 0 { s.started = true }
                 if let i = s.messages.firstIndex(where: { $0.id == responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
                 if p.terminationStatus != 0 { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. Authentication and permission settings use your installed CLI configuration; interactive terminal approval prompts are not supported in this version.")) }
-                self.save(); self.objectWillChange.send()
+                self.save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }; self.objectWillChange.send()
             }
         }
+    }
+    func refreshStatus(_ s: Session, completion: (() -> Void)? = nil) {
+        guard s.entry.engine == "muse" else { completion?(); return }
+        if let completion { s.statusCallbacks.append(completion) }
+        guard !s.probingStatus else { return }
+        s.probingStatus = true
+        let entry = s.entry; let id = s.id.uuidString
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
+            DispatchQueue.main.async {
+                s.probingStatus = false
+                switch result {
+                case .success(let snapshot):
+                    let previousQuota = s.toolStatus.quota
+                    s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
+                    if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, previousQuota.contains("observed ") { s.toolStatus.quota = previousQuota }
+                    if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
+                case .failure(let error):
+                    s.statusDetails = "Muse status refresh failed: " + error.localizedDescription
+                    s.toolStatus.access = "Status refresh failed"
+                    s.toolStatus.usage = "Refresh failed"
+                }
+                let callbacks = s.statusCallbacks; s.statusCallbacks = []
+                for callback in callbacks { callback() }
+            }
+        }
+    }
+    func handleLocalCommand(_ s: Session) -> Bool {
+        let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard ["/help", "/model", "/models", "/usage", "/status", "/stop"].contains(command) else { return false }
+        s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
+        if command == "/stop" { stop(s); saveSoon(); return true }
+        if command == "/help" {
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Change settings for new sessions through Settings (⌘,).")); saveSoon(); return true
+        }
+        let response = UUID()
+        s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
+        refreshStatus(s) {
+            if let i = s.messages.firstIndex(where: { $0.id == response }) {
+                if s.entry.engine != "muse" {
+                    s.messages[i].text = "Model: \(s.toolStatus.model)\nEffort: \(s.toolStatus.effort)\nAccess: \(s.toolStatus.access)\nLast turn: \(s.toolStatus.usage)\nLive read-only probing is currently available for Muse."
+                } else if s.statusDetails.hasPrefix("Muse status refresh failed:") {
+                    s.messages[i].text = s.statusDetails
+                } else if command == "/usage" {
+                    s.messages[i].text = "Last turn: \(s.toolStatus.usage)\nSession total: \(s.toolStatus.totalUsage ?? "Unavailable")\nAccount quota: \(s.toolStatus.quota ?? "Muse has no observed account quota")"
+                } else { s.messages[i].text = s.statusDetails }
+                self.saveSoon()
+            }
+        }
+        return true
     }
     func updateExplicitStatus(_ s: Session) {
         func option(_ names: String) -> String? {
@@ -197,6 +253,7 @@ final class Store: ObservableObject {
     }
     func updateReportedStatus(_ obj: [String: Any], session s: Session) {
         let payload = obj["payload"] as? [String: Any] ?? obj
+        if let quota = payload["allowance"] as? [String: Any], quota["window"] != nil { s.toolStatus.quota = MuseStatusProbe.quotaSummary(quota) }
         if let model = payload["model"] as? String { s.toolStatus.model = model }
         if let message = obj["message"] as? [String: Any], let model = message["model"] as? String { s.toolStatus.model = model }
         for key in ["reasoning_effort", "reasoningEffort", "effort"] {
@@ -579,7 +636,8 @@ struct ScrollingConversation: NSViewRepresentable {
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.insertionPointColor = .systemBlue
             text.undoManager?.removeAllActions()
-            if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
+            if session.draft.isEmpty && selection.length == 0 { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
+            else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else { text.setSelectedRange(NSRange(location: min(selection.location, document.length), length: 0)) }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.layoutManager?.ensureLayout(for: text.textContainer!)
@@ -612,10 +670,11 @@ struct Conversation: View {
                 Text("Access: " + session.toolStatus.access)
                 Spacer(minLength: 0)
                 Text("Last turn: " + session.toolStatus.usage)
+                Button { Store.shared.refreshStatus(session) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Query Muse status now")
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Values come from CLI events or explicit command flags. CLI default means the tool has not reported its resolved setting. Usage is token usage for the last turn, not remaining account quota. Local time zone: " + TimeZone.current.identifier)
-        }.background(Color(nsColor: .textBackgroundColor))
+                .help("Values come from CLI events or explicit command flags. CLI default means the tool has not reported its resolved setting. Usage is token usage for the last turn, not remaining account quota. /usage shows session totals and quota availability. Local time zone: " + TimeZone.current.identifier)
+        }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
     }
 }
 
@@ -787,6 +846,30 @@ func selfTest() {
     check(timedView.string == "[10 sec] Answer\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
     store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
     check(exact.toolStatus.model == "test-model" && exact.toolStatus.effort == "high" && exact.toolStatus.access == "on-request" && exact.toolStatus.usage == "120 in / 30 out", "Status reflects reported model, effort, access and usage")
+    let probeConfig: [String: Any] = ["model": "saved-model", "model_reasoning_efforts": ["retained-model": "max"]]
+    let probeSession: [String: Any] = ["modelId": "retained-model", "approvalMode": ["mode": "onRequest"]]
+    let probeRecords: [[String: Any]] = [
+        ["payload_type": "runtime.session.permission_profile_committed", "payload": ["source": ["display_name": "Auto-review"]]],
+        ["payload": ["outcome": ["kind": "top_level_turn_started"]]],
+        ["payload": ["event": ["kind": "model_completed", "usage": ["input_tokens": 100, "output_tokens": 10]]]],
+        ["payload": ["outcome": ["kind": "top_level_turn_started"]]],
+        ["payload": ["event": ["kind": "model_completed", "usage": ["input_tokens": 200, "output_tokens": 20]]]],
+        ["payload": ["event": ["kind": "model_completed", "usage": ["input_tokens": 300, "output_tokens": 30]]]],
+        ["payload": ["event": ["kind": "model_request_configured", "reminder_roster": ["agents": [["reasoning_effort": "low", "model": "child-model"]]]]]]
+    ]
+    let probe = MuseStatusProbe.resolve(config: probeConfig, session: probeSession, records: probeRecords, quota: nil)
+    check(probe.status.model == "retained-model" && probe.status.effort == "max (config)", "Retained model wins over saved config without confusing child effort")
+    check(probe.status.access == "Auto-review / onRequest" && probe.status.usage == "500 in / 50 out" && probe.status.totalUsage == "600 in / 60 out", "Read-only probe resolves access and sums all model calls per turn and session")
+    let quotaText = MuseStatusProbe.quotaSummary(["tier": "test", "window": ["usedPercent": 25, "windowDurationMins": 300], "weekly": ["usedPercent": 12], "observedAtMs": 0])
+    check(quotaText.contains("25%") && !quotaText.contains("{"), "Quota is readable text, not JSON")
+    let local = Session(entry: entry); local.draft = "/help"; store.send(local)
+    check(!local.busy && local.process == nil && local.messages.last?.text.contains("/usage") == true, "Local slash commands do not submit model prompts")
+    let localView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let localCoordinator = ScrollingConversation.Coordinator(local)
+    localCoordinator.render(localView)
+    local.messages[local.messages.count - 1].text = "A different length status reply"
+    localCoordinator.render(localView)
+    check(localView.selectedRange().location == (localView.string as NSString).length, "Asynchronous local replies leave the cursor at current input")
     let c = Session(entry: Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
     c.messages.append(Message(id: r, role: "assistant", text: ""))
     store.consume(#"{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Hello"}]}}"#, session: c, responseID: r)
@@ -829,7 +912,16 @@ func selfTest() {
     s.draft = "saved draft"; store.save()
     let loaded = Store()
     check(loaded.sessions.contains { $0.id == s.id && $0.draft == "saved draft" && $0.messages.count == s.messages.count }, "Transcript and draft survive reload")
+    let localProbe = Session(SavedSession(id: s.id, entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), title: "Probe", messages: [], draft: "/usage", attachments: [], remoteID: nil, started: true))
+    store.send(localProbe)
+    let probeDeadline = Date().addingTimeInterval(12)
+    while localProbe.probingStatus && Date() < probeDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    check(!localProbe.busy && !localProbe.probingStatus && localProbe.process == nil && localProbe.messages.last?.text.contains("Session total: 0 in / 0 out") == true, "Real read-only Muse session query and local /usage work without a turn")
     print("All checks passed")
+}
+if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {
+    do { print(try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"), sessionID: CommandLine.arguments[at + 1]).detail); exit(0) }
+    catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 let application = NSApplication.shared
