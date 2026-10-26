@@ -81,3 +81,13 @@ when observed by Muse, with its observation time; tokens are not account quota.
 /model and /models query model details; /usage queries usage; /status refreshes all
 metadata; /help lists commands; /stop interrupts. These run locally without a prompt.
 The refresh button queries again. Live read-only probing is Muse-specific.
+
+CLICKABLE SESSION SETTINGS AND SUBSCRIPTION QUOTA
+Click model, effort, or access in the bottom bar to choose from Muse's catalogs.
+Changes affect only this conversation and apply on subsequent turns. Active work
+finishes before the controls become available. Existing sessions use durable Muse
+setters; new sessions retain choices for their first turn. Global config is untouched.
+/usage now fetches the installed CLI's weekly and current-window percentages and
+reset times using its built-in usage view in an invisible, no-session-log terminal.
+No model prompt is sent. Automatic quota refresh is cached for five minutes; /usage
+and the refresh button request fresh data. Failures are explicit, not zero usage.

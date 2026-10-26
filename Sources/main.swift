@@ -35,6 +35,7 @@ struct SavedSession: Codable {
     var remoteID: String?
     var started: Bool
     var toolStatus: ToolStatus? = nil
+    var choices: SessionChoices? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -48,6 +49,11 @@ final class Session: ObservableObject, Identifiable {
     @Published var toolStatus = ToolStatus()
     var remoteID: String?
     var started: Bool
+    var choices = SessionChoices()
+    @Published var modelChoices: [MuseModelChoice] = []
+    @Published var accessChoices: [MuseAccessChoice] = []
+    @Published var changingSetting = false
+    var quotaRefreshedAt: Date?
     var probingStatus = false
     var statusCallbacks: [() -> Void] = []
     var statusDetails = ""
@@ -60,12 +66,13 @@ final class Session: ObservableObject, Identifiable {
     init(_ saved: SavedSession) {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
         toolStatus = saved.toolStatus ?? ToolStatus()
+        choices = saved.choices ?? SessionChoices()
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(), entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession] }
 final class Store: ObservableObject {
@@ -113,7 +120,7 @@ final class Store: ObservableObject {
     }
     func send(_ s: Session) {
         if handleLocalCommand(s) { return }
-        guard !s.busy, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
+        guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
@@ -137,6 +144,9 @@ final class Store: ObservableObject {
         switch s.entry.engine {
         case "muse":
             args = ["exec", "--json", "--session-id", s.id.uuidString]
+            if let model = s.choices.model { args += ["--model", model] }
+            if let effort = s.choices.effort { args += ["--reasoning-effort", effort] }
+            if let access = s.choices.access { args += ["--permission-profile", access] }
             for image in images { args += ["--image", image] }
         case "claude":
             args = ["--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
@@ -190,29 +200,74 @@ final class Store: ObservableObject {
             }
         }
     }
-    func refreshStatus(_ s: Session, completion: (() -> Void)? = nil) {
+    func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
         guard s.entry.engine == "muse" else { completion?(); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
         let entry = s.entry; let id = s.id.uuidString
+        let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
+            let quotaResult: Result<String, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
             DispatchQueue.main.async {
                 s.probingStatus = false
                 switch result {
                 case .success(let snapshot):
+                    s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                     let previousQuota = s.toolStatus.quota
                     s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
-                    if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, previousQuota.contains("observed ") { s.toolStatus.quota = previousQuota }
+                    if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
                 case .failure(let error):
                     s.statusDetails = "Muse status refresh failed: " + error.localizedDescription
                     s.toolStatus.access = "Status refresh failed"
                     s.toolStatus.usage = "Refresh failed"
                 }
+                if let quotaResult {
+                    s.quotaRefreshedAt = Date()
+                    switch quotaResult {
+                    case .success(let value): s.toolStatus.quota = value
+                    case .failure(let error): s.toolStatus.quota = error.localizedDescription
+                    }
+                }
+                self.applySessionChoices(s)
+                if let quota = s.toolStatus.quota, let range = s.statusDetails.range(of: "Account quota:") { s.statusDetails.replaceSubrange(range.lowerBound..., with: "Account quota: " + quota) }
+                self.saveSoon()
                 let callbacks = s.statusCallbacks; s.statusCallbacks = []
                 for callback in callbacks { callback() }
+            }
+        }
+    }
+    func applySessionChoices(_ s: Session) {
+        if let model = s.choices.model { s.toolStatus.model = model }
+        if let effort = s.choices.effort { s.toolStatus.effort = effort }
+        if let access = s.choices.access { s.toolStatus.access = s.accessChoices.first { $0.id == access }?.label ?? access }
+    }
+    func changeSetting(_ s: Session, _ change: MuseSettingChange) {
+        guard !s.busy && !s.changingSetting else { return }
+        func remember() {
+            switch change {
+            case .model(let model): s.choices.model = model.id
+            case .effort(let effort): s.choices.effort = effort
+            case .access(let access): s.choices.access = access
+            }
+            self.applySessionChoices(s); self.save()
+        }
+        if !s.started { remember(); return }
+        s.changingSetting = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try MuseStatusProbe.query(entry: s.entry, sessionID: s.id.uuidString, change: change) }
+            DispatchQueue.main.async {
+                s.changingSetting = false
+                switch result {
+                case .success(let snapshot):
+                    let quota = s.toolStatus.quota
+                    s.toolStatus = snapshot.status; s.toolStatus.quota = quota ?? snapshot.status.quota; s.modelChoices = snapshot.models; s.accessChoices = snapshot.access; s.statusDetails = snapshot.detail
+                    remember()
+                case .failure(let error):
+                    s.messages.append(Message(role: "notice", text: "Could not change session setting: " + error.localizedDescription)); self.saveSoon()
+                }
             }
         }
     }
@@ -226,7 +281,7 @@ final class Store: ObservableObject {
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
-        refreshStatus(s) {
+        refreshStatus(s, quota: command == "/usage") {
             if let i = s.messages.firstIndex(where: { $0.id == response }) {
                 if s.entry.engine != "muse" {
                     s.messages[i].text = "Model: \(s.toolStatus.model)\nEffort: \(s.toolStatus.effort)\nAccess: \(s.toolStatus.access)\nLast turn: \(s.toolStatus.usage)\nLive read-only probing is currently available for Muse."
@@ -665,13 +720,19 @@ struct Conversation: View {
             Divider()
             HStack(spacing: 12) {
                 Text(session.status)
-                Text("Model: " + session.toolStatus.model)
-                Text("Effort: " + session.toolStatus.effort)
-                Text("Access: " + session.toolStatus.access)
+                Menu(session.toolStatus.model) {
+                    ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
+                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
+                Menu(session.toolStatus.effort) {
+                    ForEach(session.modelChoices.first(where: { $0.id == session.toolStatus.model })?.efforts ?? ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"], id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
+                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
+                Menu(session.toolStatus.access) {
+                    ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
+                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
                 Spacer(minLength: 0)
                 Text("Last turn: " + session.toolStatus.usage)
-                Button { Store.shared.refreshStatus(session) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Query Muse status now")
-            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
+                Button { Store.shared.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Query Muse status now")
+            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled).disabled(session.busy || session.changingSetting)
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .help("Values come from CLI events or explicit command flags. CLI default means the tool has not reported its resolved setting. Usage is token usage for the last turn, not remaining account quota. /usage shows session totals and quota availability. Local time zone: " + TimeZone.current.identifier)
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
@@ -862,6 +923,14 @@ func selfTest() {
     check(probe.status.access == "Auto-review / onRequest" && probe.status.usage == "500 in / 50 out" && probe.status.totalUsage == "600 in / 60 out", "Read-only probe resolves access and sums all model calls per turn and session")
     let quotaText = MuseStatusProbe.quotaSummary(["tier": "test", "window": ["usedPercent": 25, "windowDurationMins": 300], "weekly": ["usedPercent": 12], "observedAtMs": 0])
     check(quotaText.contains("25%") && !quotaText.contains("{"), "Quota is readable text, not JSON")
+    let ttyQuota = MuseQuota.parse("\u{001B}[17;1H│ Weekly 2% used · Resets Nov 1 at 4:00 PM │\n│ Current 7% used · Resets at 10:42 PM │")
+    check(ttyQuota?.contains("Weekly 2% used · resets Nov 1 at 4:00 PM") == true && ttyQuota?.contains("Current 7%") == true && ttyQuota?.contains("\u{001B}") == false, "CLI quota parsing preserves weekly percent and reset time without terminal escapes")
+    check(MuseQuota.parse("Weekly: unavailable") == nil, "Unavailable quota is never presented as zero")
+    let fresh = Session(entry: entry)
+    store.changeSetting(fresh, .effort("max"))
+    check(fresh.choices.effort == "max" && fresh.toolStatus.effort == "max" && fresh.process == nil, "New-session setting is scoped and saved without starting a turn")
+    let commandID = MuseStatusProbe.commandID()
+    check(UUID(uuidString: commandID) != nil && commandID.split(separator: "-")[2].first == "7", "Session mutation IDs are UUIDv7")
     let local = Session(entry: entry); local.draft = "/help"; store.send(local)
     check(!local.busy && local.process == nil && local.messages.last?.text.contains("/usage") == true, "Local slash commands do not submit model prompts")
     let localView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
@@ -917,7 +986,17 @@ func selfTest() {
     let probeDeadline = Date().addingTimeInterval(12)
     while localProbe.probingStatus && Date() < probeDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     check(!localProbe.busy && !localProbe.probingStatus && localProbe.process == nil && localProbe.messages.last?.text.contains("Session total: 0 in / 0 out") == true, "Real read-only Muse session query and local /usage work without a turn")
+    do {
+        let changed = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .effort("max"), serverArguments: ["--provider", "echo"])
+        check(changed.status.effort == "max", "Real Muse setter persists session effort without a model turn")
+        let access = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .access(":read-only"), serverArguments: ["--provider", "echo"])
+        check(access.status.access.lowercased().contains("read"), "Real Muse permission-profile setter persists access without a model turn")
+    } catch { check(false, "Muse session effort setter: " + error.localizedDescription) }
     print("All checks passed")
+}
+if CommandLine.arguments.contains("--probe-muse-quota") {
+    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~/Muse", engine: "muse"))); exit(0) }
+    catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {
     do { print(try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"), sessionID: CommandLine.arguments[at + 1]).detail); exit(0) }

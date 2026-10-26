@@ -1,15 +1,40 @@
 import Foundation
 
-// This probe only initializes a host and reads existing state. It never resumes,
-// starts, attaches to, or submits a turn to a Muse session.
+// Normal queries are read-only. An explicit picker change briefly resumes the
+// session to commit its session-scoped setting; it never submits a model turn.
+struct MuseModelChoice: Identifiable {
+    var id: String
+    var label: String
+    var provider: String
+    var profile: String?
+    var efforts: [String]
+}
+struct MuseAccessChoice: Identifiable {
+    var id: String
+    var label: String
+    var available: Bool
+}
+struct SessionChoices: Codable {
+    var model: String? = nil
+    var effort: String? = nil
+    var access: String? = nil
+}
+enum MuseSettingChange {
+    case model(MuseModelChoice)
+    case effort(String)
+    case access(String)
+}
 struct MuseStatusProbe {
     struct Result {
         var status: ToolStatus
         var detail: String
+        var models: [MuseModelChoice] = []
+        var access: [MuseAccessChoice] = []
     }
-    static func query(entry: Entry, sessionID: String) throws -> Result {
+    static func query(entry: Entry, sessionID: String, change: MuseSettingChange? = nil, serverArguments: [String] = []) throws -> Result {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "exec " + entry.command + " serve"]
+        let quotedArguments = serverArguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
+        process.arguments = ["-lc", "exec " + entry.command + " serve " + quotedArguments]
         let cwd = NSString(string: entry.directory).expandingTildeInPath
         if FileManager.default.fileExists(atPath: cwd) { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         var env = ProcessInfo.processInfo.environment
@@ -42,8 +67,27 @@ struct MuseStatusProbe {
                 buffer.append(chunk)
             }
         }
-        _ = try rpc(1, "initialize", ["clientInfo": ["name": "converse", "version": "0.3"], "capabilities": ["userInputDialogs": false]])
+        _ = try rpc(1, "initialize", ["clientInfo": ["name": "converse", "version": "0.3"], "capabilities": ["userInputDialogs": false, "experimentalApi": true]])
         try write(["jsonrpc": "2.0", "method": "initialized", "params": [:]])
+        if let change {
+            _ = try rpc(10, "session/resume", ["commandId": commandID(), "sessionId": sessionID.lowercased(), "excludeItems": true])
+            var params: [String: Any] = ["commandId": commandID(), "sessionId": sessionID.lowercased()]
+            switch change {
+            case .model(let model):
+                var selection: [String: Any] = ["modelId": model.id, "providerId": model.provider]
+                if let profile = model.profile { selection["profileId"] = profile }
+                params["model"] = selection
+                _ = try rpc(11, "session/setModel", params)
+            case .effort(let effort):
+                params["reasoningEffort"] = effort
+                _ = try rpc(11, "session/setReasoningEffort", params)
+            case .access(let profile):
+                params["profileId"] = profile
+                _ = try rpc(11, "session/setPermissionProfile", params)
+            }
+        }
+        let catalog = (try? rpc(12, "model/list", [:])) ?? [:]
+        let profiles = (try? rpc(13, "permissionProfile/list", [:])) ?? [:]
         let configRoot = env["XDG_CONFIG_HOME"] ?? (NSHomeDirectory() + "/.config")
         let configURL = URL(fileURLWithPath: configRoot).appendingPathComponent("muse/settings.json")
         let config = (try? Data(contentsOf: configURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
@@ -58,6 +102,14 @@ struct MuseStatusProbe {
             records = data.split(separator: 10).compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
         }
         var result = resolve(config: config, session: session, records: records, quota: usage["usage"] as? [String: Any])
+        result.models = (catalog["models"] as? [[String: Any]] ?? []).compactMap { row in
+            guard let id = row["modelId"] as? String else { return nil }
+            return MuseModelChoice(id: id, label: row["displayLabel"] as? String ?? id, provider: row["providerId"] as? String ?? "meta", profile: row["profileId"] as? String, efforts: row["variants"] as? [String] ?? [])
+        }
+        result.access = (profiles["profiles"] as? [[String: Any]] ?? []).compactMap { row in
+            guard let id = row["profileId"] as? String else { return nil }
+            return MuseAccessChoice(id: id, label: row["label"] as? String ?? id, available: row["available"] as? Bool ?? false)
+        }
         if let readError, session.isEmpty { result.detail += "\nSession read: " + readError }
         return result
     }
@@ -84,7 +136,11 @@ struct MuseStatusProbe {
                     if let model = object["model"] as? String { status.model = model }
                 }
                 if type == "runtime.session.permission_profile_committed", let payload = object["payload"] as? [String: Any], let source = payload["source"] as? [String: Any] { profile = source["display_name"] as? String ?? source["id"] as? String }
-                if type.contains("reasoning_effort_reconfigure"), let payload = object["payload"] as? [String: Any] { retainedEffort = payload["reasoning_effort"] as? String ?? payload["effort"] as? String }
+                if type.contains("reasoning_effort_reconfigure") || kind == "reasoning_effort_reconfigure" {
+                    let payload = object["payload"] as? [String: Any] ?? object
+                    let record = payload["record"] as? [String: Any] ?? payload
+                    retainedEffort = record["reasoning_effort"] as? String ?? record["effort"] as? String ?? record["reasoningEffort"] as? String ?? record["effective"] as? String ?? retainedEffort
+                }
                 if let json = object["record_json"] as? String, let data = json.data(using: .utf8), let decoded = try? JSONSerialization.jsonObject(with: data) { visit(decoded) }
                 // Only recurse through structural containers. Never parse message text,
                 // reminder agents, tool arguments, or model-authored status claims.
@@ -108,6 +164,11 @@ struct MuseStatusProbe {
         let detail = "Model: \(status.model) (\(modelSource))\nEffort: \(status.effort) — \(effortSource)\nAccess: \(status.access) (\(accessSource))\nLast turn: \(status.usage)\nSession total: \(status.totalUsage!) · \(calls) model calls\nAccount quota: \(status.quota!)"
         return Result(status: status, detail: detail)
     }
+    static func commandID() -> String {
+        let time = String(format: "%012llx", UInt64(Date().timeIntervalSince1970 * 1000))
+        let random = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return "\(time.prefix(8))-\(time.suffix(4))-7\(random.prefix(3))-8\(random.dropFirst(3).prefix(3))-\(random.dropFirst(6).prefix(12))"
+    }
     static func quotaSummary(_ quota: [String: Any]) -> String {
         let tier = quota["tier"] as? String ?? "subscription"
         let window = quota["window"] as? [String: Any] ?? [:]
@@ -116,7 +177,8 @@ struct MuseStatusProbe {
         if let used = window["usedPercent"] as? Int { parts.append("window \(used)% used") }
         if let used = weekly["usedPercent"] as? Int { parts.append("weekly \(used)% used") }
         let formatter = DateFormatter(); formatter.dateStyle = .short; formatter.timeStyle = .short
-        if let reset = window["resetsAtMs"] as? Double { parts.append("resets " + formatter.string(from: Date(timeIntervalSince1970: reset / 1000))) }
+        if let reset = weekly["resetsAtMs"] as? Double { parts.append("weekly resets " + formatter.string(from: Date(timeIntervalSince1970: reset / 1000))) }
+        if let reset = window["resetsAtMs"] as? Double { parts.append("window resets " + formatter.string(from: Date(timeIntervalSince1970: reset / 1000))) }
         if let observed = quota["observedAtMs"] as? Double { parts.append("observed " + formatter.string(from: Date(timeIntervalSince1970: observed / 1000))) }
         return parts.joined(separator: " · ")
     }
