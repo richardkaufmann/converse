@@ -7,7 +7,7 @@ The source and build script are included; no Xcode project or third-party depend
 USE
 Click + beside an assistant to start a separate conversation.
 Settings (Command-comma) edits display names, command lines, directories, and adapters.
-Each command line must launch the selected CLI; Converse adds its headless-mode flags.
+Each command line must launch the selected CLI; Muse uses interactive MSP, while Claude/Codex use headless modes.
 Existing sessions keep their original settings. Changes apply to new sessions.
 
 The entire right pane is a native scrolling Mac text document.
@@ -42,21 +42,15 @@ No separate app account or API keys are needed: the installed CLIs supply authen
 A login shell supplies your environment; ~/.local/bin and Homebrew are also searched.
 
 ADAPTERS / CURRENT LIMITS
-Muse: muse exec --json --session-id; reuses the same ID on later turns.
+Muse: muse serve with session/resume and turn/start; interactive approvals and questions.
 Claude: claude --print --output-format stream-json; resumes its exact session.
 Codex: codex exec --json; later turns resume the returned thread ID.
-Each turn launches a headless command; conversational context is retained by the CLI's
+Each Muse turn uses an interactive host; Claude/Codex use headless commands. Context is retained by the CLI's
 session store. There is no idle terminal process. Window closure never stops a turn.
 Muse terminal responses and tool activity are displayed as provided by its JSON stream;
 Claude text streams as it arrives. Some tools only emit their answer at turn completion.
 
-Interactive terminal approval menus, login flows, slash-command menus, and tool-driven
-question dialogs are not implemented in this preview. Use the CLI to authenticate first.
-Headless permission errors appear in the transcript; no approval or sandbox bypass flags
-are added. Permissions remain governed by your CLI configuration. This is the main
-remaining integration limitation before using the app as a complete terminal replacement.
-Claude and Codex parsing were tested with protocol fixtures, not paid live requests.
-Muse was tested end-to-end with its offline echo provider, including a second resumed turn.
+Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals, login flows and full slash-command menus remain unsupported. No approval or sandbox bypass flags are added.
 
 BUILD / TEST
 ./build.sh rebuilds the application using swiftc and applies a local ad-hoc signature.

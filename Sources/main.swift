@@ -60,6 +60,12 @@ final class Session: ObservableObject, Identifiable {
     var lastOutputAt: TimeInterval?
     var streamedText = false
     var process: Process?
+    var muse: MuseConnection?
+    @Published var requests: [MuseRequest] = []
+    var requestAnswers = MuseRequestAnswers()
+    @Published var requestError = ""
+    @Published var answeringRequest = false
+    var museItems: [String: UUID] = [:]
     var web: WKWebView?
     var textScrollOrigin: NSPoint?
     var textSelection: NSRange?
@@ -70,7 +76,7 @@ final class Session: ObservableObject, Identifiable {
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
     }
     convenience init(entry: Entry) {
-        self.init(SavedSession(id: UUID(), entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
+        self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
     var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices) }
 }
@@ -105,6 +111,7 @@ final class Store: ObservableObject {
     }
     func create(_ entry: Entry) -> Session { let s = Session(entry: entry); sessions.append(s); save(); return s }
     func stop(_ s: Session) {
+        if let muse = s.muse { s.status = "Stopping…"; muse.interrupt(); return }
         guard let p = s.process, p.isRunning else { return }
         s.status = "Stopping…"; p.interrupt()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if p.isRunning { p.terminate() } }
@@ -141,6 +148,9 @@ final class Store: ObservableObject {
             prompt += "\n\n[Local context from Converse: time zone \(zone.identifier) (\(zone.abbreviation() ?? "local")); local time at send \(formatter.string(from: Date())). Use this time zone for dates and times unless I request another.]"
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
+        if s.entry.engine == "muse" && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
+            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
+        }
         switch s.entry.engine {
         case "muse":
             args = ["exec", "--json", "--session-id", s.id.uuidString]
@@ -200,12 +210,138 @@ final class Store: ObservableObject {
             }
         }
     }
+    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = []) {
+        let connection = MuseConnection(sessionID: s.remoteID ?? s.id.uuidString)
+        s.muse = connection; s.museItems = [:]; s.requests = []; s.requestError = ""; s.status = "Connecting…"
+        connection.event = { [weak self, weak s] method, params in
+            guard let self, let s, s.muse === connection else { return }
+            self.consumeMuse(method, params, session: s, responseID: responseID)
+        }
+        connection.disconnected = { [weak self, weak s] error in
+            guard let self, let s, s.muse === connection else { return }
+            self.finishMuse(s, status: "Disconnected", notice: error)
+        }
+        connection.start(entry: s.entry, arguments: serverArguments) { [weak self, weak s] result in
+            guard let self, let s else { return }
+            if case .failure(let error) = result { self.finishMuse(s, status: "Connection failed", notice: error.localizedDescription); return }
+            s.process = connection.process
+            connection.load(entry: s.entry, choices: s.choices) { result in
+                if case .failure(let error) = result { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription); return }
+                s.started = true; s.remoteID = connection.sessionID; self.save(); s.status = "Working…"
+                connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
+                    if case .failure(let error) = result { self.finishMuse(s, status: "Turn not acknowledged", notice: error.localizedDescription) }
+                }
+            }
+        }
+    }
+    func finishMuse(_ s: Session, status: String, notice: String? = nil) {
+        let connection = s.muse; s.muse = nil; connection?.event = nil; connection?.disconnected = nil; connection?.close()
+        s.busy = false; s.process = nil; s.requests = []; s.answeringRequest = false; s.status = status
+        s.messages.removeAll { $0.role == "assistant" && $0.text.isEmpty && $0.images.isEmpty }
+        if let notice, !notice.isEmpty { s.messages.append(Message(role: "notice", text: notice)) }
+        save(); objectWillChange.send()
+        if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { refreshStatus(s) }
+    }
+    func consumeMuse(_ method: String, _ params: [String: Any], session s: Session, responseID: UUID) {
+        switch method {
+        case "turn/started": s.busy = true; s.muse?.turnID = params["turnId"] as? String; s.status = "Working…"
+        case "turn/foregroundCompleted":
+            let agents = params["blockingAgents"] as? [String] ?? []
+            s.status = "Answer finished · checking " + agents.joined(separator: ", ")
+        case "turn/retryScheduled", "turn/modelRetryScheduled":
+            let delay = (params["retryDelayMs"] as? Double ?? 0) / 1000
+            s.status = "Retrying in \(Int(delay)) sec · attempt \(params["nextAttempt"] as? Int ?? 0)/\(params["maxAttempts"] as? Int ?? 0)"
+        case "turn/completed":
+            let terminal = params["terminal"] as? String ?? "unknown"
+            let error = params["error"] as? [String: Any]
+            finishMuse(s, status: terminal == "completed" ? "Ready" : terminal.capitalized, notice: error?["message"] as? String ?? params["reason"] as? String)
+        case "session/statusChanged":
+            let attention = params["attention"] as? [String] ?? []
+            if attention.contains("inputPending") { s.status = "Waiting for your answer" }
+            else if attention.contains("approvalPending") { s.status = "Waiting for approval" }
+            // Completion is authoritative on turn/completed, never host process lifetime.
+        case "approval/reviewing": s.status = "Reviewing approval…"
+        case "approval/requested": s.status = "Checking approval…"
+        case "approval/request", "userInput/request":
+            let kind = method == "approval/request" ? "approval" : "question"
+            let id = params[kind == "approval" ? "approvalId" : "userInputId"] as? String ?? ""
+            guard !id.isEmpty else { return }
+            s.requests.removeAll { $0.id == id }; s.requests.append(MuseRequest(id: id, kind: kind, params: params)); s.requestAnswers.selections = [:]; s.requestAnswers.text = [:]
+            s.status = kind == "approval" ? "Waiting for your approval" : "Waiting for your answer"
+            s.requestError = ""; s.answeringRequest = false
+            NSSound.beep()
+        case "approval/updated":
+            if let id = params["approvalId"] as? String, let index = s.requests.firstIndex(where: { $0.id == id }) {
+                s.requests[index].params.merge(params) { _, new in new }
+            }
+            s.answeringRequest = false; s.status = s.requests.isEmpty ? "Checking approval…" : "Waiting for your approval"
+        case "approval/resolved", "userInput/settled":
+            let id = params["approvalId"] as? String ?? params["userInputId"] as? String
+            s.requests.removeAll { $0.id == id }; s.answeringRequest = false
+            if method == "approval/resolved", let decision = params["decision"] as? String, ["denied", "deniedPolicyAmendment", "timedOut", "abort"].contains(decision) {
+                let evidence = params["stageEvidence"] as? [[String: Any]] ?? []
+                let diagnostics = evidence.compactMap { ($0["resolution"] as? [String: Any])?["diagnostic"] as? String }
+                s.messages.append(Message(role: "notice", text: "Approval " + decision + (diagnostics.isEmpty ? "" : ": " + diagnostics.joined(separator: "\n"))))
+            }
+            s.status = s.requests.isEmpty ? "Working…" : "Waiting for your answer"
+        case "session/tokenUsage":
+            if let usage = params["usage"] as? [String: Any] { s.toolStatus.usage = "\((usage["inputTokens"] as? Int ?? 0).formatted()) in / \((usage["outputTokens"] as? Int ?? 0).formatted()) out" }
+        case "item/started", "item/updated", "item/completed":
+            guard let item = params["item"] as? [String: Any], let itemID = item["itemId"] as? String else { break }
+            if item["kind"] as? String == "agentMessage" {
+                if s.museItems[itemID] == nil {
+                    if s.museItems.isEmpty { s.museItems[itemID] = responseID }
+                    else { let id = UUID(); s.museItems[itemID] = id; s.messages.append(Message(id: id, role: "assistant", text: "")) }
+                }
+                if let value = item["text"] as? String { updateMuseText(value, append: false, itemID: itemID, session: s) }
+            } else if item["kind"] as? String == "toolCall", method == "item/completed", item["status"] as? String == "failed" {
+                s.messages.append(Message(role: "notice", text: item["failureReason"] as? String ?? "Tool failed"))
+            }
+        case "item/delta":
+            if (params["field"] as? String ?? "text") == "text", let itemID = params["itemId"] as? String, let delta = params["delta"] as? String { updateMuseText(delta, append: true, itemID: itemID, session: s) }
+        default: break
+        }
+        saveSoon()
+    }
+    func updateMuseText(_ value: String, append: Bool, itemID: String, session s: Session) {
+        guard let id = s.museItems[itemID], let i = s.messages.firstIndex(where: { $0.id == id }) else { return }
+        let old = s.messages[i].text; let next = append ? old + value : value
+        guard next != old else { return }
+        s.messages[i].text = next
+        markOutput(s, index: i, offset: append || next.hasPrefix(old) ? (old as NSString).length : 0)
+    }
+    func answerMuse(_ s: Session, request: MuseRequest, choice: String? = nil, answers: [[String: Any]]? = nil, cancel: Bool = false) {
+        guard let connection = s.muse, !s.answeringRequest else { return }
+        var params: [String: Any] = ["commandId": MuseStatusProbe.commandID(), "sessionId": connection.sessionID]
+        let method: String
+        if request.kind == "approval" {
+            guard let choice, let requirement = request.params["currentRequirementId"],
+                  (request.params["availableChoices"] as? [[String: Any]] ?? []).contains(where: { $0["choiceId"] as? String == choice }) else { return }
+            method = "approval/decide"; params["approvalId"] = request.id; params["choiceId"] = choice; params["requirementId"] = requirement
+        } else {
+            method = cancel ? "userInput/cancel" : "userInput/answer"; params["userInputId"] = request.id
+            if !cancel { params["answers"] = answers ?? [] }
+        }
+        s.answeringRequest = true; s.requestError = ""
+        connection.rpc(method, params) { result in
+            if case .failure(let error) = result {
+                s.answeringRequest = false; s.requestError = error.localizedDescription
+                // Refresh the race-guarded request after another client or a stage change wins.
+                connection.rpc("approval/listPending", ["sessionId": connection.sessionID]) { result in
+                    if case .success(let value) = result {
+                        s.requests = (value["approvals"] as? [[String: Any]] ?? []).compactMap { p in (p["approvalId"] as? String).map { MuseRequest(id: $0, kind: "approval", params: p) } }
+                        s.requests += (value["userInputs"] as? [[String: Any]] ?? []).compactMap { p in (p["userInputId"] as? String).map { MuseRequest(id: $0, kind: "question", params: p) } }
+                    }
+                }
+            }
+        }
+    }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
-        guard s.entry.engine == "muse" else { completion?(); return }
+        guard s.entry.engine == "muse", ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
-        let entry = s.entry; let id = s.id.uuidString
+        let entry = s.entry; let id = s.remoteID ?? s.id.uuidString
         let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
@@ -257,7 +393,7 @@ final class Store: ObservableObject {
         if !s.started { remember(); return }
         s.changingSetting = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try MuseStatusProbe.query(entry: s.entry, sessionID: s.id.uuidString, change: change) }
+            let result = Result { try MuseStatusProbe.query(entry: s.entry, sessionID: s.remoteID ?? s.id.uuidString, change: change) }
             DispatchQueue.main.async {
                 s.changingSetting = false
                 switch result {
@@ -661,8 +797,22 @@ final class ConversationTextView: NSTextView {
         }
         super.keyDown(with: event)
     }
+    static func clipboardImage(_ board: NSPasteboard) -> NSImage? {
+        for type in [NSPasteboard.PasteboardType.png, .tiff, .init("public.jpeg"), .init("public.heic")] {
+            if let data = board.data(forType: type), let image = NSImage(data: data) { return image }
+        }
+        if let image = NSImage(pasteboard: board) { return image }
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            for url in urls { if let image = NSImage(contentsOf: url) { return image } }
+        }
+        return nil
+    }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), Self.clipboardImage(.general) != nil { return imagePaste != nil }
+        return super.validateUserInterfaceItem(item)
+    }
     override func paste(_ sender: Any?) {
-        if let image = NSImage(pasteboard: .general) { imagePaste?(image); return }
+        if let image = Self.clipboardImage(.general) { imagePaste?(image); return }
         if selectedRange().location < inputStart { setSelectedRange(NSRange(location: (string as NSString).length, length: 0)) }
         pasteAsPlainText(sender)
     }
@@ -835,9 +985,10 @@ struct Conversation: View {
                 Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
                 if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
-                if session.busy { ProgressView().controlSize(.small); Button("Stop") { Store.shared.stop(session) } }
+                if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
+            if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
             Divider()
             HStack(spacing: 12) {
@@ -1163,6 +1314,42 @@ func selfTest() {
     let image = NSImage(size: NSSize(width: 16, height: 16)); image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 16, height: 16).fill(); image.unlockFocus()
     store.attach(s, image: image)
     check(s.attachments.count == 1 && FileManager.default.fileExists(atPath: s.attachments[0]), "Pasted image saved as PNG")
+    let imageBoard = NSPasteboard.withUniqueName()
+    let pngImage = NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!
+    imageBoard.setData(pngImage, forType: .png)
+    check(ConversationTextView.clipboardImage(imageBoard) != nil, "PNG-only clipboard is recognized without a text representation")
+    let originalClipboard = (NSPasteboard.general.pasteboardItems ?? []).map { item -> NSPasteboardItem in
+        let copy = NSPasteboardItem(); for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }; return copy
+    }
+    NSPasteboard.general.clearContents(); NSPasteboard.general.setData(pngImage, forType: .png)
+    let pasteView = ConversationTextView(frame: .zero); var pastedImage = false
+    pasteView.imagePaste = { _ in pastedImage = true }
+    let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    check(pasteView.validateUserInterfaceItem(pasteItem), "Paste command stays enabled for image-only clipboard")
+    pasteView.paste(nil)
+    check(pastedImage, "Image-only Cmd-V routes to attachment handler")
+    NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects(originalClipboard); imageBoard.releaseGlobally()
+    let interactive = Session(entry: Entry(name: "Muse echo", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"))
+    interactive.busy = true; let interactiveID = UUID(); interactive.messages = [Message(id: interactiveID, role: "assistant", text: "")]
+    store.sendMuse(interactive, prompt: "offline msp", display: "offline msp", images: [], responseID: interactiveID, serverArguments: ["--provider", "echo"])
+    let interactiveDeadline = Date().addingTimeInterval(20)
+    while interactive.busy && Date() < interactiveDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(!interactive.busy && interactive.status == "Ready" && interactive.messages.contains { $0.text == "echo: offline msp" }, "Real interactive Muse streams text and finishes on turn/completed")
+    let fixturePath = FileManager.default.currentDirectoryPath + "/Tests/msp_fixture.py"
+    let fixture = Session(entry: Entry(name: "Fixture", command: "/usr/bin/python3 '" + fixturePath + "'", directory: NSTemporaryDirectory(), engine: "muse"))
+    fixture.busy = true; let fixtureID = UUID(); fixture.messages = [Message(id: fixtureID, role: "assistant", text: "")]
+    store.sendMuse(fixture, prompt: "fixture", display: "fixture", images: [], responseID: fixtureID)
+    let approvalDeadline = Date().addingTimeInterval(10)
+    while fixture.requests.isEmpty && fixture.busy && Date() < approvalDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(fixture.status == "Waiting for your approval" && fixture.requests.first?.kind == "approval", "Approval request reaches conversation instead of hiding behind Working")
+    if let request = fixture.requests.first { store.answerMuse(fixture, request: request, choice: "allow-once") }
+    let questionDeadline = Date().addingTimeInterval(10)
+    while fixture.requests.first?.kind != "question" && fixture.busy && Date() < questionDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(fixture.status == "Waiting for your answer" && fixture.requests.first?.kind == "question", "Question request remains visible and blocks until the user answers")
+    if let request = fixture.requests.first { store.answerMuse(fixture, request: request, answers: [["questionId": "single", "selectedLabel": "B"], ["questionId": "multiple", "selectedLabels": ["X", "Y"]], ["questionId": "free", "freeText": "hello"]]) }
+    let fixtureDeadline = Date().addingTimeInterval(10)
+    while fixture.busy && Date() < fixtureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(!fixture.busy && fixture.status == "Ready" && fixture.requests.isEmpty && fixture.messages.contains { $0.text == "Waiting for permission." }, "Approval choice, exact stage guard, presentation receipts and all question answer modes round-trip")
     let config = WKWebViewConfiguration(); config.setURLSchemeHandler(AttachmentHandler(), forURLScheme: "attachment")
     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 500), configuration: config)
     web.loadHTMLString(transcriptHTML, baseURL: nil)
@@ -1217,6 +1404,7 @@ func selfTest() {
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     print("All checks passed")
 }
+signal(SIGPIPE, SIG_IGN)
 if CommandLine.arguments.contains("--probe-muse-quota") {
     do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~/Muse", engine: "muse"))); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
