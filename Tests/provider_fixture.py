@@ -15,6 +15,8 @@ if args == ['serve']:
         elif method == 'session/read': emit({'id':rid,'result':{'session':{'sessionId':p['sessionId']}}})
         elif method == 'session/resume':
             session = p['sessionId']; emit({'id':rid,'result':{'session':{'sessionId':session}}})
+        elif method == 'session/setModel':
+            emit({'id':rid,'error':{'code':-32030,'message':'Saved model no longer available'}})
         elif method == 'turn/start':
             turn = p['commandId']; prompt = p['input'][0]['text']
             emit({'id':rid,'result':{'turnId':turn}})
@@ -102,6 +104,8 @@ answer = prompt[len('switchboard-output:'):] if prompt.startswith('switchboard-o
 if kind == 'codex' and prompt.startswith('switchboard-progress:'):
     emit({'type':'item.completed','item':{'type':'agent_message','text':'I will inspect this before sending.'}})
     answer = prompt[len('switchboard-progress:'):]
+if kind == 'codex' and prompt.startswith('switchboard-file-only:'):
+    answer = prompt[len('switchboard-file-only:'):]
 if kind == 'codex' and prompt.startswith('switchboard-commentary-only:'):
     emit({'type':'item.completed','item':{'type':'agent_message','text':prompt[len('switchboard-commentary-only:'):]}})
     answer = 'Finished without sending.'
@@ -109,6 +113,7 @@ if prompt == 'working-directory': answer = os.getcwd()
 if kind == 'codex':
     if '--output-last-message' in args and not prompt.startswith('switchboard-missing-final:'):
         Path(args[args.index('--output-last-message')+1]).write_text(answer)
-    emit({'type':'item.completed','item':{'type':'agent_message','text':answer}})
+    if not prompt.startswith('switchboard-file-only:'):
+        emit({'type':'item.completed','item':{'type':'agent_message','text':answer}})
     emit({'type':'turn.completed','usage':{'input_tokens':2,'output_tokens':3}})
 else: emit({'type':'result','session_id':'fixture-thread','result':answer})

@@ -11,6 +11,7 @@ final class MuseConnection {
     var disconnected: ((String) -> Void)?
     var sessionID: String
     var turnID: String?
+    private(set) var settingWarning: String?
     private var ready = false
     private var closing = false
     private var errorTail = ""
@@ -82,10 +83,14 @@ final class MuseConnection {
         }
     }
     func load(entry: Entry, choices: SessionChoices, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        settingWarning = nil
         func finish(_ result: Result<[String: Any], Error>) {
             guard case .success = result, let id = choices.model else { completion(result); return }
             self.changeSetting(.model(MuseModelChoice(id: id, label: id, provider: choices.modelProvider ?? "", profile: choices.modelProfile, efforts: []))) { applied in
-                if case .failure = applied { completion(applied) } else { completion(result) }
+                if case .failure(let error) = applied {
+                    self.settingWarning = "Saved model selection could not be applied: " + error.localizedDescription + ". Continuing with the session's current model."
+                }
+                completion(result)
             }
         }
         rpc("session/read", ["sessionId": sessionID, "excludeItems": true]) { result in

@@ -61,6 +61,10 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
             let captured = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(session.saved)))
             check(captured.messages.contains { $0.finalReply == command }, "Codex authoritative final reply survives archive persistence")
             session.pending = []
+            session.draft = "switchboard-file-only:" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.count == 1 && session.messages.contains { $0.finalReply == command && $0.text == command }, "Codex final-answer file without a JSONL text event remains visible and dispatches")
+            session.pending = []
             session.draft = "switchboard-commentary-only:" + command; store.submit(session)
             pump { !session.busy }
             check(session.pending.isEmpty, "Codex command in commentary cannot execute when final answer is ordinary prose")
@@ -135,6 +139,16 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
 
     }
     let museEntry = Entry(name: "Muse fixture", command: "python3 " + ProviderCommand.quote(fixture) + " muse", directory: NSTemporaryDirectory(), engine: "muse")
+    let resumed = MuseConnection(sessionID: UUID().uuidString)
+    var resumedResult: Result<[String: Any], Error>?
+    resumed.start(entry: museEntry) { result in
+        if case .failure = result { resumedResult = result; return }
+        resumed.load(entry: museEntry, choices: SessionChoices(model: "retired-model")) { resumedResult = $0 }
+    }
+    pump { resumedResult != nil }
+    if case .success? = resumedResult { check(resumed.settingWarning?.contains("Continuing with the session's current model") == true, "Rejected saved Muse model does not turn successful resume into session-open failure") }
+    else { check(false, "Rejected saved Muse model does not turn successful resume into session-open failure") }
+    resumed.close()
     let muse = store.create(museEntry)
     var reply = UUID(); muse.busy = true; muse.messages = [Message(id: reply, role: "assistant", text: "")]
     store.sendMuse(muse, prompt: "slow", display: "slow", images: [], responseID: reply)

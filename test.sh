@@ -12,4 +12,5 @@ chmod +x "$test_dir/muse-echo"
 test_mode=--self-test
 if [[ "${1:-}" == --providers-only ]]; then test_mode=--provider-self-test; fi
 CONVERSE_DATA_DIR="$test_dir/data" CONVERSE_TEST_COMMAND="$test_dir/muse-echo" "$app/Contents/MacOS/Converse" "$test_mode"
+python3 Tests/install_shortcut_test.py
 printf 'Isolated test data: %s\n' "$test_dir"

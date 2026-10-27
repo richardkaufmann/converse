@@ -351,6 +351,9 @@ final class Store: ObservableObject {
                 if s.entry.engine == "codex", p.terminationStatus == 0, !s.turnFailed, !s.interrupted,
                    let i = s.messages.firstIndex(where: { $0.id == responseID }) {
                     s.messages[i].finalReply = finalReply
+                    if s.messages[i].text.isEmpty, let finalReply {
+                        s.messages[i].text = Store.visibleText(finalReply)
+                    }
                     if finalReply == nil && s.switchboardEnabled {
                         s.messages.append(Message(role: "notice", text: "Switchboard: Codex final-answer capture was unavailable; no command was dispatched."))
                     }
@@ -383,6 +386,7 @@ final class Store: ObservableObject {
             s.process = connection.process
             connection.load(entry: s.entry, choices: s.choices) { result in
                 if case .failure(let error) = result { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription); return }
+                if let warning = connection.settingWarning { s.messages.append(Message(role: "notice", text: warning)); s.settingNotice = warning }
                 s.started = true; s.remoteID = connection.sessionID; self.save(); s.status = "Working…"
                 connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
                     if case .failure(let error) = result { self.finishMuse(s, status: "Turn not acknowledged", notice: error.localizedDescription) }

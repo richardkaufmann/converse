@@ -38,6 +38,7 @@ helper="$job/install.command"
 status_file="$job/status.txt"
 fail() { print -r -- "FAILED: $1" > "$status_file"; exit 1; }
 trap 'fail "Installer stopped; see install.log. The previous app is retained in this update folder if replacement began."' ZERR
+trap 'rm -f "$job/agent.plist"' EXIT
 print -r -- "WAITING: Converse $version is staged for $destination" > "$status_file"
 # Only replace a bundle after every process using its executable has exited.
 while ps -axo comm= | /usr/bin/grep -Fxq "$destination/Contents/MacOS/Converse"; do sleep 1; done
@@ -64,7 +65,7 @@ fi
 if [[ -n "$dock_command" && -x "$dock_command" ]]; then
     dock_url=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri() + "/")' "$destination")
     current_dock=$($dock_command --list | awk -F '\t' '$1 == "Converse" {print $2}')
-    if [[ "$current_dock" != "$dock_url" ]]; then
+    if [[ -n "$current_dock" && "$current_dock" != "$dock_url" ]]; then
         if ! "$dock_command" --add "$destination" --replacing Converse; then
             print -r -- "INSTALLED: Converse $version at $destination; SHORTCUT REPAIR FAILED" > "$status_file"
             exit 1
