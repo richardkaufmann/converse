@@ -48,7 +48,7 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
         var dom: [String: Any]?
         web.evaluateJavaScript("({messages:document.querySelectorAll('article.message').length, bold:document.querySelector('strong').textContent, cells:document.querySelectorAll('table tr').length, scripts:document.scripts.length, blue:getComputedStyle(document.querySelector('.prompt .ln')).backgroundColor,white:getComputedStyle(document.querySelector('.response .ln')).backgroundColor})") { value, _ in dom = value as? [String: Any] }
         while dom == nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-        check(dom?["messages"] as? Int == 4 && dom?["bold"] as? String == "Bold" && dom?["cells"] as? Int == 2 && dom?["scripts"] as? Int == 0 && dom?["blue"] as? String == "rgb(240, 247, 255)" && dom?["white"] as? String == "rgb(255, 255, 255)", "WebKit renders the standalone export with formatted content and blue/white line-number gutters")
+        check(dom?["messages"] as? Int == 4 && dom?["bold"] as? String == "Bold" && dom?["cells"] as? Int == 2 && dom?["scripts"] as? Int == 0 && dom?["blue"] as? String == "rgb(224, 238, 255)" && dom?["white"] as? String == "rgb(255, 255, 255)", "WebKit renders the standalone export with formatted content and blue/white line-number gutters")
     } catch { check(false, "Transcript export failed: " + error.localizedDescription) }
     check((try? TranscriptExport.html(sessions: [], order: .sequential, content: .both, lineNumbers: true)) == nil, "Empty exports report an actionable error")
 }

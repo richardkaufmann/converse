@@ -881,7 +881,7 @@ final class LineNumberRuler: NSRulerView {
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
         // Shade the entire visual block, including wrapped lines and images,
         // rather than only the first numbered line of a submitted prompt.
-        NSColor(red: 0.94, green: 0.97, blue: 1, alpha: 1).setFill()
+        NSColor(red: 224.0 / 255, green: 238.0 / 255, blue: 1, alpha: 1).setFill()
         for block in text.userBlocks where block.length > 0 && block.location < string.length {
             let end = min(NSMaxRange(block), string.length)
             let first = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
