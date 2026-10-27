@@ -8,7 +8,14 @@ if [[ "${CONVERSE_SKIP_ICON_BUILD:-0}" != 1 ]]; then
 elif [[ ! -f Converse.app/Contents/Resources/Converse.icns ]]; then
   print -u2 'No existing icon to reuse'; exit 1
 fi
-swiftc Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift -O -o Converse.app/Contents/MacOS/Converse -framework AppKit -framework SwiftUI -framework WebKit
+mkdir -p .build
+architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
+binaries=()
+for architecture in "${architectures[@]}"; do
+    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
+    binaries+=(".build/Converse-${architecture}")
+done
+lipo -create "${binaries[@]}" -output Converse.app/Contents/MacOS/Converse
 cat > Converse.app/Contents/Info.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -19,8 +26,8 @@ cat > Converse.app/Contents/Info.plist <<'PLIST'
 <key>CFBundleName</key><string>Converse</string>
 <key>CFBundleDisplayName</key><string>Converse</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

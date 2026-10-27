@@ -1,7 +1,10 @@
-Converse — macOS preview 0.2
+Converse — macOS preview 0.3.0
 
 OPEN
-Double-click Converse.app. The build is native Apple Silicon and locally signed.
+Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
+It is ad-hoc signed, not Developer ID signed or notarized.
+Drag Converse.app to Applications. Install and sign in to your assistant CLIs separately.
+If macOS blocks the app, see https://support.apple.com/102445 for Apple's guidance.
 The source and build script are included; no Xcode project or third-party dependencies are required. This preview was built and tested on this Mac with its installed macOS SDK.
 
 USE
@@ -11,7 +14,8 @@ Each command line must launch the selected CLI; Muse uses interactive MSP, while
 Existing sessions keep their original settings. Changes apply to new sessions.
 
 The entire right pane is a native scrolling Mac text document.
-Type at the bottom. Return sends or queues while busy; Escape interrupts and sends the draft (or stops if empty).
+Type at the bottom. Return sends or queues while busy. Queue rows have Inject now;
+Inject all sends the queue together. Both interrupt current work. Escape does not send.
 Command-Return inserts a newline (Shift-Return also works).
 Draft text is blue; submitted input becomes italic in the system text color.
 The app follows the Mac's light/dark appearance.
@@ -121,3 +125,9 @@ Claude/AltClaude have separate CLI stores; desktop sign-ins do not transfer.
 Sign in to each Claude CLI account once with its Sign in button. Choosing another
 account for existing work opens a separate conversation and transfers your draft;
 the original account keeps its history. No credentials are copied into Converse.
+
+SESSION MESSAGING
+Right-click a session and choose Teach Session To Talk To Other Sessions.
+Then ask it to "tell <name> <message>" (or "tell <name> urgently <message>").
+The assistant queries a live session directory and emits visible JSON commands.
+Normal messages queue; urgent messages interrupt. Both preserve the recipient draft.

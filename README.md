@@ -6,6 +6,12 @@
 
 A native Mac home for Muse, Claude Code, and Codex: the immediacy of a shell with a normal, selectable Mac text window. And a tennis shoe, because **Converse**.
 
+## Download
+
+[Download the latest Mac preview](https://github.com/richardkaufmann/converse/releases/latest). Unzip, drag **Converse.app** into **Applications**, and open it. The universal download targets **macOS 14 or later**, on **Apple Silicon and Intel**. It is tested on an Apple Silicon Mac; older macOS versions and Intel hardware have not been tested directly.
+
+This preview is ad-hoc signed, **not notarized**. macOS may block its first launch; see [Apple’s app-opening guidance](https://support.apple.com/102445). Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
+
 ## Use
 
 Click **+** next to an assistant to start a session. Settings (**⌘,**) configures its name, command line, working directory, and adapter. Each entry can have multiple independent conversations.
@@ -62,14 +68,16 @@ Additional Codex and Claude accounts can be added, renamed, or pointed at existi
 
 ## Build and run
 
-This preview is built and tested on an Apple Silicon Mac using Apple's Command Line Tools and the installed macOS SDK. No third-party libraries or Xcode project are required.
+This preview is built and tested on an Apple Silicon Mac using Apple's Command Line Tools and the installed macOS SDK, targeting macOS 14. No third-party libraries or Xcode project are required.
 
 ```sh
 ./build.sh
 open Converse.app
 ```
 
-The build generates the sneaker artwork, creates `Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
+`./release.sh` builds both CPU architectures and packages the downloadable ZIP under `.build/release/`.
+
+The build generates the sneaker artwork with a plain circular badge, creates `Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
 
 Install and authenticate the assistant CLIs separately. Configure each entry with the matching adapter; Converse uses Muse’s interactive MSP host and the other adapters’ headless modes. Command lines run through your login shell. Homebrew and `~/.local/bin` are included in the executable search path.
 

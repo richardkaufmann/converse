@@ -16,7 +16,7 @@ for size in [16,32,64,128,256,512,1024] {
     let stripe = path([NSPoint(x: 175,y: 251),NSPoint(x: 858,y: 251)], close: false); stripe.lineWidth = 9; NSColor(calibratedRed: 0.12,green: 0.17,blue: 0.25,alpha: 1).setStroke(); stripe.stroke()
     let toe = NSBezierPath(); toe.move(to: NSPoint(x: 625,y: 315)); toe.curve(to: NSPoint(x: 850,y: 315), controlPoint1: NSPoint(x: 658,y: 415),controlPoint2: NSPoint(x: 817,y: 382)); toe.close(); NSColor(calibratedWhite: 0.96,alpha: 1).setFill(); toe.fill()
     let patch = NSBezierPath(ovalIn: NSRect(x: 236,y: 480,width: 132,height: 132)); NSColor(calibratedWhite: 0.96,alpha: 1).setFill(); patch.fill()
-    var star: [NSPoint] = []; for i in 0..<10 { let angle = Double(i)*Double.pi/5 + Double.pi/2; let radius = i % 2 == 0 ? 47.0 : 21.0; star.append(NSPoint(x: 302 + cos(angle)*radius,y: 546 + sin(angle)*radius)) }; NSColor(calibratedRed: 0.16,green: 0.23,blue: 0.35,alpha: 1).setFill(); path(star).fill()
+    let badge = NSBezierPath(ovalIn: NSRect(x: 268, y: 512, width: 68, height: 68)); NSColor(calibratedRed: 0.16, green: 0.23, blue: 0.35, alpha: 1).setFill(); badge.fill()
     for i in 0..<5 { let x = 423.0 + Double(i)*34; let y = 561.0-Double(i)*35; let lace = path([NSPoint(x: x-26,y: y+23),NSPoint(x: x+32,y: y-5)], close: false); lace.lineWidth = 14; lace.lineCapStyle = .round; NSColor(calibratedWhite: 0.97,alpha: 1).setStroke(); lace.stroke() }
     image.unlockFocus()
     let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
