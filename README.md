@@ -119,6 +119,8 @@ open .build/Converse.app
 
 `./release.sh` builds both CPU architectures and packages the downloadable ZIP under `.build/release/`.
 
+**Building or publishing does not update an installed copy.** Run `./install.sh` to install the verified build into `~/Applications/Converse.app`, or pass the exact app path you normally launch: `./install.sh /path/to/Converse.app`. If that copy is running, installation waits for it to quit, retains the previous bundle as a backup, and replaces the app at that same path. Wait a few seconds after quitting before reopening. Conversations and credentials are not touched. The script prints a status-file path; check it for `INSTALLED` before claiming the installed copy is current. This is a local developer installation helper, not an automatic release updater.
+
 Keep your checkout outside Documents, Desktop and Downloads (for example, `~/Developer/Converse`) to avoid macOS protected-folder prompts during development. Builds go into `.build`; use `CONVERSE_APP_OUTPUT=/path/to/Converse.app` to choose another destination. The build refuses to replace a running app because changing an ad-hoc signature can invalidate its privacy permissions.
 
 The build generates the sneaker artwork with a plain circular badge, creates `.build/Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
