@@ -141,3 +141,7 @@ Right-click a session and choose Teach Session To Talk To Other Sessions.
 Then ask it to "tell <name> <message>" (or "tell <name> urgently <message>").
 The assistant queries a live session directory and emits visible JSON commands.
 Normal messages queue; urgent messages interrupt. Both preserve the recipient draft.
+
+LICENSE
+Copyright 2026 Richard Kaufmann. Licensed under the Apache License, Version 2.0.
+See the included LICENSE file.

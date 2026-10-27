@@ -156,3 +156,7 @@ Only successful, completed assistant turns from enabled sessions execute command
 ## Feedback
 
 Questions and ideas are welcome in [Discussions](https://github.com/richardkaufmann/converse/discussions). Please use the [bug-report form](https://github.com/richardkaufmann/converse/issues/new/choose) for problems. Pull requests are by invitation; see [contribution guidelines](CONTRIBUTING.md).
+
+## License
+
+Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).

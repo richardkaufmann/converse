@@ -8,6 +8,7 @@ if [[ "${CONVERSE_SKIP_ICON_BUILD:-0}" != 1 ]]; then
 elif [[ ! -f Converse.app/Contents/Resources/Converse.icns ]]; then
   print -u2 'No existing icon to reuse'; exit 1
 fi
+cp LICENSE Converse.app/Contents/Resources/LICENSE
 mkdir -p .build
 architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
 binaries=()

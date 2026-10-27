@@ -7,7 +7,7 @@ release_root=".build/release"
 staging=$(mktemp -d "${TMPDIR:-/tmp}/converse-release.XXXXXX")
 mkdir -p "$release_root" "$staging/Converse"
 ditto --norsrc --noextattr Converse.app "$staging/Converse/Converse.app"
-cp README.txt "$staging/Converse/README.txt"
+cp README.txt LICENSE "$staging/Converse/"
 codesign --verify --deep --strict "$staging/Converse/Converse.app"
 archive="$release_root/Converse-${version}-macOS-universal.zip"
 ditto -c -k --norsrc --noextattr --keepParent "$staging/Converse" "$archive"
