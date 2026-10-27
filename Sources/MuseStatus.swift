@@ -18,6 +18,7 @@ struct SessionChoices: Codable {
     var model: String? = nil
     var effort: String? = nil
     var access: String? = nil
+    var approval: String? = nil
 }
 enum MuseSettingChange {
     case model(MuseModelChoice)

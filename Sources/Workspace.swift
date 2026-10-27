@@ -61,6 +61,7 @@ final class WindowState: ObservableObject {
     let workspace: Workspace
     @Published var settings = false
     @Published var setup = false
+    @Published var sessionSetup: SessionSetupRequest? = nil
     @Published var closingSessionID: UUID? = nil
     init(workspace: Workspace = .shared) { self.workspace = workspace; workspace.register(id) }
     var title: String { workspace.names[id] ?? "Converse" }
@@ -110,6 +111,7 @@ extension Session {
                   "Messages: \(messages.count) · queued: \(pending.count)\(queuePaused ? " (paused)" : "")",
                   "Draft: \(draft.count) characters · attached images: \(attachments.count)",
                   "Conversation ID: \(id.uuidString)", "CLI session ID: \(remoteID ?? "Not started")"]
+        if let approval = toolStatus.approval { lines.append("Approvals: " + approval) }
         if let directory = entry.accountDirectory, !directory.isEmpty { lines.append("Account directory: \(directory)") }
         if let observed = toolStatus.accountObservedAt { lines.append("Account observed: " + DateFormatter.localizedString(from: observed, dateStyle: .short, timeStyle: .medium)) }
         if !probeError.isEmpty { lines.append("Status refresh: \(probeError)") }

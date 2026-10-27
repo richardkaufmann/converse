@@ -29,11 +29,11 @@ The setup guide opens automatically for a new installation:
 2. Reuse an existing CLI login or use **Sign in…** to open the selected CLI’s login flow in Terminal. Add another named Codex or Claude account for an independent sign-in. Muse reuses its CLI login. Credentials stay in the CLI’s stores.
 3. Choose an assistant and account, then **Create session**. Creating a session sends no prompt. Type at the bottom and press Return to begin.
 
-Use **+** for more sessions, **Settings → Accounts** for additional sign-ins, and **Help → Setup Guide** to revisit setup. **Set up later** skips the guide. Existing users keep their saved accounts, commands, sessions and drafts; upgrades do not rerun first-launch setup or replace local settings. CLI version checks confirm installation, not sign-in or subscription access.
+Use **+** for more sessions, **Settings → Models & sessions** for additional sign-ins, and **Help → Setup Guide** to revisit setup. **Set up later** skips the guide. Existing users keep their saved accounts, commands, sessions and drafts; upgrades do not rerun first-launch setup or replace local settings. CLI version checks confirm installation, not sign-in or subscription access.
 
 ## Use
 
-Click **+** next to an assistant to start a session. Settings (**⌘,**) configures its name, command line, working directory, and adapter. Each entry can have multiple independent conversations.
+The sidebar has one heading per assistant: **Claude**, **Codex**, and **Muse**. All its sessions appear beneath it, regardless of login or older launch-configuration names. Click **+**, choose a session name and working folder, then choose an existing login or **New login…**. A new login opens authentication in Terminal; finish there and return. Settings (**⌘,**) follows the same model → session → login structure, with advanced CLI configuration below each model.
 
 - **Return** sends, or queues the draft while a turn is active. Queue rows have **Inject now** to interrupt and send that message next. **Inject all** interrupts and sends the entire queue together in order, preserving attachments and the current draft. Escape has no send or interrupt binding. **⌘Return** inserts a newline; Shift-Return also works. These keys have the same meaning for all assistants.
 - Queued messages appear above the transcript, with Pause/Resume, Edit, and Clear controls. Stop pauses the queue; failures pause it too. Queued text and attachments survive relaunch, paused until you resume. You can keep editing a separate draft while the queue runs.
@@ -75,18 +75,32 @@ These are handled by Converse without sending a prompt or spending model tokens:
 | `/usage` | Read last-turn and session-total token usage, plus any observed account quota |
 | `/status` | Refresh and display all session details |
 | `/stop` | Interrupt the current turn |
-| `/login` | Open this conversation’s Codex/Claude CLI sign-in in Terminal; Muse gets CLI sign-in guidance |
+| `/login` | Choose an existing login, create a new login, or sign in again; uses the same picker as session creation |
 | `/help` | Show local command help |
 
 Muse queries run automatically when a conversation is opened. Read-only metadata commands do not change model, permissions or effort. `/usage` additionally invokes the built-in CLI usage view to fetch subscription quota; it never submits a model request. The status pickers, by contrast, explicitly update the selected conversation's model, effort or access profile. Muse uses its durable setters. Codex and Claude save per-conversation overrides and pass them on each subsequent turn, including resumed turns. CLI defaults are labeled when the CLI does not report a resolved effort. Claude and Codex also refresh their model catalogs and account/session metadata without submitting a model prompt. These commands do not implement the full CLI slash-command menus. Unrecognized commands remain ordinary prompts.
 
+## Model, effort and access options
+
+Catalogs come from the installed CLI and selected login, rather than a fixed list of model names. Codex includes hidden catalog rows and follows pagination; availability still depends on the account. Effort menus use each model’s reported supported levels. Custom model/effort entries remain available.
+
+| Assistant | Access controls |
+| --- | --- |
+| Claude | Manual, Accept edits, Auto, Plan, Don’t ask (deny unapproved), Bypass permissions |
+| Codex | Read-only, Workspace write, Full access; independent approval policy: CLI default, Never, On request, Untrusted |
+| Muse | The host’s available permission profiles; current built-ins include read-only, ask-me, auto-review, unrestricted |
+
+**Claude’s Don’t ask denies actions needing approval. Bypass permissions is the separate mode for skipping permission checks.** Converse passes the selected mode to every turn, including resumed turns. CLI/organization restrictions still apply. Claude and Codex run headlessly here, so terminal approval dialogs are not embedded. Muse’s host supplies native approval choices. Claude/Codex model, effort and access menus can return to CLI defaults.
+
+Sources checked against the installed CLI help and schemas: [Claude permission modes](https://code.claude.com/docs/en/permission-modes), [Codex command reference](https://learn.chatgpt.com/docs/developer-commands), and Muse’s offline MSP schema (`muse schema generate-json-schema`). Muse’s reported effort variants and profile availability take precedence over its broader CLI vocabulary.
+
 ## Accounts
 
-Settings → Accounts manages named CLI accounts and their configuration directories. The bottom account menu selects one for a fresh conversation. On an existing conversation, choosing another account opens a new conversation under that account and transfers the unsent draft and attachments; the original history and remote session stay tied to the original account. Sidebar rows show their account labels. Closing windows keeps all accounts’ active work alive.
+Settings → Models & sessions groups sessions and saved logins under their model. Click the login identity in the conversation footer, type **/login**, or use **Login…** in Settings to choose an existing login or **New login…**. Existing logins reuse their CLI authentication; the optional sign-in action authenticates them again. New logins get separate configuration directories and open Terminal authentication. On an existing conversation, choosing another account opens a new conversation under that account and transfers the unsent draft and attachments; the original history and remote session stay tied to the original account. Sidebar rows show their account labels. Closing windows keeps all accounts’ active work alive.
 
 Default accounts use the standard CLI stores (`~/.codex` and `~/.claude`); Muse reuses its current CLI sign-in. Add more named Codex or Claude accounts in Settings. Each additional account gets a separate configuration directory under Converse’s local data folder. Use **Sign in…** for each account, complete the official CLI flow in Terminal/browser, then return to Converse. Claude desktop accounts are separate from Claude Code accounts. No account names, credentials or configuration are bundled with the app.
 
-A conversation’s account menu includes **Sign in to this account…**. `/login` invokes the same local action, never a model prompt. Authentication failures show a sign-in banner. Finish the login flow in Terminal/browser, return to Converse to refresh status, then retry your message or resume the held queue. Login uses the conversation’s saved account directory and CLI command, preserving history, draft and attachments. Sign-in is blocked while that account has active work. A conversation’s title does not select or switch its account.
+Click a conversation’s login identity or type **/login** to open its login picker. Select **Sign in again using this login** to authenticate the bound account. This is a local action, never a model prompt. Authentication failures show a sign-in banner. Finish the login flow in Terminal/browser, return to Converse to refresh status, then retry your message or resume the held queue. Login uses the conversation’s saved account directory and CLI command, preserving history, draft and attachments. Sign-in is blocked while that account has active work. A conversation’s title does not select or switch its account.
 
 Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
 
@@ -140,7 +154,7 @@ The app uses the installed CLIs' authentication and permission configuration. Cr
 
 Muse approval and question dialogs are supported. Approval buttons use the server’s exact labels, choice IDs, scope, and current requirement token. Questions support single choices, multiple choices, free text, and cancellation. Requests stay visible until Muse settles them; errors and stale decisions are shown and refreshed. Auto-review policy may resolve an action without asking you. The status line distinguishes approval waits, automatic review, retries, foreground completion with background checks, and terminal completion; waiting on your input shows no working spinner. Closing a window keeps the host alive.
 
-Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Login and full CLI slash-command menus are not implemented. Authenticate through the CLI first. Converse adds no approval or sandbox bypass flags. Some tools provide their response only at turn completion.
+Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
 
 The current app is macOS-only. An iPad client and remote session service are future work.
 

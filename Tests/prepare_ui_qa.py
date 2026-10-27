@@ -57,7 +57,7 @@ if not archive.exists():
 # protected working folder. Rebuild disposable QA data explicitly if needed.
 saved = json.loads(archive.read_text())
 for entry in saved["entries"] + [s["entry"] for s in saved["sessions"]]:
-    assert entry["command"] == "python3 " + shlex.quote(str(root / "provider_fixture.py")) + " codex", "QA command must use the offline fixture"
+    assert entry["engine"] in ["codex", "claude", "muse"] and entry["command"] == "python3 " + shlex.quote(str(root / "provider_fixture.py")) + " " + entry["engine"], "QA command must use the offline fixture"
     assert Path(entry["directory"]).resolve().is_relative_to(root.resolve()), "QA working directory must be isolated"
     assert Path(entry["accountDirectory"]).resolve().is_relative_to(root.resolve()), "QA account must be isolated"
 subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)

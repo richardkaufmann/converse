@@ -25,6 +25,7 @@ struct ToolStatus: Codable {
     var model = "not reported"
     var effort = "CLI default"
     var access = "CLI default"
+    var approval: String? = nil
     var usage = "not reported"
     var totalUsage: String? = nil
     var quota: String? = nil
@@ -299,7 +300,7 @@ final class Store: ObservableObject {
                     let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")
                     if AccountLogin.requiresSignIn(output) { s.needsSignIn = true }
                 }
-                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. For authentication, use Sign in… or /login to open this account's CLI login in Terminal. Interactive terminal approval prompts are not supported in this version.")) }
+                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. For authentication, use Sign in… or /login to choose a login or authenticate in Terminal. Interactive terminal approval prompts are not supported in this version.")) }
                 self.save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }; self.objectWillChange.send()
                 self.finishQueue(s, success: p.terminationStatus == 0 && !s.turnFailed)
             }
@@ -480,6 +481,7 @@ final class Store: ObservableObject {
             s.toolStatus.model = s.entry.engine == "claude" ? (s.modelChoices.first { $0.id == model }?.label ?? model) : model
         }
         if let effort = s.choices.effort { s.toolStatus.effort = effort }
+        if let approval = s.choices.approval { s.toolStatus.approval = approval }
         if let access = s.choices.access { s.toolStatus.access = s.accessChoices.first { $0.id == access }?.label ?? access }
     }
     func changeSetting(_ s: Session, _ change: MuseSettingChange) {
@@ -517,11 +519,15 @@ final class Store: ObservableObject {
     func handleLocalCommand(_ s: Session) -> Bool {
         let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login"].contains(command) else { return false }
+        if command == "/login" {
+            s.draft = ""
+            if let app = AppDelegate.shared { app.chooseLogin(s) } else { signInSession(s) }
+            saveSoon(); return true
+        }
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
-        if command == "/login" { signInSession(s); saveSoon(); return true }
         if command == "/stop" { stop(s); saveSoon(); return true }
         if command == "/help" {
-            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/login — open this account’s CLI sign-in in Terminal\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/login — choose an existing login, add a new one, or sign in again\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
@@ -1116,18 +1122,10 @@ struct Conversation: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     Text(session.status)
-                    Menu(session.entry.accountName ?? session.entry.name) {
-                        ForEach(store.accounts.filter { $0.engine == session.entry.engine }) { profile in
-                            Button(profile.name + (session.entry.accountID == profile.id ? " ✓" : (session.started ? " · new conversation" : ""))) { store.chooseAccount(session, profile: profile) }
-                        }
-                        Divider()
-                        if session.entry.engine != "muse" {
-                            Button("Sign in to this account…") { store.signInSession(session) }
-                                .disabled(store.loginAccount(for: session).map(store.accountIsBusy) == true)
-                        }
-                        Button("Manage accounts…") { AppDelegate.shared.showSettings() }
-                    }.menuStyle(.borderlessButton).fixedSize().disabled(session.busy || session.changingSetting).help("Select an account independently of the conversation title. Sign in opens this conversation’s CLI login in Terminal.")
-                    if !session.accountStatus.isEmpty { Text(session.accountStatus).help(session.accountStatus).truncationMode(.middle) }
+                    Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary)
+                    Button(store.sessionLoginLabel(session)) { AppDelegate.shared.chooseLogin(session) }
+                        .buttonStyle(.borderless).disabled(session.busy || session.changingSetting)
+                        .help("Choose an existing login, add a new login, or sign in again. /login opens the same picker.")
                     Spacer(minLength: 0)
                     Text("Last turn: " + session.toolStatus.usage)
                     Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
@@ -1135,19 +1133,31 @@ struct Conversation: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         Menu(session.toolStatus.model) {
+                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "model") }; Divider() }
                             ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
                             Divider()
                             Button("Other model…") { store.chooseCustomModel(session) }
                         }.menuStyle(.borderlessButton).fixedSize()
                         Menu(session.toolStatus.effort) {
+                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "effort") }; Divider() }
                             if session.availableEfforts.isEmpty { Text(session.probingStatus ? "Loading supported effort levels…" : "This model has no reported effort options") }
                             ForEach(session.availableEfforts, id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
                             Divider()
                             Button("Other effort…") { store.chooseCustomEffort(session) }
                         }.menuStyle(.borderlessButton).fixedSize()
                         Menu(session.toolStatus.access) {
+                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "access") }; Divider() }
                             ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
                         }.menuStyle(.borderlessButton).fixedSize()
+                        if session.entry.engine == "codex" {
+                            Menu("Approvals: " + (session.toolStatus.approval ?? "CLI default")) {
+                                Button("CLI default") { store.setApproval(session, value: nil) }
+                                Button("Never") { store.setApproval(session, value: "never") }
+                                Button("On request") { store.setApproval(session, value: "on-request") }
+                                Button("Untrusted") { store.setApproval(session, value: "untrusted") }
+                            }.menuStyle(.borderlessButton).fixedSize()
+                                .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
+                        }
                     }.disabled(session.busy || session.changingSetting || session.probingStatus)
                 }
                 if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
@@ -1175,19 +1185,18 @@ struct RootView: View {
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(store.entries) { entry in
+                        ForEach(store.assistantFamilies, id: \.self) { engine in
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
-                                    Text(entry.name).fontWeight(store.sessions.contains { $0.entry.id == entry.id } ? .bold : .regular)
-                                    Text(entry.directory).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(entry.directory)
+                                    Text(AssistantFamily.name(engine)).fontWeight(store.sessions.contains { $0.entry.engine == engine } ? .bold : .regular)
                                     Spacer()
-                                    Button { AppDelegate.shared.newSession(entry, state: state) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New session")
+                                    Button { state.sessionSetup = SessionSetupRequest(engine: engine) } label: { Image(systemName: "plus") }
+                                        .buttonStyle(.plain).help("New " + AssistantFamily.name(engine) + " session")
                                 }.padding(.horizontal, 4).contextMenu {
-                                    Button("Configure…") { AppDelegate.shared.configureEntry(entry) }
-                                    Button("New Session") { AppDelegate.shared.newSession(entry, state: state) }
-                                    Button("Delete Entry", role: .destructive) { store.entries.removeAll { $0.id == entry.id }; store.save() }.disabled(store.sessions.contains { $0.entry.id == entry.id })
+                                    Button("New session…") { state.sessionSetup = SessionSetupRequest(engine: engine) }
+                                    Button("Settings…") { state.settings = true }
                                 }
-                                ForEach(store.sessions.filter { $0.entry.id == entry.id }) { session in
+                                ForEach(store.sessions.filter { $0.entry.engine == engine }) { session in
                                     SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= 360)
                                 }
                             }
@@ -1203,48 +1212,81 @@ struct RootView: View {
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
             }.frame(minWidth: 200, idealWidth: 340, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
-        }.sheet(isPresented: $state.settings) { SettingsView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.frame(minWidth: 760, minHeight: 540)
+        }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
     }
 }
 struct SettingsView: View {
     @ObservedObject var store = Store.shared
+    @ObservedObject var state: WindowState
+    @StateObject private var flow = SettingsFlow()
     @Environment(\.dismiss) var dismiss
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Assistants").font(.title2.bold())
-            Text("Commands run through your login shell. Choose the matching conversation adapter. Changes apply to new sessions.").font(.callout).foregroundStyle(.secondary)
-            ScrollView { VStack(alignment: .leading, spacing: 18) {
-                Text("Accounts").font(.headline)
-                Text("Default accounts reuse your existing CLI sign-ins. Add named accounts for separate sign-ins; each gets its own configuration folder. Claude desktop sign-ins are separate from Claude Code. Account changes apply to new conversations.").font(.caption).foregroundStyle(.secondary)
-                ForEach($store.accounts) { $profile in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            TextField("Account name", text: $profile.name)
-                            Text(profile.engine.capitalized).foregroundStyle(.secondary).frame(width: 60)
-                            if profile.engine != "muse" { Button("Sign in…") { store.signIn(profile) }.disabled(store.accountIsBusy(profile)).help("Sign in to this CLI account when its active turns have finished") }
-                        }
-                        if profile.engine != "muse" { TextField("CLI configuration directory", text: $profile.directory) }
-                    }.padding(8).background(.quaternary.opacity(0.3)).clipShape(RoundedRectangle(cornerRadius: 6))
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Models & sessions").font(.title2.bold())
+            Text("Choose a model, create a session, then bind its login. Existing conversations keep their history and login.").font(.callout).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(store.assistantFamilies, id: \.self) { engine in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text(AssistantFamily.name(engine)).font(.headline)
+                                Spacer()
+                                Button("New session…") { flow.request = SessionSetupRequest(engine: engine) }
+                            }
+                            ForEach(store.sessions.filter { $0.entry.engine == engine }) { session in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(session.title).lineLimit(1)
+                                        Text(store.sessionLoginLabel(session)).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Configure…") { AppDelegate.shared.configureSession(session) }
+                                    Button("Login…") { flow.request = SessionSetupRequest(engine: engine, sessionID: session.id) }
+                                }.disabled(session.busy || session.changingSetting)
+                            }
+                            DisclosureGroup("Saved logins") {
+                                ForEach($store.accounts) { $profile in
+                                    if profile.engine == engine {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            HStack {
+                                                TextField("Login name", text: $profile.name)
+                                                if engine != "muse" { Button("Sign in…") { store.signIn(profile) }.disabled(store.accountIsBusy(profile)) }
+                                            }
+                                            if engine != "muse" { TextField("CLI configuration folder", text: $profile.directory) }
+                                        }.padding(.vertical, 4)
+                                    }
+                                }
+                                Text("Add a new login when creating a session or through its Login… button.").font(.caption).foregroundStyle(.secondary)
+                            }
+                            DisclosureGroup("Advanced launch configurations") {
+                                ForEach($store.entries) { $entry in
+                                    if entry.engine == engine {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            TextField("Configuration name", text: $entry.name)
+                                            TextField("CLI command", text: $entry.command)
+                                            TextField("Default working folder", text: $entry.directory)
+                                        }.padding(.vertical, 4)
+                                    }
+                                }
+                            }
+                        }.padding(12).background(.quaternary.opacity(0.3)).clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
                 }
-                HStack { Button("Add Codex account") { store.addAccount(engine: "codex") }; Button("Add Claude account") { store.addAccount(engine: "claude") } }
-                Divider()
-                Text("Assistants").font(.headline)
-                ForEach($store.entries) { $entry in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack { TextField("Name", text: $entry.name); Picker("Adapter", selection: $entry.engine) { Text("Muse").tag("muse"); Text("Claude").tag("claude"); Text("Codex").tag("codex") }.frame(width: 200) }
-                        TextField("Command line, e.g. muse --model …", text: $entry.command)
-                        TextField("Working directory", text: $entry.directory)
-                        Picker("Default account", selection: Binding(get: { entry.accountID ?? entry.engine + "-default" }, set: { entry.accountID = $0; entry.accountName = nil; entry.accountDirectory = nil })) {
-                            ForEach(store.accounts.filter { $0.engine == entry.engine }) { profile in Text(profile.name).tag(profile.id) }
-                        }
-                        HStack { Button("Choose directory…") { let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; if p.runModal() == .OK, let url = p.url { entry.directory = url.path } }; Spacer(); Button("Remove") { store.entries.removeAll { $0.id == entry.id } }.disabled(store.sessions.contains { $0.entry.id == entry.id }) }
-                    }.padding(12).background(.quaternary.opacity(0.4)).clipShape(RoundedRectangle(cornerRadius: 10))
+            }.textFieldStyle(.roundedBorder)
+            HStack {
+                Menu("Add model") {
+                    ForEach(SetupCatalog.entries.filter { candidate in !store.entries.contains { $0.engine == candidate.engine } }) { entry in
+                        Button(entry.name) { store.entries.append(entry); store.save() }
+                    }
                 }
-            } }.textFieldStyle(.roundedBorder)
-            HStack { Button("Add assistant") { store.entries.append(Entry(name: "Muse", command: "muse", directory: "~", engine: "muse")) }; Spacer(); Button("Done") { store.save(); dismiss() }.keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 600, height: 540).onDisappear { store.save() }
+                Spacer()
+                Button("Done") { store.save(); dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(24).frame(width: 600, height: 580).onDisappear { store.save() }
+            .sheet(item: $flow.request) { SessionSetupView(request: $0, state: state) }
     }
 }
+final class SettingsFlow: ObservableObject { @Published var request: SessionSetupRequest? = nil }
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate!
     var windows: [(NSWindow, WindowState)] = []
@@ -1364,7 +1406,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let target = windows.first { $0.0.isKeyWindow } ?? windows.last
         if let (window, state) = target { select(session, state: state); window.makeKeyAndOrderFront(nil) }
     }
-    func newSession(_ entry: Entry, state: WindowState) { select(Store.shared.create(entry), state: state) }
+    func newSession(_ entry: Entry, state: WindowState) { state.sessionSetup = SessionSetupRequest(engine: entry.engine) }
+    func chooseLogin(_ session: Session) {
+        if windows.isEmpty { newWindow() }
+        guard let (_, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last else { return }
+        state.sessionSetup = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id)
+    }
     func select(_ session: Session, state: WindowState) {
         let pane = Workspace.shared.pane(for: session.id, in: state.id) ?? Workspace.shared.firstAvailablePane(in: state.id)
         assign(session, to: state, pane: pane)
@@ -1632,10 +1679,16 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), Command
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), CommandLine.arguments.count > at + 2 {
     let engine = CommandLine.arguments[at + 1], directory = CommandLine.arguments[at + 2]
-    guard ["codex", "claude"].contains(engine) else { exit(2) }
+    guard ["codex", "claude", "muse"].contains(engine) else { exit(2) }
     do {
-        let snapshot = try ProviderStatus.query(entry: Entry(name: engine, command: engine, directory: "~", engine: engine, accountDirectory: directory), remoteID: nil)
+        let entry = Entry(name: engine, command: engine, directory: "~", engine: engine, accountDirectory: directory)
+        let snapshot: ProviderSnapshot
+        if engine == "muse" {
+            let result = try MuseStatusProbe.query(entry: entry, sessionID: UUID().uuidString)
+            snapshot = ProviderSnapshot(status: result.status, models: result.models, access: result.access, account: result.status.account ?? "", detail: result.detail)
+        } else { snapshot = try ProviderStatus.query(entry: entry, remoteID: nil) }
         print(snapshot.detail)
+        print("Access: " + snapshot.access.map { $0.id + ($0.available ? "" : " (unavailable)") }.joined(separator: ", "))
         print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }

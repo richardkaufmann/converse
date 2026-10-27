@@ -23,7 +23,7 @@ extension Store {
             session.messages.append(Message(role: "notice", text: "Sign-in is held because this account has active work. Stop or finish its turns, then use Sign in… or /login again.")); save(); return
         }
         if signIn(profile, command: session.entry.command) {
-            session.messages.append(Message(role: "notice", text: "Sign-in opened in Terminal for \(profile.name). Complete the CLI/browser flow, then return here. This conversation keeps its account, history and draft; queued input is paused until you resume it. The account is chosen with the account menu, independently of the conversation title."))
+            session.messages.append(Message(role: "notice", text: "Sign-in opened in Terminal for \(profile.name). Complete the CLI/browser flow, then return here. This conversation keeps its account, history and draft; queued input is paused until you resume it. Choose logins with /login or the login identity in the footer, independently of the conversation title."))
             save()
         }
     }

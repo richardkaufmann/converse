@@ -1,4 +1,4 @@
-Converse — macOS preview 0.3.2
+Converse — macOS preview 0.4.0
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -65,7 +65,7 @@ session store. There is no idle terminal process. Window closure never stops a t
 Muse terminal responses and tool activity are displayed as provided by its JSON stream;
 Claude text streams as it arrives. Some tools only emit their answer at turn completion.
 
-Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals and full slash-command menus are not embedded; Sign in or /login opens their login flow in Terminal. No approval or sandbox bypass flags are added.
+Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals and full slash-command menus are not embedded; /login opens a login picker; new logins and Sign in again open Terminal authentication. Explicit session access selections apply to subsequent turns, including resumes.
 
 BUILD / TEST
 ./build.sh builds .build/Converse.app using swiftc and applies a local ad-hoc signature.
@@ -132,7 +132,7 @@ Return sends or queues. Inject now and Inject all interrupt with queued input.
 Escape has no send or interrupt binding. Muse uses native turn/interrupt. Claude and Codex receive
 SIGINT and resume the exact conversation only after the old process exits.
 Stop and failures pause queued messages. Queues survive relaunch paused.
-Settings > Accounts manages named sign-ins. Defaults reuse standard CLI stores.
+Settings > Models & sessions groups sessions and saved logins by model. Defaults reuse standard CLI stores.
 Add named accounts for separate logins; desktop sign-ins do not transfer.
 Sign in to each Claude CLI account once with its Sign in button. Choosing another
 account for existing work opens a separate conversation and transfers your draft;
@@ -149,8 +149,18 @@ Copyright 2026 Richard Kaufmann. Licensed under the Apache License, Version 2.0.
 See the included LICENSE file.
 
 SIGN-IN RECOVERY
-Use Sign in to this account in the conversation account menu, or type /login.
+Click the conversation login identity or type /login; choose Sign in again.
 Converse opens that account's CLI login in Terminal, without sending a model prompt.
 Finish sign-in there, return, then retry your input or resume the held queue.
 The conversation title does not choose its account. History and drafts stay intact.
 Sidebar hover details use a scrollable panel; move into it to select/copy text.
+
+MODEL → SESSION → LOGIN
+The sidebar has one heading each for Claude, Codex and Muse. + creates a session
+and lets you choose an existing login or New login. /login and the footer login
+identity open the same picker. Settings uses the same model/session hierarchy.
+Changing the login of an established conversation creates a separate conversation.
+Claude: Manual, Accept edits, Auto, Plan, Don't ask (deny unapproved), Bypass permissions.
+Codex: sandbox access and approval policy have independent controls.
+Muse: models, efforts and available permission profiles come from the host.
+CLI catalogs supply model IDs and supported effort levels for the selected login.

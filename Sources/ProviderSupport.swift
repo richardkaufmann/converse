@@ -59,6 +59,7 @@ struct ProviderCommand {
             if let effort = choices.effort { args += ["-c", "model_reasoning_effort=\(toml(effort))"] }
             // Config overrides work for both exec and resume, whose flag sets differ.
             if let access = choices.access { args += ["-c", "sandbox_mode=\(toml(access))"] }
+            if let approval = choices.approval { args += ["-c", "approval_policy=\(toml(approval))"] }
             for image in images { args += ["--image", image] }
         }
         return args
@@ -119,11 +120,11 @@ struct ProviderStatus {
         let rpc = try ProviderProbeConnection(entry: entry, arguments: ["app-server"])
         _ = try rpc.rpc("initialize", ["clientInfo": ["name": "converse", "version": "0.5"], "capabilities": ["experimentalApi": true]])
         try rpc.write(["method": "initialized", "params": [:]])
-        var catalog = try rpc.rpc("model/list", [:])
+        var catalog = try rpc.rpc("model/list", ["includeHidden": true])
         var models = catalog["data"] as? [[String: Any]] ?? []
         var cursors = Set<String>()
         while let cursor = catalog["nextCursor"] as? String, cursors.insert(cursor).inserted {
-            catalog = try rpc.rpc("model/list", ["cursor": cursor]); models += catalog["data"] as? [[String: Any]] ?? []
+            catalog = try rpc.rpc("model/list", ["cursor": cursor, "includeHidden": true]); models += catalog["data"] as? [[String: Any]] ?? []
         }
         catalog["data"] = models
         let config = try rpc.rpc("config/read", ["includeLayers": false, "cwd": NSString(string: entry.directory).expandingTildeInPath])["config"] as? [String: Any] ?? [:]
@@ -132,7 +133,7 @@ struct ProviderStatus {
         if let remoteID { thread = try rpc.rpc("thread/read", ["threadId": remoteID, "includeTurns": false])["thread"] as? [String: Any] ?? [:] }
         var result = resolveCodex(catalog: catalog, config: config, thread: thread)
         result.account = account?["email"] as? String ?? (account == nil ? "Not signed in" : "API key account")
-        result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nAccount: \(result.account)\nCatalog availability does not guarantee account access."
+        result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nApprovals: \(result.status.approval ?? "CLI default")\nAccount: \(result.account)\nCatalog availability does not guarantee account access."
         return result
     }
     static func resolveCodex(catalog: [String: Any], config: [String: Any], thread: [String: Any]) -> ProviderSnapshot {
@@ -147,6 +148,7 @@ struct ProviderStatus {
         let model = rows.first { $0["model"] as? String == result.status.model }
         result.status.effort = thread["reasoningEffort"] as? String ?? config["model_reasoning_effort"] as? String ?? model?["defaultReasoningEffort"] as? String ?? "CLI default"
         result.status.access = config["sandbox_mode"] as? String ?? "CLI default"
+        result.status.approval = config["approval_policy"] as? String
         result.access = ["read-only", "workspace-write", "danger-full-access"].map { MuseAccessChoice(id: $0, label: $0, available: true) }
         if let path = thread["path"] as? String {
             for object in tailRecords(path: path) where object["type"] as? String == "turn_context" {
@@ -204,7 +206,7 @@ struct ProviderStatus {
         }
         result.status.model = rows.first { $0["value"] as? String == "default" }?["resolvedModel"] as? String ?? "Model unavailable"
         result.status.effort = "CLI default"; result.status.access = payload["current_permission_mode"] as? String ?? "CLI default"
-        result.access = ["manual", "acceptEdits", "auto", "plan", "dontAsk"].map { MuseAccessChoice(id: $0, label: $0, available: true) }
+        result.access = [("default", "Manual"), ("acceptEdits", "Accept edits"), ("auto", "Auto"), ("plan", "Plan"), ("dontAsk", "Don’t ask (deny unapproved)"), ("bypassPermissions", "Bypass permissions")].map { MuseAccessChoice(id: $0.0, label: $0.1, available: true) }
         let account = payload["account"] as? [String: Any] ?? [:]
         result.account = account["email"] as? String ?? ((account["tokenSource"] as? String ?? "none") == "none" ? "Not signed in" : "Signed in · " + (account["tokenSource"] as? String ?? "CLI"))
         return result
@@ -234,7 +236,8 @@ extension Store {
                     switch result {
                     case .success(let snapshot):
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
-                        s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.status.access
+                        s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.access.first { $0.id == snapshot.status.access }?.label ?? snapshot.status.access
+                        s.toolStatus.approval = snapshot.status.approval
                         s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
                         s.statusDetails = snapshot.detail; s.probeError = ""; s.needsSignIn = AccountLogin.requiresSignIn(snapshot.account)
                     case .failure(let error): s.probeError = error.localizedDescription; if AccountLogin.requiresSignIn(s.probeError) { s.needsSignIn = true }
@@ -264,9 +267,10 @@ extension Store {
         let effort = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !effort.isEmpty { changeSetting(s, .effort(effort)) }
     }
-    func chooseAccount(_ s: Session, profile: AccountProfile) {
-        guard !s.busy, !s.changingSetting, profile.engine == s.entry.engine else { return }
-        guard s.entry.accountID != profile.id else { return }
+    @discardableResult
+    func chooseAccount(_ s: Session, profile: AccountProfile) -> Session {
+        guard !s.busy, !s.changingSetting, profile.engine == s.entry.engine else { return s }
+        guard s.entry.accountID != profile.id else { return s }
         var entry = s.entry
         entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory
         // A CLI's retained context lives in its account directory. Never resume a
@@ -274,12 +278,13 @@ extension Store {
         if s.started || s.remoteID != nil || !s.messages.isEmpty || !s.pending.isEmpty {
             let next = create(entry); next.draft = s.draft; next.attachments = s.attachments
             s.draft = ""; s.attachments = []; save()
-            AppDelegate.shared?.showSession(next)
+            return next
         } else {
             s.entry = entry; s.choices = SessionChoices(); s.toolStatus = ToolStatus()
             s.modelChoices = []; s.accessChoices = []; s.accountStatus = ""; s.probeError = ""
             save(); refreshStatus(s)
         }
+        return s
     }
     func addAccount(engine: String) {
         let id = UUID().uuidString
