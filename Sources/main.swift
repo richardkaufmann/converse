@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import Combine
 
 struct Entry: Codable, Identifiable, Equatable {
     var id = UUID()
@@ -27,6 +28,8 @@ struct ToolStatus: Codable {
     var usage = "not reported"
     var totalUsage: String? = nil
     var quota: String? = nil
+    var account: String? = nil
+    var accountObservedAt: Date? = nil
 }
 struct SavedSession: Codable {
     var id: UUID
@@ -64,6 +67,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var modelChoices: [MuseModelChoice] = []
     @Published var accessChoices: [MuseAccessChoice] = []
     @Published var changingSetting = false
+    var sidebarProbeAttemptAt: Date?
     var quotaRefreshedAt: Date?
     var probingStatus = false
     var statusCallbacks: [() -> Void] = []
@@ -83,6 +87,7 @@ final class Session: ObservableObject, Identifiable {
     init(_ saved: SavedSession) {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
         toolStatus = saved.toolStatus ?? ToolStatus()
+        accountStatus = saved.toolStatus?.account ?? ""
         choices = saved.choices ?? SessionChoices()
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
@@ -410,7 +415,9 @@ final class Store: ObservableObject {
                 case .success(let snapshot):
                     s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                     let previousQuota = s.toolStatus.quota
+                    let identity = snapshot.status.account ?? "Muse CLI has no reported account email"
                     s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
+                    s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
                 case .failure(let error):
@@ -503,7 +510,7 @@ final class Store: ObservableObject {
             let data = try JSONEncoder().encode(s.saved)
             try data.write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
         } catch {
-            let alert = NSAlert(); alert.messageText = "Could not delete conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
+            let alert = NSAlert(); alert.messageText = "Could not close conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
         }
         s.pending = []; stop(s)
         sessions.removeAll { $0.id == s.id }
@@ -1048,7 +1055,7 @@ struct Conversation: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("↵ send / queue · Esc interrupt + send · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("↵ send / queue · Esc interrupt + send · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).layoutPriority(-1)
                 Spacer()
                 Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
@@ -1102,49 +1109,48 @@ struct Conversation: View {
     }
 }
 
-final class WindowState: ObservableObject { @Published var selected: UUID?; @Published var settings = false }
-struct SidebarSession: View {
-    @ObservedObject var session: Session
-    var selected: Bool
-    var action: () -> Void
-    var body: some View {
-        Button(action: action) { HStack(spacing: 8) { Circle().fill(session.busy ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6); Text(session.title).lineLimit(1); Spacer(); if let account = session.entry.accountName { Text(account).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1) } }.padding(.vertical, 3).padding(.horizontal, 6).background(selected ? Color.accentColor.opacity(0.15) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 7)) }.buttonStyle(.plain).contextMenu {
-            Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
-            Button("Show Window", action: action)
-            Button("Close Window") { AppDelegate.shared.closeSessionWindow(session) }
-            Divider()
-            Button("Delete Conversation", role: .destructive) { Store.shared.deleteSession(session) }
-        }
-    }
-}
 struct RootView: View {
     @ObservedObject var store = Store.shared
+    @ObservedObject var workspace = Workspace.shared
     @ObservedObject var state: WindowState
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Color.clear.frame(width: 12, height: 1)
+                    Text("Conversation").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Model").frame(width: 105, alignment: .leading)
+                    Text("Placement").frame(width: 98, alignment: .leading)
+                }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(store.entries) { entry in
                             VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 6) { Text(entry.name).fontWeight(store.sessions.contains { $0.entry.id == entry.id } ? .bold : .regular); Text(entry.directory).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(entry.directory); Spacer(); Button { AppDelegate.shared.newSession(entry, state: state) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New session") }.contextMenu {
+                                HStack(spacing: 6) {
+                                    Text(entry.name).fontWeight(store.sessions.contains { $0.entry.id == entry.id } ? .bold : .regular)
+                                    Text(entry.directory).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(entry.directory)
+                                    Spacer()
+                                    Button { AppDelegate.shared.newSession(entry, state: state) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New session")
+                                }.padding(.horizontal, 4).contextMenu {
                                     Button("Configure…") { AppDelegate.shared.configureEntry(entry) }
                                     Button("New Session") { AppDelegate.shared.newSession(entry, state: state) }
                                     Button("Delete Entry", role: .destructive) { store.entries.removeAll { $0.id == entry.id }; store.save() }.disabled(store.sessions.contains { $0.entry.id == entry.id })
                                 }
                                 ForEach(store.sessions.filter { $0.entry.id == entry.id }) { session in
-                                    SidebarSession(session: session, selected: state.selected == session.id) { AppDelegate.shared.select(session, state: state) }
+                                    SidebarSession(session: session, workspace: workspace, state: state)
                                 }
                             }
                         }
                     }.padding(.top, 6)
                 }
-                HStack { Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }; Spacer(); Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings") }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
-            }.padding(.horizontal, 8).frame(minWidth: 220, idealWidth: 255, maxWidth: 350)
-            if let session = store.sessions.first(where: { $0.id == state.selected }) { Conversation(session: session).id(session.id).frame(minWidth: 460) }
-            else {
-                Color(nsColor: .textBackgroundColor).frame(maxWidth: .infinity, maxHeight: .infinity).frame(minWidth: 460)
-            }
+                HStack {
+                    Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }
+                    Spacer()
+                    Text("\(workspace.names.count) window\(workspace.names.count == 1 ? "" : "s")").font(.caption)
+                    Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
+                }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
+            }.padding(.horizontal, 8).frame(minWidth: 390, idealWidth: 460, maxWidth: 720)
+            WorkspacePanes(workspace: workspace, state: state)
         }.sheet(isPresented: $state.settings) { SettingsView() }.frame(minWidth: 760, minHeight: 540)
     }
 }
@@ -1190,9 +1196,11 @@ struct SettingsView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate!
     var windows: [(NSWindow, WindowState)] = []
+    var paneObserver: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
+        paneObserver = Workspace.shared.$placements.sink { [weak self] placements in self?.updatePaneWidths(placements) }
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
     }
     func buildMenu() {
@@ -1201,7 +1209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ","); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
-        f.addItem(withTitle: "Restore Deleted Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
+        f.addItem(withTitle: "Restore Closed Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
         for (name, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
@@ -1209,26 +1217,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         NSApp.mainMenu = menu
     }
-    @objc func showSettings() { if windows.isEmpty { newWindow() }; windows.last?.1.settings = true }
+    @objc func showSettings() {
+        if windows.isEmpty { newWindow() }
+        (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settings = true
+    }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: "0.2", .credits: NSAttributedString(string: "A calmer home for your command-line assistants.")]) }
     @objc func newWindow() {
         let state = WindowState()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Converse"; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
-        window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow"); windows.append((window, state)); window.makeKeyAndOrderFront(nil)
+        window.contentMinSize = NSSize(width: 760, height: 540)
+        window.title = state.title; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
+        let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
+        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        window.addTitlebarAccessoryViewController(title)
+        window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
+        if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }
+        windows.append((window, state)); window.makeKeyAndOrderFront(nil)
+        NSApp.addWindowsItem(window, title: state.title, filename: false)
     }
-    func sessionWasDeleted(_ session: Session) {
-        let remaining = Store.shared.sessions
-        let next = remaining.first(where: { $0.entry.id == session.entry.id }) ?? remaining.first
-        for (_, state) in windows where state.selected == session.id { state.selected = next?.id }
+    func updatePaneWidths(_ placements: [UUID: PaneLocation]) {
+        for (window, state) in windows where window.isVisible {
+            let count = placements.values.filter { $0.windowID == state.id }.count
+            let minimum = Workspace.minimumWidth(paneCount: count)
+            window.contentMinSize = NSSize(width: minimum, height: 540)
+            let size = window.contentRect(forFrameRect: window.frame).size
+            if size.width < minimum { window.setContentSize(NSSize(width: minimum, height: max(540, size.height))) }
+        }
     }
+    func sessionWasDeleted(_ session: Session) { Workspace.shared.park(session.id) }
     func closeSessionWindow(_ session: Session) {
-        for (window, state) in windows where state.selected == session.id { window.performClose(nil) }
+        guard let location = Workspace.shared.placements[session.id], let (window, _) = windows.first(where: { $0.1.id == location.windowID }) else { return }
+        window.performClose(nil)
+    }
+    func frontWindow(_ id: UUID) {
+        guard let (window, _) = windows.first(where: { $0.1.id == id }) else { return }
+        window.deminiaturize(nil); window.makeKeyAndOrderFront(nil)
+    }
+    func renameWindow(_ id: UUID) {
+        guard let (window, state) = windows.first(where: { $0.1.id == id }) else { return }
+        configurationForm(title: "Rename window", values: [("Window name", state.title)]) { values in
+            guard !values[0].isEmpty else { return }
+            Workspace.shared.rename(id, to: values[0]); window.title = state.title
+            NSApp.changeWindowsItem(window, title: state.title, filename: false)
+        }
+    }
+    func assign(_ session: Session, to state: WindowState, pane: Int) {
+        guard Store.shared.sessions.contains(where: { $0.id == session.id }) else { return }
+        Workspace.shared.assign(session.id, to: state.id, pane: pane)
+        if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }
     }
     @objc func restoreDeletedConversation() {
         guard let session = Store.shared.restoreDeleted() else { return }
         if windows.isEmpty { newWindow() }
-        if let (_, state) = windows.last { select(session, state: state) }
+        if let (_, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last { select(session, state: state) }
     }
     func configurationForm(title: String, values: [(String, String)], save: ([String]) -> Void) {
         let alert = NSAlert(); alert.messageText = title
@@ -1262,13 +1303,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let target = windows.first { $0.0.isKeyWindow } ?? windows.last
         if let (window, state) = target { select(session, state: state); window.makeKeyAndOrderFront(nil) }
     }
-    func newSession(_ entry: Entry, state: WindowState) { let s = Store.shared.create(entry); state.selected = s.id }
+    func newSession(_ entry: Entry, state: WindowState) { select(Store.shared.create(entry), state: state) }
     func select(_ session: Session, state: WindowState) {
-        if let (window, _) = windows.first(where: { $0.1 !== state && $0.1.selected == session.id && $0.0.isVisible }) { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil); return }
-        state.selected = session.id
+        let pane = Workspace.shared.pane(for: session.id, in: state.id) ?? Workspace.shared.firstAvailablePane(in: state.id)
+        assign(session, to: state, pane: pane)
     }
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
+        guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
+        Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -1510,10 +1552,10 @@ func selfTest() {
     let deleteState = WindowState()
     deleteDelegate.windows = [(deleteWindow, deleteState)]
     let disposable = store.create(entry); disposable.title = "Recovery check"; disposable.draft = "keep this draft"
-    deleteState.selected = disposable.id
+    Workspace.shared.assign(disposable.id, to: deleteState.id, pane: 1)
     store.deleteSession(disposable)
     check(!store.sessions.contains { $0.id == disposable.id }, "Deleting a conversation removes it from the active sidebar")
-    check(deleteDelegate.windows.count == 1 && deleteState.selected != disposable.id && deleteState.selected != nil, "Delete Conversation keeps the window open and selects another session")
+    check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     print("All checks passed")

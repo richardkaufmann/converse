@@ -187,9 +187,17 @@ struct ProviderStatus {
                     if let message = object["message"] as? [String: Any], let model = message["model"] as? String, model != "<synthetic>" { result.status.model = model }
                 }
             }
+            if !result.account.contains("@"), let email = try? claudeAccountEmail(entry: entry) { result.account = email }
             result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nAccount: \(result.account)"
             return result
         }
+    }
+    static func claudeAccountEmail(entry: Entry) throws -> String? {
+        let query = try ProviderProbeConnection(entry: entry, arguments: ["auth", "status", "--json"])
+        try query.input.fileHandleForWriting.close()
+        let data = query.output.fileHandleForReading.readDataToEndOfFile()
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return object["email"] as? String
     }
     static func resolvedClaudeModel(_ model: String, models: [[String: Any]]) -> String { models.first { $0["value"] as? String == model }?["resolvedModel"] as? String ?? model }
     static func resolveClaude(payload: [String: Any]) -> ProviderSnapshot {
@@ -231,7 +239,8 @@ extension Store {
                     case .success(let snapshot):
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                         s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.status.access
-                        s.accountStatus = snapshot.account; s.statusDetails = snapshot.detail; s.probeError = ""
+                        s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
+                        s.statusDetails = snapshot.detail; s.probeError = ""
                     case .failure(let error): s.probeError = error.localizedDescription
                     }
                     self.updateExplicitStatus(s); self.saveSoon()

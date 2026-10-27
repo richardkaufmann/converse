@@ -27,11 +27,11 @@ Click HTTP/HTTPS links to open them in your default browser.
 Text is selectable and supports copy. Assistant Markdown renders native headings, emphasis, lists, code, quotes, links and pipe tables. Right-click for Copy this prompt or Copy this response. Rich-text targets receive RTF/HTML formatting; plain-text targets receive original Markdown, without delay markers.
 The app icon is a high-top tennis shoe — Converse.
 
-Command-N / File > New Window opens another two-pane window.
-Selecting a conversation already shown in another visible window brings that window forward.
+Command-N / File > New Window opens a window with the same sidebar and up to three right panes.
+Use 1, 2 or 3 beside a conversation to move it here; any displaced conversation is parked.
 Closing windows leaves work running. Click the Dock icon to reopen a window.
 Sessions remain listed after their window closes; select one to reopen it.
-Bold assistant names indicate that sessions exist. Green dots indicate active work.
+Bold assistant names indicate that sessions exist. A spinning rainbow beachball indicates active work.
 Stop interrupts the current turn, preserving the conversation for another message.
 Quitting warns if work is active. Conversation history and drafts are saved across launches.
 
@@ -91,14 +91,20 @@ and the refresh button request fresh data. Failures are explicit, not zero usage
 INPUT AND SIDEBAR SHORTCUTS
 Click blank space below the transcript to focus the current input. The editable
 view fills tall windows, and normal Mac input methods work after clicking history.
-Right-click a conversation for Configure, Show Window, Close Window, or Delete
-Conversation. Configure uses a compact name/command/directory dialog. Header menus
-configure assistant entries for future conversations. Closing keeps work running;
-deleting stops it and saves a recovery snapshot. File > Restore Deleted Conversation
-restores the latest deleted transcript and draft. Attachments are retained.
-
-Delete Conversation keeps the window open and selects another conversation when
-available. Only the separate Close Window action closes the window.
+Each sidebar row has activity, title, model and P 1 2 3 X controls.
+P parks a conversation without stopping it. 1/2/3 assign it to that pane here,
+removing it from any other window and parking the previous occupant.
+Each window has a shared list of all conversations and its own pane assignments.
+A row shown elsewhere indicates P locally; hover shows the owning window/pane.
+Selected placement buttons are green/white; unselected buttons are white/black.
+X asks before closing the conversation and turns dark red during confirmation.
+Closing stops active work and saves a recovery snapshot. The window stays open.
+File > Restore Closed Conversation recovers the latest closed transcript/draft.
+Hover over a row for its CLI account email, settings, activity, usage and location.
+Right-click a row for configuration, pane moves, park, show owning window or close.
+Right-click the titlebar name to rename a window. The Window menu lists the names.
+Closing a window parks all its conversations and leaves work running. New windows
+start empty; after relaunch, use 1/2/3 to show saved conversations again.
 
 ALL-ASSISTANT SETTINGS, QUEUES AND ACCOUNTS
 The bottom model, effort and access dropdowns work for Muse, Claude and Codex.

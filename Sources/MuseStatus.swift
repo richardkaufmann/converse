@@ -102,6 +102,10 @@ struct MuseStatusProbe {
             records = data.split(separator: 10).compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
         }
         var result = resolve(config: config, session: session, records: records, quota: usage["usage"] as? [String: Any])
+        let authURL = URL(fileURLWithPath: configRoot).appendingPathComponent("muse/auth.json")
+        if let data = try? Data(contentsOf: authURL), let auth = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            result.status.account = accountEmail(auth: auth, provider: config["provider"] as? String ?? "meta")
+        }
         result.models = (catalog["models"] as? [[String: Any]] ?? []).compactMap { row in
             guard let id = row["modelId"] as? String else { return nil }
             return MuseModelChoice(id: id, label: row["displayLabel"] as? String ?? id, provider: row["providerId"] as? String ?? "meta", profile: row["profileId"] as? String, efforts: row["variants"] as? [String] ?? [])
@@ -112,6 +116,13 @@ struct MuseStatusProbe {
         }
         if let readError, session.isEmpty { result.detail += "\nSession read: " + readError }
         return result
+    }
+    static func accountEmail(auth: [String: Any], provider: String) -> String? {
+        // Auth's non-secret identity metadata; never inspect credentials or tokens.
+        let providers = auth["providers"] as? [String: Any]
+        let identity = providers?[provider] as? [String: Any]
+        guard let email = identity?["user_email"] as? String, !email.isEmpty else { return nil }
+        return email
     }
     static func resolve(config: [String: Any], session: [String: Any], records: [[String: Any]], quota: [String: Any]?) -> Result {
         var status = ToolStatus()

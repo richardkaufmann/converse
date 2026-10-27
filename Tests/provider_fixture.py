@@ -40,6 +40,10 @@ if args == ['app-server']:
         else: raise AssertionError('Status query must not resume or submit: ' + method)
         emit({'id': rid, 'result': result})
     sys.exit()
+if args == ['auth', 'status', '--json']:
+    assert kind == 'claude'
+    emit({'loggedIn': True, 'email': os.environ['CLAUDE_CONFIG_DIR']})
+    sys.exit()
 if '--input-format' in args:
     assert kind == 'claude' and '--no-session-persistence' in args
     q = json.loads(sys.stdin.readline())
