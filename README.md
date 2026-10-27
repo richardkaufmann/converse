@@ -4,7 +4,16 @@
 
 # Converse
 
-A native Mac home for Muse, Claude Code, and Codex: the immediacy of a shell with a normal, selectable Mac text window. And a tennis shoe, because **Converse**.
+A Mac app that manages multiple conversations with Muse, Claude Code, and Codex: the immediacy of a shell with a normal, selectable Mac text window. You "converse" (sorry) with the coding tools, and they can also message each other.  You might like it if...
+
+* You really don't like pretending you're using a CRT from the 1970s.
+* You use multiple coding tools, or multiple accounts with one coding agent.
+* You have noticed how hard it is to build a switchboard where these tools talk to each other
+* You hate looking at raw markdown
+
+It's a bit "opinionated" to match how I work.  Feel free to rip it off and make any changes you like.
+
+100% vibe-coded.
 
 ## Download
 
