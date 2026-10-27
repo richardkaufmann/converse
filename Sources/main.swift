@@ -794,13 +794,27 @@ final class LineNumberRuler: NSRulerView {
     override func draw(_ dirtyRect: NSRect) { drawHashMarksAndLabels(in: dirtyRect) }
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let text, let layout = text.layoutManager, let container = text.textContainer else { return }
-        NSColor.controlBackgroundColor.setFill(); bounds.fill()
-        NSColor.gray.withAlphaComponent(0.25).setStroke()
-        let edge = NSBezierPath(); edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY)); edge.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY)); edge.lineWidth = 0.5; edge.stroke()
+        NSColor.white.setFill(); bounds.fill()
         layout.ensureLayout(for: container)
         let string = text.string as NSString
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.gray]
+        // Shade the entire visual block, including wrapped lines and images,
+        // rather than only the first numbered line of a submitted prompt.
+        NSColor(white: 0.95, alpha: 1).setFill()
+        for block in text.userBlocks where block.length > 0 && block.location < string.length {
+            let end = min(NSMaxRange(block), string.length)
+            let first = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
+            let last = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: end - 1), effectiveRange: nil)
+            NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: last.maxY - first.minY).intersection(bounds).fill()
+        }
+        // The editable draft is a prompt too, including its empty final line.
+        let start = min(text.inputStart, string.length)
+        let first = start < string.length ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: start), effectiveRange: nil) : layout.extraLineFragmentRect
+        let last = string.length > start && !text.string.hasSuffix("\n") ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: string.length - 1), effectiveRange: nil) : layout.extraLineFragmentRect
+        NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: max(18, last.maxY - first.minY)).intersection(bounds).fill()
+        NSColor.gray.withAlphaComponent(0.25).setStroke()
+        let edge = NSBezierPath(); edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY)); edge.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY)); edge.lineWidth = 0.5; edge.stroke()
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor(white: 0.475, alpha: 1)]
         var offset = 0; var number = 1; var previousY: CGFloat?
         repeat {
             let lineRect: NSRect

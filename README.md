@@ -205,3 +205,5 @@ The JSON contains `title`, `transcriptUuid`, `converseSessionId`, ISO-8601 `crea
 Agents must check `live` is `true` and `transcriptUuid` matches their own transcript before trusting the title. Closing a conversation writes a tombstone (`live: false`, `closedAt` set); parking it or closing its window keeps the conversation live. Restoring a closed conversation republishes its identity. Isolated developer runs place sidecars under their isolated data directory instead of the user’s `~/.converse`.
 
 Right-clicking submitted text offers **Copy this prompt** or **Copy this response** for that message alone. Drafts and gaps do not offer a whole-message copy action; the standard selection Copy remains available.
+
+The line-number gutter uses white behind responses and very light grey behind prompts (including the editable draft), with midpoint grey numbers. Prompt shading spans wrapped lines and attached images so input blocks remain easy to find while scrolling.

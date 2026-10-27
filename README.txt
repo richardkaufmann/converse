@@ -204,3 +204,6 @@ Window resizing preserves manually chosen session-pane proportions. In small
 windows the sidebar shrinks; growing restores its preferred width and pane
 proportions. Temporary readable-minimum clamping does not erase your settings.
 Header logos use Meta blue, Claude clay, and the uncolored OpenAI mark.
+
+The line-number gutter is white for responses and very light grey for prompts,
+with midpoint-grey numbers. Wrapped prompts and the draft keep the same shading.
