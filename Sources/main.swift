@@ -1119,11 +1119,12 @@ struct RootView: View {
     @ObservedObject var state: WindowState
     var body: some View {
         HSplitView {
+            GeometryReader { sidebar in
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Color.clear.frame(width: 12, height: 1)
-                    Text("Conversation").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Model").frame(width: 105, alignment: .leading)
+                    Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    if sidebar.size.width >= 360 { Text("Model").frame(width: 105, alignment: .leading) }
                     Text("Placement").frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
@@ -1141,7 +1142,7 @@ struct RootView: View {
                                     Button("Delete Entry", role: .destructive) { store.entries.removeAll { $0.id == entry.id }; store.save() }.disabled(store.sessions.contains { $0.entry.id == entry.id })
                                 }
                                 ForEach(store.sessions.filter { $0.entry.id == entry.id }) { session in
-                                    SidebarSession(session: session, workspace: workspace, state: state)
+                                    SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= 360)
                                 }
                             }
                         }
@@ -1153,7 +1154,8 @@ struct RootView: View {
                     Text("\(workspace.names.count) window\(workspace.names.count == 1 ? "" : "s")").font(.caption)
                     Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
                 }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
-            }.padding(.horizontal, 8).frame(minWidth: 390, idealWidth: 440, maxWidth: 480)
+            }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.frame(minWidth: 200, idealWidth: 340, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
         }.sheet(isPresented: $state.settings) { SettingsView() }.frame(minWidth: 760, minHeight: 540)
     }

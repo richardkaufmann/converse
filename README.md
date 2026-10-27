@@ -20,6 +20,8 @@ Click **+** next to an assistant to start a session. Settings (**⌘,**) configu
 - The **line numbers** checkbox controls a narrow logical-line gutter. It defaults on and remembers your choice.
 - Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
 
+The sidebar gutter can be dragged down to 200 points wide. Below 360 points, the model column and its header disappear; narrowing further truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons visible. The full model and title remain in row hover details.
+
 Each sidebar row shows a spinning rainbow beachball while the assistant is working (blank when idle or waiting for you), the conversation title, its model, and **P 1 2 3 X**. Hover over the row for account email, profile, model, effort, access, state, current window/pane, usage, quota, directory, queued input, draft/attachment counts and session IDs. Identity comes from the account's CLI: Codex account metadata, Claude initialization/auth status, or Muse's non-secret auth identity fields. The observation time is included; missing identity and probe failures are stated explicitly. Hover refreshes stale metadata without submitting a model prompt.
 
 - **P** parks the conversation: no right pane displays it, and active work continues.

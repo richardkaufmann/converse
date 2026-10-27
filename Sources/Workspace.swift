@@ -118,6 +118,7 @@ struct SidebarSession: View {
     @ObservedObject var session: Session
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
+    var showsModel = true
     var confirmingClose: Bool { state.closingSessionID == session.id }
     var closeBinding: Binding<Bool> {
         Binding(get: { confirmingClose }, set: { if $0 { state.closingSessionID = session.id } else if confirmingClose { state.closingSessionID = nil } })
@@ -127,9 +128,11 @@ struct SidebarSession: View {
         HStack(spacing: 6) {
             SessionActivity(session: session)
             Button { AppDelegate.shared.select(session, state: state) } label: {
-                Text(session.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-            Text(session.toolStatus.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(width: 105, alignment: .leading)
+                Text(session.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain).layoutPriority(-1)
+            if showsModel {
+                Text(session.toolStatus.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(width: 105, alignment: .leading)
+            }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)")
                 ForEach(1...3, id: \.self) { pane in
@@ -137,7 +140,7 @@ struct SidebarSession: View {
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)")
                 }
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)")
-            }
+            }.fixedSize(horizontal: true, vertical: false)
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background(localPane == nil ? Color.clear : Color.accentColor.opacity(0.05))
             .contentShape(Rectangle())
