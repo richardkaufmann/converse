@@ -16,18 +16,21 @@ struct DeviceLease: Equatable {
 final class DeviceLeaseManager {
     private let now: () -> Date
     private let ttl: TimeInterval
-    private let persistEpochs: (([UUID: UInt64]) -> Void)?
+    private let persistEpochs: (([UUID: UInt64]) -> Bool)?
     private(set) var leases: [UUID: DeviceLease] = [:]
     private(set) var epochs: [UUID: UInt64]
-    init(now: @escaping () -> Date = Date.init, ttl: TimeInterval = 15, initialEpochs: [UUID: UInt64] = [:], persistEpochs: (([UUID: UInt64]) -> Void)? = nil) {
+    init(now: @escaping () -> Date = Date.init, ttl: TimeInterval = 15, initialEpochs: [UUID: UInt64] = [:], persistEpochs: (([UUID: UInt64]) -> Bool)? = nil) {
         self.now = now; self.ttl = ttl; epochs = initialEpochs; self.persistEpochs = persistEpochs
     }
     func acquire(session: UUID, device: String) -> (granted: Bool, epoch: UInt64, displaced: String?) {
         // Report any previous holder, even expired, so callers clear its stream.
         let displaced = leases[session].flatMap { $0.device != device ? $0.device : nil }
         let epoch = (epochs[session] ?? 0) + 1
-        epochs[session] = epoch
-        persistEpochs?(epochs)
+        var candidate = epochs; candidate[session] = epoch
+        // Fail closed: an epoch that cannot be persisted must never grant,
+        // or a restart could reuse it and resurrect stale authority.
+        if let persistEpochs, !persistEpochs(candidate) { return (false, epochs[session] ?? 0, nil) }
+        epochs = candidate
         leases[session] = DeviceLease(device: device, epoch: epoch, expiresAt: now().addingTimeInterval(ttl))
         return (true, epoch, displaced)
     }
@@ -104,25 +107,31 @@ final class DeviceCommandStore {
     }
 }
 
+// Keyed by routing key: home-local session UUID string on the home,
+// full global ID on viewers. Never a bare cross-home UUID alone.
 struct DeviceDraftTracker {
-    private var versions: [UUID: UInt64] = [:]
-    private var texts: [UUID: String] = [:]
-    mutating func apply(session: UUID, version: UInt64, text: String) -> Bool {
+    private var versions: [String: UInt64] = [:]
+    private var texts: [String: String] = [:]
+    mutating func apply(session: String, version: UInt64, text: String) -> Bool {
         guard version > (versions[session] ?? 0) else { return false }
         versions[session] = version; texts[session] = text; return true
     }
-    func text(session: UUID) -> String? { texts[session] }
-    func version(session: UUID) -> UInt64 { versions[session] ?? 0 }
-    mutating func bump(session: UUID, text: String) -> UInt64 {
+    func text(session: String) -> String? { texts[session] }
+    func version(session: String) -> UInt64 { versions[session] ?? 0 }
+    mutating func bump(session: String, text: String) -> UInt64 {
         let next = (versions[session] ?? 0) + 1; _ = apply(session: session, version: next, text: text); return next
     }
-    // Home snapshot on grant is authoritative; viewer adopts its version so
-    // the next edit is snapshot+1 instead of an independent low counter.
-    mutating func adopt(session: UUID, version: UInt64, text: String) {
+    mutating func adopt(session: String, version: UInt64, text: String) {
         versions[session] = version; texts[session] = text
     }
-    var snapshot: (versions: [UUID: UInt64], texts: [UUID: String]) { (versions, texts) }
-    mutating func restore(versions: [UUID: UInt64], texts: [UUID: String]) { self.versions = versions; self.texts = texts }
+    // Periodic snapshots must never regress a viewer version or clobber
+    // a newer pending edit. Adopt only strictly newer home state.
+    mutating func adoptIfNewer(session: String, version: UInt64, text: String) -> Bool {
+        guard version > (versions[session] ?? 0) else { return false }
+        versions[session] = version; texts[session] = text; return true
+    }
+    var snapshot: (versions: [String: UInt64], texts: [String: String]) { (versions, texts) }
+    mutating func restore(versions: [String: UInt64], texts: [String: String]) { self.versions = versions; self.texts = texts }
 }
 
 // Viewer outbox: submitted content and its command ID persist until an
@@ -149,7 +158,8 @@ final class DeviceOutboxStore {
     func add(_ record: DeviceOutboxRecord) throws { records.removeAll { $0.commandID == record.commandID }; records.append(record); try save() }
     func resolve(commandID: UUID, outcome: String, detail: String?) throws {
         guard let index = records.firstIndex(where: { $0.commandID == commandID }) else { return }
-        if outcome == "completed" || outcome == "failed" || outcome == "rejected" { records.remove(at: index) }
+        // Only success removes the record. Failures retain content for recovery.
+        if outcome == "completed" { records.remove(at: index) }
         else { records[index].outcome = outcome; records[index].detail = detail }
         try save()
     }
@@ -169,6 +179,7 @@ final class DeviceOutboxStore {
 struct DeviceDraftFile: Codable {
     var versions: [String: UInt64] = [:]
     var texts: [String: String] = [:]
+    var attachments: [String: [String]] = [:]
 }
 
 final class DeviceDraftStore {
@@ -204,8 +215,9 @@ final class DeviceSyncStateStore {
     }
     func nextSeq() -> UInt64 { state.homeSeq += 1; try? save(); return state.homeSeq }
     func beginBoot() -> UInt64 { state.boot += 1; try? save(); return state.boot }
-    func saveEpochs(_ epochs: [UUID: UInt64]) {
-        state.epochs = Dictionary(uniqueKeysWithValues: epochs.map { ($0.key.uuidString, $0.value) }); try? save()
+    func saveEpochs(_ epochs: [UUID: UInt64]) -> Bool {
+        state.epochs = Dictionary(uniqueKeysWithValues: epochs.map { ($0.key.uuidString, $0.value) })
+        do { try save(); return true } catch { return false }
     }
     var loadedEpochs: [UUID: UInt64] {
         Dictionary(uniqueKeysWithValues: state.epochs.compactMap { pair in UUID(uuidString: pair.key).map { ($0, pair.value) } })

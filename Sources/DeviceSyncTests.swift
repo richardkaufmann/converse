@@ -38,7 +38,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(try responder.readMessage(m3) == Data("hello-c".utf8), "Noise XX third payload reaches responder")
         let a = try initiator.finish(), b = try responder.finish()
         check(a.remoteStatic == respStatic.publicKey.rawRepresentation && b.remoteStatic == initStatic.publicKey.rawRepresentation, "Noise XX authenticates both static keys")
-        check(a.handshakeHash == b.handshakeHash && DeviceSAS.code(a.handshakeHash) == DeviceSAS.code(b.handshakeHash) && DeviceSAS.code(a.handshakeHash).count == 6, "Both devices derive the same six digit pairing code")
+        check(a.handshakeHash == b.handshakeHash && DeviceSAS.code(a.handshakeHash) == DeviceSAS.code(b.handshakeHash) && DeviceSAS.code(a.handshakeHash).filter { $0 != " " }.count == 32, "Both devices derive the same 128-bit pairing code")
         var aSend = a.sender, bRecv = b.receiver
         let sealed = try aSend.encrypt(Data("secret frame".utf8))
         check(!sealed.contains { $0 == 0x73 } || sealed != Data("secret frame".utf8), "Transport ciphertext is not plaintext")
@@ -105,7 +105,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
 
     // Draft versions, blob hashes, trust pinning, and global session identity.
     var drafts = DeviceDraftTracker()
-    check(drafts.apply(session: sessionID, version: 2, text: "new") && !drafts.apply(session: sessionID, version: 1, text: "old") && drafts.text(session: sessionID) == "new", "Stale draft patches cannot overwrite newer home drafts")
+    check(drafts.apply(session: sessionID.uuidString, version: 2, text: "new") && !drafts.apply(session: sessionID.uuidString, version: 1, text: "old") && drafts.text(session: sessionID.uuidString) == "new", "Stale draft patches cannot overwrite newer home drafts")
     let blob = Data("image-bytes".utf8)
     check(DeviceBlob.verify(blob, sha256Hex: DeviceBlob.sha256Hex(blob)) && !DeviceBlob.verify(blob, sha256Hex: DeviceBlob.sha256Hex(Data("other".utf8))), "Attachment blobs verify by SHA-256 before use")
     do {
@@ -128,10 +128,10 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let freshEpoch = restarted.acquire(session: sessionID, device: "viewer").epoch
         check(freshEpoch > oldEpoch && !restarted.validate(session: sessionID, device: "viewer", epoch: oldEpoch), "Persisted epochs never reuse a pre-restart token")
         var homeDraft = DeviceDraftTracker(); var viewerDraft = DeviceDraftTracker()
-        _ = homeDraft.apply(session: sessionID, version: 5, text: "preserved draft")
-        viewerDraft.adopt(session: sessionID, version: 5, text: "preserved draft")
-        let adopted = viewerDraft.bump(session: sessionID, text: "new holder edit")
-        check(adopted == 6 && homeDraft.apply(session: sessionID, version: adopted, text: "new holder edit"), "New holder adopts home draft version before editing")
+        _ = homeDraft.apply(session: sessionID.uuidString, version: 5, text: "preserved draft")
+        viewerDraft.adopt(session: sessionID.uuidString, version: 5, text: "preserved draft")
+        let adopted = viewerDraft.bump(session: sessionID.uuidString, text: "new holder edit")
+        check(adopted == 6 && homeDraft.apply(session: sessionID.uuidString, version: adopted, text: "new holder edit"), "New holder adopts home draft version before editing")
         let outboxStore = try DeviceOutboxStore(folder: root)
         let payload = DeviceCommandPayload(action: "submit", text: "keep me")
         let record = DeviceOutboxRecord(commandID: UUID(), sessionID: "home/session", payload: payload, payloadHash: "hash")
@@ -206,6 +206,76 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(responder.plain == "loopback secret", "Loopback Network transport carries Noise handshake and encrypted frame")
         outgoing.cancel(); responder.connection?.cancel(); listener.cancel()
     } catch { check(false, "Loopback integration failed: " + error.localizedDescription) }
+    // MITM grinding regression (review reproduction): two attacker legs
+    // with different keys must not share the 128-bit verification code.
+    do {
+        func codeForLeg(attackerStatic: Curve25519.KeyAgreement.PrivateKey, victimStatic: Curve25519.KeyAgreement.PrivateKey, victimInitiator: Bool) throws -> String {
+            var victim = DeviceHandshake(isInitiator: victimInitiator, staticKey: victimStatic, ephemeralKey: fixedKey(0x51))
+            var attacker = DeviceHandshake(isInitiator: !victimInitiator, staticKey: attackerStatic, ephemeralKey: fixedKey(0x52))
+            if victimInitiator {
+                _ = try attacker.readMessage(try victim.writeMessage(payload: Data("hello-victim".utf8)))
+                _ = try victim.readMessage(try attacker.writeMessage(payload: Data("hello-attacker".utf8)))
+                _ = try attacker.readMessage(try victim.writeMessage(payload: Data("hello-victim".utf8)))
+            } else {
+                _ = try victim.readMessage(try attacker.writeMessage(payload: Data("hello-attacker".utf8)))
+                _ = try attacker.readMessage(try victim.writeMessage(payload: Data("hello-victim".utf8)))
+                _ = try victim.readMessage(try attacker.writeMessage(payload: Data("hello-attacker".utf8)))
+            }
+            return DeviceSAS.code(try victim.finish().handshakeHash)
+        }
+        let legA = try codeForLeg(attackerStatic: fixedKey(0x61), victimStatic: fixedKey(0x11), victimInitiator: true)
+        let legB = try codeForLeg(attackerStatic: fixedKey(0x62), victimStatic: fixedKey(0x22), victimInitiator: false)
+        check(legA != legB && legA.filter { $0 != " " }.count == 32, "MITM legs with different keys show different 128-bit codes")
+        var h1 = Data(count: 32), h2 = Data(count: 32); h2[10] = 9
+        check(DeviceSAS.code(h1) != DeviceSAS.code(h2), "Verification code covers bits beyond the old four-byte truncation")
+    } catch { check(false, "MITM SAS regression failed: " + error.localizedDescription) }
+
+    // Service-level harness: isolated home service, fake authenticated peer.
+    do {
+        let home = DeviceSyncService()
+        try home.configureForTesting(folder: root.appendingPathComponent("harness"))
+        guard let entry = Store.shared.entries.first, let homeIdentity = home.identity else {
+            check(false, "Harness needs a catalog entry and identity")
+            throw NSError(domain: "harness", code: 1)
+        }
+        let session = Store.shared.create(entry)
+        session.title = "Harness session"; session.draft = "home draft"
+        var viewerHS = DeviceHandshake(isInitiator: true, staticKey: fixedKey(0x77), ephemeralKey: fixedKey(0x33))
+        var homeHS = DeviceHandshake(isInitiator: false, staticKey: homeIdentity.privateKey, ephemeralKey: fixedKey(0x44))
+        _ = try homeHS.readMessage(try viewerHS.writeMessage(payload: Data("v".utf8)))
+        _ = try viewerHS.readMessage(try homeHS.writeMessage(payload: Data("h".utf8)))
+        _ = try homeHS.readMessage(try viewerHS.writeMessage(payload: Data("v".utf8)))
+        var viewerKeys = try viewerHS.finish()
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: false, displayName: "Viewer")
+        peer.hello = DeviceHello(deviceID: DeviceBlob.sha256Hex(fixedKey(0x77).publicKey.rawRepresentation), deviceName: "Viewer", converseVersion: "test")
+        peer.keys = try homeHS.finish(); peer.trustedReady = true
+        var captured: [Data] = []
+        peer.testSink = { captured.append($0) }
+        home.adoptPeerForTesting(peer)
+        func capturedEnvelopes() throws -> [DeviceEnvelope] {
+            var decoder = DeviceFrameDecoder(); var out: [DeviceEnvelope] = []
+            for chunk in captured { out.append(contentsOf: try decoder.append(try viewerKeys.receiver.decrypt(chunk))) }
+            return out
+        }
+        let globalString = DeviceGlobalID(home: homeIdentity.deviceID, session: session.id).string
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: globalString))
+        let grantFrames = try capturedEnvelopes()
+        let granted = grantFrames.first { $0.kind == DeviceMessageKind.leaseGranted.rawValue }
+        let snapshot = grantFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
+        check(granted != nil && snapshot?.draft == "home draft" && snapshot?.epoch == granted?.epoch, "Service harness grants lease and streams matching home snapshot")
+        captured = []
+        let renameID = UUID()
+        let renamePayload = try JSONEncoder().encode(DeviceCommandPayload(action: "rename", text: "Renamed remotely"))
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: renameID, epoch: (granted?.epoch ?? 0) + 99, payload: renamePayload))
+        check(session.title == "Harness session", "Service harness rejects stale-epoch commands without applying them")
+        _ = try capturedEnvelopes()
+        captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: renameID, epoch: granted?.epoch, payload: renamePayload))
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: renameID, epoch: granted?.epoch, payload: renamePayload))
+        let ackCount = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.commandAck.rawValue }.count
+        check(session.title == "Renamed remotely" && ackCount >= 2, "Service harness applies valid command once and acks duplicate without reapplying")
+        Store.shared.deleteSession(session)
+    } catch { check(false, "Service harness failed: " + error.localizedDescription) }
     let global = DeviceGlobalID(home: "home-abc", session: sessionID)
     check(DeviceGlobalID(global.string) == global && DeviceGlobalID(home: "home-xyz", session: sessionID) != global, "Global session IDs stay unique per home and parse exactly")
 }

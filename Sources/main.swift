@@ -1411,6 +1411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func assign(_ session: Session, to state: WindowState, pane: Int) {
         guard Store.shared.sessions.contains(where: { $0.id == session.id }) else { return }
+        DeviceSyncService.shared.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: session.id)
         DeviceSyncService.shared.localTake(sessionID: session.id)
         Workspace.shared.assign(session.id, to: state.id, pane: pane)
         if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }

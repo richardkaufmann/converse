@@ -10,9 +10,10 @@ final class RemoteComposer: ObservableObject {
     @Published var blobHashes: [String] = []
     @Published var sentCommandID: UUID?
     @Published var sentText = ""
-    var hydratedSession: UUID?
-    var suppressEcho = false
+    @Published var sentHashes: [String] = []
+    var hydratedKey = ""
     @Published var answers: [String: String] = [:]
+    @Published var selections: [String: Set<String>] = [:]
 }
 
 struct DeviceConnectView: View {
@@ -56,7 +57,7 @@ struct DeviceConnectView: View {
         }.padding(24).frame(width: 560)
             .alert(item: $service.pairingPrompt) { prompt in
                 Alert(title: Text("Pair with " + prompt.peerName + "?"),
-                      message: Text("Confirm this code matches on both Macs:\n\n" + prompt.code + "\n\nFingerprint " + prompt.fingerprint + (prompt.keyChanged ? "\n\nWarning: stored key mismatch. Pair again only if you expect this." : "") + (prompt.nameCollision ? "\n\nNote: a different paired device already uses this name. Check the fingerprint." : "") + "\n\nPairing allows remote prompts and tool execution on the home Mac."),
+                      message: Text("Compare EVERY group on both Macs. Pair only if all 8 groups match exactly:\n\n" + prompt.code + "\n\nFingerprint " + prompt.fingerprint + (prompt.keyChanged ? "\n\nWarning: stored key mismatch. Pair again only if you expect this." : "") + (prompt.nameCollision ? "\n\nNote: a different paired device already uses this name. Check the fingerprint." : "") + "\n\nPairing allows remote prompts and tool execution on the home Mac."),
                       primaryButton: .default(Text("Pair")) { service.confirmPairing() },
                       secondaryButton: .cancel(Text("Reject")) { service.rejectPairing() })
             }
@@ -80,9 +81,9 @@ struct DeviceSidebarSection: View {
                     }.padding(.horizontal, 4)
                     ForEach(home.rows) { row in
                         RemoteSidebarRow(row: row, homeName: home.deviceName, online: home.online, showsModel: showsModel,
-                                         localPane: workspace.pane(for: row.sessionID, in: state.id),
-                                         park: { service.releaseRemote(sessionID: row.sessionID); workspace.park(row.sessionID) },
-                                         assign: { pane in service.acquireRemote(globalID: row.globalID); workspace.assign(row.sessionID, to: state.id, pane: pane) })
+                                         localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                         park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
+                                         assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
                     }
                     if home.rows.isEmpty { Text(home.online ? "No sessions shared yet." : "Offline. Last known sessions kept.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
                 }
@@ -110,6 +111,7 @@ struct RemoteSidebarRow: View {
                 .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 0.5))
             Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
+            if row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title)
                 ForEach(1...3, id: \.self) { pane in
@@ -118,30 +120,31 @@ struct RemoteSidebarRow: View {
                 }
             }.fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.horizontal, 4).padding(.vertical, 3)
-            .background(localPane == nil ? Color.clear : Color.accentColor.opacity(0.05))
+            .background(row.status == "Waiting for approval" && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .help(helpText)
     }
 }
 
 struct RemotePane: View {
-    let sessionID: UUID
+    let globalID: String
     let pane: Int
     @ObservedObject var service = DeviceSyncService.shared
     @ObservedObject var workspace: Workspace
     @StateObject private var composer = RemoteComposer()
-    var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[sessionID] }
-    var hasLease: Bool { service.remoteLeases[sessionID] != nil }
-    var offline: Bool { service.remoteOffline.contains(sessionID) }
-    var pendingRecord: DeviceOutboxRecord? { composer.sentCommandID.flatMap { id in service.outbox.first { $0.commandID == id } } }
+    var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
+    var hasLease: Bool { service.remoteLeases[globalID] != nil }
+    var offline: Bool { service.remoteOffline.contains(globalID) }
+    var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first }
+    var placement: UUID { service.placementID(forGlobal: globalID) }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
-                Text(transcript?.title ?? service.remoteRow(sessionID: sessionID)?.title ?? "Remote session").font(.system(size: 15, weight: .medium)).lineLimit(1)
+                Text(transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session").font(.system(size: 15, weight: .medium)).lineLimit(1)
                 Text("on home Mac").font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
-                PaneButton(label: "P", selected: false) { service.releaseRemote(sessionID: sessionID); workspace.park(sessionID) }.help("Park this conversation")
+                PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
             }.padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             if offline {
@@ -149,39 +152,47 @@ struct RemotePane: View {
             } else if !hasLease {
                 HStack {
                     Text("Display is elsewhere or lease expired.").font(.caption); Spacer()
-                    Button("Take here") { if let row = service.remoteRow(sessionID: sessionID) { service.acquireRemote(globalID: row.globalID) } }
+                    Button("Take here") { service.acquireRemote(globalID: globalID) }
                 }.padding(8).background(Color.accentColor.opacity(0.06))
             }
-            if let request = transcript?.requests.first { RemoteRequestView(sessionID: sessionID, request: request, composer: composer) }
+            if let request = transcript?.requests.first { RemoteRequestView(globalID: globalID, request: request, composer: composer) }
             if let pending = transcript?.pending, !pending.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(String(pending.count) + " queued on home" + (transcript?.queuePaused == true ? " · paused" : "")); Spacer()
-                        Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
-                        Button("Inject all") { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "injectAll")) }
-                        Button("Clear queue") { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "clearQueue")) }
+                        Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
+                        Button("Inject all") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "injectAll")) }
+                        Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                     }
                     ForEach(pending) { item in
-                        HStack { Text(item.text).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
+                        HStack { Text(item.text).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
                     }
                 }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
             }
             if let record = pendingRecord {
                 HStack {
-                    Text(record.outcome == "uncertain" ? "Send uncertain. Home may have received it. Check home first." : "Waiting for home acknowledgment…").font(.caption)
+                    Text(outboxText(record)).font(.caption)
                     Spacer()
                     if record.outcome == "uncertain" {
                         Button("Check home") { service.queryOutbox(record) }
                         Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
+                    } else if record.outcome == "failed" || record.outcome == "rejected" {
+                        Button("Restore to composer") { composer.draft = record.payload.text ?? ""; composer.blobHashes = record.payload.blobHashes; service.discardOutbox(record); composer.sentCommandID = nil }
+                        Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
+                    } else if record.outcome == "accepted" {
+                        Button("Dismiss") { service.discardOutbox(record); composer.sentCommandID = nil }
                     } else { Button("Resend same ID") { service.retryOutbox(record) } }
                 }.padding(8).background(Color.orange.opacity(0.10))
+            }
+            if let conflict = service.draftConflicts[globalID] {
+                Text(conflict).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.10))
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let transcript, transcript.offset > 0 {
-                        Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(sessionID: sessionID) }
+                        Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }
                     }
-                    ForEach(transcript?.messages ?? []) { message in RemoteMessageView(sessionID: sessionID, message: message) }
+                    ForEach(transcript?.messages ?? []) { message in RemoteMessageView(globalID: globalID, message: message) }
                 }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
@@ -190,21 +201,20 @@ struct RemotePane: View {
                     Text(transcript.status).lineLimit(1)
                     if let account = transcript.accountName { Text(account).foregroundStyle(.secondary).lineLimit(1) }
                     Spacer(minLength: 0)
-                    Menu(transcript.model) { ForEach(transcript.modelOptions) { option in Button(option.label) { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "model", model: option.id)) } } }.menuStyle(.borderlessButton).fixedSize()
-                    Menu(transcript.effort) { ForEach(transcript.effortOptions, id: \.self) { effort in Button(effort) { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "effort", effort: effort)) } } }.menuStyle(.borderlessButton).fixedSize()
-                    Menu(transcript.access) { ForEach(transcript.accessOptions) { option in Button(option.label) { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "access", access: option.id)) } } }.menuStyle(.borderlessButton).fixedSize()
-                }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(transcript.busy || !hasLease)
+                    Menu(transcript.model) { ForEach(transcript.modelOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model", model: option.id, modelProvider: option.provider, modelProfile: option.profile)) } } }.menuStyle(.borderlessButton).fixedSize()
+                    Menu(transcript.effort) { ForEach(transcript.effortOptions, id: \.self) { effort in Button(effort) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "effort", effort: effort)) } } }.menuStyle(.borderlessButton).fixedSize()
+                    Menu(transcript.access) { ForEach(transcript.accessOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access", access: option.id)) } } }.menuStyle(.borderlessButton).fixedSize()
+                }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(!hasLease)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message home session… Return sends", text: $composer.draft, axis: .vertical).lineLimit(1...6).textFieldStyle(.roundedBorder)
+                TextField("Message home session… Return sends", text: Binding(get: { composer.draft }, set: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) }), axis: .vertical).lineLimit(1...6).textFieldStyle(.roundedBorder)
                     .disabled(offline || !hasLease)
-                    .onChange(of: composer.draft) { _, value in if !composer.suppressEcho { service.sendRemoteDraft(sessionID: sessionID, text: value) } }
                     .onSubmit { send() }
                 Button("Attach") {
                     let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = false
-                    if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url), let hash = service.sendRemoteBlob(sessionID: sessionID, data: data) { composer.blobHashes.append(hash) }
+                    if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url), let hash = service.sendRemoteBlob(globalID: globalID, data: data) { composer.blobHashes.append(hash); service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes) }
                 }.disabled(offline || !hasLease)
-                Button("Stop") { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "stop")) }.disabled(!hasLease)
+                Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(!hasLease)
                 Button("Send", action: send).disabled(!canSend)
             }.padding(10)
             if !composer.blobHashes.isEmpty {
@@ -214,30 +224,50 @@ struct RemotePane: View {
                 Text(service.lastOutcome).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).padding(.horizontal, 10).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading)
             }
         }.background(Color(nsColor: .textBackgroundColor)).frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: transcript?.draftVersion) { _, _ in hydrate() }
+            .onChange(of: service.remoteLeases[globalID]) { _, _ in hydrate(force: true) }
             .onAppear { hydrate() }
             .onChange(of: service.outbox) { _, _ in
+                // Disappearance now means completed only. Preserve typing
+                // that arrived while waiting: strip just the sent prefix.
                 if let id = composer.sentCommandID, !service.outbox.contains(where: { $0.commandID == id }) {
-                    composer.suppressEcho = true; composer.draft = ""; composer.blobHashes = []; composer.sentText = ""; composer.sentCommandID = nil; composer.suppressEcho = false
+                    if composer.draft == composer.sentText { composer.draft = "" }
+                    else if composer.draft.hasPrefix(composer.sentText) && !composer.sentText.isEmpty { composer.draft = String(composer.draft.dropFirst(composer.sentText.count)) }
+                    composer.blobHashes.removeAll { composer.sentHashes.contains($0) }
+                    service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+                    composer.sentText = ""; composer.sentHashes = []; composer.sentCommandID = nil
                 }
             }
     }
-    var canSend: Bool {
-        hasLease && !offline && composer.sentCommandID == nil && (!composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.blobHashes.isEmpty) && composer.blobHashes.allSatisfy { service.blobReady[$0] == true }
+    func outboxText(_ record: DeviceOutboxRecord) -> String {
+        switch record.outcome {
+        case "uncertain": return "Send uncertain. Home may have received it. Check home first."
+        case "failed", "rejected": return "Home did not accept this send. Your text is preserved."
+        case "accepted": return "Accepted on home. Still finishing there."
+        default: return "Waiting for home acknowledgment…"
+        }
     }
-    func hydrate() {
-        guard let transcript, composer.hydratedSession != sessionID else { return }
-        composer.hydratedSession = sessionID; composer.suppressEcho = true; composer.draft = transcript.draft; composer.suppressEcho = false
+    var canSend: Bool {
+        hasLease && !offline && pendingRecord == nil && (!composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.blobHashes.isEmpty) && composer.blobHashes.allSatisfy { service.blobReady[$0] == true }
+    }
+    func hydrate(force: Bool = false) {
+        guard let transcript else { return }
+        let key = globalID + "@" + String(service.remoteLeases[globalID] ?? 0)
+        guard force || composer.hydratedKey != key else { return }
+        composer.hydratedKey = key
+        composer.draft = transcript.draft
+        composer.blobHashes = service.draftAttachments[globalID] ?? []
+        for hash in composer.blobHashes where service.blobReady[hash] != true { service.queryBlob(globalID: globalID, hash: hash) }
+        if let record = pendingRecord { composer.sentCommandID = record.commandID; composer.sentText = record.payload.text ?? ""; composer.sentHashes = record.payload.blobHashes }
     }
     func send() {
         guard canSend else { return }
-        composer.sentText = composer.draft
-        composer.sentCommandID = service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "submit", text: composer.draft, blobHashes: composer.blobHashes))
+        composer.sentText = composer.draft; composer.sentHashes = composer.blobHashes
+        composer.sentCommandID = service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "submit", text: composer.draft, blobHashes: composer.blobHashes))
     }
 }
 
 struct RemoteMessageView: View {
-    let sessionID: UUID
+    let globalID: String
     let message: DeviceWireMessage
     @ObservedObject var service = DeviceSyncService.shared
     var body: some View {
@@ -252,7 +282,7 @@ struct RemoteMessageView: View {
                     if let url = service.blobCache[hash], let image = NSImage(contentsOf: url) {
                         Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 260)
                     } else {
-                        Text("Image on home…").font(.caption).foregroundStyle(.secondary).onAppear { service.fetchBlob(sessionID: sessionID, hash: hash) }
+                        Text("Image on home…").font(.caption).foregroundStyle(.secondary).onAppear { service.fetchBlob(globalID: globalID, hash: hash) }
                     }
                 }
             }
@@ -261,22 +291,32 @@ struct RemoteMessageView: View {
 }
 
 struct RemoteRequestView: View {
-    let sessionID: UUID
+    let globalID: String
     let request: DeviceRequestDTO
     @ObservedObject var composer: RemoteComposer
     @ObservedObject var service = DeviceSyncService.shared
     var questions: [[String: Any]] {
         request.questionsJSON.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
     }
+    func options(_ q: [String: Any]) -> [[String: Any]] { q["options"] as? [[String: Any]] ?? [] }
+    func isMultiple(_ q: [String: Any]) -> Bool {
+        if let selection = q["selection"] as? [String: Any] { return (selection["mode"] as? String) == "multiple" }
+        return false
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(request.kind == "approval" ? "Home session needs your approval" : "Home session has a question").fontWeight(.semibold)
+            if request.kind == "approval" {
+                HStack { Text("PERMISSION REQUIRED").font(.system(size: 12, weight: .bold)); Text("Review before continuing").font(.system(size: 11)).opacity(0.75) }
+                    .padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color(red: 1, green: 0.78, blue: 0.12))
+            } else {
+                Text("Home session has a question").fontWeight(.semibold)
+            }
             if request.kind == "approval" {
                 if let tool = request.toolName { Text(tool).fontWeight(.medium) }
                 if let args = request.rawArgs { Text(args).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
                 ForEach(request.choices) { choice in
                     HStack {
-                        Button(choice.label) { service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "answer", requestID: request.id, choiceID: choice.id)) }
+                        Button(choice.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "answer", requestID: request.id, choiceID: choice.id)) }
                         if let detail = choice.detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
                     }
                 }
@@ -285,15 +325,31 @@ struct RemoteRequestView: View {
                 ForEach(questions.indices, id: \.self) { index in
                     let q = questions[index]; let qid = q["id"] as? String ?? String(index)
                     Text(q["question"] as? String ?? "Question").textSelection(.enabled)
-                    TextField("Your answer", text: Binding(get: { composer.answers[qid] ?? "" }, set: { composer.answers[qid] = $0 }), axis: .vertical).lineLimit(1...4)
+                    ForEach(options(q).indices, id: \.self) { oi in
+                        let option = options(q)[oi]; let label = option["label"] as? String ?? "Option"
+                        let selected = composer.selections[qid]?.contains(label) == true
+                        Button((selected ? "✓ " : "○ ") + label) {
+                            if isMultiple(q) {
+                                if selected { composer.selections[qid]?.remove(label) } else { composer.selections[qid, default: []].insert(label) }
+                            } else { composer.selections[qid] = [label] }
+                        }.buttonStyle(.plain)
+                        if let desc = option["description"] as? String { Text(desc).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    TextField(options(q).isEmpty ? "Your answer" : "Or type your own", text: Binding(get: { composer.answers[qid] ?? "" }, set: { composer.answers[qid] = $0 }), axis: .vertical).lineLimit(1...4)
                 }
                 Button("Send answer") {
                     let answers: [[String: Any]] = questions.map { q in
                         let qid = q["id"] as? String ?? ""
-                        return ["questionId": qid, "freeText": composer.answers[qid] ?? ""]
+                        let chosen = composer.selections[qid] ?? []
+                        var answer: [String: Any] = ["questionId": qid]
+                        if isMultiple(q) { if !chosen.isEmpty { answer["selectedLabels"] = Array(chosen) } }
+                        else if let one = chosen.first { answer["selectedLabel"] = one }
+                        let free = (composer.answers[qid] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !free.isEmpty { answer["freeText"] = free }
+                        return answer
                     }
                     let json = try? JSONSerialization.data(withJSONObject: answers)
-                    service.sendRemoteCommand(sessionID: sessionID, command: DeviceCommandPayload(action: "answer", requestID: request.id, answersJSON: json))
+                    service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "answer", requestID: request.id, answersJSON: json))
                 }
             }
         }.padding(10).background(Color(nsColor: .controlBackgroundColor))

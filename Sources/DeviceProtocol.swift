@@ -18,6 +18,7 @@ struct DeviceEnvelope: Codable, Equatable {
     var version = 1
     var kind: String
     var homeSeq: UInt64? = nil
+    var boot: UInt64? = nil
     var sessionID: String? = nil
     var commandID: UUID? = nil
     var epoch: UInt64? = nil
@@ -69,17 +70,24 @@ struct DeviceGlobalID: Equatable, Hashable {
     }
 }
 
-// SAS rationale: the code is the first 32 bits of the Noise handshake hash
-// (the channel-binding value, Noise 11.2) reduced to six decimal digits and
-// compared by the user on both devices. An active MITM terminates two
-// different handshakes, yielding different hashes; matching codes therefore
-// bind both static keys and the full transcript. Six digits give roughly
-// one-in-a-million blind success per pairing attempt; pairing allows one
-// attempt per connection and disconnects on reject or timeout.
+// Verification code rationale: a short truncation is grindable offline by
+// an active MITM who controls the final handshake payload (confirmed by
+// review reproduction against the former six-digit code). The code is
+// therefore the first 128 bits of the Noise handshake hash (the channel
+// binding value, Noise 11.2) as 32 hex characters in eight groups. Users
+// must compare ALL groups on both devices. Grinding a 128-bit match is
+// computationally infeasible within any pairing window, and no online
+// attempt limit is load-bearing for this property.
 enum DeviceSAS {
     static func code(_ handshakeHash: Data) -> String {
-        let value = handshakeHash.prefix(4).withUnsafeBytes { $0.count == 4 ? UInt32(bigEndian: $0.load(as: UInt32.self)) : 0 }
-        return String(format: "%06d", value % 1_000_000)
+        let hex = handshakeHash.prefix(16).map { String(format: "%02x", $0) }.joined()
+        var groups: [String] = []
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 4, limitedBy: hex.endIndex) ?? hex.endIndex
+            groups.append(String(hex[index..<next])); index = next
+        }
+        return groups.joined(separator: " ")
     }
 }
 
@@ -133,6 +141,8 @@ struct DeviceChoiceDTO: Codable, Equatable, Identifiable {
     var id: String
     var label: String
     var detail: String? = nil
+    var provider: String? = nil
+    var profile: String? = nil
 }
 struct DeviceRequestDTO: Codable, Equatable, Identifiable {
     var id: String
@@ -183,6 +193,8 @@ struct DeviceCommandPayload: Codable, Equatable {
     var requestID: String? = nil
     var choiceID: String? = nil
     var answersJSON: Data? = nil
+    var modelProvider: String? = nil
+    var modelProfile: String? = nil
 }
 
 struct DeviceAckPayload: Codable, Equatable {
