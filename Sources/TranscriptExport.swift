@@ -42,7 +42,35 @@ final class TranscriptExportSelection: ObservableObject {
     @Published var format = TranscriptExportFormat.html
     init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
     var chosen: [ExportSession] { sessions.filter { selected.contains($0.id) } }
+    var selectionState: NSControl.StateValue {
+        let count = chosen.count
+        return count == 0 ? .off : count == sessions.count ? .on : .mixed
+    }
+    func toggleAll() { selected = selectionState == .on ? [] : Set(sessions.map(\.id)) }
     var includesUntimedMessages: Bool { chosen.contains { $0.messages.contains { content.includes($0.role) && $0.createdAt == nil } } }
+}
+
+// Use the standard Mac checkbox so the header has a real mixed state, including
+// its accessibility value, rather than drawing a checkbox-shaped button.
+struct ExportSelectAllCheckbox: NSViewRepresentable {
+    let state: NSControl.StateValue
+    let enabled: Bool
+    let action: () -> Void
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func changed(_ sender: NSButton) { action() }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(checkboxWithTitle: "", target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        button.allowsMixedState = true
+        button.setAccessibilityLabel("Select or clear all sessions")
+        return button
+    }
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action; button.state = state; button.isEnabled = enabled
+    }
 }
 struct TranscriptExportOptionsView: View {
     @ObservedObject var selection: TranscriptExportSelection
@@ -52,18 +80,29 @@ struct TranscriptExportOptionsView: View {
                 Text("Sessions").fontWeight(.semibold)
                 Text("\(selection.selected.count) selected").foregroundStyle(.secondary)
                 Spacer()
-                Button("All") { selection.selected = Set(selection.sessions.map(\.id)) }
-                Button("None") { selection.selected = [] }
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(selection.sessions) { session in
-                        Toggle(isOn: Binding(get: { selection.selected.contains(session.id) }, set: { enabled in
-                            if enabled { selection.selected.insert(session.id) } else { selection.selected.remove(session.id) }
-                        })) { Text(session.title + " · " + session.provider).lineLimit(1).truncationMode(.middle) }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 90).padding(8).background(.quaternary.opacity(0.2)).clipShape(RoundedRectangle(cornerRadius: 5))
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    ExportSelectAllCheckbox(state: selection.selectionState, enabled: !selection.sessions.isEmpty, action: selection.toggleAll)
+                        .frame(width: 24, height: 18).help(selection.selectionState == .on ? "Clear all sessions" : "Select all sessions")
+                    Text("Session").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Model").frame(width: 120, alignment: .leading)
+                }.font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.vertical, 6)
+                Divider()
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(selection.sessions) { session in
+                            HStack(spacing: 10) {
+                                Toggle("", isOn: Binding(get: { selection.selected.contains(session.id) }, set: { enabled in
+                                    if enabled { selection.selected.insert(session.id) } else { selection.selected.remove(session.id) }
+                                })).toggleStyle(.checkbox).labelsHidden().frame(width: 24).accessibilityLabel("Export " + session.title)
+                                Text(session.title).lineLimit(1).truncationMode(.tail).frame(maxWidth: .infinity, alignment: .leading).help(session.title)
+                                Text(session.provider).lineLimit(1).truncationMode(.tail).foregroundStyle(.secondary).frame(width: 120, alignment: .leading).help(session.provider)
+                            }.padding(.horizontal, 8).padding(.vertical, 4)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(height: 100)
+            }.background(.quaternary.opacity(0.15)).clipShape(RoundedRectangle(cornerRadius: 5))
             Picker("Order", selection: $selection.order) {
                 ForEach(TranscriptExportOrder.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.radioGroup)
