@@ -162,19 +162,21 @@ struct SessionSetupView: View {
 
 extension Store {
     func setApproval(_ session: Session, value: String?) {
-        guard session.entry.engine == "codex", !session.busy, !session.changingSetting else { return }
+        guard session.entry.engine == "codex", !session.changingSetting else { return }
         session.choices.approval = value; session.toolStatus.approval = value
-        save(); refreshStatus(session)
+        session.settingNotice = "Change saved · applies next turn"
+        save(); if !session.busy { refreshStatus(session) }
     }
     func clearOverride(_ session: Session, field: String) {
-        guard session.entry.engine != "muse", !session.busy, !session.changingSetting else { return }
+        guard session.entry.engine != "muse", !session.changingSetting else { return }
         switch field {
-        case "model": session.choices.model = nil; session.toolStatus.model = "CLI default"
+        case "model": session.choices.model = nil; session.choices.modelProvider = nil; session.choices.modelProfile = nil; session.toolStatus.model = "CLI default"
         case "effort": session.choices.effort = nil; session.toolStatus.effort = "CLI default"
         case "access": session.choices.access = nil; session.toolStatus.access = "CLI default"
         default: return
         }
-        save(); refreshStatus(session)
+        session.settingNotice = "Change saved · applies next turn"
+        save(); if !session.busy { refreshStatus(session) }
     }
 }
 

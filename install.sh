@@ -27,12 +27,13 @@ job=$(mktemp -d "$root/install.XXXXXXXX")
 ditto --norsrc --noextattr "$source_app" "$job/Converse.app"
 codesign --verify --deep --strict "$job/Converse.app"
 source_digest=$(shasum -a 256 "$source_app/Contents/MacOS/Converse" | cut -d ' ' -f 1)
+dock_command=$(command -v dockutil || true)
 label="local.converse.install.${job:t}"
 helper="$job/install.command"
 {
     print '#!/bin/zsh'
     print 'set -eu'
-    printf 'destination=%q\njob=%q\nexpected=%q\nversion=%q\n' "$destination" "$job" "$source_digest" "$version"
+    printf 'destination=%q\njob=%q\nexpected=%q\nversion=%q\ndock_command=%q\n' "$destination" "$job" "$source_digest" "$version" "$dock_command"
     cat <<'HELPER'
 status_file="$job/status.txt"
 fail() { print -r -- "FAILED: $1" > "$status_file"; exit 1; }
@@ -57,6 +58,25 @@ if ! codesign --verify --deep --strict "$destination"; then
     mv "$destination" "$job/Failed Converse.app"
     [[ ! -e "$job/Previous Converse.app" ]] || mv "$job/Previous Converse.app" "$destination"
     fail 'Installed signature check failed; previous version restored'
+fi
+# Keep an existing Converse shortcut pointed at the installed build. The
+# supported Dock management CLI preserves the existing item's position.
+if [[ -n "$dock_command" && -x "$dock_command" ]]; then
+    dock_url=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri() + "/")' "$destination")
+    current_dock=$($dock_command --list | awk -F '\t' '$1 == "Converse" {print $2}')
+    if [[ "$current_dock" != "$dock_url" ]]; then
+        if ! "$dock_command" --add "$destination" --replacing Converse; then
+            print -r -- "INSTALLED: Converse $version at $destination; SHORTCUT REPAIR FAILED" > "$status_file"
+            exit 1
+        fi
+        current_dock=$($dock_command --list | awk -F '\t' '$1 == "Converse" {print $2}')
+        if [[ "$current_dock" != "$dock_url" ]]; then
+            print -r -- "INSTALLED: Converse $version at $destination; SHORTCUT TARGET NOT VERIFIED" > "$status_file"
+            exit 1
+        fi
+    fi
+else
+    print 'Dock shortcut was not verified automatically (dockutil unavailable).'
 fi
 print -r -- "INSTALLED: Converse $version at $destination" > "$status_file"
 rm -f "$job/agent.plist"

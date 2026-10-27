@@ -83,6 +83,8 @@ final class Session: ObservableObject, Identifiable {
     @Published var modelChoices: [MuseModelChoice] = []
     @Published var accessChoices: [MuseAccessChoice] = []
     @Published var changingSetting = false
+    @Published var settingNotice = ""
+    var settingRevision = 0
     var sidebarProbeAttemptAt: Date?
     var quotaRefreshedAt: Date?
     var probingStatus = false
@@ -270,7 +272,7 @@ final class Store: ObservableObject {
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
             s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it with Configure and retry this conversation.")); return
         }
-        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false
+        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.settingNotice = ""
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
         let images = s.attachments
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
@@ -472,13 +474,17 @@ final class Store: ObservableObject {
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
-        let entry = s.entry; let id = s.remoteID ?? s.id.uuidString
+        let entry = s.entry; let id = s.remoteID ?? s.id.uuidString; let revision = s.settingRevision
         let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
             let quotaResult: Result<String, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
             DispatchQueue.main.async {
                 s.probingStatus = false
+                // A pre-change metadata read must not revert the picker after
+                // a newer acknowledged setting transaction.
+                if s.changingSetting { return }
+                if revision != s.settingRevision { self.refreshStatus(s); return }
                 switch result {
                 case .success(let snapshot):
                     s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
@@ -509,6 +515,7 @@ final class Store: ObservableObject {
         }
     }
     func applySessionChoices(_ s: Session) {
+        guard s.entry.engine != "muse" || !s.started else { return }
         if let model = s.choices.model {
             s.toolStatus.model = s.entry.engine == "claude" ? (s.modelChoices.first { $0.id == model }?.label ?? model) : model
         }
@@ -517,11 +524,12 @@ final class Store: ObservableObject {
         if let access = s.choices.access { s.toolStatus.access = s.accessChoices.first { $0.id == access }?.label ?? access }
     }
     func changeSetting(_ s: Session, _ change: MuseSettingChange) {
-        guard !s.busy && !s.changingSetting else { return }
+        guard !s.changingSetting else { return }
+        s.settingRevision += 1
         func remember() {
             switch change {
             case .model(let model):
-                s.choices.model = model.id
+                s.choices.model = model.id; s.choices.modelProvider = model.provider; s.choices.modelProfile = model.profile
                 if let effort = s.choices.effort, !model.efforts.contains(effort) {
                     s.choices.effort = s.entry.engine == "muse" ? nil : model.efforts.first
                     s.toolStatus.effort = s.choices.effort ?? "CLI default"
@@ -529,22 +537,59 @@ final class Store: ObservableObject {
             case .effort(let effort): s.choices.effort = effort
             case .access(let access): s.choices.access = access
             }
-            self.applySessionChoices(s); self.save()
+            if s.entry.engine == "muse", s.started {
+                switch change {
+                case .model(let model): s.toolStatus.model = model.label
+                case .effort(let effort): s.toolStatus.effort = effort
+                case .access(let access): s.toolStatus.access = s.accessChoices.first { $0.id == access }?.label ?? access
+                }
+            } else { self.applySessionChoices(s) }
+            self.save()
         }
-        if !s.started || s.entry.engine != "muse" { remember(); return }
-        s.changingSetting = true
+        if s.entry.engine != "muse" || !s.started {
+            remember(); s.settingNotice = s.busy ? "Change saved · applies next turn" : "Change saved · applies when the next turn starts"; return
+        }
+        if s.busy {
+            guard let connection = s.muse, connection.turnID != nil else {
+                remember(); s.settingNotice = "Change saved · applies next turn"; return
+            }
+            s.changingSetting = true; s.settingNotice = "Applying change…"
+            connection.changeSetting(change) { result in
+                s.changingSetting = false
+                switch result {
+                case .success:
+                    remember()
+                    switch change {
+                    case .access: s.settingNotice = "Permission profile applied · pending approvals still need a decision"
+                    case .model: s.settingNotice = "Model selected · applies at the next model call"
+                    case .effort: s.settingNotice = "Effort saved · applies next turn"
+                    }
+                case .failure(let error):
+                    s.settingNotice = "Change not confirmed: " + error.localizedDescription
+                    s.messages.append(Message(role: "notice", text: s.settingNotice)); s.queuePaused = !s.pending.isEmpty; self.saveSoon()
+                }
+                if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }
+                self.runNext(s)
+            }
+            return
+        }
+        s.changingSetting = true; s.settingNotice = "Applying change…"
+        let entry = s.entry, id = s.remoteID ?? s.id.uuidString
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try MuseStatusProbe.query(entry: s.entry, sessionID: s.remoteID ?? s.id.uuidString, change: change) }
+            let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id, change: change) }
             DispatchQueue.main.async {
                 s.changingSetting = false
                 switch result {
                 case .success(let snapshot):
                     let quota = s.toolStatus.quota
                     s.toolStatus = snapshot.status; s.toolStatus.quota = quota ?? snapshot.status.quota; s.modelChoices = snapshot.models; s.accessChoices = snapshot.access; s.statusDetails = snapshot.detail
-                    remember()
+                    remember(); s.settingNotice = "Session setting applied"
                 case .failure(let error):
-                    s.messages.append(Message(role: "notice", text: "Could not change session setting: " + error.localizedDescription)); self.saveSoon()
+                    s.settingNotice = "Change not confirmed: " + error.localizedDescription
+                    s.messages.append(Message(role: "notice", text: s.settingNotice)); self.saveSoon()
                 }
+                if !s.statusCallbacks.isEmpty && !s.probingStatus { self.refreshStatus(s) }
+                self.runNext(s)
             }
         }
     }
@@ -1208,12 +1253,13 @@ struct Conversation: View {
                             }.menuStyle(.borderlessButton).fixedSize()
                                 .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
                         }
-                    }.disabled(session.busy || session.changingSetting || session.probingStatus)
+                    }.disabled(session.changingSetting)
                 }
+                if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }
                 if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Settings apply to subsequent turns in this conversation. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
+                .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
@@ -1577,6 +1623,15 @@ func selfTest() {
     let probe = MuseStatusProbe.resolve(config: probeConfig, session: probeSession, records: probeRecords, quota: nil)
     check(probe.status.model == "retained-model" && probe.status.effort == "max (config)", "Retained model wins over saved config without confusing child effort")
     check(probe.status.access == "Auto-review / onRequest" && probe.status.usage == "500 in / 50 out" && probe.status.totalUsage == "600 in / 60 out", "Read-only probe resolves access and sums all model calls per turn and session")
+    var currentPermission = probeSession
+    currentPermission["permissionState"] = ["profileId": ":ask-me", "reviewerAuthority": "human", "reviewerAttached": false]
+    let currentProbe = MuseStatusProbe.resolve(config: probeConfig, session: currentPermission, records: probeRecords, quota: nil)
+    check(currentProbe.status.access == ":ask-me / onRequest", "Current Muse permission snapshot overrides an older Auto-review transcript record")
+    for engine in ["codex", "claude"] {
+        let active = Session(entry: Entry(name: engine, command: engine, directory: NSTemporaryDirectory(), engine: engine)); active.busy = true
+        store.changeSetting(active, .effort("high"))
+        check(active.busy && active.choices.effort == "high" && active.settingNotice.contains("next turn"), engine + " accepts settings during an active turn without restarting the process")
+    }
     let quotaText = MuseStatusProbe.quotaSummary(["tier": "test", "window": ["usedPercent": 25, "windowDurationMins": 300], "weekly": ["usedPercent": 12], "observedAtMs": 0])
     check(quotaText.contains("25%") && !quotaText.contains("{"), "Quota is readable text, not JSON")
     let ttyQuota = MuseQuota.parse("\u{001B}[17;1H│ Weekly 2% used · Resets Nov 1 at 4:00 PM │\n│ Current 7% used · Resets at 10:42 PM │")
@@ -1660,6 +1715,20 @@ func selfTest() {
     let approvalDeadline = Date().addingTimeInterval(10)
     while fixture.requests.isEmpty && fixture.busy && Date() < approvalDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     check(fixture.status == "Waiting for your approval" && fixture.requests.first?.kind == "approval" && fixture.needsApproval, "Approval request reaches conversation instead of hiding behind Working")
+    func settleSetting() {
+        let deadline = Date().addingTimeInterval(5)
+        while fixture.changingSetting && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+    store.changeSetting(fixture, .access(":ask-me")); settleSetting()
+    check(fixture.busy && fixture.choices.access == ":ask-me" && fixture.requests.first?.kind == "approval" && fixture.settingNotice.contains("applied"), "Muse permission changes use the active connection without answering a pending approval or stopping the turn")
+    store.changeSetting(fixture, .effort("max")); settleSetting()
+    check(fixture.busy && fixture.choices.effort == "max" && fixture.settingNotice.contains("next turn"), "Muse accepts effort changes while running and reports their next-turn timing")
+    store.changeSetting(fixture, .model(MuseModelChoice(id: "fixture-model", label: "Fixture", provider: "echo", profile: nil, efforts: ["max"]))); settleSetting()
+    check(fixture.busy && fixture.choices.model == "fixture-model" && fixture.settingNotice.contains("next model call"), "Muse model changes while running are acknowledged for the next model-call boundary")
+    store.changeSetting(fixture, .access(":unavailable")); settleSetting()
+    check(fixture.choices.access == ":ask-me" && fixture.settingNotice.contains("not confirmed"), "A rejected live permission change is visible and never presented as applied")
+    fixture.title = "Renamed during a running turn"
+    check(fixture.busy && fixture.title == "Renamed during a running turn", "Renaming a running session never waits for the next turn")
     if let request = fixture.requests.first { store.answerMuse(fixture, request: request, choice: "allow-once") }
     let questionDeadline = Date().addingTimeInterval(10)
     while fixture.requests.first?.kind != "question" && fixture.busy && Date() < questionDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }

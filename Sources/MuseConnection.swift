@@ -82,13 +82,19 @@ final class MuseConnection {
         }
     }
     func load(entry: Entry, choices: SessionChoices, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        func finish(_ result: Result<[String: Any], Error>) {
+            guard case .success = result, let id = choices.model else { completion(result); return }
+            self.changeSetting(.model(MuseModelChoice(id: id, label: id, provider: choices.modelProvider ?? "", profile: choices.modelProfile, efforts: []))) { applied in
+                if case .failure = applied { completion(applied) } else { completion(result) }
+            }
+        }
         rpc("session/read", ["sessionId": sessionID, "excludeItems": true]) { result in
             var params: [String: Any] = ["commandId": MuseStatusProbe.commandID(), "sessionId": self.sessionID]
             if let access = choices.access { params["permissionProfile"] = access }
             switch result {
             case .success:
                 params["excludeItems"] = true
-                self.rpc("session/resume", params, completion: completion)
+                self.rpc("session/resume", params, completion: finish)
             case .failure(let error):
                 guard (error as NSError).userInfo["kind"] as? String == "sessionNotFound" else { completion(.failure(error)); return }
                 if self.sessionID.split(separator: "-").dropFirst(2).first?.first != "7" {
@@ -96,9 +102,24 @@ final class MuseConnection {
                 }
                 params["workspaceRoot"] = NSString(string: entry.directory).expandingTildeInPath
                 if let model = choices.model { params["modelId"] = model }
-                self.rpc("session/start", params, completion: completion)
+                self.rpc("session/start", params, completion: finish)
             }
         }
+    }
+    func changeSetting(_ change: MuseSettingChange, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        var params: [String: Any] = ["commandId": MuseStatusProbe.commandID(), "sessionId": sessionID]
+        let method: String
+        switch change {
+        case .access(let id): method = "session/setPermissionProfile"; params["profileId"] = id
+        case .effort(let effort): method = "session/setReasoningEffort"; params["reasoningEffort"] = effort
+        case .model(let model):
+            method = "session/setModel"
+            var selection = ["modelId": model.id]
+            if !model.provider.isEmpty { selection["providerId"] = model.provider }
+            if let profile = model.profile { selection["profileId"] = profile }
+            params["model"] = selection
+        }
+        rpc(method, params, completion: completion)
     }
     func submit(prompt: String, display: String, images: [String], effort: String?, completion: @escaping (Result<[String: Any], Error>) -> Void) {
         var parts: [[String: Any]] = [["type": "text", "text": prompt]]

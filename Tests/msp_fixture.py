@@ -35,6 +35,19 @@ for line in sys.stdin:
                 toolName="network", rawArgs="https example.invalid:443", availableChoices=[
                     dict(choiceId="allow-once", label="Allow once", scope="once", decision="approved"),
                     dict(choiceId="deny", label="Deny", scope="once", decision="denied")])
+    elif method == "session/setPermissionProfile":
+        assert p['sessionId'] == session
+        if p['profileId'] == ':unavailable':
+            emit(id=rid, error=dict(code=-32030,message='Profile unavailable',data=dict(kind='commandRejected')))
+        else:
+            assert p['profileId'] == ':ask-me'
+            result(rid, status='accepted', applyOutcome='completed', permissionState=dict(profileId=p['profileId'],reviewerAuthority='human',reviewerAttached=False))
+    elif method == 'session/setReasoningEffort':
+        assert p['sessionId'] == session and p['reasoningEffort'] == 'max'
+        result(rid,status='accepted')
+    elif method == 'session/setModel':
+        assert p['sessionId'] == session and p['model']['modelId'] == 'fixture-model'
+        result(rid,status='accepted')
     elif method == "approval/decide":
         assert p["sessionId"] == session and p["approvalId"] == "approval-fixture"
         assert p["choiceId"] == "allow-once" and p["requirementId"] == requirement

@@ -19,6 +19,8 @@ struct SessionChoices: Codable {
     var effort: String? = nil
     var access: String? = nil
     var approval: String? = nil
+    var modelProvider: String? = nil
+    var modelProfile: String? = nil
 }
 enum MuseSettingChange {
     case model(MuseModelChoice)
@@ -115,6 +117,10 @@ struct MuseStatusProbe {
             guard let id = row["profileId"] as? String else { return nil }
             return MuseAccessChoice(id: id, label: row["label"] as? String ?? id, available: row["available"] as? Bool ?? false)
         }
+        if let id = (session["permissionState"] as? [String: Any])?["profileId"] as? String,
+           let label = result.access.first(where: { $0.id == id })?.label {
+            result.status.access = label + " / " + ((session["approvalMode"] as? [String: Any])?["mode"] as? String ?? "not reported")
+        }
         if let readError, session.isEmpty { result.detail += "\nSession read: " + readError }
         return result
     }
@@ -164,6 +170,8 @@ struct MuseStatusProbe {
         if let retainedEffort { status.effort = retainedEffort; effortSource = "retained session" }
         else if let effort = efforts[status.model] as? String ?? config["reasoning_effort"] as? String { status.effort = effort + " (config)" }
         else { status.effort = "No saved override" }
+        // Current native state wins over historical commit records.
+        if let current = (session["permissionState"] as? [String: Any])?["profileId"] as? String { profile = current }
         if let profile { status.access = profile + " / " + status.access }
         if session.isEmpty { accessSource = "no retained session yet" }
         status.usage = hasTurn || calls > 0 ? "\(lastInput.formatted()) in / \(lastOutput.formatted()) out" : "0 in / 0 out"

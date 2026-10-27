@@ -96,8 +96,9 @@ The refresh button queries again. Codex and Claude also query their CLI catalogs
 
 CLICKABLE SESSION SETTINGS AND SUBSCRIPTION QUOTA
 Click model, effort, or access in the bottom bar to choose from Muse's catalogs.
-Changes affect only this conversation and apply on subsequent turns. Active work
-finishes before the controls become available. Existing sessions use durable Muse
+Changes affect only this conversation. Muse permissions apply live, model changes
+at the next model call, and effort next turn. Other CLIs apply changes next turn.
+Settings remain editable during active work. Existing sessions use durable Muse
 setters; new sessions retain choices for their first turn. Global config is untouched.
 /usage now fetches the installed CLI's weekly and current-window percentages and
 reset times using its built-in usage view in an invisible, no-session-log terminal.
@@ -211,3 +212,6 @@ with midpoint-grey numbers. Wrapped prompts and the draft keep the same shading.
 Approvals stand out with a bright yellow PERMISSION REQUIRED card in the pane.
 A session awaiting approval that is parked everywhere gets a yellow sidebar row
 and an exclamation point. Showing it in any pane clears that sidebar alert.
+
+Muse YOLO is called Unrestricted in the native permission-profile menu.
+Setting timing or rejection is shown below the controls. Renaming is immediate.
