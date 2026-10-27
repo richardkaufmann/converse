@@ -1,0 +1,233 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+enum TranscriptExportOrder: String, CaseIterable, Identifiable {
+    case interleaved = "Interleaved by time", sequential = "One after the other"
+    var id: Self { self }
+}
+enum TranscriptExportContent: String, CaseIterable, Identifiable {
+    case prompts = "Prompts", responses = "Responses", both = "Both"
+    var id: Self { self }
+    func includes(_ role: String) -> Bool {
+        role == "user" ? self != .responses : role == "assistant" && self != .prompts
+    }
+}
+struct ExportSession: Identifiable {
+    let id: UUID
+    let title: String
+    let provider: String
+    let messages: [Message]
+    init(_ session: Session) { id = session.id; title = session.title; provider = session.entry.name; messages = session.messages }
+}
+final class TranscriptExportSelection: ObservableObject {
+    let sessions: [ExportSession]
+    @Published var selected: Set<UUID>
+    @Published var order = TranscriptExportOrder.sequential
+    @Published var content = TranscriptExportContent.both
+    @Published var lineNumbers = true
+    init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
+    var chosen: [ExportSession] { sessions.filter { selected.contains($0.id) } }
+    var includesUntimedMessages: Bool { chosen.contains { $0.messages.contains { content.includes($0.role) && $0.createdAt == nil } } }
+}
+struct TranscriptExportOptionsView: View {
+    @ObservedObject var selection: TranscriptExportSelection
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Sessions").fontWeight(.semibold)
+                Text("\(selection.selected.count) selected").foregroundStyle(.secondary)
+                Spacer()
+                Button("All") { selection.selected = Set(selection.sessions.map(\.id)) }
+                Button("None") { selection.selected = [] }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(selection.sessions) { session in
+                        Toggle(isOn: Binding(get: { selection.selected.contains(session.id) }, set: { enabled in
+                            if enabled { selection.selected.insert(session.id) } else { selection.selected.remove(session.id) }
+                        })) { Text(session.title + " · " + session.provider).lineLimit(1).truncationMode(.middle) }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: 90).padding(8).background(.quaternary.opacity(0.2)).clipShape(RoundedRectangle(cornerRadius: 5))
+            Picker("Order", selection: $selection.order) {
+                ForEach(TranscriptExportOrder.allCases) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.radioGroup)
+            Picker("Include", selection: $selection.content) {
+                ForEach(TranscriptExportContent.allCases) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented)
+            Toggle("Line numbers", isOn: $selection.lineNumbers)
+            Text("Formatted HTML with embedded images. Drafts and tool activity are excluded.").font(.caption).foregroundStyle(.secondary)
+            if selection.order == .interleaved && selection.includesUntimedMessages {
+                Text("Older messages have no recorded times. They appear after timed messages in their original session order, labeled “Time unavailable.”").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }.padding(16).frame(width: 510)
+    }
+}
+
+final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
+    let selection: TranscriptExportSelection
+    let panel = NSSavePanel()
+    var completed: (() -> Void)?
+    init(sessions: [ExportSession]) { selection = TranscriptExportSelection(sessions: sessions); super.init() }
+    func show(for window: NSWindow?) {
+        panel.title = "Export Conversations"
+        panel.prompt = "Export"
+        panel.nameFieldStringValue = "Converse Transcripts.html"
+        panel.allowedContentTypes = [.html]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        let view = NSHostingView(rootView: TranscriptExportOptionsView(selection: selection))
+        view.frame = NSRect(x: 0, y: 0, width: 510, height: 365)
+        panel.accessoryView = view
+        panel.delegate = self
+        let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
+            defer { completed?() }
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let html = try TranscriptExport.html(sessions: selection.chosen, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: Self.imageData)
+                try html.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                let alert = NSAlert(); alert.messageText = "Could not export conversations"; alert.informativeText = error.localizedDescription; alert.runModal()
+            }
+        }
+        if let window { panel.beginSheetModal(for: window, completionHandler: finish) }
+        else { panel.begin(completionHandler: finish) }
+    }
+    func panel(_ sender: Any, validate url: URL) throws {
+        guard !selection.selected.isEmpty else { throw TranscriptExport.error("Select at least one session to export.") }
+        guard selection.chosen.contains(where: { $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || !$0.images.isEmpty) } }) else {
+            throw TranscriptExport.error("There are no submitted messages matching these options.")
+        }
+    }
+    static func imageData(_ path: String) -> Data? {
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let root = Store.shared.folder.appendingPathComponent("Attachments").resolvingSymlinksInPath().path + "/"
+        guard url.path.hasPrefix(root), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 25_000_000,
+              let data = try? Data(contentsOf: url), let bitmap = NSBitmapImageRep(data: data) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+}
+extension AppDelegate {
+    @objc func exportTranscripts() {
+        if let exporter = transcriptExporter { exporter.panel.makeKeyAndOrderFront(nil); return }
+        let exporter = TranscriptExportController(sessions: Store.shared.sessions.map(ExportSession.init))
+        transcriptExporter = exporter
+        exporter.completed = { [weak self] in self?.transcriptExporter = nil }
+        exporter.show(for: windows.first(where: { $0.0.isKeyWindow })?.0 ?? windows.last?.0)
+    }
+}
+
+enum TranscriptExport {
+    static func error(_ text: String) -> NSError { NSError(domain: "Converse Export", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
+    static func escape(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "'", with: "&#39;")
+    }
+    static func inline(_ source: String) -> String {
+        let rich = MarkdownText.inline(source)
+        var output = ""
+        rich.enumerateAttributes(in: NSRange(location: 0, length: rich.length)) { attrs, range, _ in
+            var text = escape((rich.string as NSString).substring(with: range))
+            if let font = attrs[.font] as? NSFont {
+                let traits = NSFontManager.shared.traits(of: font)
+                if traits.contains(.boldFontMask) { text = "<strong>" + text + "</strong>" }
+                if traits.contains(.italicFontMask) { text = "<em>" + text + "</em>" }
+                if traits.contains(.fixedPitchFontMask) { text = "<code>" + text + "</code>" }
+            }
+            if attrs[.strikethroughStyle] != nil { text = "<s>" + text + "</s>" }
+            if let url = attrs[.link] as? URL, ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+                text = "<a href=\"" + escape(url.absoluteString) + "\" rel=\"noreferrer\">" + text + "</a>"
+            }
+            output += text
+        }
+        return output
+    }
+    struct Item { let session: ExportSession; let message: Message; let position: Int }
+    static func items(sessions: [ExportSession], order: TranscriptExportOrder, content: TranscriptExportContent) -> [Item] {
+        var result: [Item] = []
+        for session in sessions {
+            for message in session.messages where content.includes(message.role) && (!Store.visibleText(message.text).isEmpty || !message.images.isEmpty) {
+                result.append(Item(session: session, message: message, position: result.count))
+            }
+        }
+        if order == .interleaved {
+            result.sort {
+                switch ($0.message.createdAt, $1.message.createdAt) {
+                case let (a?, b?): return a == b ? $0.position < $1.position : a < b
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: return $0.position < $1.position
+                }
+            }
+        }
+        return result
+    }
+    static func html(sessions: [ExportSession], order: TranscriptExportOrder, content: TranscriptExportContent,
+                     lineNumbers: Bool, imageData: (String) -> Data? = { _ in nil }) throws -> String {
+        let selected = items(sessions: sessions, order: order, content: content)
+        guard !selected.isEmpty else { throw error("There are no submitted messages matching these options.") }
+        let date = DateFormatter(); date.dateStyle = .medium; date.timeStyle = .medium; date.timeZone = .current
+        var body = ""; var number = 1; var previousSession: UUID?
+        func numberCell() -> String { defer { number += 1 }; return lineNumbers ? "<span class=\"ln\">\(number)</span>" : "" }
+        func row(_ html: String, extra: String = "") -> String { "<div class=\"line \(extra)\">" + numberCell() + "<div class=\"text\">" + (html.isEmpty ? "&#160;" : html) + "</div></div>" }
+        for item in selected {
+            if order == .sequential && previousSession != item.session.id {
+                body += "<h2 class=\"session\">" + escape(item.session.title) + "<small>" + escape(item.session.provider) + "</small></h2>"
+                previousSession = item.session.id
+            }
+            let message = item.message
+            let prompt = message.role == "user"
+            let time = message.createdAt.map { date.string(from: $0) } ?? "Time unavailable"
+            let label = (prompt ? "Prompt" : "Response") + " · " + item.session.title
+            body += "<article class=\"message \(prompt ? "prompt" : "response")\"><header><b>" + escape(label) + "</b><time>" + escape(time) + "</time></header>"
+            let lines = Store.visibleText(message.text).components(separatedBy: "\n")
+            var index = 0
+            while index < lines.count {
+                let text = lines[index]; let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if prompt { body += row(escape(text), extra: "literal"); index += 1; continue }
+                if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                    let fence = String(trimmed.prefix(3)); index += 1
+                    while index < lines.count && !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(fence) { body += row("<code>" + escape(lines[index]) + "</code>", extra: "code-line"); index += 1 }
+                    if index < lines.count { index += 1 }; continue
+                }
+                if index + 1 < lines.count && text.contains("|") && MarkdownText.tableDivider(lines[index + 1]) {
+                    var rows = [MarkdownText.cells(text)]; index += 2
+                    while index < lines.count && !lines[index].isEmpty && lines[index].contains("|") { rows.append(MarkdownText.cells(lines[index])); index += 1 }
+                    body += "<div class=\"table-scroll\"><table>"
+                    for (r, cells) in rows.enumerated() {
+                        body += "<tr>" + (lineNumbers ? "<td class=\"ln\">\(number)</td>" : ""); number += 1
+                        let tag = r == 0 ? "th" : "td"
+                        for cell in cells { body += "<\(tag)>" + inline(cell) + "</\(tag)>" }
+                        body += "</tr>"
+                    }
+                    body += "</table></div>"; continue
+                }
+                if let match = trimmed.range(of: "^#{1,6}\\s+", options: .regularExpression) {
+                    let level = min(6, trimmed[match].filter { $0 == "#" }.count)
+                    body += row("<h\(level)>" + inline(String(trimmed[match.upperBound...])) + "</h\(level)>")
+                } else if trimmed.hasPrefix("> ") { body += row("<blockquote>" + inline(String(trimmed.dropFirst(2))) + "</blockquote>") }
+                else if let marker = trimmed.range(of: "^(?:[-*+] |[0-9]+[.)] )", options: .regularExpression) {
+                    let bullet = String(trimmed[marker]); let indent = text.prefix { $0 == " " || $0 == "\t" }.count
+                    body += row("<div class=\"list-item\" style=\"margin-left:\(min(indent, 32) * 4)px\"><span class=\"bullet\">" + escape(bullet.first?.isNumber == true ? bullet : "•") + "</span>" + inline(String(trimmed[marker.upperBound...])) + "</div>")
+                } else if ["---", "***", "___"].contains(trimmed) { body += row("<hr>") }
+                else { body += row(inline(text)) }
+                index += 1
+            }
+            for path in message.images {
+                if let data = imageData(path) { body += row("<img alt=\"Attached image\" src=\"data:image/png;base64," + data.base64EncodedString() + "\">") }
+                else { body += row("<span class=\"unavailable\">Attached image unavailable</span>") }
+            }
+            body += "</article>"
+        }
+        let untimed = selected.contains { $0.message.createdAt == nil }
+        let note = untimed ? " Older messages without recorded times retain their session order after timed messages when interleaved." : ""
+        return """
+        <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+        <title>Converse Transcripts</title><style>
+        *{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#222;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:auto;padding:40px 24px}h1{font-size:30px;margin:0}.summary{font-size:13px;color:#657083;margin:4px 0 30px}.session{margin:32px 0 12px;font-size:23px}.session small{display:block;font-size:13px;font-weight:400;color:#657083}.message{margin:0 0 22px;background:white;border:1px solid #dde3eb;border-radius:10px;overflow:hidden;break-inside:auto}.message header{display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e6eaf0;font-size:12px;color:#526174}.line{display:grid;grid-template-columns:\(lineNumbers ? "48px minmax(0,1fr)" : "minmax(0,1fr)")}.ln{background:white;color:#797979;text-align:right;font:11px/25.6px ui-monospace,monospace;padding:0 10px;user-select:none;border-right:1px solid #e6eaf0}.prompt .ln{background:#f0f7ff}.text{padding:0 16px;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}.literal .text{font-style:italic}.message header+.line{padding-top:10px}.message .line:last-child{padding-bottom:10px}h1,h2,h3,h4,h5,h6,blockquote{white-space:normal}h1,h2,h3,h4,h5,h6{line-height:1.3;margin:8px 0}blockquote{margin:4px 0;border-left:3px solid #adbed6;padding-left:12px;color:#526174}code{font:14px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;background:#f1f4f8;border-radius:3px}.code-line .text{background:#f1f4f8;overflow-wrap:normal;overflow-x:auto}a{color:#175eba;text-decoration:underline}.list-item{white-space:normal;display:flex;gap:8px}.bullet{min-width:20px}img{max-width:100%;max-height:720px;object-fit:contain;margin:8px 0}.table-scroll{overflow-x:auto;padding:8px 0}table{border-collapse:collapse;width:100%}th,td{border:1px solid #dce3ed;padding:7px 12px;text-align:left;vertical-align:top}th{background:#f1f5fa}td.ln{width:48px}.unavailable{color:#7e6470;font-size:13px}hr{border:0;border-top:1px solid #ccd5e2}@media print{body{background:white}main{max-width:none;padding:0}.message{border-radius:0}.message header{break-after:avoid}tr,img{break-inside:avoid}}
+        </style></head><body><main><h1>Converse Transcripts</h1><p class="summary">\(sessions.count) session\(sessions.count == 1 ? "" : "s") · \(escape(content.rawValue)) · \(escape(order.rawValue)) · Times: \(escape(TimeZone.current.identifier)).\(escape(note))</p>\(body)</main></body></html>
+        """
+    }
+}

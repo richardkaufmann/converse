@@ -4,6 +4,7 @@ import Foundation
 func providerSelfTests(_ check: (Bool, String) -> Void) {
     workspaceSelfTests(check)
     switchboardSelfTests(check)
+    transcriptExportSelfTests(check)
     setupSelfTests(check)
     accountLoginSelfTests(check)
     sessionSetupSelfTests(check)

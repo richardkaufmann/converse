@@ -24,7 +24,7 @@ mkdir -p .build
 architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
 binaries=()
 for architecture in "${architectures[@]}"; do
-    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/ProviderLogo.swift Sources/PaneSizing.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift Sources/Setup.swift Sources/SetupTests.swift Sources/AccountLogin.swift Sources/AccountLoginTests.swift Sources/SidebarHover.swift Sources/SessionIdentity.swift Sources/SessionLogin.swift Sources/SessionSetup.swift Sources/SessionSetupTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
+    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/ProviderLogo.swift Sources/PaneSizing.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift Sources/TranscriptExport.swift Sources/TranscriptExportTests.swift Sources/Setup.swift Sources/SetupTests.swift Sources/AccountLogin.swift Sources/AccountLoginTests.swift Sources/SidebarHover.swift Sources/SessionIdentity.swift Sources/SessionLogin.swift Sources/SessionSetup.swift Sources/SessionSetupTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
     binaries+=(".build/Converse-${architecture}")
 done
 lipo -create "${binaries[@]}" -output "$app/Contents/MacOS/Converse"
@@ -39,7 +39,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Converse</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.4.3</string>
-<key>CFBundleVersion</key><string>9</string>
+<key>CFBundleVersion</key><string>10</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

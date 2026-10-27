@@ -24,6 +24,8 @@ struct Message: Codable, Identifiable {
     // Codex JSONL combines progress and answer events. Only its authoritative
     // --output-last-message result is eligible for switchboard execution.
     var finalReply: String? = nil
+    // Older archives have no message times. Leave those unknown on decode.
+    var createdAt: Date? = Date()
 }
 struct ToolStatus: Codable {
     var model = "not reported"
@@ -879,7 +881,7 @@ final class LineNumberRuler: NSRulerView {
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
         // Shade the entire visual block, including wrapped lines and images,
         // rather than only the first numbered line of a submitted prompt.
-        NSColor(white: 0.95, alpha: 1).setFill()
+        NSColor(red: 0.94, green: 0.97, blue: 1, alpha: 1).setFill()
         for block in text.userBlocks where block.length > 0 && block.location < string.length {
             let end = min(NSMaxRange(block), string.length)
             let first = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
@@ -1410,6 +1412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var windows: [(NSWindow, WindowState)] = []
     var paneObserver: AnyCancellable?
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
+    var transcriptExporter: TranscriptExportController?
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -1429,6 +1432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ","); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
+        f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
         f.addItem(withTitle: "Restore Closed Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e

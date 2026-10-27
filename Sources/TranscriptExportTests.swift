@@ -1,0 +1,47 @@
+import AppKit
+import WebKit
+
+func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
+    let entry = Entry(name: "Offline model", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
+    let first = Session(entry: entry), second = Session(entry: entry)
+    first.title = "Alpha <safe>"; second.title = "Beta"
+    let later = Date(timeIntervalSince1970: 200), earlier = Date(timeIntervalSince1970: 100)
+    first.messages = [Message(role: "user", text: "Prompt alpha <script>alert(1)</script>", createdAt: later),
+                      Message(role: "assistant", text: "# Heading\n**Bold** and *italic* and [link](https://example.com)\n\n| Column | Value |\n| --- | --- |\n| One | Two |\n\n```swift\nlet x = \"<tag>\"\n```\n- First item", images: ["fixture.png"], createdAt: later)]
+    first.draft = "DO NOT EXPORT DRAFT"
+    first.messages.append(Message(role: "activity", text: "DO NOT EXPORT TOOL", createdAt: earlier))
+    second.messages = [Message(role: "user", text: "Prompt beta", createdAt: earlier), Message(role: "assistant", text: "Legacy reply", createdAt: nil)]
+    let sessions = [ExportSession(first), ExportSession(second)]
+    let chronological = TranscriptExport.items(sessions: sessions, order: .interleaved, content: .both)
+    check(chronological.map { $0.message.text }.first == "Prompt beta" && chronological.last?.message.text == "Legacy reply" && chronological.count == 4, "Export interleaves recorded times stably and keeps untimed legacy messages explicit")
+    let sequential = TranscriptExport.items(sessions: sessions, order: .sequential, content: .both)
+    check(sequential.map { $0.session.id } == [first.id, first.id, second.id, second.id], "Sequential export keeps each session together in recorded message order")
+    check(TranscriptExport.items(sessions: sessions, order: .interleaved, content: .prompts).allSatisfy { $0.message.role == "user" } && TranscriptExport.items(sessions: sessions, order: .sequential, content: .responses).count == 2, "Export Prompts and Responses filters exclude the other role and tool activity")
+    let selection = TranscriptExportSelection(sessions: sessions)
+    selection.selected = [second.id]
+    check(selection.chosen.map(\.id) == [second.id] && selection.includesUntimedMessages, "Export subset selects only checked sessions and flags missing historical times")
+    let legacy = try! JSONDecoder().decode(Message.self, from: Data("{\"id\":\"\(UUID().uuidString)\",\"role\":\"assistant\",\"text\":\"old\",\"images\":[]}".utf8))
+    let roundTrip = try! JSONDecoder().decode(Message.self, from: JSONEncoder().encode(first.messages[0]))
+    check(legacy.createdAt == nil && roundTrip.createdAt == later, "Message dates persist without inventing dates for legacy archives")
+    let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1kAAAAASUVORK5CYII=")!
+    do {
+        let html = try TranscriptExport.html(sessions: sessions, order: .interleaved, content: .both, lineNumbers: true, imageData: { _ in png })
+        check(html.contains("<strong>Bold</strong>") && html.contains("<table>") && html.contains("<code>") && html.contains("<h1>Heading</h1>") && html.contains("https://example.com"), "Export preserves emphasis, headings, code, tables and clickable links")
+        check(html.contains("data:image/png;base64,") && !html.contains("fixture.png") && html.contains("Time unavailable"), "Export embeds attachments into one portable file and labels unknown message times")
+        check(!html.contains("<script>") && html.contains("&lt;script&gt;") && !html.contains("DO NOT EXPORT") && html.contains("default-src 'none'"), "Export escapes user HTML, blocks active content and excludes drafts and tools")
+        let noNumbers = try TranscriptExport.html(sessions: sessions, order: .sequential, content: .responses, lineNumbers: false)
+        check(!noNumbers.contains("class=\"ln\"") && !noNumbers.contains("Prompt alpha") && noNumbers.contains("Attached image unavailable"), "Export line numbers can be omitted and missing images are described visibly")
+        let file = Store.shared.folder.appendingPathComponent("ExportQA.html")
+        try html.write(to: file, atomically: true, encoding: .utf8)
+        check(try String(contentsOf: file, encoding: .utf8) == html, "Formatted export writes a complete standalone UTF-8 file")
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 1100))
+        web.loadHTMLString(html, baseURL: nil)
+        let deadline = Date().addingTimeInterval(10)
+        while web.isLoading && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        var dom: [String: Any]?
+        web.evaluateJavaScript("({messages:document.querySelectorAll('article.message').length, bold:document.querySelector('strong').textContent, cells:document.querySelectorAll('table tr').length, scripts:document.scripts.length, blue:getComputedStyle(document.querySelector('.prompt .ln')).backgroundColor,white:getComputedStyle(document.querySelector('.response .ln')).backgroundColor})") { value, _ in dom = value as? [String: Any] }
+        while dom == nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        check(dom?["messages"] as? Int == 4 && dom?["bold"] as? String == "Bold" && dom?["cells"] as? Int == 2 && dom?["scripts"] as? Int == 0 && dom?["blue"] as? String == "rgb(240, 247, 255)" && dom?["white"] as? String == "rgb(255, 255, 255)", "WebKit renders the standalone export with formatted content and blue/white line-number gutters")
+    } catch { check(false, "Transcript export failed: " + error.localizedDescription) }
+    check((try? TranscriptExport.html(sessions: [], order: .sequential, content: .both, lineNumbers: true)) == nil, "Empty exports report an actionable error")
+}
