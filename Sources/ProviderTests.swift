@@ -7,6 +7,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     setupSelfTests(check)
     accountLoginSelfTests(check)
     sessionSetupSelfTests(check)
+    deviceSyncSelfTests(check)
     let store = Store.shared
     let fixture = FileManager.default.currentDirectoryPath + "/Tests/provider_fixture.py"
     func pump(_ done: () -> Bool, seconds: Double = 8) {

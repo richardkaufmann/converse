@@ -60,6 +60,7 @@ final class WindowState: ObservableObject {
     let id = UUID()
     let workspace: Workspace
     @Published var settings = false
+    @Published var deviceConnect = false
     @Published var setup = false
     @Published var sessionSetup: SessionSetupRequest? = nil
     @Published var closingSessionID: UUID? = nil
@@ -186,6 +187,7 @@ struct WindowTitle: View {
 struct WorkspacePanes: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var store = Store.shared
+    @ObservedObject var devices = DeviceSyncService.shared
     let state: WindowState
     var occupied: [Int] { (1...3).filter { workspace.session(in: state.id, pane: $0) != nil } }
     var body: some View {
@@ -201,6 +203,8 @@ struct WorkspacePanes: View {
                     ForEach(occupied, id: \.self) { pane in
                         if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
                             SessionPane(session: session, workspace: workspace, pane: pane)
+                        } else if let id = workspace.session(in: state.id, pane: pane), devices.remoteRow(sessionID: id) != nil {
+                            RemotePane(sessionID: id, pane: pane, workspace: workspace)
                         }
                     }
                 }

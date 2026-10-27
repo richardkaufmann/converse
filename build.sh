@@ -24,7 +24,7 @@ mkdir -p .build
 architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
 binaries=()
 for architecture in "${architectures[@]}"; do
-    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/ProviderLogo.swift Sources/PaneSizing.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift Sources/Setup.swift Sources/SetupTests.swift Sources/AccountLogin.swift Sources/AccountLoginTests.swift Sources/SidebarHover.swift Sources/SessionIdentity.swift Sources/SessionLogin.swift Sources/SessionSetup.swift Sources/SessionSetupTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
+    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/ProviderLogo.swift Sources/PaneSizing.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift Sources/Setup.swift Sources/SetupTests.swift Sources/AccountLogin.swift Sources/AccountLoginTests.swift Sources/SidebarHover.swift Sources/SessionIdentity.swift Sources/SessionLogin.swift Sources/SessionSetup.swift Sources/SessionSetupTests.swift Sources/DeviceProtocol.swift Sources/DeviceCrypto.swift Sources/DeviceIdentity.swift Sources/DeviceSync.swift Sources/DeviceTransport.swift Sources/DeviceUI.swift Sources/DeviceSyncTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit -framework Network -framework CryptoKit -framework Security
     binaries+=(".build/Converse-${architecture}")
 done
 lipo -create "${binaries[@]}" -output "$app/Contents/MacOS/Converse"
@@ -42,6 +42,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleVersion</key><string>8</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSLocalNetworkUsageDescription</key><string>Converse connects to your other Macs so you can view and control sessions across devices.</string>
+<key>NSBonjourServices</key><array><string>_converse._tcp</string></array>
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$app"
