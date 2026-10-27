@@ -2,9 +2,13 @@
 set -eu
 cd "${0:A:h}"
 mkdir -p Converse.app/Contents/MacOS Converse.app/Contents/Resources
-swift Sources/Icon.swift Converse.iconset
-iconutil -c icns Converse.iconset -o Converse.app/Contents/Resources/Converse.icns
-swiftc Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift -O -o Converse.app/Contents/MacOS/Converse -framework AppKit -framework SwiftUI -framework WebKit
+if [[ "${CONVERSE_SKIP_ICON_BUILD:-0}" != 1 ]]; then
+  swift Sources/Icon.swift Converse.iconset
+  iconutil -c icns Converse.iconset -o Converse.app/Contents/Resources/Converse.icns
+elif [[ ! -f Converse.app/Contents/Resources/Converse.icns ]]; then
+  print -u2 'No existing icon to reuse'; exit 1
+fi
+swiftc Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift -O -o Converse.app/Contents/MacOS/Converse -framework AppKit -framework SwiftUI -framework WebKit
 cat > Converse.app/Contents/Info.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

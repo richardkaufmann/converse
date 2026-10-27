@@ -11,7 +11,8 @@ Each command line must launch the selected CLI; Muse uses interactive MSP, while
 Existing sessions keep their original settings. Changes apply to new sessions.
 
 The entire right pane is a native scrolling Mac text document.
-Type at the bottom. Return sends; Command-Return inserts a newline (Shift-Return also works).
+Type at the bottom. Return sends or queues while busy; Escape interrupts and sends the draft (or stops if empty).
+Command-Return inserts a newline (Shift-Return also works).
 Draft text is blue; submitted input becomes italic in the system text color.
 The app follows the Mac's light/dark appearance.
 No speaker labels, prompts, or extra spacing. The window follows typing.
@@ -75,7 +76,7 @@ The log supplies last-turn and cumulative session tokens. Saved effort is labele
 when observed by Muse, with its observation time; tokens are not account quota.
 /model and /models query model details; /usage queries usage; /status refreshes all
 metadata; /help lists commands; /stop interrupts. These run locally without a prompt.
-The refresh button queries again. Live read-only probing is Muse-specific.
+The refresh button queries again. Codex and Claude also query their CLI catalogs and retained session metadata without a model prompt.
 
 CLICKABLE SESSION SETTINGS AND SUBSCRIPTION QUOTA
 Click model, effort, or access in the bottom bar to choose from Muse's catalogs.
@@ -98,3 +99,19 @@ restores the latest deleted transcript and draft. Attachments are retained.
 
 Delete Conversation keeps the window open and selects another conversation when
 available. Only the separate Close Window action closes the window.
+
+ALL-ASSISTANT SETTINGS, QUEUES AND ACCOUNTS
+The bottom model, effort and access dropdowns work for Muse, Claude and Codex.
+Menus use the installed CLI catalogs and supported effort levels. Settings apply
+to subsequent turns, including resumed conversations. Other model/effort entries
+accept custom values, which the CLI validates. CLI defaults remain labeled when
+no resolved effort is reported.
+Return sends or queues; Escape interrupts and sends the current draft, or just
+stops if it is empty. Muse uses native turn/interrupt. Claude and Codex receive
+SIGINT and resume the exact conversation only after the old process exits.
+Stop and failures pause queued messages. Queues survive relaunch paused.
+Settings > Accounts manages named sign-ins. Sam/AltSam reuse their Codex stores.
+Claude/AltClaude have separate CLI stores; desktop sign-ins do not transfer.
+Sign in to each Claude CLI account once with its Sign in button. Choosing another
+account for existing work opens a separate conversation and transfers your draft;
+the original account keeps its history. No credentials are copied into Converse.

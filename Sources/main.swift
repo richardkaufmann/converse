@@ -8,6 +8,9 @@ struct Entry: Codable, Identifiable, Equatable {
     var command: String
     var directory: String
     var engine: String
+    var accountID: String? = nil
+    var accountName: String? = nil
+    var accountDirectory: String? = nil
 }
 struct DelayMark: Codable { var offset: Int; var seconds: Double }
 struct Message: Codable, Identifiable {
@@ -36,6 +39,7 @@ struct SavedSession: Codable {
     var started: Bool
     var toolStatus: ToolStatus? = nil
     var choices: SessionChoices? = nil
+    var pending: [PendingPrompt]? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -44,6 +48,13 @@ final class Session: ObservableObject, Identifiable {
     @Published var messages: [Message]
     @Published var draft: String
     @Published var attachments: [String]
+    @Published var pending: [PendingPrompt] = []
+    @Published var queuePaused = false
+    var interrupted = false
+    var resumeAfterInterrupt = false
+    var turnFailed = false
+    @Published var accountStatus = ""
+    @Published var probeError = ""
     @Published var busy = false
     @Published var status = "Ready"
     @Published var toolStatus = ToolStatus()
@@ -73,26 +84,35 @@ final class Session: ObservableObject, Identifiable {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
         toolStatus = saved.toolStatus ?? ToolStatus()
         choices = saved.choices ?? SessionChoices()
+        pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending) }
 }
-struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession] }
+struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil }
 final class Store: ObservableObject {
     static let shared = Store()
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
+    @Published var accounts: [AccountProfile] = []
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
     let folder = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
     var pendingSave: DispatchWorkItem?
     init() {
+        accounts = AccountProfile.defaults(dataFolder: folder)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: folder.appendingPathComponent("sessions.json")))
             entries = archive.entries; sessions = archive.sessions.map(Session.init)
+            accounts = archive.accounts ?? accounts
+            for session in sessions where session.entry.accountID == nil {
+                if let profile = accounts.first(where: { $0.id == session.entry.engine + "-default" }) {
+                    session.entry.accountID = profile.id; session.entry.accountName = profile.name; session.entry.accountDirectory = profile.directory
+                }
+            }
         } catch {
             if FileManager.default.fileExists(atPath: folder.appendingPathComponent("sessions.json").path) {
                 DispatchQueue.main.async { let alert = NSAlert(); alert.messageText = "Could not load saved conversations"; alert.informativeText = "Your saved file has been left in Application Support/Converse. \(error.localizedDescription)"; alert.runModal() }
@@ -106,15 +126,28 @@ final class Store: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
     func save() {
-        do { let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved))); try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic) }
+        do { let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts)); try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic) }
         catch { NSLog("Save failed: %@", error.localizedDescription) }
     }
-    func create(_ entry: Entry) -> Session { let s = Session(entry: entry); sessions.append(s); save(); return s }
+    func create(_ entry: Entry) -> Session {
+        var entry = entry
+        if entry.accountDirectory == nil, let profile = accounts.first(where: { $0.id == (entry.accountID ?? entry.engine + "-default") }) {
+            entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory
+        }
+        let s = Session(entry: entry); sessions.append(s); save(); return s
+    }
     func stop(_ s: Session) {
+        s.queuePaused = true; s.resumeAfterInterrupt = false
+        interruptProcess(s)
+    }
+    func interruptProcess(_ s: Session) {
+        guard s.busy else { return }
+        s.interrupted = true
         if let muse = s.muse { s.status = "Stopping…"; muse.interrupt(); return }
         guard let p = s.process, p.isRunning else { return }
         s.status = "Stopping…"; p.interrupt()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if p.isRunning { p.terminate() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { if p.isRunning { s.status = "Still stopping… · queued input is held" } }
     }
     func attach(_ s: Session, image: NSImage) {
         do {
@@ -125,6 +158,40 @@ final class Store: ObservableObject {
             try png.write(to: url, options: .atomic); s.attachments.append(url.path); saveSoon()
         } catch { s.messages.append(Message(role: "notice", text: "Could not attach image: \(error.localizedDescription)")) }
     }
+    func submit(_ s: Session, interrupt: Bool = false) {
+        if handleLocalCommand(s) { return }
+        let hasInput = !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty
+        guard hasInput else { if interrupt { stop(s) }; return }
+        if s.busy || !s.pending.isEmpty {
+            let prompt = PendingPrompt(text: s.draft, images: s.attachments)
+            if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
+            s.draft = ""; s.attachments = []; s.queuePaused = false
+            if interrupt && s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
+            else if !s.busy { runNext(s) }
+            save(); return
+        }
+        send(s)
+    }
+    func runNext(_ s: Session) {
+        guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
+        // A separately edited draft stays editable while queued messages run.
+        let draft = s.draft, attachments = s.attachments
+        let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
+        send(s)
+        if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
+        s.draft = draft; s.attachments = attachments; save()
+    }
+    func finishQueue(_ s: Session, success: Bool) {
+        var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
+        if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
+            shouldRun = false
+            s.messages.append(Message(role: "notice", text: "Interrupted before the CLI returned a conversation ID. Your queued message is held; use Resume queue to retry."))
+        }
+        s.interrupted = false; s.resumeAfterInterrupt = false
+        if !shouldRun { s.queuePaused = !s.pending.isEmpty }
+        save()
+        if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
+    }
     func send(_ s: Session) {
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
@@ -133,6 +200,7 @@ final class Store: ObservableObject {
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
             s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it in Settings and start a new session.")); return
         }
+        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
         let images = s.attachments
         s.messages.append(Message(role: "user", text: text, images: images))
@@ -158,30 +226,16 @@ final class Store: ObservableObject {
             if let effort = s.choices.effort { args += ["--reasoning-effort", effort] }
             if let access = s.choices.access { args += ["--permission-profile", access] }
             for image in images { args += ["--image", image] }
-        case "claude":
-            args = ["--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
-            if s.started || s.remoteID != nil { args += ["--resume", s.remoteID ?? s.id.uuidString] }
-            else { args += ["--session-id", s.id.uuidString] }
-            if !images.isEmpty { args += ["--add-dir", folder.appendingPathComponent("Attachments").path] }
         default:
-            args = ["exec"]
-            if let remote = s.remoteID { args += ["resume", remote] }
-            args += ["--json", "--skip-git-repo-check"]
-            for image in images { args += ["--image", image] }
+            args = ProviderCommand.turnArguments(entry: s.entry, choices: s.choices, id: s.id, remoteID: s.remoteID, started: s.started, images: images)
         }
         args += ["--", prompt]
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let quote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        p.arguments = ["-lc", "exec " + s.entry.command + " " + args.map(quote).joined(separator: " ")]
-        p.currentDirectoryURL = URL(fileURLWithPath: directory)
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS:" + (env["PATH"] ?? "/usr/bin:/bin")
-        env["TZ"] = TimeZone.current.identifier; env["TERM"] = "dumb"; env["NO_COLOR"] = "1"; p.environment = env
+        let p = ProviderCommand.process(entry: s.entry, arguments: args, effort: s.choices.effort)
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
         s.process = p; save()
         do { try p.run() } catch {
             s.busy = false; s.process = nil; s.status = "Failed to start"
-            s.messages.append(Message(role: "notice", text: error.localizedDescription)); save(); return
+            s.messages.append(Message(role: "notice", text: error.localizedDescription)); s.queuePaused = true; save(); return
         }
         DispatchQueue.global(qos: .userInitiated).async {
             var buffer = Data()
@@ -202,11 +256,12 @@ final class Store: ObservableObject {
             p.waitUntilExit()
             DispatchQueue.main.async {
                 s.busy = false; s.process = nil
-                s.status = p.terminationStatus == 0 ? "Ready" : "Stopped · exit \(p.terminationStatus)"
+                s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
                 if let i = s.messages.firstIndex(where: { $0.id == responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
-                if p.terminationStatus != 0 { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. Authentication and permission settings use your installed CLI configuration; interactive terminal approval prompts are not supported in this version.")) }
+                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. Authentication and permission settings use your installed CLI configuration; interactive terminal approval prompts are not supported in this version.")) }
                 self.save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }; self.objectWillChange.send()
+                self.finishQueue(s, success: p.terminationStatus == 0 && !s.turnFailed)
             }
         }
     }
@@ -230,6 +285,7 @@ final class Store: ObservableObject {
                 s.started = true; s.remoteID = connection.sessionID; self.save(); s.status = "Working…"
                 connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
                     if case .failure(let error) = result { self.finishMuse(s, status: "Turn not acknowledged", notice: error.localizedDescription) }
+                    else if s.interrupted { connection.interrupt() }
                 }
             }
         }
@@ -241,6 +297,7 @@ final class Store: ObservableObject {
         if let notice, !notice.isEmpty { s.messages.append(Message(role: "notice", text: notice)) }
         save(); objectWillChange.send()
         if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { refreshStatus(s) }
+        finishQueue(s, success: status == "Ready")
     }
     func consumeMuse(_ method: String, _ params: [String: Any], session s: Session, responseID: UUID) {
         switch method {
@@ -337,7 +394,8 @@ final class Store: ObservableObject {
         }
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
-        guard s.entry.engine == "muse", ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
+        guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
+        if s.entry.engine != "muse" { refreshProviderStatus(s, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
@@ -376,7 +434,9 @@ final class Store: ObservableObject {
         }
     }
     func applySessionChoices(_ s: Session) {
-        if let model = s.choices.model { s.toolStatus.model = model }
+        if let model = s.choices.model {
+            s.toolStatus.model = s.entry.engine == "claude" ? (s.modelChoices.first { $0.id == model }?.label ?? model) : model
+        }
         if let effort = s.choices.effort { s.toolStatus.effort = effort }
         if let access = s.choices.access { s.toolStatus.access = s.accessChoices.first { $0.id == access }?.label ?? access }
     }
@@ -384,13 +444,18 @@ final class Store: ObservableObject {
         guard !s.busy && !s.changingSetting else { return }
         func remember() {
             switch change {
-            case .model(let model): s.choices.model = model.id
+            case .model(let model):
+                s.choices.model = model.id
+                if let effort = s.choices.effort, !model.efforts.contains(effort) {
+                    s.choices.effort = s.entry.engine == "muse" ? nil : model.efforts.first
+                    s.toolStatus.effort = s.choices.effort ?? "CLI default"
+                }
             case .effort(let effort): s.choices.effort = effort
             case .access(let access): s.choices.access = access
             }
             self.applySessionChoices(s); self.save()
         }
-        if !s.started { remember(); return }
+        if !s.started || s.entry.engine != "muse" { remember(); return }
         s.changingSetting = true
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try MuseStatusProbe.query(entry: s.entry, sessionID: s.remoteID ?? s.id.uuidString, change: change) }
@@ -413,14 +478,14 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
         if command == "/stop" { stop(s); saveSoon(); return true }
         if command == "/help" {
-            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Change settings for new sessions through Settings (⌘,).")); saveSoon(); return true
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy; Escape interrupts and sends your draft. Command Return inserts a newline.")); saveSoon(); return true
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
         refreshStatus(s, quota: command == "/usage") {
             if let i = s.messages.firstIndex(where: { $0.id == response }) {
                 if s.entry.engine != "muse" {
-                    s.messages[i].text = "Model: \(s.toolStatus.model)\nEffort: \(s.toolStatus.effort)\nAccess: \(s.toolStatus.access)\nLast turn: \(s.toolStatus.usage)\nLive read-only probing is currently available for Muse."
+                    s.messages[i].text = "Model: \(s.toolStatus.model)\nEffort: \(s.toolStatus.effort)\nAccess: \(s.toolStatus.access)\nLast turn: \(s.toolStatus.usage)\n\(s.probeError.isEmpty ? s.statusDetails : s.probeError)"
                 } else if s.statusDetails.hasPrefix("Muse status refresh failed:") {
                     s.messages[i].text = s.statusDetails
                 } else if command == "/usage" {
@@ -440,7 +505,7 @@ final class Store: ObservableObject {
         } catch {
             let alert = NSAlert(); alert.messageText = "Could not delete conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
         }
-        stop(s)
+        s.pending = []; stop(s)
         sessions.removeAll { $0.id == s.id }
         AppDelegate.shared?.sessionWasDeleted(s)
         save()
@@ -466,6 +531,7 @@ final class Store: ObservableObject {
         if let model = option("--model|-m") { s.toolStatus.model = model + " (requested)" }
         if let effort = option("--reasoning-effort|--effort") { s.toolStatus.effort = effort + " (requested)" }
         if let access = option("--permission-profile|--approval-mode|--permission-mode|--sandbox|-s") { s.toolStatus.access = access + " (requested)" }
+        applySessionChoices(s)
     }
     func updateReportedStatus(_ obj: [String: Any], session s: Session) {
         let payload = obj["payload"] as? [String: Any] ?? obj
@@ -555,6 +621,7 @@ final class Store: ObservableObject {
                     if block["type"] as? String == "tool_use" { activity("Using \(block["name"] as? String ?? "tool")", session: s) }
                 }
             } else if type == "result" {
+                if obj["is_error"] as? Bool == true { s.turnFailed = true }
                 if let result = obj["result"] as? String { text = result; replace = true }
                 if let errors = obj["errors"] as? [String] { s.messages.append(Message(role: "notice", text: errors.joined(separator: "\n"))) }
             }
@@ -564,7 +631,7 @@ final class Store: ObservableObject {
                 if item["type"] as? String == "agent_message" { text = item["text"] as? String }
                 else if let command = item["command"] as? String { activity(command, session: s) }
             }
-            if type == "error" || type == "turn.failed" { s.messages.append(Message(role: "notice", text: obj["message"] as? String ?? String(describing: obj["error"] ?? "Command failed"))) }
+            if type == "error" || type == "turn.failed" { s.turnFailed = true; s.messages.append(Message(role: "notice", text: obj["message"] as? String ?? String(describing: obj["error"] ?? "Command failed"))) }
         }
         if let raw = text, let i = s.messages.firstIndex(where: { $0.id == responseID }) {
             let visible = Store.visibleText(raw)
@@ -780,9 +847,11 @@ final class ConversationTextView: NSTextView {
     }
 
     var inputStart = 0
+    var interruptAndSubmit: (() -> Void)?
     var submit: (() -> Void)?
     var imagePaste: ((NSImage) -> Void)?
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { interruptAndSubmit?(); return }
         if event.keyCode == 36 || event.keyCode == 76 {
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.option) {
                 insertNewline(nil); return
@@ -842,11 +911,9 @@ struct ScrollingConversation: NSViewRepresentable {
         text.textContainerInset = NSSize(width: 12, height: 12)
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
-        text.setAccessibilityLabel("Conversation and message input. Return sends. Command Return inserts a new line.")
-        text.submit = {
-            guard !session.busy else { NSSound.beep(); return }
-            Store.shared.send(session)
-        }
+        text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Escape interrupts and sends. Command Return inserts a new line.")
+        text.submit = { Store.shared.submit(session) }
+        text.interruptAndSubmit = { Store.shared.submit(session, interrupt: true) }
         text.imagePaste = { Store.shared.attach(session, image: $0) }
         scroll.documentView = text
         scroll.verticalRulerView = LineNumberRuler(scroll: scroll, text: text)
@@ -981,6 +1048,7 @@ struct Conversation: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                Text("↵ send / queue · Esc interrupt + send · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
@@ -989,26 +1057,48 @@ struct Conversation: View {
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
+            if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
             Divider()
-            HStack(spacing: 12) {
-                Text(session.status)
-                Menu(session.toolStatus.model) {
-                    ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
-                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
-                Menu(session.toolStatus.effort) {
-                    ForEach(session.modelChoices.first(where: { $0.id == session.toolStatus.model })?.efforts ?? ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"], id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
-                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
-                Menu(session.toolStatus.access) {
-                    ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
-                }.menuStyle(.borderlessButton).fixedSize().disabled(session.entry.engine != "muse")
-                Spacer(minLength: 0)
-                Text("Last turn: " + session.toolStatus.usage)
-                Button { Store.shared.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Query Muse status now")
-            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled).disabled(session.busy || session.changingSetting)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    Text(session.status)
+                    Menu(session.entry.accountName ?? session.entry.name) {
+                        ForEach(store.accounts.filter { $0.engine == session.entry.engine }) { profile in
+                            Button(profile.name + (session.entry.accountID == profile.id ? " ✓" : (session.started ? " · new conversation" : ""))) { store.chooseAccount(session, profile: profile) }
+                        }
+                        Divider()
+                        Button("Manage accounts…") { AppDelegate.shared.showSettings() }
+                    }.menuStyle(.borderlessButton).fixedSize().disabled(session.busy || session.changingSetting)
+                    if !session.accountStatus.isEmpty { Text(session.accountStatus).help(session.accountStatus).truncationMode(.middle) }
+                    Spacer(minLength: 0)
+                    Text("Last turn: " + session.toolStatus.usage)
+                    Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        Menu(session.toolStatus.model) {
+                            ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
+                            Divider()
+                            Button("Other model…") { store.chooseCustomModel(session) }
+                        }.menuStyle(.borderlessButton).fixedSize()
+                        Menu(session.toolStatus.effort) {
+                            if session.availableEfforts.isEmpty { Text(session.probingStatus ? "Loading supported effort levels…" : "This model has no reported effort options") }
+                            ForEach(session.availableEfforts, id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
+                            Divider()
+                            Button("Other effort…") { store.chooseCustomEffort(session) }
+                        }.menuStyle(.borderlessButton).fixedSize()
+                        Menu(session.toolStatus.access) {
+                            ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
+                        }.menuStyle(.borderlessButton).fixedSize()
+                    }.disabled(session.busy || session.changingSetting || session.probingStatus)
+                }
+                if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
+            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Values come from CLI events or explicit command flags. CLI default means the tool has not reported its resolved setting. Usage is token usage for the last turn, not remaining account quota. /usage shows session totals and quota availability. Local time zone: " + TimeZone.current.identifier)
+                .help("Settings apply to subsequent turns in this conversation. Switching accounts opens a new conversation and keeps this account's history. Token usage is not account quota.")
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
 }
 
@@ -1018,7 +1108,7 @@ struct SidebarSession: View {
     var selected: Bool
     var action: () -> Void
     var body: some View {
-        Button(action: action) { HStack(spacing: 8) { Circle().fill(session.busy ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6); Text(session.title).lineLimit(1); Spacer() }.padding(.vertical, 3).padding(.horizontal, 6).background(selected ? Color.accentColor.opacity(0.15) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 7)) }.buttonStyle(.plain).contextMenu {
+        Button(action: action) { HStack(spacing: 8) { Circle().fill(session.busy ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6); Text(session.title).lineLimit(1); Spacer(); if let account = session.entry.accountName { Text(account).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1) } }.padding(.vertical, 3).padding(.horizontal, 6).background(selected ? Color.accentColor.opacity(0.15) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 7)) }.buttonStyle(.plain).contextMenu {
             Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
             Button("Show Window", action: action)
             Button("Close Window") { AppDelegate.shared.closeSessionWindow(session) }
@@ -1065,12 +1155,30 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Assistants").font(.title2.bold())
             Text("Commands run through your login shell. Choose the matching conversation adapter. Changes apply to new sessions.").font(.callout).foregroundStyle(.secondary)
-            ScrollView { VStack(spacing: 18) {
+            ScrollView { VStack(alignment: .leading, spacing: 18) {
+                Text("Accounts").font(.headline)
+                Text("Each account keeps its own CLI sign-in. Sam and AltSam reuse your existing Codex stores. Claude desktop sign-ins are separate; sign in to each Claude Code account once. Account changes apply to new conversations.").font(.caption).foregroundStyle(.secondary)
+                ForEach($store.accounts) { $profile in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            TextField("Account name", text: $profile.name)
+                            Text(profile.engine.capitalized).foregroundStyle(.secondary).frame(width: 60)
+                            if profile.engine != "muse" { Button("Sign in…") { store.signIn(profile) }.disabled(store.accountIsBusy(profile)).help("Sign in to this CLI account when its active turns have finished") }
+                        }
+                        if profile.engine != "muse" { TextField("CLI configuration directory", text: $profile.directory) }
+                    }.padding(8).background(.quaternary.opacity(0.3)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                HStack { Button("Add Codex account") { store.addAccount(engine: "codex") }; Button("Add Claude account") { store.addAccount(engine: "claude") } }
+                Divider()
+                Text("Assistants").font(.headline)
                 ForEach($store.entries) { $entry in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack { TextField("Name", text: $entry.name); Picker("Adapter", selection: $entry.engine) { Text("Muse").tag("muse"); Text("Claude").tag("claude"); Text("Codex").tag("codex") }.frame(width: 200) }
                         TextField("Command line, e.g. muse --model …", text: $entry.command)
                         TextField("Working directory", text: $entry.directory)
+                        Picker("Default account", selection: Binding(get: { entry.accountID ?? entry.engine + "-default" }, set: { entry.accountID = $0; entry.accountName = nil; entry.accountDirectory = nil })) {
+                            ForEach(store.accounts.filter { $0.engine == entry.engine }) { profile in Text(profile.name).tag(profile.id) }
+                        }
                         HStack { Button("Choose directory…") { let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; if p.runModal() == .OK, let url = p.url { entry.directory = url.path } }; Spacer(); Button("Remove") { store.entries.removeAll { $0.id == entry.id } }.disabled(store.sessions.contains { $0.entry.id == entry.id }) }
                     }.padding(12).background(.quaternary.opacity(0.4)).clipShape(RoundedRectangle(cornerRadius: 10))
                 }
@@ -1149,6 +1257,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.title = values[0]; session.entry.command = values[1]; session.entry.directory = values[2]; Store.shared.save()
         }
     }
+    func showSession(_ session: Session) {
+        if windows.isEmpty { newWindow() }
+        let target = windows.first { $0.0.isKeyWindow } ?? windows.last
+        if let (window, state) = target { select(session, state: state); window.makeKeyAndOrderFront(nil) }
+    }
     func newSession(_ entry: Entry, state: WindowState) { let s = Store.shared.create(entry); state.selected = s.id }
     func select(_ session: Session, state: WindowState) {
         if let (window, _) = windows.first(where: { $0.1 !== state && $0.1.selected == session.id && $0.0.isVisible }) { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil); return }
@@ -1175,6 +1288,7 @@ func selfTest() {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh to run isolated tests.\n", stderr); exit(2) }
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
+    providerSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
     let r = UUID(); s.messages.append(Message(id: r, role: "assistant", text: ""))
@@ -1412,6 +1526,21 @@ if CommandLine.arguments.contains("--probe-muse-quota") {
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {
     do { print(try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"), sessionID: CommandLine.arguments[at + 1]).detail); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), CommandLine.arguments.count > at + 2 {
+    let engine = CommandLine.arguments[at + 1], directory = CommandLine.arguments[at + 2]
+    guard ["codex", "claude"].contains(engine) else { exit(2) }
+    do {
+        let snapshot = try ProviderStatus.query(entry: Entry(name: engine, command: engine, directory: "~", engine: engine, accountDirectory: directory), remoteID: nil)
+        print(snapshot.detail)
+        print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
+        exit(0)
+    } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--provider-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh --providers-only for isolated tests.\n", stderr); exit(2) }
+    providerSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }
+    print("All provider checks passed"); exit(0)
 }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 let application = NSApplication.shared
