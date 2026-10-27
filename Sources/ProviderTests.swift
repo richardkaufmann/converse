@@ -89,8 +89,30 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         session.busy = false
         session.draft = "transfer this draft"
         let remote = session.remoteID
-        store.chooseAccount(session, profile: AccountProfile(id: "other", name: "Other", engine: engine, directory: "/other"))
-        check(session.entry == before && session.remoteID == remote && store.sessions.last?.remoteID == nil && store.sessions.last?.draft == "transfer this draft", engine + " switching accounts preserves old context and opens an independent conversation")
+        let countBeforeBinding = store.sessions.count
+        let alternateDirectory = store.folder.appendingPathComponent("Other/fixture-" + engine + "-account").path
+        store.chooseAccount(session, profile: AccountProfile(id: "other", name: "Other", engine: engine, directory: alternateDirectory))
+        check(session.entry.accountID == "other" && session.remoteID == remote && session.draft == "transfer this draft" && store.sessions.count == countBeforeBinding, engine + " login is rebound on the same session without losing context or creating another conversation")
+        let bound = session.entry
+        let changedFolder = store.folder.appendingPathComponent(engine + " changed working folder")
+        try! FileManager.default.createDirectory(at: changedFolder, withIntermediateDirectories: true)
+        session.draft = "preserved draft"; session.attachments = ["preserved.png"]
+        let messageCount = session.messages.count
+        try! store.configure(session, title: "Renamed now", command: session.entry.command, directory: changedFolder.path)
+        check(session.title == "Renamed now" && session.entry.directory == changedFolder.path && session.remoteID == remote && session.entry.accountID == bound.accountID && session.messages.count == messageCount && session.draft == "preserved draft" && session.attachments == ["preserved.png"], engine + " session settings save immediately without changing history, login, context or unsent input")
+        session.pending = []; session.attachments = []
+        session.choices = SessionChoices(model: engine == "codex" ? "fixture-sol" : "sonnet", effort: "high", access: engine == "codex" ? "read-only" : "manual")
+        session.draft = "working-directory"; store.submit(session)
+        pump { !session.busy }
+        let actualFolder = session.messages.last(where: { $0.role == "assistant" })?.text ?? ""
+        let actualIdentity = try? FileManager.default.attributesOfItem(atPath: actualFolder)
+        let expectedIdentity = try! FileManager.default.attributesOfItem(atPath: changedFolder.path)
+        check(actualIdentity?[.systemFileNumber] as? NSNumber == expectedIdentity[.systemFileNumber] as? NSNumber && actualIdentity?[.systemNumber] as? NSNumber == expectedIdentity[.systemNumber] as? NSNumber && session.remoteID == remote, engine + " next resumed turn runs in the changed working folder")
+        let saved = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(session.saved)))
+        check(saved.title == "Renamed now" && saved.entry.directory == changedFolder.path && saved.remoteID == remote, engine + " renamed title and working folder survive relaunch")
+        do { try store.configure(session, title: "Invalid", command: session.entry.command, directory: changedFolder.appendingPathComponent("missing").path); check(false, engine + " rejects missing working folders") }
+        catch { check(session.title == "Renamed now" && session.entry.directory == changedFolder.path, engine + " rejects missing working folders without partially changing title or directory") }
+
     }
     let museEntry = Entry(name: "Muse fixture", command: "python3 " + ProviderCommand.quote(fixture) + " muse", directory: NSTemporaryDirectory(), engine: "muse")
     let muse = store.create(museEntry)

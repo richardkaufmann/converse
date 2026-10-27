@@ -24,7 +24,7 @@ extension Store {
         guard let id = sessionEntryID, var entry = entries.first(where: { $0.id == id }),
               SetupCatalog.validDirectory(entry.directory),
               let profile = accounts.first(where: { $0.id == accountID && $0.engine == entry.engine }) else { save(); return nil }
-        entry.accountID = profile.id; entry.accountName = nil; entry.accountDirectory = nil
+        entry.accountID = profile.id; entry.accountName = nil; entry.accountDirectory = nil; entry.useDefaultAccountStore = profile.useDefaultStore
         if let index = entries.firstIndex(where: { $0.id == id }) { entries[index] = entry }
         let session = create(entry); save(); return session
     }
@@ -156,7 +156,7 @@ struct SetupView: View {
                             HStack {
                                 TextField("Account name", text: $profile.name)
                                 if engine != "muse" {
-                                    Button("Sign in…") { store.signIn(profile, command: selectedEntries.first { $0.engine == engine }?.command) }.disabled(store.accountIsBusy(profile))
+                                    Button("Sign in…") { store.signIn(profile, command: selectedEntries.first { $0.engine == engine }?.command) }.disabled(store.accountIsBusy(profile) || !store.sessionsUsingLogin(profile).isEmpty)
                                 }
                             }
                             Text(profile.directory.isEmpty ? "Uses the CLI’s current sign-in" : profile.directory).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -184,7 +184,7 @@ struct SetupView: View {
                 Text("Working folder: " + entry.directory).font(.caption).foregroundStyle(.secondary)
             }
             Text("Creating a session sends no model prompt. Type at the bottom and press Return when you are ready.").font(.callout)
-            Text("Use + for more sessions. Use 1, 2 or 3 to display a session in a pane, or P to park it. The account, model, effort and access controls are at the bottom of each conversation. Switching accounts for an existing conversation opens a separate one.").font(.callout)
+            Text("Use + for more sessions. Use 1, 2 or 3 to display a session in a pane, or P to park it. The account, model, effort and access controls are at the bottom of each conversation. Changing a login affects only that session and preserves its conversation.").font(.callout)
             Text("Your conversations and drafts are saved on this Mac. Settings manages additional accounts and assistants; Help → Setup Guide reopens these steps.").font(.callout)
         }
     }

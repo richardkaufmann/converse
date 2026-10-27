@@ -1,0 +1,5 @@
+Provider identification marks: Meta, Anthropic and OpenAI.
+SVG artwork from Simple Icons 14.15.0:
+https://github.com/simple-icons/simple-icons/tree/14.15.0/icons
+Distributed under CC0 1.0; see LICENSE.md in this folder.
+The company names and marks belong to their respective owners.

@@ -153,6 +153,7 @@ struct SidebarSession: View {
             .onAppear { if session.accountStatus.isEmpty { Store.shared.refreshSidebarStatus(session) } }
             .onHover { inside in hover.setHovered(inside); if inside { Store.shared.refreshSidebarStatus(session) } }
             .contextMenu {
+                Button("Rename…") { AppDelegate.shared.renameSession(session) }
                 Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
                 ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }
                 if let location = workspace.placements[session.id], location.windowID != state.id {
@@ -199,16 +200,7 @@ struct WorkspacePanes: View {
                 HSplitView {
                     ForEach(occupied, id: \.self) { pane in
                         if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
-                            VStack(spacing: 0) {
-                                HStack(spacing: 8) {
-                                    Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
-                                    Text(session.title).font(.caption).lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    Button { workspace.park(session.id) } label: { Image(systemName: "tray") }.buttonStyle(.plain).help("Park this conversation")
-                                }.padding(.horizontal, 8).padding(.vertical, 4)
-                                Divider()
-                                Conversation(session: session).id(session.id)
-                            }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
+                            SessionPane(session: session, workspace: workspace, pane: pane)
                         }
                     }
                 }
@@ -225,5 +217,24 @@ extension Store {
         if let attempted = session.sidebarProbeAttemptAt, now.timeIntervalSince(attempted) < 60 { return }
         session.sidebarProbeAttemptAt = now
         refreshStatus(session)
+    }
+}
+
+struct SessionPane: View {
+    @ObservedObject var session: Session
+    @ObservedObject var workspace: Workspace
+    let pane: Int
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
+                ProviderLogo(engine: session.entry.engine)
+                Text(session.title).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
+                PaneButton(label: "P", selected: false) { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")
+            }.padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
+            Conversation(session: session).id(session.id)
+        }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
     }
 }

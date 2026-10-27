@@ -12,6 +12,7 @@ struct Entry: Codable, Identifiable, Equatable {
     var accountID: String? = nil
     var accountName: String? = nil
     var accountDirectory: String? = nil
+    var useDefaultAccountStore: Bool? = nil
 }
 struct DelayMark: Codable { var offset: Int; var seconds: Double }
 struct Message: Codable, Identifiable {
@@ -46,11 +47,18 @@ struct SavedSession: Codable {
     var pending: [PendingPrompt]? = nil
     var switchboardEnabled: Bool? = nil
     var switchboardHandled: [UUID]? = nil
+    var createdAt: Date? = nil
+    var titleUpdatedAt: Date? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
     @Published var entry: Entry
-    @Published var title: String
+    @Published var title: String { didSet { if title != oldValue { titleUpdatedAt = Date(); identityChanged?() } } }
+    var createdAt: Date
+    var titleUpdatedAt: Date
+    var identityChanged: (() -> Void)?
+    var identityPath: String?
+    var identityError = ""
     @Published var messages: [Message]
     @Published var draft: String
     @Published var attachments: [String]
@@ -69,7 +77,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var busy = false
     @Published var status = "Ready"
     @Published var toolStatus = ToolStatus()
-    var remoteID: String?
+    var remoteID: String? { didSet { if remoteID != oldValue { identityChanged?() } } }
     var started: Bool
     var choices = SessionChoices()
     @Published var modelChoices: [MuseModelChoice] = []
@@ -93,6 +101,7 @@ final class Session: ObservableObject, Identifiable {
     var textScrollOrigin: NSPoint?
     var textSelection: NSRange?
     init(_ saved: SavedSession) {
+        createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
@@ -104,7 +113,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil }
 final class Store: ObservableObject {
@@ -115,10 +124,13 @@ final class Store: ObservableObject {
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
     let folder: URL
+    var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
+    let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     var pendingSave: DispatchWorkItem?
     init(folder: URL? = nil) {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
+        identityFolder = (folder != nil || ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil) ? self.folder.appendingPathComponent("SessionIdentity") : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".converse/sessions")
         accounts = AccountProfile.defaults(dataFolder: self.folder)
         do {
             try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
@@ -128,8 +140,17 @@ final class Store: ObservableObject {
             accounts = archive.accounts ?? accounts
             for session in sessions where session.entry.accountID == nil {
                 if let profile = accounts.first(where: { $0.id == session.entry.engine + "-default" }) {
-                    session.entry.accountID = profile.id; session.entry.accountName = profile.name; session.entry.accountDirectory = profile.directory
+                    session.entry.accountID = profile.id; session.entry.accountName = profile.name; session.entry.accountDirectory = profile.directory; session.entry.useDefaultAccountStore = profile.useDefaultStore
                 }
+            }
+            // Import an explicit CLI-default authentication selection used by
+            // older versions, replacing its command override with a binding.
+            for session in sessions where session.entry.engine == "claude" && session.entry.command == "env -u CLAUDE_CONFIG_DIR claude" {
+                let profile = accounts.first { $0.engine == "claude" && $0.useDefaultStore == true } ?? AccountProfile(id: "claude-cli-auth-default", name: "CLI default login", engine: "claude", directory: NSHomeDirectory() + "/.claude", useDefaultStore: true)
+                if !accounts.contains(where: { $0.id == profile.id }) { accounts.append(profile) }
+                session.entry.command = "claude"
+                session.entry.accountID = profile.id; session.entry.accountName = profile.name
+                session.entry.accountDirectory = profile.directory; session.entry.useDefaultAccountStore = true
             }
         } catch {
             if FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path) {
@@ -138,6 +159,15 @@ final class Store: ObservableObject {
             setupCompleted = FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path)
             entries = SetupCatalog.entries
         }
+        for session in sessions { attachIdentity(session) }
+        if !sessions.isEmpty { save() }
+    }
+    func attachIdentity(_ session: Session) {
+        session.identityChanged = { [weak self, weak session] in
+            guard let self, let session, self.sessions.contains(where: { $0 === session }) else { return }
+            self.syncIdentity(session); self.save()
+        }
+        syncIdentity(session)
     }
     func saveSoon() {
         pendingSave?.cancel()
@@ -151,9 +181,9 @@ final class Store: ObservableObject {
     func create(_ entry: Entry) -> Session {
         var entry = entry
         if entry.accountDirectory == nil, let profile = accounts.first(where: { $0.id == (entry.accountID ?? entry.engine + "-default") }) {
-            entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory
+            entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         }
-        let s = Session(entry: entry); sessions.append(s); save(); return s
+        let s = Session(entry: entry); sessions.append(s); attachIdentity(s); save(); return s
     }
     func stop(_ s: Session) {
         s.queuePaused = true; s.resumeAfterInterrupt = false
@@ -234,7 +264,7 @@ final class Store: ObservableObject {
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
-            s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it in Settings and start a new session.")); return
+            s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it with Configure and retry this conversation.")); return
         }
         s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
@@ -247,10 +277,8 @@ final class Store: ObservableObject {
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
-        if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
-            let zone = TimeZone.current
-            let formatter = ISO8601DateFormatter(); formatter.timeZone = zone
-            prompt += "\n\n[Local context from Converse: time zone \(zone.identifier) (\(zone.abbreviation() ?? "local")); local time at send \(formatter.string(from: Date())). Use this time zone for dates and times unless I request another.]"
+        if includesLocalContext {
+            prompt += "\n\n" + localContext(s, directory: directory)
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
@@ -554,6 +582,10 @@ final class Store: ObservableObject {
         } catch {
             let alert = NSAlert(); alert.messageText = "Could not close conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
         }
+        do { try closeIdentity(s) } catch {
+            let alert = NSAlert(); alert.messageText = "Could not close conversation identity"; alert.informativeText = error.localizedDescription; alert.runModal(); return
+        }
+        s.identityChanged = nil
         s.pending = []; stop(s)
         sessions.removeAll { $0.id == s.id }
         AppDelegate.shared?.sessionWasDeleted(s)
@@ -564,7 +596,7 @@ final class Store: ObservableObject {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
         for file in files.sorted(by: { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }) {
             guard let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(SavedSession.self, from: data), !sessions.contains(where: { $0.id == saved.id }) else { continue }
-            let s = Session(saved); sessions.append(s)
+            let s = Session(saved); sessions.append(s); attachIdentity(s)
             if !entries.contains(where: { $0.id == s.entry.id }) { entries.append(s.entry) }
             save(); return s
         }
@@ -851,6 +883,10 @@ final class ConversationTextView: NSTextView {
             pasteboard.setData(html, forType: .html)
         }
     }
+    func copyAction(at character: Int) -> (title: String, index: Int)? {
+        guard let index = copyBlocks.firstIndex(where: { NSLocationInRange(character, $0.range) }), ["user", "assistant"].contains(copyBlocks[index].role) else { return nil }
+        return (copyBlocks[index].role == "user" ? "Copy this prompt" : "Copy this response", index)
+    }
     @objc private func copyConversationBlock(_ sender: NSMenuItem) { copyBlock(sender.tag, to: .general) }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
@@ -859,19 +895,12 @@ final class ConversationTextView: NSTextView {
         point.x -= textContainerOrigin.x; point.y -= textContainerOrigin.y
         let glyph = layout.glyphIndex(for: point, in: container)
         let character = glyph < layout.numberOfGlyphs ? layout.characterIndexForGlyph(at: glyph) : (string as NSString).length
-        let clicked = copyBlocks.lastIndex { $0.range.location <= character } ?? 0
-        var prompt = clicked
-        while prompt > 0 && copyBlocks[prompt].role != "user" { prompt -= 1 }
-        var response = copyBlocks[clicked].role == "assistant" ? clicked : prompt + 1
-        while response < copyBlocks.count && copyBlocks[response].role != "assistant" { response += 1 }
-        var items: [NSMenuItem] = []
-        for (title, index) in [("Copy this prompt", prompt), ("Copy this response", response)] {
-            guard copyBlocks.indices.contains(index), copyBlocks[index].role == (title == "Copy this prompt" ? "user" : "assistant") else { continue }
-            let item = NSMenuItem(title: title, action: #selector(copyConversationBlock(_:)), keyEquivalent: "")
-            item.target = self; item.tag = index; items.append(item)
-        }
-        if !items.isEmpty { menu.insertItem(.separator(), at: 0) }
-        for item in items.reversed() { menu.insertItem(item, at: 0) }
+        guard glyph < layout.numberOfGlyphs else { return menu }
+        let line = layout.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
+        guard point.y >= line.minY && point.y < line.maxY, let action = copyAction(at: character) else { return menu }
+        let item = NSMenuItem(title: action.title, action: #selector(copyConversationBlock(_:)), keyEquivalent: "")
+        item.target = self; item.tag = action.index
+        menu.insertItem(.separator(), at: 0); menu.insertItem(item, at: 0)
         return menu
     }
     var userBlocks: [NSRange] = []
@@ -1112,7 +1141,7 @@ struct Conversation: View {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
                     Spacer()
                     Button("Sign in to \(session.entry.accountName ?? session.entry.name)…") { store.signInSession(session) }
-                        .disabled(session.busy || store.loginAccount(for: session).map(store.accountIsBusy) == true)
+                        .disabled(session.busy || session.changingSetting)
                 }.padding(8).background(Color.orange.opacity(0.1))
             }
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
@@ -1163,7 +1192,7 @@ struct Conversation: View {
                 if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Settings apply to subsequent turns in this conversation. Switching accounts opens a new conversation and keeps this account's history. Token usage is not account quota.")
+                .help("Settings apply to subsequent turns in this conversation. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
@@ -1234,15 +1263,7 @@ struct SettingsView: View {
                                 Button("New session…") { flow.request = SessionSetupRequest(engine: engine) }
                             }
                             ForEach(store.sessions.filter { $0.entry.engine == engine }) { session in
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(session.title).lineLimit(1)
-                                        Text(store.sessionLoginLabel(session)).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Button("Configure…") { AppDelegate.shared.configureSession(session) }
-                                    Button("Login…") { flow.request = SessionSetupRequest(engine: engine, sessionID: session.id) }
-                                }.disabled(session.busy || session.changingSetting)
+                                SessionSettingsRow(session: session, store: store, flow: flow)
                             }
                             DisclosureGroup("Saved logins") {
                                 ForEach($store.accounts) { $profile in
@@ -1250,7 +1271,7 @@ struct SettingsView: View {
                                         VStack(alignment: .leading, spacing: 6) {
                                             HStack {
                                                 TextField("Login name", text: $profile.name)
-                                                if engine != "muse" { Button("Sign in…") { store.signIn(profile) }.disabled(store.accountIsBusy(profile)) }
+                                                if engine != "muse" { Button("Sign in…") { store.signIn(profile) }.disabled(store.accountIsBusy(profile) || !store.sessionsUsingLogin(profile).isEmpty).help("For a saved login in use, choose Login… on its session to authenticate independently.") }
                                             }
                                             if engine != "muse" { TextField("CLI configuration folder", text: $profile.directory) }
                                         }.padding(.vertical, 4)
@@ -1391,8 +1412,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if windows.isEmpty { newWindow() }
         if let (_, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last { select(session, state: state) }
     }
-    func configurationForm(title: String, values: [(String, String)], save: ([String]) -> Void) {
-        let alert = NSAlert(); alert.messageText = title
+    func configurationForm(title: String, values: [(String, String)], explanation: String = "", save: ([String]) -> Void) {
+        let alert = NSAlert(); alert.messageText = title; alert.informativeText = explanation
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 350, height: CGFloat(values.count * 44)))
         var fields = [NSTextField]()
         for (index, item) in values.enumerated() {
@@ -1411,11 +1432,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Store.shared.entries[index].name = values[0]; Store.shared.entries[index].command = values[1]; Store.shared.entries[index].directory = values[2]; Store.shared.save()
         }
     }
+    func renameSession(_ session: Session) {
+        configurationForm(title: "Rename conversation", values: [("Conversation name", session.title)]) { values in
+            guard !values[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            session.title = values[0]; Store.shared.save()
+        }
+    }
     func configureSession(_ session: Session) {
         guard !session.busy else { return }
-        configurationForm(title: "Configure conversation", values: [("Conversation name", session.title), ("Command", session.entry.command), ("Working directory", session.entry.directory)]) { values in
-            guard values.allSatisfy({ !$0.isEmpty }) else { return }
-            session.title = values[0]; session.entry.command = values[1]; session.entry.directory = values[2]; Store.shared.save()
+        configurationForm(title: "Configure conversation", values: [("Conversation name", session.title), ("Command", session.entry.command), ("Working directory", session.entry.directory)], explanation: "The title updates immediately. The working folder and command apply to the next turn; this conversation keeps its history and login.") { values in
+            do { try Store.shared.configure(session, title: values[0], command: values[1], directory: values[2]) }
+            catch { let alert = NSAlert(); alert.messageText = "Could not save conversation settings"; alert.informativeText = error.localizedDescription; alert.runModal() }
         }
     }
     func showSession(_ session: Session) {
@@ -1683,6 +1710,7 @@ func selfTest() {
     check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
+    identitySelfTests(check)
     print("All checks passed")
 }
 signal(SIGPIPE, SIG_IGN)

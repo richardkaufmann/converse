@@ -20,7 +20,7 @@ extension Store {
     }
     func loginLabel(_ profile: AccountProfile) -> String {
         let matching = sessions.filter {
-            $0.entry.engine == profile.engine &&
+            $0.entry.engine == profile.engine && ($0.entry.useDefaultAccountStore == true) == (profile.useDefaultStore == true) &&
             AccountLogin.directoryKey($0.entry.accountDirectory ?? "") == AccountLogin.directoryKey(profile.directory)
         }
         let identity = matching.map(\.accountStatus).first { $0.contains("@") }
@@ -39,7 +39,7 @@ extension Store {
     func createBoundSession(entry: Entry, profile: AccountProfile, title: String) -> Session? {
         guard entry.engine == profile.engine else { return nil }
         var bound = entry
-        bound.accountID = profile.id; bound.accountName = profile.name; bound.accountDirectory = profile.directory
+        bound.accountID = profile.id; bound.accountName = profile.name; bound.accountDirectory = profile.directory; bound.useDefaultAccountStore = profile.useDefaultStore
         let session = create(bound)
         if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { session.title = title }
         save(); return session
@@ -110,17 +110,23 @@ struct SessionSetupView: View {
                 }
                 if engine != "muse" { Text("New login…").tag("new") }
             }
+            if engine == "claude" && !profiles.contains(where: { $0.useDefaultStore == true }) {
+                Button("Use installed Claude CLI login") {
+                    let profile = store.installedClaudeLogin()
+                    progress.accountID = profile.id
+                }.help("Reuse the CLI’s normal login without signing in again.")
+            }
             if isNew {
                 TextField("Name this login (e.g. Personal or Work)", text: $progress.loginName)
                 Text("Creates a separate login and opens the CLI’s authentication flow in Terminal. Finish signing in, then return here.").font(.callout).foregroundStyle(.secondary)
             } else if engine != "muse" {
-                Toggle("Sign in again using this login", isOn: $progress.signIn)
-                Text("An existing login is reused. Sign in again only if it has expired or you want to authenticate it.").font(.callout).foregroundStyle(.secondary)
+                Toggle("Sign in to another account for this session", isOn: $progress.signIn)
+                Text("Reusing a saved login does not change it. Signing into another account creates an isolated login for this session and preserves its conversation.").font(.callout).foregroundStyle(.secondary)
             } else {
                 Text("Muse uses its installed CLI login and permission profiles.").font(.callout).foregroundStyle(.secondary)
             }
             if let session, session.started || session.remoteID != nil || !session.messages.isEmpty || !session.pending.isEmpty {
-                Text("Choosing a different login starts a new conversation. This session keeps its history and login.").font(.callout).foregroundStyle(.secondary)
+                Text("Changing the login preserves this session’s history, draft and retained CLI context. Other sessions are unchanged.").font(.callout).foregroundStyle(.secondary)
             }
             HStack {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -132,17 +138,24 @@ struct SessionSetupView: View {
         }.padding(24).frame(width: 480).textFieldStyle(.roundedBorder)
     }
     private func finish() {
-        guard let profile = isNew ? store.makeLogin(engine: engine, name: loginName) : profiles.first(where: { $0.id == accountID && $0.engine == engine }) else { return }
         let target: Session
         if let session {
-            target = store.chooseAccount(session, profile: profile)
+            if isNew || signIn {
+                guard store.signInSession(session, name: isNew ? loginName : profiles.first(where: { $0.id == accountID })?.name) else { return }
+            } else {
+                guard let profile = profiles.first(where: { $0.id == accountID }) else { return }
+                _ = store.chooseAccount(session, profile: profile)
+            }
+            target = session
         } else {
+            guard let profile = isNew ? store.makeLogin(engine: engine, name: loginName) : profiles.first(where: { $0.id == accountID }) else { return }
             var entry = store.defaultEntry(engine: engine); entry.directory = directory
             guard let created = store.createBoundSession(entry: entry, profile: profile, title: title) else { return }
             target = created
+            if isNew { guard store.signInSession(target, freshProfile: profile) else { return } }
+            else if signIn { guard store.signInSession(target, name: profile.name) else { return } }
         }
         AppDelegate.shared.select(target, state: state)
-        if isNew || signIn { store.signInSession(target) }
         dismiss()
     }
 }
@@ -162,5 +175,47 @@ extension Store {
         default: return
         }
         save(); refreshStatus(session)
+    }
+}
+
+struct SessionSettingsRow: View {
+    @ObservedObject var session: Session
+    @ObservedObject var store: Store
+    @ObservedObject var flow: SettingsFlow
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(session.title).lineLimit(1)
+                Text(store.sessionLoginLabel(session)).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Rename…") { AppDelegate.shared.renameSession(session) }
+            Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy || session.changingSetting)
+            Button("Login…") { flow.request = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id) }.disabled(session.busy || session.changingSetting)
+        }
+    }
+}
+extension Store {
+    func configure(_ session: Session, title: String, command: String, directory: String) throws {
+        guard !session.busy, !session.changingSetting else {
+            throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "Finish or stop the current turn before changing its settings."])
+        }
+        guard !title.isEmpty, !command.isEmpty, SetupCatalog.validDirectory(directory) else {
+            throw NSError(domain: "Converse", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use a nonempty title and command, and an existing working folder."])
+        }
+        let changed = session.entry.command != command || session.entry.directory != directory
+        session.title = title
+        var entry = session.entry; entry.command = command; entry.directory = directory
+        session.entry = entry
+        save()
+        if changed { refreshStatus(session) }
+    }
+}
+
+extension Store {
+    func installedClaudeLogin() -> AccountProfile {
+        if let profile = accounts.first(where: { $0.engine == "claude" && $0.useDefaultStore == true }) { return profile }
+        let profile = AccountProfile(id: UUID().uuidString, name: "Installed CLI login", engine: "claude", directory: NSHomeDirectory() + "/.claude", useDefaultStore: true)
+        accounts.append(profile); save(); return profile
     }
 }

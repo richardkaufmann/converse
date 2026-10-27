@@ -6,11 +6,12 @@ struct AccountProfile: Codable, Identifiable, Equatable {
     var name: String
     var engine: String
     var directory: String
+    var useDefaultStore: Bool? = nil
     static func defaults(dataFolder: URL) -> [AccountProfile] {
         let home = NSHomeDirectory()
         return [AccountProfile(id: "muse-default", name: "Muse", engine: "muse", directory: ""),
                 AccountProfile(id: "codex-default", name: "Codex", engine: "codex", directory: home + "/.codex"),
-                AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude")]
+                AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude", useDefaultStore: true)]
     }
 }
 struct PendingPrompt: Codable, Identifiable {
@@ -25,10 +26,11 @@ struct ProviderCommand {
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     static func script(entry: Entry, arguments: [String], effort: String? = nil) -> String {
         var setup = "export PATH=\(quote(NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS")):\"$PATH\"; "
+        if entry.engine == "claude", entry.useDefaultAccountStore == true { setup += "unset CLAUDE_CONFIG_DIR; " }
         if let directory = entry.accountDirectory, !directory.isEmpty {
             let path = NSString(string: directory).expandingTildeInPath
             if entry.engine == "codex" { setup += "unset CODEX_ACCESS_TOKEN OPENAI_API_KEY; export CODEX_HOME=\(quote(path)); " }
-            if entry.engine == "claude" { setup += "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR; export CLAUDE_CONFIG_DIR=\(quote(path)); " }
+            if entry.engine == "claude" { setup += "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR; \(entry.useDefaultAccountStore == true ? "" : "export CLAUDE_CONFIG_DIR=\(quote(path)); ")" }
         }
         if entry.engine == "claude", let effort { setup += "export CLAUDE_CODE_EFFORT_LEVEL=\(quote(effort)); " }
         return setup + "exec " + entry.command + " " + arguments.map(quote).joined(separator: " ")
@@ -270,37 +272,33 @@ extension Store {
     @discardableResult
     func chooseAccount(_ s: Session, profile: AccountProfile) -> Session {
         guard !s.busy, !s.changingSetting, profile.engine == s.entry.engine else { return s }
-        guard s.entry.accountID != profile.id else { return s }
-        var entry = s.entry
-        entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory
-        // A CLI's retained context lives in its account directory. Never resume a
-        // remote ID against a different store or change credentials under active work.
-        if s.started || s.remoteID != nil || !s.messages.isEmpty || !s.pending.isEmpty {
-            let next = create(entry); next.draft = s.draft; next.attachments = s.attachments
-            s.draft = ""; s.attachments = []; save()
-            return next
-        } else {
-            s.entry = entry; s.choices = SessionChoices(); s.toolStatus = ToolStatus()
-            s.modelChoices = []; s.accessChoices = []; s.accountStatus = ""; s.probeError = ""
+        guard s.entry.accountID != profile.id || AccountLogin.directoryKey(s.entry.accountDirectory ?? "") != AccountLogin.directoryKey(profile.directory) || (s.entry.useDefaultAccountStore == true) != (profile.useDefaultStore == true) else { return s }
+        do {
+            if let source = loginAccount(for: s) { try SessionLoginContext.copy(s, from: source, to: profile) }
+            bindLogin(s, profile: profile)
             save(); refreshStatus(s)
-        }
+        } catch { s.messages.append(Message(role: "notice", text: error.localizedDescription)); save() }
         return s
     }
+
     func addAccount(engine: String) {
         let id = UUID().uuidString
         accounts.append(AccountProfile(id: id, name: engine.capitalized + " account \(accounts.filter { $0.engine == engine }.count + 1)", engine: engine, directory: folder.appendingPathComponent("Accounts/" + id).path)); save()
     }
     func accountIsBusy(_ profile: AccountProfile) -> Bool {
-        sessions.contains { $0.busy && $0.entry.engine == profile.engine && loginAccount(for: $0).map { AccountLogin.directoryKey($0.directory) == AccountLogin.directoryKey(profile.directory) } == true }
+        sessionsUsingLogin(profile).contains { $0.busy || $0.changingSetting }
     }
     @discardableResult
-    func signIn(_ profile: AccountProfile, command: String? = nil) -> Bool {
+    func signIn(_ profile: AccountProfile, command: String? = nil, sessionID: UUID? = nil) -> Bool {
         guard ["codex", "claude"].contains(profile.engine), !accountIsBusy(profile) else { return false }
+        // Saved logins in use are immutable authentication identities. Session
+        // sign-in always stages a fresh store, so it cannot overwrite another.
+        guard sessionsUsingLogin(profile).allSatisfy({ $0.id == sessionID }) else { return false }
         do {
             let directory = NSString(string: profile.directory).expandingTildeInPath
             guard !directory.isEmpty else { return false }
             try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let entry = Entry(name: profile.name, command: command ?? entries.first(where: { $0.engine == profile.engine })?.command ?? profile.engine, directory: "~", engine: profile.engine, accountID: profile.id, accountName: profile.name, accountDirectory: directory)
+            let entry = Entry(name: profile.name, command: command ?? entries.first(where: { $0.engine == profile.engine })?.command ?? profile.engine, directory: "~", engine: profile.engine, accountID: profile.id, accountName: profile.name, accountDirectory: directory, useDefaultAccountStore: profile.useDefaultStore)
             let args = profile.engine == "codex" ? ["login"] : ["auth", "login"]
             let scripts = folder.appendingPathComponent("Login")
             try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -309,7 +307,6 @@ extension Store {
             try contents.write(to: file, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
             guard loginFileOpener(file) else { throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open Terminal for sign-in."]) }
-            for session in sessions where session.entry.engine == profile.engine && loginAccount(for: session).map({ AccountLogin.directoryKey($0.directory) == AccountLogin.directoryKey(profile.directory) }) == true { session.queuePaused = true }
             save(); return true
         } catch {
             let alert = NSAlert(); alert.messageText = "Could not start sign-in"; alert.informativeText = error.localizedDescription; alert.runModal(); return false

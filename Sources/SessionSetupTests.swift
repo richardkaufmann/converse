@@ -15,11 +15,14 @@ func sessionSetupSelfTests(_ check: (Bool, String) -> Void) {
     check(store.createBoundSession(entry: a, profile: AccountProfile(id: "wrong", name: "Wrong", engine: "codex", directory: root.path), title: "") == nil, "Session creation rejects a login from another model")
     first.accountStatus = "qa@example.invalid"
     check(store.loginLabel(personal).contains("qa@example.invalid") && !store.loginLabel(work).contains("qa@example.invalid"), "Login picker reuses observed identity only from its own login directory")
+    let context = URL(fileURLWithPath: personal.directory).appendingPathComponent("projects/test/retained.jsonl")
+    try! FileManager.default.createDirectory(at: context.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try! Data("retained conversation".utf8).write(to: context)
     first.remoteID = "retained"; first.started = true; first.messages = [Message(role: "assistant", text: "keep context")]
     first.draft = "keep draft"; first.attachments = ["attachment.png"]
     let next = store.chooseAccount(first, profile: work)
-    check(next !== first && first.remoteID == "retained" && first.entry.accountID == personal.id && first.messages.last?.text == "keep context" && next.remoteID == nil, "Rebinding a conversation to another login preserves original context and creates a fresh conversation")
-    check(next.draft == "keep draft" && next.attachments == ["attachment.png"], "New login conversation receives unsent draft and attachments")
+    check(next === first && first.remoteID == "retained" && first.entry.accountID == work.id && first.messages.last?.text == "keep context" && store.sessions.count == 2, "Rebinding a login preserves the same conversation and its retained CLI identity")
+    check(next.draft == "keep draft" && next.attachments == ["attachment.png"] && second.entry.accountID == work.id, "Changing a session login preserves its unsent input and other sessions")
     next.busy = true
     check(store.chooseAccount(next, profile: personal) === next && next.entry.accountID == work.id, "Login selection cannot rebind an active session")
     next.busy = false

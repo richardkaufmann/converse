@@ -25,10 +25,11 @@ account = root / "fixture-codex-account"
 running = subprocess.check_output(["ps", "-axo", "comm="], text=True).splitlines()
 if str(contents / "MacOS/ConverseNative") in [line.strip() for line in running]:
     raise SystemExit("Quit Converse Isolated QA before rebuilding its bundle.")
-for directory in [contents / "MacOS", contents / "Resources", work, data, account]:
+for directory in [contents / "MacOS", contents / "Resources", work, data, account, root / "Config", root / "RuntimeData"]:
     directory.mkdir(parents=True, exist_ok=True)
 shutil.copy2(built / "Contents/MacOS/Converse", contents / "MacOS/ConverseNative")
 shutil.copy2(built / "Contents/Resources/Converse.icns", contents / "Resources/Converse.icns")
+shutil.copytree(built / "Contents/Resources/ProviderLogos", contents / "Resources/ProviderLogos", dirs_exist_ok=True)
 shutil.copy2(repo / "Tests/provider_fixture.py", root / "provider_fixture.py")
 info = plistlib.loads((built / "Contents/Info.plist").read_bytes())
 info.update(CFBundleIdentifier="local.converse.IsolatedQA", CFBundleName="Converse Isolated QA", CFBundleDisplayName="Converse Isolated QA")
@@ -36,6 +37,8 @@ info.update(CFBundleIdentifier="local.converse.IsolatedQA", CFBundleName="Conver
 wrapper = contents / "MacOS/Converse"
 wrapper.write_text("#!/bin/zsh\ncd " + shlex.quote(str(work)) + "\n"
                    "export CONVERSE_TEST_COMMAND=offline-fixture\n"
+                   "export XDG_CONFIG_HOME=" + shlex.quote(str(root / "Config")) + "\n"
+                   "export XDG_DATA_HOME=" + shlex.quote(str(root / "RuntimeData")) + "\n"
                    "export CONVERSE_DATA_DIR=" + shlex.quote(str(data)) + "\n"
                    "exec " + shlex.quote(str(contents / "MacOS/ConverseNative")) +
                    " > " + shlex.quote(str(root / "app.log")) + " 2>&1\n")

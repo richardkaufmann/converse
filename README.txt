@@ -1,4 +1,4 @@
-Converse — macOS preview 0.4.1
+Converse — macOS preview 0.4.2
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -134,9 +134,9 @@ SIGINT and resume the exact conversation only after the old process exits.
 Stop and failures pause queued messages. Queues survive relaunch paused.
 Settings > Models & sessions groups sessions and saved logins by model. Defaults reuse standard CLI stores.
 Add named accounts for separate logins; desktop sign-ins do not transfer.
-Sign in to each Claude CLI account once with its Sign in button. Choosing another
-account for existing work opens a separate conversation and transfers your draft;
-the original account keeps its history. No credentials are copied into Converse.
+Choose an existing login or sign into another account for a selected session.
+The same session keeps its history, retained CLI context and draft; other sessions
+keep their bindings. No credential files are copied.
 
 SESSION MESSAGING
 Right-click a session and choose Teach Session To Talk To Other Sessions.
@@ -159,7 +159,7 @@ MODEL → SESSION → LOGIN
 The sidebar has one heading each for Claude, Codex and Muse. + creates a session
 and lets you choose an existing login or New login. /login and the footer login
 identity open the same picker. Settings uses the same model/session hierarchy.
-Changing the login of an established conversation creates a separate conversation.
+Changing a login preserves the same session and its retained CLI context.
 Claude: Manual, Accept edits, Auto, Plan, Don't ask (deny unapproved), Bypass permissions.
 Codex: sandbox access and approval policy have independent controls.
 Muse: models, efforts and available permission profiles come from the host.
@@ -170,3 +170,31 @@ Adding a pane compacts the sidebar until the model column is hidden, then divide
 the remaining window width evenly. Removing a pane keeps the sidebar width and
 evenly redistributes the remaining panes. Replacing a pane's conversation leaves
 its gutter positions unchanged. Gutters remain adjustable.
+
+SESSION CONFIGURATION
+Session titles refresh immediately in the sidebar, pane header and Settings.
+Working-folder and command changes apply to the next CLI turn, preserving the
+conversation and login. The next prompt includes the current working directory.
+Stop or finish active work before changing these settings.
+
+SESSION LOGINS
+Login is a property of each session. Reusing an existing login never changes its
+authentication. Signing into another account stages a fresh isolated CLI store
+for only that session, preserving its history and retained conversation context.
+Other sessions keep their login and work. Credential files are never copied.
+The installed Claude CLI login is distinct from explicitly setting its config
+folder; existing authenticated logins can be reused without another sign-in.
+
+SESSION IDENTITY
+Each user turn identifies its current session title and Converse session ID in
+local context. Right-click a sidebar session > Rename works during a running turn.
+Claude agents can also read ~/.converse/sessions/<transcript-uuid>.json, where the
+UUID matches their Claude Code transcript filename. Local context gives the exact
+path. Fields: title, transcriptUuid, converseSessionId, createdAt, titleUpdatedAt,
+converseVersion, live, closedAt (when closed). Dates use ISO 8601.
+Files are replaced atomically and published read-only. Renames update immediately;
+closed conversations are tombstoned with live:false. Agents must verify live:true
+and their own transcriptUuid. Parking/window closing leaves the conversation live.
+There is no agent API to change titles. Same-user unrestricted file tools retain
+normal macOS access. Isolated developer runs use their isolated data directory.
+Right-click text to copy only that prompt or response, according to the message.
