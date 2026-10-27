@@ -1180,7 +1180,7 @@ struct RootView: View {
                 HStack(spacing: 6) {
                     Color.clear.frame(width: 12, height: 1)
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    if sidebar.size.width >= 360 { Text("Model").frame(width: 105, alignment: .leading) }
+                    if sidebar.size.width >= PaneSizing.modelColumnThreshold { Text("Model").frame(width: 105, alignment: .leading) }
                     Text("Placement").frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
@@ -1197,7 +1197,7 @@ struct RootView: View {
                                     Button("Settings…") { state.settings = true }
                                 }
                                 ForEach(store.sessions.filter { $0.entry.engine == engine }) { session in
-                                    SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= 360)
+                                    SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                                 }
                             }
                         }
@@ -1291,6 +1291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate!
     var windows: [(NSWindow, WindowState)] = []
     var paneObserver: AnyCancellable?
+    var paneCounts: [UUID: Int] = [:]
+    var paneLayoutRevision: [UUID: Int] = [:]
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -1341,10 +1343,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func updatePaneWidths(_ placements: [UUID: PaneLocation]) {
         for (window, state) in windows where window.isVisible {
             let count = placements.values.filter { $0.windowID == state.id }.count
-            let minimum = Workspace.minimumWidth(paneCount: count)
+            let previous = paneCounts[state.id] ?? 0
+            paneCounts[state.id] = count
+            guard count != previous else { continue }
+            let sidebar = count > previous ? PaneSizing.compactSidebar : (PaneSizing.sidebarWidth(in: window) ?? PaneSizing.compactSidebar)
+            let minimum = max(760, sidebar + max(310, CGFloat(count) * PaneSizing.minimumPane) + 12)
             window.contentMinSize = NSSize(width: minimum, height: 540)
             let size = window.contentRect(forFrameRect: window.frame).size
             if size.width < minimum { window.setContentSize(NSSize(width: minimum, height: max(540, size.height))) }
+            let revision = (paneLayoutRevision[state.id] ?? 0) + 1
+            paneLayoutRevision[state.id] = revision
+            // SwiftUI publishes placement changes before updating its native split
+            // views. Apply once those views contain the new number of panes.
+            func arrange(_ attempts: Int) {
+                guard self.paneLayoutRevision[state.id] == revision, window.isVisible else { return }
+                if !PaneSizing.apply(to: window, sidebar: sidebar, paneCount: count), attempts > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { arrange(attempts - 1) }
+                }
+            }
+            DispatchQueue.main.async { arrange(6) }
         }
     }
     func sessionWasDeleted(_ session: Session) { Workspace.shared.park(session.id) }

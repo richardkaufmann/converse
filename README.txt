@@ -1,4 +1,4 @@
-Converse — macOS preview 0.4.0
+Converse — macOS preview 0.4.1
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -164,3 +164,9 @@ Claude: Manual, Accept edits, Auto, Plan, Don't ask (deny unapproved), Bypass pe
 Codex: sandbox access and approval policy have independent controls.
 Muse: models, efforts and available permission profiles come from the host.
 CLI catalogs supply model IDs and supported effort levels for the selected login.
+
+PANE SIZING
+Adding a pane compacts the sidebar until the model column is hidden, then divides
+the remaining window width evenly. Removing a pane keeps the sidebar width and
+evenly redistributes the remaining panes. Replacing a pane's conversation leaves
+its gutter positions unchanged. Gutters remain adjustable.
