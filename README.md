@@ -71,7 +71,7 @@ The Mac's local time zone and send time are supplied as context to the assistant
 
 Choose **File → Export…**. In the standard Mac save dialog, check one, several, or all sessions; choose **Interleaved by time** or **One after the other**, **Prompts**, **Responses**, or **Both**, and whether to include line numbers. The export is a snapshot of submitted messages when the dialog opens; drafts, tool activity, and account configuration are excluded.
 
-Converse saves one portable HTML file with formatted headings, emphasis, code, tables, links, and embedded attachment images. Open it in a browser to read or print. New messages retain their creation times. Older messages without recorded timestamps are labeled **Time unavailable** and appear after timed messages in their original session order when interleaved.
+Choose **HTML** for one portable file with formatted headings, emphasis, code, tables, links, and embedded attachment images. Open it in a browser to read or print. Choose **Text** for a UTF-8 `.txt` file preserving original Markdown and listing attached image filenames; line numbers are disabled for Text. New messages retain their creation times. Older messages without recorded timestamps are labeled **Time unavailable** and appear after timed messages in their original session order when interleaved.
 
 ## Local slash commands
 

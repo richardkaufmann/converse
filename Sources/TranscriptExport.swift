@@ -1,6 +1,19 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
+
+enum TranscriptExportFormat: String, CaseIterable, Identifiable {
+    case html = "HTML", text = "Text"
+    var id: Self { self }
+    var contentType: UTType { self == .html ? .html : .plainText }
+    var fileExtension: String { self == .html ? "html" : "txt" }
+    func fileName(_ current: String) -> String {
+        let name = current as NSString
+        let base = ["html", "htm", "txt"].contains(name.pathExtension.lowercased()) ? name.deletingPathExtension : current
+        return base + "." + fileExtension
+    }
+}
 
 enum TranscriptExportOrder: String, CaseIterable, Identifiable {
     case interleaved = "Interleaved by time", sequential = "One after the other"
@@ -26,6 +39,7 @@ final class TranscriptExportSelection: ObservableObject {
     @Published var order = TranscriptExportOrder.sequential
     @Published var content = TranscriptExportContent.both
     @Published var lineNumbers = true
+    @Published var format = TranscriptExportFormat.html
     init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
     var chosen: [ExportSession] { sessions.filter { selected.contains($0.id) } }
     var includesUntimedMessages: Bool { chosen.contains { $0.messages.contains { content.includes($0.role) && $0.createdAt == nil } } }
@@ -56,8 +70,11 @@ struct TranscriptExportOptionsView: View {
             Picker("Include", selection: $selection.content) {
                 ForEach(TranscriptExportContent.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
-            Toggle("Line numbers", isOn: $selection.lineNumbers)
-            Text("Formatted HTML with embedded images. Drafts and tool activity are excluded.").font(.caption).foregroundStyle(.secondary)
+            Picker("Format", selection: $selection.format) {
+                ForEach(TranscriptExportFormat.allCases) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented)
+            Toggle("Line numbers", isOn: $selection.lineNumbers).disabled(selection.format == .text)
+            Text(selection.format == .html ? "Formatted HTML with embedded images. Drafts and tool activity are excluded." : "UTF-8 text preserves Markdown source; images are listed by filename. No line numbers, drafts or tool activity.").font(.caption).foregroundStyle(.secondary)
             if selection.order == .interleaved && selection.includesUntimedMessages {
                 Text("Older messages have no recorded times. They appear after timed messages in their original session order, labeled “Time unavailable.”").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -68,6 +85,7 @@ struct TranscriptExportOptionsView: View {
 final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     let selection: TranscriptExportSelection
     let panel = NSSavePanel()
+    private var formatObserver: AnyCancellable?
     var completed: (() -> Void)?
     init(sessions: [ExportSession]) { selection = TranscriptExportSelection(sessions: sessions); super.init() }
     func show(for window: NSWindow?) {
@@ -78,15 +96,24 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         let view = NSHostingView(rootView: TranscriptExportOptionsView(selection: selection))
-        view.frame = NSRect(x: 0, y: 0, width: 510, height: 365)
+        view.frame = NSRect(x: 0, y: 0, width: 510, height: 400)
         panel.accessoryView = view
         panel.delegate = self
+        formatObserver = selection.$format.removeDuplicates().sink { [weak self] format in
+            guard let self else { return }
+            panel.allowedContentTypes = [format.contentType]
+            panel.nameFieldStringValue = format.fileName(panel.nameFieldStringValue)
+        }
         let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
             defer { completed?() }
             guard response == .OK, let url = panel.url else { return }
             do {
-                let html = try TranscriptExport.html(sessions: selection.chosen, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: Self.imageData)
-                try html.write(to: url, atomically: true, encoding: .utf8)
+                let document: String
+                switch selection.format {
+                case .html: document = try TranscriptExport.html(sessions: selection.chosen, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: Self.imageData)
+                case .text: document = try TranscriptExport.text(sessions: selection.chosen, order: selection.order, content: selection.content)
+                }
+                try document.write(to: url, atomically: true, encoding: .utf8)
             } catch {
                 let alert = NSAlert(); alert.messageText = "Could not export conversations"; alert.informativeText = error.localizedDescription; alert.runModal()
             }
@@ -120,6 +147,28 @@ extension AppDelegate {
 
 enum TranscriptExport {
     static func error(_ text: String) -> NSError { NSError(domain: "Converse Export", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
+    static func text(sessions: [ExportSession], order: TranscriptExportOrder, content: TranscriptExportContent) throws -> String {
+        let selected = items(sessions: sessions, order: order, content: content)
+        guard !selected.isEmpty else { throw error("There are no submitted messages matching these options.") }
+        let date = DateFormatter(); date.dateStyle = .medium; date.timeStyle = .medium; date.timeZone = .current
+        var output = "Converse Transcripts\n====================\n\(sessions.count) sessions · \(content.rawValue) · \(order.rawValue)\nTimes: \(TimeZone.current.identifier)\n"
+        if selected.contains(where: { $0.message.createdAt == nil }) {
+            output += "Older messages without recorded times are labeled Time unavailable. When interleaved they follow timed messages in their original session order.\n"
+        }
+        var previousSession: UUID?
+        for item in selected {
+            if order == .sequential && previousSession != item.session.id {
+                output += "\n\(item.session.title) · \(item.session.provider)\n" + String(repeating: "=", count: 40) + "\n"
+                previousSession = item.session.id
+            }
+            let message = item.message
+            let time = message.createdAt.map { date.string(from: $0) } ?? "Time unavailable"
+            output += "\n[\(message.role == "user" ? "Prompt" : "Response") · \(item.session.title) · \(time)]\n"
+            output += Store.visibleText(message.text) + "\n"
+            for image in message.images { output += "[Attached image: \((image as NSString).lastPathComponent)]\n" }
+        }
+        return output
+    }
     static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "'", with: "&#39;")

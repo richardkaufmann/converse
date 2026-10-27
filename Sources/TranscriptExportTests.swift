@@ -18,6 +18,8 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
     check(sequential.map { $0.session.id } == [first.id, first.id, second.id, second.id], "Sequential export keeps each session together in recorded message order")
     check(TranscriptExport.items(sessions: sessions, order: .interleaved, content: .prompts).allSatisfy { $0.message.role == "user" } && TranscriptExport.items(sessions: sessions, order: .sequential, content: .responses).count == 2, "Export Prompts and Responses filters exclude the other role and tool activity")
     let selection = TranscriptExportSelection(sessions: sessions)
+    selection.format = .text
+    check(selection.lineNumbers && selection.format == .text && TranscriptExportFormat.text.fileName("Project.v1.html") == "Project.v1.txt" && TranscriptExportFormat.html.fileName("Project.v1.txt") == "Project.v1.html", "Text format preserves the HTML line-number preference and updates filename extensions without losing dotted names")
     selection.selected = [second.id]
     check(selection.chosen.map(\.id) == [second.id] && selection.includesUntimedMessages, "Export subset selects only checked sessions and flags missing historical times")
     let legacy = try! JSONDecoder().decode(Message.self, from: Data("{\"id\":\"\(UUID().uuidString)\",\"role\":\"assistant\",\"text\":\"old\",\"images\":[]}".utf8))
@@ -25,6 +27,11 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
     check(legacy.createdAt == nil && roundTrip.createdAt == later, "Message dates persist without inventing dates for legacy archives")
     let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1kAAAAASUVORK5CYII=")!
     do {
+        let plain = try TranscriptExport.text(sessions: sessions, order: .interleaved, content: .responses)
+        check(plain.contains("**Bold**") && plain.contains("[Attached image: fixture.png]") && plain.contains("Time unavailable") && !plain.contains("Prompt beta") && !plain.contains("<article") && !plain.contains("class=\"ln\"") && !plain.contains("DO NOT EXPORT"), "Text export preserves original Markdown and image labels with no HTML, generated line numbers, prompts or private drafts")
+        let textFile = Store.shared.folder.appendingPathComponent("ExportQA.txt")
+        try plain.write(to: textFile, atomically: true, encoding: .utf8)
+        check(try String(contentsOf: textFile, encoding: .utf8) == plain, "Text export writes a standalone UTF-8 file")
         let html = try TranscriptExport.html(sessions: sessions, order: .interleaved, content: .both, lineNumbers: true, imageData: { _ in png })
         check(html.contains("<strong>Bold</strong>") && html.contains("<table>") && html.contains("<code>") && html.contains("<h1>Heading</h1>") && html.contains("https://example.com"), "Export preserves emphasis, headings, code, tables and clickable links")
         check(html.contains("data:image/png;base64,") && !html.contains("fixture.png") && html.contains("Time unavailable"), "Export embeds attachments into one portable file and labels unknown message times")
