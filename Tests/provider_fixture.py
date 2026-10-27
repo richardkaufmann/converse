@@ -99,8 +99,16 @@ if prompt == 'login-required':
     sys.exit(1)
 if prompt == 'fail': sys.exit(1)
 answer = prompt[len('switchboard-output:'):] if prompt.startswith('switchboard-output:') else 'answer: '+prompt
+if kind == 'codex' and prompt.startswith('switchboard-progress:'):
+    emit({'type':'item.completed','item':{'type':'agent_message','text':'I will inspect this before sending.'}})
+    answer = prompt[len('switchboard-progress:'):]
+if kind == 'codex' and prompt.startswith('switchboard-commentary-only:'):
+    emit({'type':'item.completed','item':{'type':'agent_message','text':prompt[len('switchboard-commentary-only:'):]}})
+    answer = 'Finished without sending.'
 if prompt == 'working-directory': answer = os.getcwd()
 if kind == 'codex':
+    if '--output-last-message' in args and not prompt.startswith('switchboard-missing-final:'):
+        Path(args[args.index('--output-last-message')+1]).write_text(answer)
     emit({'type':'item.completed','item':{'type':'agent_message','text':answer}})
     emit({'type':'turn.completed','usage':{'input_tokens':2,'output_tokens':3}})
 else: emit({'type':'result','session_id':'fixture-thread','result':answer})

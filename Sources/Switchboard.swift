@@ -61,7 +61,9 @@ extension Store {
               let start = s.switchboardTurnStart else { return }
         let replies = Array(s.messages.dropFirst(start).filter { $0.role == "assistant" })
         for reply in replies {
-            guard !s.switchboardHandled.contains(reply.id), let request = SwitchboardCommand.parse(reply.text) else { continue }
+            let commandText = s.entry.engine == "codex" ? reply.finalReply : reply.text
+            guard !s.switchboardHandled.contains(reply.id), let commandText,
+                  let request = SwitchboardCommand.parse(commandText) else { continue }
             s.switchboardHandled.append(reply.id)
             func note(_ text: String) { s.messages.append(Message(role: "notice", text: "Switchboard: " + text)) }
             guard s.switchboardHop < 8 else { note("chain stopped at 8 hops. A human can continue it with a new message."); save(); continue }

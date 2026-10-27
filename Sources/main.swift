@@ -21,6 +21,9 @@ struct Message: Codable, Identifiable {
     var text: String
     var images: [String] = []
     var delays: [DelayMark]? = nil
+    // Codex JSONL combines progress and answer events. Only its authoritative
+    // --output-last-message result is eligible for switchboard execution.
+    var finalReply: String? = nil
 }
 struct ToolStatus: Codable {
     var model = "not reported"
@@ -300,11 +303,25 @@ final class Store: ObservableObject {
         default:
             args = ProviderCommand.turnArguments(entry: s.entry, choices: s.choices, id: s.id, remoteID: s.remoteID, started: s.started, images: images)
         }
+        var finalOutputDirectory: URL?
+        if s.entry.engine == "codex" {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("converse-final-" + UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                finalOutputDirectory = directory
+                args += ["--output-last-message", directory.appendingPathComponent("answer.txt").path]
+            } catch {
+                s.busy = false; s.status = "Failed to start"; s.queuePaused = true
+                s.messages.append(Message(role: "notice", text: "Could not prepare Codex final-answer capture: " + error.localizedDescription)); save(); return
+            }
+        }
+        let finalDirectory = finalOutputDirectory
         args += ["--", prompt]
         let p = ProviderCommand.process(entry: s.entry, arguments: args, effort: s.choices.effort)
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
         s.process = p; save()
         do { try p.run() } catch {
+            if let finalDirectory { try? FileManager.default.removeItem(at: finalDirectory) }
             s.busy = false; s.process = nil; s.status = "Failed to start"
             s.messages.append(Message(role: "notice", text: error.localizedDescription)); s.queuePaused = true; save(); return
         }
@@ -325,10 +342,19 @@ final class Store: ObservableObject {
                 DispatchQueue.main.async { self.consume(line, session: s, responseID: responseID) }
             }
             p.waitUntilExit()
+            let finalReply = finalDirectory.flatMap { try? String(contentsOf: $0.appendingPathComponent("answer.txt"), encoding: .utf8) }
+            if let finalDirectory { try? FileManager.default.removeItem(at: finalDirectory) }
             DispatchQueue.main.async {
                 s.busy = false; s.process = nil
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
+                if s.entry.engine == "codex", p.terminationStatus == 0, !s.turnFailed, !s.interrupted,
+                   let i = s.messages.firstIndex(where: { $0.id == responseID }) {
+                    s.messages[i].finalReply = finalReply
+                    if finalReply == nil && s.switchboardEnabled {
+                        s.messages.append(Message(role: "notice", text: "Switchboard: Codex final-answer capture was unavailable; no command was dispatched."))
+                    }
+                }
                 if let i = s.messages.firstIndex(where: { $0.id == responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
                 if (p.terminationStatus != 0 || s.turnFailed) && !s.interrupted {
                     let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")

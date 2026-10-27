@@ -52,6 +52,26 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         store.submit(session)
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.contains { $0.role == "user" && $0.text.hasPrefix("[Converse switchboard directory") && $0.text.contains(session.id.uuidString) }, engine + " completed directory command automatically returns live IDs through the provider")
+        if engine == "codex" {
+            let command = "```converse\n{\"command\":\"list-sessions\"}\n```"
+            session.queuePaused = true
+            session.draft = "switchboard-progress:" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.count == 1 && session.pending.first?.text.hasPrefix("[Converse switchboard directory") == true && session.messages.contains { $0.finalReply == command && $0.text.contains("I will inspect") }, "Codex progress remains visible while its separate final reply dispatches exactly once")
+            let captured = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(session.saved)))
+            check(captured.messages.contains { $0.finalReply == command }, "Codex authoritative final reply survives archive persistence")
+            session.pending = []
+            session.draft = "switchboard-commentary-only:" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.isEmpty, "Codex command in commentary cannot execute when final answer is ordinary prose")
+            session.draft = "switchboard-output:Example:\n" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.isEmpty, "Codex quoted final-answer command remains non-executable")
+            session.draft = "switchboard-missing-final:" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.isEmpty && session.messages.contains { $0.role == "notice" && $0.text.contains("final-answer capture was unavailable") }, "Missing Codex final-answer capture fails closed with a visible delivery notice")
+            session.queuePaused = false
+        }
         let peer = store.create(entry); peer.choices = session.choices
         peer.draft = "slow"; store.submit(peer)
         pump { peer.messages.last?.text == "partial" }

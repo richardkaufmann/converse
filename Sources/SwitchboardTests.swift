@@ -14,7 +14,7 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     func reply(_ text: String, hop: Int = 0) {
         source.switchboardTurnStart = source.messages.count
         source.switchboardHop = hop
-        source.messages.append(Message(role: "assistant", text: text))
+        source.messages.append(Message(role: "assistant", text: text, finalReply: text))
         store.processSwitchboard(source)
     }
     reply(block("tell", to: target.id.uuidString, text: "disabled"))
