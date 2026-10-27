@@ -9,7 +9,7 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     workspace.assign(b, to: first.id, pane: 2)
     workspace.assign(c, to: first.id, pane: 3)
     check((1...3).compactMap { workspace.session(in: first.id, pane: $0) } == [a, b, c], "Three independent panes retain three different conversations")
-    check(workspace.minimumWidth(in: first.id) >= 1200, "Three panes request enough native window width to stay visible")
+    check(workspace.minimumWidth(in: first.id) >= 480 + 3 * 270, "Three panes request enough native window width to stay visible")
     workspace.assign(d, to: first.id, pane: 1)
     check(workspace.placements[a] == nil && workspace.session(in: first.id, pane: 1) == d && workspace.placements[b]?.pane == 2, "Replacing a pane parks only its previous occupant")
     workspace.assign(b, to: second.id, pane: 3)

@@ -931,6 +931,10 @@ struct ScrollingConversation: NSViewRepresentable {
         DispatchQueue.main.async { text.window?.makeFirstResponder(text) }
         return scroll
     }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        // The native scroll view starts wide, but must accept narrower split panes.
+        CGSize(width: proposal.width ?? 700, height: proposal.height ?? 600)
+    }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         scroll.rulersVisible = lineNumbers
         if let text = scroll.documentView as? ConversationTextView { context.coordinator.render(text); text.refreshDecorations() }
@@ -1149,7 +1153,7 @@ struct RootView: View {
                     Text("\(workspace.names.count) window\(workspace.names.count == 1 ? "" : "s")").font(.caption)
                     Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
                 }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
-            }.padding(.horizontal, 8).frame(minWidth: 390, idealWidth: 460, maxWidth: 720)
+            }.padding(.horizontal, 8).frame(minWidth: 390, idealWidth: 440, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
         }.sheet(isPresented: $state.settings) { SettingsView() }.frame(minWidth: 760, minHeight: 540)
     }

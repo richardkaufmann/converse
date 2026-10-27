@@ -50,7 +50,7 @@ final class Workspace: ObservableObject {
         let count = placements.values.filter { $0.windowID == windowID }.count
         return Self.minimumWidth(paneCount: count)
     }
-    static func minimumWidth(paneCount: Int) -> CGFloat { max(760, 390 + max(310, CGFloat(paneCount) * 270) + 12) }
+    static func minimumWidth(paneCount: Int) -> CGFloat { max(760, 480 + max(310, CGFloat(paneCount) * 270) + 12) }
     func placementDescription(_ sessionID: UUID) -> String {
         guard let location = placements[sessionID] else { return "Parked · not displayed in any window" }
         return "\(names[location.windowID] ?? "Converse") · pane \(location.pane)"
