@@ -1329,6 +1329,7 @@ struct RootView: View {
                                 }
                             }
                         }
+                        DeviceSidebarSection(workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                     }.padding(.top, 6)
                 }
                 HStack {
@@ -1340,7 +1341,7 @@ struct RootView: View {
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
             }.frame(minWidth: PaneSizing.minimumSidebar, idealWidth: 340, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
-        }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
+        }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.deviceConnect) { DeviceConnectView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
     }
 }
 struct SettingsView: View {
@@ -1425,11 +1426,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             preview.status = "Waiting for your approval"
         }
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
+        DeviceSyncService.shared.startIfNeeded()
     }
     func buildMenu() {
         let menu = NSMenu(); let app = NSMenuItem(); menu.addItem(app); let sub = NSMenu(); app.submenu = sub
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
-        sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ","); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        sub.addItem(withTitle: "Connect to Other Converses…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
@@ -1442,6 +1445,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
         h.addItem(withTitle: "Setup Guide…", action: #selector(showSetup), keyEquivalent: "")
         NSApp.mainMenu = menu
+    }
+    @objc func showDeviceConnect() {
+        if windows.isEmpty { newWindow() }
+        (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.deviceConnect = true
     }
     @objc func showSettings() {
         if windows.isEmpty { newWindow() }
@@ -1493,6 +1500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func assign(_ session: Session, to state: WindowState, pane: Int) {
         guard Store.shared.sessions.contains(where: { $0.id == session.id }) else { return }
+        DeviceSyncService.shared.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: session.id)
+        DeviceSyncService.shared.localTake(sessionID: session.id)
         Workspace.shared.assign(session.id, to: state.id, pane: pane)
         if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }
     }
@@ -1552,6 +1561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
         paneLayouts.removeValue(forKey: state.id)
+        DeviceSyncService.shared.releaseWindow(placements: Workspace.shared.placements, windowID: state.id)
         Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
