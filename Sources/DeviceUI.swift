@@ -177,7 +177,7 @@ struct RemotePane: View {
                         Button("Check home") { service.queryOutbox(record) }
                         Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
                     } else if record.outcome == "failed" || record.outcome == "rejected" {
-                        Button("Restore to composer") { composer.draft = record.payload.text ?? ""; composer.blobHashes = record.payload.blobHashes; service.discardOutbox(record); composer.sentCommandID = nil }
+                        Button("Restore to composer") { composer.sentCommandID = nil; composer.draft = record.payload.text ?? ""; composer.blobHashes = record.payload.blobHashes; service.discardOutbox(record) }
                         Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
                     } else if record.outcome == "accepted" {
                         Button("Dismiss") { service.discardOutbox(record); composer.sentCommandID = nil }
@@ -225,15 +225,15 @@ struct RemotePane: View {
             }
         }.background(Color(nsColor: .textBackgroundColor)).frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: service.remoteLeases[globalID]) { _, _ in hydrate(force: true) }
+            .onChange(of: service.remoteTranscripts[globalID]?.draftVersion) { _, _ in hydrate() }
+            .onChange(of: service.remoteTranscripts[globalID]?.globalID) { _, _ in hydrate() }
             .onAppear { hydrate() }
-            .onChange(of: service.outbox) { _, _ in
-                // Disappearance now means completed only. Preserve typing
-                // that arrived while waiting: strip just the sent prefix.
-                if let id = composer.sentCommandID, !service.outbox.contains(where: { $0.commandID == id }) {
+            .onChange(of: service.completedCommands) { _, completed in
+                // Only explicit completion clears, and only exact matches.
+                // Edited text is never prefix-stripped; discard never clears.
+                if let id = composer.sentCommandID, completed.contains(id) {
                     if composer.draft == composer.sentText { composer.draft = "" }
-                    else if composer.draft.hasPrefix(composer.sentText) && !composer.sentText.isEmpty { composer.draft = String(composer.draft.dropFirst(composer.sentText.count)) }
-                    composer.blobHashes.removeAll { composer.sentHashes.contains($0) }
-                    service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+                    if composer.blobHashes == composer.sentHashes { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []) }
                     composer.sentText = ""; composer.sentHashes = []; composer.sentCommandID = nil
                 }
             }

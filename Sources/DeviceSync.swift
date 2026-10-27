@@ -143,6 +143,7 @@ struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var sessionID: String
     var payload: DeviceCommandPayload
     var payloadHash: String
+    var epoch: UInt64 = 0
     var outcome: String = "pending"
     var detail: String? = nil
 }

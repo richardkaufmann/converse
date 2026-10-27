@@ -276,6 +276,51 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(session.title == "Renamed remotely" && ackCount >= 2, "Service harness applies valid command once and acks duplicate without reapplying")
         Store.shared.deleteSession(session)
     } catch { check(false, "Service harness failed: " + error.localizedDescription) }
+    // Viewer-service harness: grant, snapshot adoption, stale seq, ack binding.
+    do {
+        let viewer = DeviceSyncService()
+        try viewer.configureForTesting(folder: root.appendingPathComponent("viewer"))
+        let homeStatic = fixedKey(0x22)
+        let homeID = DeviceBlob.sha256Hex(homeStatic.publicKey.rawRepresentation)
+        let gid = DeviceGlobalID(home: homeID, session: sessionID).string
+        viewer.homes[homeID] = RemoteHomeState(deviceID: homeID, deviceName: "Home", online: true, rows: [
+            DeviceSidebarRow(globalID: gid, sessionID: sessionID, title: "T", assistant: "Muse", engine: "muse", model: "m", effort: "e", access: "a", status: "Ready", busy: false, queued: 0, queuePaused: false)
+        ], lastSeen: Date())
+        var viewerHS2 = DeviceHandshake(isInitiator: true, staticKey: try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: (try Data(contentsOf: root.appendingPathComponent("viewer/device-key.bin")))), ephemeralKey: fixedKey(0x33))
+        var homeHS2 = DeviceHandshake(isInitiator: false, staticKey: homeStatic, ephemeralKey: fixedKey(0x44))
+        _ = try homeHS2.readMessage(try viewerHS2.writeMessage(payload: Data("v".utf8)))
+        _ = try viewerHS2.readMessage(try homeHS2.writeMessage(payload: Data("h".utf8)))
+        _ = try homeHS2.readMessage(try viewerHS2.writeMessage(payload: Data("v".utf8)))
+        var homeKeys2 = try homeHS2.finish()
+        let fakeHome = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        fakeHome.hello = DeviceHello(deviceID: homeID, deviceName: "Home", converseVersion: "test")
+        fakeHome.keys = try viewerHS2.finish(); fakeHome.trustedReady = true
+        var viewerSent: [Data] = []
+        fakeHome.testSink = { viewerSent.append($0) }
+        viewer.adoptPeerForTesting(fakeHome)
+        viewer.acquireRemote(globalID: gid)
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.leaseGranted.rawValue, boot: 7, sessionID: gid, epoch: 4))
+        check(viewer.remoteLeases[gid] == 4, "Viewer harness installs correlated lease grant")
+        let snap = DeviceTranscriptPayload(globalID: gid, homeSeq: 10, epoch: 4, boot: 7, messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: "hi")], offset: 0, total: 1, draft: "home words", draftVersion: 5, busy: false, status: "Ready", title: "T2")
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 10, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(snap)))
+        check(viewer.remoteTranscripts[gid]?.draft == "home words" && viewer.remoteTranscripts[gid]?.title == "T2", "Viewer harness stores first snapshot for hydration")
+        var stale = snap; stale.homeSeq = 9; stale.title = "STALE"
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 9, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(stale)))
+        check(viewer.remoteTranscripts[gid]?.title == "T2", "Viewer harness drops stale-sequence snapshots")
+        let sentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "New"))
+        check(sentID != nil && viewer.unresolved(globalID: gid).count == 1, "Viewer harness persists outgoing command in outbox")
+        // Wrong-home ack must not complete it.
+        let rogue = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Rogue")
+        rogue.hello = DeviceHello(deviceID: DeviceBlob.sha256Hex(fixedKey(0x99).publicKey.rawRepresentation), deviceName: "Rogue", converseVersion: "test")
+        rogue.keys = fakeHome.keys; rogue.trustedReady = true; rogue.testSink = { _ in }
+        viewer.adoptPeerForTesting(rogue)
+        let ackPayload = try JSONEncoder().encode(DeviceAckPayload(outcome: "completed", epoch: 4))
+        viewer.handleEnvelope(rogue, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: sentID, epoch: 4, payload: ackPayload))
+        check(viewer.unresolved(globalID: gid).count == 1 && !viewer.completedCommands.contains(sentID!), "Viewer harness ignores ack from wrong authenticated home")
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: sentID, epoch: 4, payload: ackPayload))
+        check(viewer.unresolved(globalID: gid).isEmpty && viewer.completedCommands.contains(sentID!), "Viewer harness completes only on bound home ack")
+        _ = homeKeys2
+    } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
     let global = DeviceGlobalID(home: "home-abc", session: sessionID)
     check(DeviceGlobalID(global.string) == global && DeviceGlobalID(home: "home-xyz", session: sessionID) != global, "Global session IDs stay unique per home and parse exactly")
 }
