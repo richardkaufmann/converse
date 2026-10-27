@@ -5,6 +5,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     workspaceSelfTests(check)
     switchboardSelfTests(check)
     setupSelfTests(check)
+    accountLoginSelfTests(check)
     let store = Store.shared
     let fixture = FileManager.default.currentDirectoryPath + "/Tests/provider_fixture.py"
     func pump(_ done: () -> Bool, seconds: Double = 8) {
@@ -74,6 +75,10 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         session.draft = "must not run"; store.submit(session)
         pump { !session.busy }
         check(session.queuePaused && session.pending.count == 1 && !session.messages.contains { $0.text == "answer: must not run" }, engine + " failure pauses queue without losing input")
+        let signedOut = store.create(entry); signedOut.choices = session.choices
+        signedOut.draft = "login-required"; store.submit(signedOut)
+        pump { !signedOut.busy }
+        check(signedOut.needsSignIn && signedOut.status.hasPrefix("Failed"), engine + " authentication failure exposes sign-in recovery instead of requiring headless slash login")
         store.changeSetting(session, .model(MuseModelChoice(id: "fixture-small", label: "Small", provider: engine, profile: nil, efforts: ["low"])))
         check(session.choices.effort == "low" && session.availableEfforts.isEmpty, engine + " changing models replaces an unsupported saved effort")
         let before = session.entry

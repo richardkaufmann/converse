@@ -75,6 +75,10 @@ if prompt == 'slow':
     if kind == 'codex': emit({'type':'item.completed','item':{'type':'agent_message','text':'partial'}})
     else: emit({'type':'assistant','message':{'content':[{'type':'text','text':'partial'}]}})
     time.sleep(20)
+if prompt == 'login-required':
+    if kind == 'codex': emit({'type':'turn.failed','error':{'message':'Not logged in. Please run /login'}})
+    else: emit({'type':'result','session_id':'fixture-thread','is_error':True,'result':'Not logged in. Please run /login'})
+    sys.exit(1)
 if prompt == 'fail': sys.exit(1)
 answer = prompt[len('switchboard-output:'):] if prompt.startswith('switchboard-output:') else 'answer: '+prompt
 if kind == 'codex':

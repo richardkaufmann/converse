@@ -3,3 +3,5 @@ Converse.app/
 Converse.iconset/
 *.zip
 .build/
+
+__pycache__/

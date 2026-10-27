@@ -53,6 +53,8 @@ Each sidebar row shows a spinning rainbow beachball while the assistant is worki
 - **1 / 2 / 3** move it into that pane in this window. Each pane holds one conversation; its previous occupant is parked. Moving from another window vacates the original pane immediately.
 - **X** asks before closing the conversation, stopping active work and removing it from every sidebar. A recovery snapshot retains transcript, draft and attachments; **File → Restore Closed Conversation** restores it. Closing a conversation leaves the window open and its pane empty.
 
+Hover details appear in a native scrollable panel after a short pause over any part of a session row. Moving into the panel keeps it open so its text can be selected and copied; moving away closes it.
+
 The selected P/1/2/3 button has a green background and white text. Other buttons have white backgrounds, black text and faint borders. X turns dark red while its confirmation is open. A conversation displayed elsewhere shows P in this window; hover gives its exact location, and its context menu can bring the owning window forward. P always parks it globally.
 
 **File → New Window** (**⌘N**) opens a separate window with the same complete sidebar and up to three independently resizable panes on the right. Empty slots take no space; a numbered header identifies each visible pane. New windows start empty. Right-click the window name in the title bar to rename it; the **Window** menu uses these names to bring windows forward. Names are unique among open windows. Closing a window parks all its conversations and leaves their work running. Quit warns about active commands. Pane assignments belong to open windows; after relaunch, choose 1, 2 or 3 to display saved conversations again.
@@ -73,6 +75,7 @@ These are handled by Converse without sending a prompt or spending model tokens:
 | `/usage` | Read last-turn and session-total token usage, plus any observed account quota |
 | `/status` | Refresh and display all session details |
 | `/stop` | Interrupt the current turn |
+| `/login` | Open this conversation’s Codex/Claude CLI sign-in in Terminal; Muse gets CLI sign-in guidance |
 | `/help` | Show local command help |
 
 Muse queries run automatically when a conversation is opened. Read-only metadata commands do not change model, permissions or effort. `/usage` additionally invokes the built-in CLI usage view to fetch subscription quota; it never submits a model request. The status pickers, by contrast, explicitly update the selected conversation's model, effort or access profile. Muse uses its durable setters. Codex and Claude save per-conversation overrides and pass them on each subsequent turn, including resumed turns. CLI defaults are labeled when the CLI does not report a resolved effort. Claude and Codex also refresh their model catalogs and account/session metadata without submitting a model prompt. These commands do not implement the full CLI slash-command menus. Unrecognized commands remain ordinary prompts.
@@ -83,6 +86,8 @@ Settings → Accounts manages named CLI accounts and their configuration directo
 
 Default accounts use the standard CLI stores (`~/.codex` and `~/.claude`); Muse reuses its current CLI sign-in. Add more named Codex or Claude accounts in Settings. Each additional account gets a separate configuration directory under Converse’s local data folder. Use **Sign in…** for each account, complete the official CLI flow in Terminal/browser, then return to Converse. Claude desktop accounts are separate from Claude Code accounts. No account names, credentials or configuration are bundled with the app.
 
+A conversation’s account menu includes **Sign in to this account…**. `/login` invokes the same local action, never a model prompt. Authentication failures show a sign-in banner. Finish the login flow in Terminal/browser, return to Converse to refresh status, then retry your message or resume the held queue. Login uses the conversation’s saved account directory and CLI command, preserving history, draft and attachments. Sign-in is blocked while that account has active work. A conversation’s title does not select or switch its account.
+
 Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
 
 ## Build and run
@@ -91,12 +96,14 @@ This preview is built and tested on an Apple Silicon Mac using Apple's Command L
 
 ```sh
 ./build.sh
-open Converse.app
+open .build/Converse.app
 ```
 
 `./release.sh` builds both CPU architectures and packages the downloadable ZIP under `.build/release/`.
 
-The build generates the sneaker artwork with a plain circular badge, creates `Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
+Keep your checkout outside Documents, Desktop and Downloads (for example, `~/Developer/Converse`) to avoid macOS protected-folder prompts during development. Builds go into `.build`; use `CONVERSE_APP_OUTPUT=/path/to/Converse.app` to choose another destination. The build refuses to replace a running app because changing an ad-hoc signature can invalidate its privacy permissions.
+
+The build generates the sneaker artwork with a plain circular badge, creates `.build/Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
 
 Install and authenticate the assistant CLIs separately. Configure each entry with the matching adapter; Converse uses Muse’s interactive MSP host and the other adapters’ headless modes. Command lines run through your login shell. Homebrew and `~/.local/bin` are included in the executable search path.
 
@@ -108,7 +115,7 @@ With Muse installed:
 ./test.sh
 ```
 
-For provider-only checks without a macOS GUI session, use `./test.sh --providers-only`. They validate shared multi-window placement, displacement/parking, window naming/closing, hover identity and persistence, catalogs, setting arguments, all three interruption paths, exact resumption, queue ordering and recovery, failure handling, account environment separation, and archive compatibility using offline peers. A live read-only smoke query is available with `Converse.app/Contents/MacOS/Converse --probe-provider-status codex /path/to/codex-home` (or `claude /path/to/claude-config`). Neither submits a model prompt. If iconutil is unavailable in the build environment, `CONVERSE_SKIP_ICON_BUILD=1 ./build.sh` reuses an existing icon bundle.
+For provider-only checks without a macOS GUI session, use `./test.sh --providers-only`. They validate shared multi-window placement, displacement/parking, window naming/closing, hover identity and persistence, catalogs, setting arguments, all three interruption paths, exact resumption, queue ordering and recovery, failure handling, account environment separation, and archive compatibility using offline peers. A live read-only smoke query is available with `.build/Converse.app/Contents/MacOS/Converse --probe-provider-status codex /path/to/codex-home` (or `claude /path/to/claude-config`). Neither submits a model prompt. If iconutil is unavailable in the build environment, `CONVERSE_SKIP_ICON_BUILD=1 ./build.sh` reuses an existing icon bundle.
 
 The checks use isolated temporary data and Muse's offline echo provider. They cover real Muse execution and session resumption, prompt quoting, persistence, image creation and image-only clipboard paste validation, interactive Muse completion and approval/question round trips, text editing and styling, Command-Return, input blocks, output cleanup, elapsed-time markers, clickable links, and Claude/Codex protocol fixtures. Claude and Codex checks do not make paid requests.
 
@@ -160,3 +167,7 @@ Questions and ideas are welcome in [Discussions](https://github.com/richardkaufm
 ## License
 
 Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+### Isolated UI testing
+
+After building, run `python3 Tests/prepare_ui_qa.py` and open the app path it prints. The dedicated **Converse Isolated QA** app, copied offline provider fixture, data and working directory live under `~/Library/Application Support/Converse Developer QA`, outside Documents, Desktop and Downloads. The helper does not launch the app or request access to protected folders. It never copies real accounts, conversations or credentials, and refuses QA configurations that point outside its isolated folder or invoke live assistants. Rebuilding this ad-hoc QA app does not require Documents access. Keep UI testing in this app; the production app may legitimately ask for access when a user chooses a protected project folder.

@@ -121,6 +121,7 @@ struct SidebarSession: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     var showsModel = true
+    @StateObject private var hover = SidebarHoverState()
     var confirmingClose: Bool { state.closingSessionID == session.id }
     var closeBinding: Binding<Bool> {
         Binding(get: { confirmingClose }, set: { if $0 { state.closingSessionID = session.id } else if confirmingClose { state.closingSessionID = nil } })
@@ -146,9 +147,9 @@ struct SidebarSession: View {
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background(localPane == nil ? Color.clear : Color.accentColor.opacity(0.05))
             .contentShape(Rectangle())
-            .help(session.sidebarSummary(workspace: workspace, windowID: state.id))
+            .background(SidebarHoverDetails(text: session.sidebarSummary(workspace: workspace, windowID: state.id), state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onAppear { if session.accountStatus.isEmpty { Store.shared.refreshSidebarStatus(session) } }
-            .onHover { inside in if inside { Store.shared.refreshSidebarStatus(session) } }
+            .onHover { inside in hover.setHovered(inside); if inside { Store.shared.refreshSidebarStatus(session) } }
             .contextMenu {
                 Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
                 ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }

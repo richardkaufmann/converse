@@ -236,8 +236,8 @@ extension Store {
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                         s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.status.access
                         s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
-                        s.statusDetails = snapshot.detail; s.probeError = ""
-                    case .failure(let error): s.probeError = error.localizedDescription
+                        s.statusDetails = snapshot.detail; s.probeError = ""; s.needsSignIn = AccountLogin.requiresSignIn(snapshot.account)
+                    case .failure(let error): s.probeError = error.localizedDescription; if AccountLogin.requiresSignIn(s.probeError) { s.needsSignIn = true }
                     }
                     self.updateExplicitStatus(s); self.saveSoon()
                 }
@@ -286,13 +286,14 @@ extension Store {
         accounts.append(AccountProfile(id: id, name: engine.capitalized + " account \(accounts.filter { $0.engine == engine }.count + 1)", engine: engine, directory: folder.appendingPathComponent("Accounts/" + id).path)); save()
     }
     func accountIsBusy(_ profile: AccountProfile) -> Bool {
-        sessions.contains { $0.busy && $0.entry.engine == profile.engine && $0.entry.accountDirectory == profile.directory }
+        sessions.contains { $0.busy && $0.entry.engine == profile.engine && loginAccount(for: $0).map { AccountLogin.directoryKey($0.directory) == AccountLogin.directoryKey(profile.directory) } == true }
     }
-    func signIn(_ profile: AccountProfile, command: String? = nil) {
-        guard profile.engine != "muse", !accountIsBusy(profile) else { return }
+    @discardableResult
+    func signIn(_ profile: AccountProfile, command: String? = nil) -> Bool {
+        guard ["codex", "claude"].contains(profile.engine), !accountIsBusy(profile) else { return false }
         do {
             let directory = NSString(string: profile.directory).expandingTildeInPath
-            guard !directory.isEmpty else { return }
+            guard !directory.isEmpty else { return false }
             try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let entry = Entry(name: profile.name, command: command ?? entries.first(where: { $0.engine == profile.engine })?.command ?? profile.engine, directory: "~", engine: profile.engine, accountID: profile.id, accountName: profile.name, accountDirectory: directory)
             let args = profile.engine == "codex" ? ["login"] : ["auth", "login"]
@@ -302,9 +303,11 @@ extension Store {
             let contents = "#!/bin/zsh\n" + ProviderCommand.script(entry: entry, arguments: args) + "\n"
             try contents.write(to: file, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
-            NSWorkspace.shared.open(file)
+            guard loginFileOpener(file) else { throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open Terminal for sign-in."]) }
+            for session in sessions where session.entry.engine == profile.engine && loginAccount(for: session).map({ AccountLogin.directoryKey($0.directory) == AccountLogin.directoryKey(profile.directory) }) == true { session.queuePaused = true }
+            save(); return true
         } catch {
-            let alert = NSAlert(); alert.messageText = "Could not start sign-in"; alert.informativeText = error.localizedDescription; alert.runModal()
+            let alert = NSAlert(); alert.messageText = "Could not start sign-in"; alert.informativeText = error.localizedDescription; alert.runModal(); return false
         }
     }
     func restorePending(_ s: Session, id: UUID) {

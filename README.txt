@@ -1,4 +1,4 @@
-Converse — macOS preview 0.3.1
+Converse — macOS preview 0.3.2
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -65,10 +65,12 @@ session store. There is no idle terminal process. Window closure never stops a t
 Muse terminal responses and tool activity are displayed as provided by its JSON stream;
 Claude text streams as it arrives. Some tools only emit their answer at turn completion.
 
-Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals, login flows and full slash-command menus remain unsupported. No approval or sandbox bypass flags are added.
+Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals and full slash-command menus are not embedded; Sign in or /login opens their login flow in Terminal. No approval or sandbox bypass flags are added.
 
 BUILD / TEST
-./build.sh rebuilds the application using swiftc and applies a local ad-hoc signature.
+./build.sh builds .build/Converse.app using swiftc and applies a local ad-hoc signature.
+Keep the checkout outside Documents, Desktop and Downloads while developing.
+Running app bundles cannot be overwritten; use CONVERSE_APP_OUTPUT for another destination.
 ./test.sh runs isolated offline checks using the installed Muse echo provider.
 Sources/main.swift contains the app, session engine, adapters, and checks.
 The current UI is macOS only. An iPad client and remote session service are future work.
@@ -145,3 +147,10 @@ Normal messages queue; urgent messages interrupt. Both preserve the recipient dr
 LICENSE
 Copyright 2026 Richard Kaufmann. Licensed under the Apache License, Version 2.0.
 See the included LICENSE file.
+
+SIGN-IN RECOVERY
+Use Sign in to this account in the conversation account menu, or type /login.
+Converse opens that account's CLI login in Terminal, without sending a model prompt.
+Finish sign-in there, return, then retry your input or resume the held queue.
+The conversation title does not choose its account. History and drafts stay intact.
+Sidebar hover details use a scrollable panel; move into it to select/copy text.

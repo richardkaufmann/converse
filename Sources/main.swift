@@ -64,6 +64,7 @@ final class Session: ObservableObject, Identifiable {
     var turnFailed = false
     @Published var accountStatus = ""
     @Published var probeError = ""
+    @Published var needsSignIn = false
     @Published var busy = false
     @Published var status = "Ready"
     @Published var toolStatus = ToolStatus()
@@ -113,6 +114,7 @@ final class Store: ObservableObject {
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
     let folder: URL
+    var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     var pendingSave: DispatchWorkItem?
     init(folder: URL? = nil) {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
@@ -293,7 +295,11 @@ final class Store: ObservableObject {
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
                 if let i = s.messages.firstIndex(where: { $0.id == responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
-                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. Authentication and permission settings use your installed CLI configuration; interactive terminal approval prompts are not supported in this version.")) }
+                if (p.terminationStatus != 0 || s.turnFailed) && !s.interrupted {
+                    let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")
+                    if AccountLogin.requiresSignIn(output) { s.needsSignIn = true }
+                }
+                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. For authentication, use Sign in… or /login to open this account's CLI login in Terminal. Interactive terminal approval prompts are not supported in this version.")) }
                 self.save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }; self.objectWillChange.send()
                 self.finishQueue(s, success: p.terminationStatus == 0 && !s.turnFailed)
             }
@@ -510,11 +516,12 @@ final class Store: ObservableObject {
     }
     func handleLocalCommand(_ s: Session) -> Bool {
         let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard ["/help", "/model", "/models", "/usage", "/status", "/stop"].contains(command) else { return false }
+        guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login"].contains(command) else { return false }
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
+        if command == "/login" { signInSession(s); saveSoon(); return true }
         if command == "/stop" { stop(s); saveSoon(); return true }
         if command == "/help" {
-            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/login — open this account’s CLI sign-in in Terminal\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
@@ -1094,6 +1101,14 @@ struct Conversation: View {
                 if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
+            if session.needsSignIn && session.entry.engine != "muse" {
+                HStack {
+                    Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
+                    Spacer()
+                    Button("Sign in to \(session.entry.accountName ?? session.entry.name)…") { store.signInSession(session) }
+                        .disabled(session.busy || store.loginAccount(for: session).map(store.accountIsBusy) == true)
+                }.padding(8).background(Color.orange.opacity(0.1))
+            }
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
@@ -1106,8 +1121,12 @@ struct Conversation: View {
                             Button(profile.name + (session.entry.accountID == profile.id ? " ✓" : (session.started ? " · new conversation" : ""))) { store.chooseAccount(session, profile: profile) }
                         }
                         Divider()
+                        if session.entry.engine != "muse" {
+                            Button("Sign in to this account…") { store.signInSession(session) }
+                                .disabled(store.loginAccount(for: session).map(store.accountIsBusy) == true)
+                        }
                         Button("Manage accounts…") { AppDelegate.shared.showSettings() }
-                    }.menuStyle(.borderlessButton).fixedSize().disabled(session.busy || session.changingSetting)
+                    }.menuStyle(.borderlessButton).fixedSize().disabled(session.busy || session.changingSetting).help("Select an account independently of the conversation title. Sign in opens this conversation’s CLI login in Terminal.")
                     if !session.accountStatus.isEmpty { Text(session.accountStatus).help(session.accountStatus).truncationMode(.middle) }
                     Spacer(minLength: 0)
                     Text("Last turn: " + session.toolStatus.usage)
