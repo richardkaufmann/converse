@@ -19,6 +19,7 @@ struct AccountProfile: Codable, Identifiable, Equatable {
     }
 }
 struct PendingPrompt: Codable, Identifiable {
+    var switchboardHop: Int? = nil
     var id = UUID()
     var text: String
     var images: [String]
@@ -332,12 +333,14 @@ struct PendingMessagesView: View {
                     Store.shared.save()
                     if !session.queuePaused { Store.shared.runNext(session) }
                 }
+                Button("Inject all") { Store.shared.injectPending(session) }.disabled(session.changingSetting).help("Interrupt and send all queued messages together, in order")
                 Button("Clear queue") { session.pending = []; Store.shared.save() }
             }
-            ForEach(session.pending.prefix(3)) { prompt in
+            ForEach(session.pending) { prompt in
                 HStack {
                     Text(prompt.text.isEmpty ? "Attached image" : prompt.text).lineLimit(1)
                     Spacer()
+                    Button("Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }
                     Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
                 }

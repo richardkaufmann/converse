@@ -43,6 +43,8 @@ struct SavedSession: Codable {
     var toolStatus: ToolStatus? = nil
     var choices: SessionChoices? = nil
     var pending: [PendingPrompt]? = nil
+    var switchboardEnabled: Bool? = nil
+    var switchboardHandled: [UUID]? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -53,6 +55,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var attachments: [String]
     @Published var pending: [PendingPrompt] = []
     @Published var queuePaused = false
+    @Published var switchboardEnabled = false
+    var switchboardHandled: [UUID] = []
+    var switchboardTurnStart: Int?
+    var switchboardHop = 0
     var interrupted = false
     var resumeAfterInterrupt = false
     var turnFailed = false
@@ -89,13 +95,14 @@ final class Session: ObservableObject, Identifiable {
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         choices = saved.choices ?? SessionChoices()
+        switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil }
 final class Store: ObservableObject {
@@ -177,16 +184,33 @@ final class Store: ObservableObject {
         }
         send(s)
     }
+    func injectPending(_ s: Session, id: UUID? = nil) {
+        guard !s.pending.isEmpty, !s.changingSetting else { return }
+        if let id {
+            guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return }
+            let prompt = s.pending.remove(at: index)
+            s.pending.insert(prompt, at: 0)
+        } else {
+            let prompts = s.pending
+            s.pending = [PendingPrompt(switchboardHop: prompts.compactMap(\.switchboardHop).max(), text: prompts.map(\.text).joined(separator: "\n\n"), images: prompts.flatMap(\.images))]
+        }
+        s.queuePaused = false
+        if s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
+        else { runNext(s) }
+        save()
+    }
     func runNext(_ s: Session) {
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s)
+        send(s, switchboardHop: next.switchboardHop ?? 0)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         s.draft = draft; s.attachments = attachments; save()
     }
     func finishQueue(_ s: Session, success: Bool) {
+        if success && !s.interrupted { processSwitchboard(s) }
+        s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
             shouldRun = false
@@ -197,7 +221,7 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session) {
+    func send(_ s: Session, switchboardHop: Int = 0) {
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
@@ -208,6 +232,7 @@ final class Store: ObservableObject {
         s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
         let images = s.attachments
+        s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.status = "Working…"
@@ -485,7 +510,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
         if command == "/stop" { stop(s); saveSoon(); return true }
         if command == "/help" {
-            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy; Escape interrupts and sends your draft. Command Return inserts a newline.")); saveSoon(); return true
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
@@ -854,11 +879,10 @@ final class ConversationTextView: NSTextView {
     }
 
     var inputStart = 0
-    var interruptAndSubmit: (() -> Void)?
     var submit: (() -> Void)?
     var imagePaste: ((NSImage) -> Void)?
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { interruptAndSubmit?(); return }
+        if event.keyCode == 53 { super.keyDown(with: event); return }
         if event.keyCode == 36 || event.keyCode == 76 {
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.option) {
                 insertNewline(nil); return
@@ -918,9 +942,8 @@ struct ScrollingConversation: NSViewRepresentable {
         text.textContainerInset = NSSize(width: 12, height: 12)
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
-        text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Escape interrupts and sends. Command Return inserts a new line.")
+        text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Command Return inserts a new line.")
         text.submit = { Store.shared.submit(session) }
-        text.interruptAndSubmit = { Store.shared.submit(session, interrupt: true) }
         text.imagePaste = { Store.shared.attach(session, image: $0) }
         scroll.documentView = text
         scroll.verticalRulerView = LineNumberRuler(scroll: scroll, text: text)
@@ -1059,7 +1082,7 @@ struct Conversation: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("↵ send / queue · Esc interrupt + send · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).layoutPriority(-1)
+                Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).layoutPriority(-1)
                 Spacer()
                 Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")

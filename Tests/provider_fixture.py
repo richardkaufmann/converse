@@ -20,7 +20,8 @@ if args == ['serve']:
             emit({'id':rid,'result':{'turnId':turn}})
             notify('turn/started', turnId=turn)
             notify('item/started', item={'itemId':'reply','kind':'agentMessage','text':''})
-            notify('item/delta', itemId='reply', field='text', delta='partial' if prompt == 'slow' else 'answer: '+prompt)
+            answer = prompt[len('switchboard-output:'):] if prompt.startswith('switchboard-output:') else 'answer: '+prompt
+            notify('item/delta', itemId='reply', field='text', delta='partial' if prompt == 'slow' else answer)
             if prompt != 'slow': notify('turn/completed', turnId=turn, terminal='completed')
         elif method == 'turn/interrupt':
             assert session == p['sessionId'] and turn == p['turnId']
@@ -75,7 +76,8 @@ if prompt == 'slow':
     else: emit({'type':'assistant','message':{'content':[{'type':'text','text':'partial'}]}})
     time.sleep(20)
 if prompt == 'fail': sys.exit(1)
+answer = prompt[len('switchboard-output:'):] if prompt.startswith('switchboard-output:') else 'answer: '+prompt
 if kind == 'codex':
-    emit({'type':'item.completed','item':{'type':'agent_message','text':'answer: '+prompt}})
+    emit({'type':'item.completed','item':{'type':'agent_message','text':answer}})
     emit({'type':'turn.completed','usage':{'input_tokens':2,'output_tokens':3}})
-else: emit({'type':'result','session_id':'fixture-thread','result':'answer: '+prompt})
+else: emit({'type':'result','session_id':'fixture-thread','result':answer})

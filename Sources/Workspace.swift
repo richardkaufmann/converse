@@ -105,6 +105,7 @@ extension Session {
         if let location = workspace.placements[id], location.windowID != windowID { lines.append("Parked in this window · use 1, 2 or 3 to move here") }
         lines += ["Last turn: \(toolStatus.usage)", "Session total: \(toolStatus.totalUsage ?? "Not reported")",
                   "Quota: \(toolStatus.quota ?? "Not reported")", "Directory: \(entry.directory)",
+                  "Session messaging: \(switchboardEnabled ? "enabled" : "disabled")",
                   "Messages: \(messages.count) · queued: \(pending.count)\(queuePaused ? " (paused)" : "")",
                   "Draft: \(draft.count) characters · attached images: \(attachments.count)",
                   "Conversation ID: \(id.uuidString)", "CLI session ID: \(remoteID ?? "Not started")"]
@@ -153,6 +154,8 @@ struct SidebarSession: View {
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }
                 }
+                Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }
+                if session.switchboardEnabled { Button("Disable session messaging") { session.switchboardEnabled = false; Store.shared.save() } }
                 Button("Park conversation") { workspace.park(session.id) }
                 Divider()
                 Button("Close conversation…", role: .destructive) { state.closingSessionID = session.id }

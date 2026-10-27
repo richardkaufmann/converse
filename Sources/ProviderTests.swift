@@ -3,6 +3,7 @@ import Foundation
 
 func providerSelfTests(_ check: (Bool, String) -> Void) {
     workspaceSelfTests(check)
+    switchboardSelfTests(check)
     let store = Store.shared
     let fixture = FileManager.default.currentDirectoryPath + "/Tests/provider_fixture.py"
     func pump(_ done: () -> Bool, seconds: Double = 8) {
@@ -31,6 +32,33 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         pump { !session.busy && session.pending.isEmpty }
         let answers = session.messages.filter { $0.role == "assistant" }.map(\.text)
         check(answers == ["partial", "answer: urgent", "answer: queued"] && session.draft == "keep draft", engine + " interruption waits for exit, resumes exact session, drains in order and preserves edited draft")
+        session.draft = "slow"; store.submit(session)
+        pump { session.messages.last?.text == "partial" }
+        session.pending = [PendingPrompt(text: "first", images: []), PendingPrompt(text: "second", images: [])]
+        session.draft = "untouched"
+        store.injectPending(session, id: session.pending[1].id)
+        pump { !session.busy && session.pending.isEmpty }
+        check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: second", "answer: first"] && session.draft == "untouched", engine + " Inject now promotes selected row, interrupts, and preserves draft")
+        session.pending = [PendingPrompt(text: "one", images: []), PendingPrompt(text: "two", images: [])]
+        session.queuePaused = true
+        store.injectPending(session)
+        pump { !session.busy && session.pending.isEmpty }
+        check(session.messages.last?.text == "answer: one\n\ntwo" && session.draft == "untouched", engine + " Inject all resumes paused queue as one ordered turn without changing draft")
+        session.switchboardEnabled = true
+        session.draft = "switchboard-output:```converse\n{\"command\":\"list-sessions\"}\n```"
+        store.submit(session)
+        pump { !session.busy && session.pending.isEmpty }
+        check(session.messages.contains { $0.role == "user" && $0.text.hasPrefix("[Converse switchboard directory") && $0.text.contains(session.id.uuidString) }, engine + " completed directory command automatically returns live IDs through the provider")
+        let peer = store.create(entry); peer.choices = session.choices
+        peer.draft = "slow"; store.submit(peer)
+        pump { peer.messages.last?.text == "partial" }
+        peer.draft = "preserve peer draft"
+        let request = ["command": "tell-urgently", "to": peer.id.uuidString, "text": "review now"]
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: request), as: UTF8.self)
+        session.draft = "switchboard-output:```converse\n" + json + "\n```"; store.submit(session)
+        pump { !session.busy && !peer.busy && peer.pending.isEmpty }
+        check(peer.messages.contains { $0.role == "assistant" && $0.text.hasSuffix("review now") } && peer.remoteID == "fixture-thread" && peer.draft == "preserve peer draft", engine + " switchboard urgent delivery interrupts running peer and resumes exact conversation without touching draft")
+        session.switchboardEnabled = false
         session.draft = "slow"; store.submit(session)
         pump { session.messages.last?.text == "partial" }
         session.draft = "held"; store.submit(session); store.stop(session)
@@ -69,12 +97,19 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     store.sendMuse(muse, prompt: "after interrupt", display: "after interrupt", images: [], responseID: reply)
     pump { !muse.busy }
     check(muse.remoteID == museRemote && muse.messages.last?.text == "answer: after interrupt", "Muse resumes its retained session after interruption")
+    muse.switchboardEnabled = true; muse.queuePaused = true
+    muse.switchboardTurnStart = muse.messages.count
+    reply = UUID(); muse.busy = true; muse.messages.append(Message(id: reply, role: "assistant", text: ""))
+    store.sendMuse(muse, prompt: "switchboard-output:```converse\n{\"command\":\"list-sessions\"}\n```", display: "directory", images: [], responseID: reply)
+    pump { !muse.busy }
+    check(muse.pending.first?.text.hasPrefix("[Converse switchboard directory") == true && muse.pending.first?.text.contains(muse.id.uuidString) == true, "Muse native successful completion dispatches switchboard commands")
+    muse.pending = []; muse.switchboardEnabled = false
     let keys = ConversationTextView(frame: .zero)
-    var interrupted = false, submitted = false
-    keys.submit = { submitted = true }; keys.interruptAndSubmit = { interrupted = true }
+    var submitted = false
+    keys.submit = { submitted = true }
     let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
     keys.keyDown(with: escape)
-    check(interrupted && !submitted, "Escape consistently routes to interrupt-and-send")
+    check(!submitted, "Escape never submits queued or draft input")
     let legacy = #"{"entries":[],"sessions":[]}"#.data(using: .utf8)!
     let archive = try! JSONDecoder().decode(Archive.self, from: legacy)
     check(archive.accounts == nil, "Archives predating account support remain readable")
