@@ -104,20 +104,23 @@ final class Session: ObservableObject, Identifiable {
     }
     var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled) }
 }
-struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil }
+struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil }
 final class Store: ObservableObject {
     static let shared = Store()
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
+    @Published var setupCompleted = false
     @Published var accounts: [AccountProfile] = []
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
-    let folder = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
+    let folder: URL
     var pendingSave: DispatchWorkItem?
-    init() {
-        accounts = AccountProfile.defaults(dataFolder: folder)
+    init(folder: URL? = nil) {
+        self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
+        accounts = AccountProfile.defaults(dataFolder: self.folder)
         do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: folder.appendingPathComponent("sessions.json")))
+            try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
+            let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: self.folder.appendingPathComponent("sessions.json")))
+            setupCompleted = archive.setupCompleted ?? true
             entries = archive.entries; sessions = archive.sessions.map(Session.init)
             accounts = archive.accounts ?? accounts
             for session in sessions where session.entry.accountID == nil {
@@ -126,10 +129,11 @@ final class Store: ObservableObject {
                 }
             }
         } catch {
-            if FileManager.default.fileExists(atPath: folder.appendingPathComponent("sessions.json").path) {
+            if FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path) {
                 DispatchQueue.main.async { let alert = NSAlert(); alert.messageText = "Could not load saved conversations"; alert.informativeText = "Your saved file has been left in Application Support/Converse. \(error.localizedDescription)"; alert.runModal() }
             }
-            entries = [Entry(name: "Muse", command: "muse", directory: "~/Muse", engine: "muse"), Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"), Entry(name: "Codex", command: "codex", directory: "~", engine: "codex")]
+            setupCompleted = FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path)
+            entries = SetupCatalog.entries
         }
     }
     func saveSoon() {
@@ -138,7 +142,7 @@ final class Store: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
     func save() {
-        do { let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts)); try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic) }
+        do { let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted)); try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic) }
         catch { NSLog("Save failed: %@", error.localizedDescription) }
     }
     func create(_ entry: Entry) -> Session {
@@ -1180,7 +1184,7 @@ struct RootView: View {
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
             }.frame(minWidth: 200, idealWidth: 340, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
-        }.sheet(isPresented: $state.settings) { SettingsView() }.frame(minWidth: 760, minHeight: 540)
+        }.sheet(isPresented: $state.settings) { SettingsView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.frame(minWidth: 760, minHeight: 540)
     }
 }
 struct SettingsView: View {
@@ -1192,7 +1196,7 @@ struct SettingsView: View {
             Text("Commands run through your login shell. Choose the matching conversation adapter. Changes apply to new sessions.").font(.callout).foregroundStyle(.secondary)
             ScrollView { VStack(alignment: .leading, spacing: 18) {
                 Text("Accounts").font(.headline)
-                Text("Each account keeps its own CLI sign-in. Sam and AltSam reuse your existing Codex stores. Claude desktop sign-ins are separate; sign in to each Claude Code account once. Account changes apply to new conversations.").font(.caption).foregroundStyle(.secondary)
+                Text("Default accounts reuse your existing CLI sign-ins. Add named accounts for separate sign-ins; each gets its own configuration folder. Claude desktop sign-ins are separate from Claude Code. Account changes apply to new conversations.").font(.caption).foregroundStyle(.secondary)
                 ForEach($store.accounts) { $profile in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
@@ -1244,15 +1248,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (name, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
+        let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
+        h.addItem(withTitle: "Setup Guide…", action: #selector(showSetup), keyEquivalent: "")
         NSApp.mainMenu = menu
     }
     @objc func showSettings() {
         if windows.isEmpty { newWindow() }
         (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settings = true
     }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: "0.2", .credits: NSAttributedString(string: "A calmer home for your command-line assistants.")]) }
+    @objc func showSetup() {
+        if windows.isEmpty { newWindow() }
+        guard let state = (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1 else { return }
+        state.settings = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
+    }
+    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "A calmer home for your command-line assistants.")]) }
     @objc func newWindow() {
         let state = WindowState()
+        state.setup = windows.isEmpty && !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
         window.title = state.title; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
@@ -1591,7 +1604,7 @@ func selfTest() {
 }
 signal(SIGPIPE, SIG_IGN)
 if CommandLine.arguments.contains("--probe-muse-quota") {
-    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~/Muse", engine: "muse"))); exit(0) }
+    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"))); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {

@@ -1,4 +1,4 @@
-Converse — macOS preview 0.3.0
+Converse — macOS preview 0.3.1
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -6,6 +6,16 @@ It is ad-hoc signed, not Developer ID signed or notarized.
 Drag Converse.app to Applications. Install and sign in to your assistant CLIs separately.
 If macOS blocks the app, see https://support.apple.com/102445 for Apple's guidance.
 The source and build script are included; no Xcode project or third-party dependencies are required. This preview was built and tested on this Mac with its installed macOS SDK.
+
+FIRST LAUNCH
+The setup guide lets you select one or more assistants, follow CLI installation
+links, check each CLI, choose a working folder, and sign in to named accounts.
+Default accounts reuse existing CLI logins. Add another account for a separate
+sign-in. Sign in opens Terminal; finish its browser/terminal flow and return here.
+Muse reuses its own CLI login. Choose an assistant and account to create a first
+session; creating it sends no prompt. Check CLI confirms installation, not sign-in.
+Help > Setup Guide reopens setup. Set up later skips it. Existing accounts,
+commands, sessions and drafts survive upgrades unchanged.
 
 USE
 Click + beside an assistant to start a separate conversation.
@@ -116,12 +126,12 @@ Menus use the installed CLI catalogs and supported effort levels. Settings apply
 to subsequent turns, including resumed conversations. Other model/effort entries
 accept custom values, which the CLI validates. CLI defaults remain labeled when
 no resolved effort is reported.
-Return sends or queues; Escape interrupts and sends the current draft, or just
-stops if it is empty. Muse uses native turn/interrupt. Claude and Codex receive
+Return sends or queues. Inject now and Inject all interrupt with queued input.
+Escape has no send or interrupt binding. Muse uses native turn/interrupt. Claude and Codex receive
 SIGINT and resume the exact conversation only after the old process exits.
 Stop and failures pause queued messages. Queues survive relaunch paused.
-Settings > Accounts manages named sign-ins. Sam/AltSam reuse their Codex stores.
-Claude/AltClaude have separate CLI stores; desktop sign-ins do not transfer.
+Settings > Accounts manages named sign-ins. Defaults reuse standard CLI stores.
+Add named accounts for separate logins; desktop sign-ins do not transfer.
 Sign in to each Claude CLI account once with its Sign in button. Choosing another
 account for existing work opens a separate conversation and transfers your draft;
 the original account keeps its history. No credentials are copied into Converse.

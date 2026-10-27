@@ -12,6 +12,16 @@ A native Mac home for Muse, Claude Code, and Codex: the immediacy of a shell wit
 
 This preview is ad-hoc signed, **not notarized**. macOS may block its first launch; see [Apple’s app-opening guidance](https://support.apple.com/102445). Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
 
+## First launch
+
+The setup guide opens automatically for a new installation:
+
+1. Choose one or more assistants, follow the official CLI installation links, and use **Check CLI** to verify installation. Choose an existing project folder (or keep `~` for your home folder).
+2. Reuse an existing CLI login or use **Sign in…** to open the selected CLI’s login flow in Terminal. Add another named Codex or Claude account for an independent sign-in. Muse reuses its CLI login. Credentials stay in the CLI’s stores.
+3. Choose an assistant and account, then **Create session**. Creating a session sends no prompt. Type at the bottom and press Return to begin.
+
+Use **+** for more sessions, **Settings → Accounts** for additional sign-ins, and **Help → Setup Guide** to revisit setup. **Set up later** skips the guide. Existing users keep their saved accounts, commands, sessions and drafts; upgrades do not rerun first-launch setup or replace local settings. CLI version checks confirm installation, not sign-in or subscription access.
+
 ## Use
 
 Click **+** next to an assistant to start a session. Settings (**⌘,**) configures its name, command line, working directory, and adapter. Each entry can have multiple independent conversations.
@@ -62,7 +72,7 @@ Muse queries run automatically when a conversation is opened. Read-only metadata
 
 Settings → Accounts manages named CLI accounts and their configuration directories. The bottom account menu selects one for a fresh conversation. On an existing conversation, choosing another account opens a new conversation under that account and transfers the unsent draft and attachments; the original history and remote session stay tied to the original account. Sidebar rows show their account labels. Closing windows keeps all accounts’ active work alive.
 
-On this Mac, Sam and AltSam reuse `~/.codex` and `~/.codex-samclone`; Muse uses its existing CLI login. Claude uses its existing CLI store, and AltClaude gets a separate store under Converse’s data directory. Claude desktop profiles (including `ClaudeAlt`) do not supply Claude Code authentication. Use **Sign in…** for each Claude CLI account once, choosing the matching account in the browser. The action opens the official CLI login in Terminal. Return to Converse and refresh; no credentials are stored in the repository or in `sessions.json`.
+Default accounts use the standard CLI stores (`~/.codex` and `~/.claude`); Muse reuses its current CLI sign-in. Add more named Codex or Claude accounts in Settings. Each additional account gets a separate configuration directory under Converse’s local data folder. Use **Sign in…** for each account, complete the official CLI flow in Terminal/browser, then return to Converse. Claude desktop accounts are separate from Claude Code accounts. No account names, credentials or configuration are bundled with the app.
 
 Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
 

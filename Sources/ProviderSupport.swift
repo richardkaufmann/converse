@@ -8,14 +8,9 @@ struct AccountProfile: Codable, Identifiable, Equatable {
     var directory: String
     static func defaults(dataFolder: URL) -> [AccountProfile] {
         let home = NSHomeDirectory()
-        var profiles = [AccountProfile(id: "muse-default", name: "Muse", engine: "muse", directory: ""),
-                        AccountProfile(id: "codex-default", name: "Sam", engine: "codex", directory: home + "/.codex"),
-                        AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude")]
-        if FileManager.default.fileExists(atPath: home + "/.codex-samclone") {
-            profiles.append(AccountProfile(id: "codex-alt", name: "AltSam", engine: "codex", directory: home + "/.codex-samclone"))
-        }
-        profiles.append(AccountProfile(id: "claude-alt", name: "AltClaude", engine: "claude", directory: dataFolder.appendingPathComponent("Accounts/Claude-alt").path))
-        return profiles
+        return [AccountProfile(id: "muse-default", name: "Muse", engine: "muse", directory: ""),
+                AccountProfile(id: "codex-default", name: "Codex", engine: "codex", directory: home + "/.codex"),
+                AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude")]
     }
 }
 struct PendingPrompt: Codable, Identifiable {
@@ -288,18 +283,18 @@ extension Store {
     }
     func addAccount(engine: String) {
         let id = UUID().uuidString
-        accounts.append(AccountProfile(id: id, name: engine.capitalized + " account", engine: engine, directory: folder.appendingPathComponent("Accounts/" + id).path)); save()
+        accounts.append(AccountProfile(id: id, name: engine.capitalized + " account \(accounts.filter { $0.engine == engine }.count + 1)", engine: engine, directory: folder.appendingPathComponent("Accounts/" + id).path)); save()
     }
     func accountIsBusy(_ profile: AccountProfile) -> Bool {
         sessions.contains { $0.busy && $0.entry.engine == profile.engine && $0.entry.accountDirectory == profile.directory }
     }
-    func signIn(_ profile: AccountProfile) {
+    func signIn(_ profile: AccountProfile, command: String? = nil) {
         guard profile.engine != "muse", !accountIsBusy(profile) else { return }
         do {
             let directory = NSString(string: profile.directory).expandingTildeInPath
             guard !directory.isEmpty else { return }
             try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let entry = Entry(name: profile.name, command: profile.engine == "codex" ? "codex" : "claude", directory: "~", engine: profile.engine, accountID: profile.id, accountName: profile.name, accountDirectory: directory)
+            let entry = Entry(name: profile.name, command: command ?? entries.first(where: { $0.engine == profile.engine })?.command ?? profile.engine, directory: "~", engine: profile.engine, accountID: profile.id, accountName: profile.name, accountDirectory: directory)
             let args = profile.engine == "codex" ? ["login"] : ["auth", "login"]
             let scripts = folder.appendingPathComponent("Login")
             try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

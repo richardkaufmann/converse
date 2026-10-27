@@ -60,6 +60,7 @@ final class WindowState: ObservableObject {
     let id = UUID()
     let workspace: Workspace
     @Published var settings = false
+    @Published var setup = false
     @Published var closingSessionID: UUID? = nil
     init(workspace: Workspace = .shared) { self.workspace = workspace; workspace.register(id) }
     var title: String { workspace.names[id] ?? "Converse" }

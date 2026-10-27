@@ -12,7 +12,7 @@ mkdir -p .build
 architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
 binaries=()
 for architecture in "${architectures[@]}"; do
-    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
+    swiftc -target "${architecture}-apple-macos14.0" Sources/main.swift Sources/MuseStatus.swift Sources/MuseQuota.swift Sources/MarkdownText.swift Sources/MuseConnection.swift Sources/ProviderSupport.swift Sources/ProviderTests.swift Sources/Workspace.swift Sources/WorkspaceTests.swift Sources/Switchboard.swift Sources/SwitchboardTests.swift Sources/Setup.swift Sources/SetupTests.swift -O -o ".build/Converse-${architecture}" -framework AppKit -framework SwiftUI -framework WebKit
     binaries+=(".build/Converse-${architecture}")
 done
 lipo -create "${binaries[@]}" -output Converse.app/Contents/MacOS/Converse
@@ -26,8 +26,8 @@ cat > Converse.app/Contents/Info.plist <<'PLIST'
 <key>CFBundleName</key><string>Converse</string>
 <key>CFBundleDisplayName</key><string>Converse</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>0.3.1</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
