@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas, and discussion
+    url: https://github.com/richardkaufmann/converse/discussions
+    about: Talk about Converse or suggest an improvement.
