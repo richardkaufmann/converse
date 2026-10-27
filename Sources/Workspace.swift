@@ -40,6 +40,7 @@ final class Workspace: ObservableObject {
         var next = placements.filter { $0.key != sessionID && $0.value != destination }
         next[sessionID] = destination; placements = next
     }
+    func showsParkedApproval(_ session: Session) -> Bool { session.needsApproval && placements[session.id] == nil }
     func park(_ sessionID: UUID) { placements.removeValue(forKey: sessionID) }
     func close(_ windowID: UUID) {
         placements = placements.filter { $0.value.windowID != windowID }
@@ -69,16 +70,19 @@ final class WindowState: ObservableObject {
 
 struct SessionActivity: View {
     @ObservedObject var session: Session
+    var showApproval = false
     var body: some View {
         Group {
-            if session.busy && session.requests.isEmpty && !session.status.hasPrefix("Waiting") {
+            if showApproval {
+                Circle().fill(.yellow).overlay(Text("!").font(.system(size: 10, weight: .heavy)).foregroundStyle(.black))
+            } else if session.busy && session.requests.isEmpty && !session.status.hasPrefix("Waiting") {
                 TimelineView(.animation(minimumInterval: 1.0 / 20)) { context in
                     Circle().fill(AngularGradient(colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .red], center: .center))
                         .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 0.5))
                         .rotationEffect(.degrees(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.5) * 240))
                 }
             } else { Color.clear }
-        }.frame(width: 12, height: 12).accessibilityLabel(session.busy ? session.status : "Idle")
+        }.frame(width: 12, height: 12).accessibilityLabel(showApproval ? "Permission required" : (session.busy ? session.status : "Idle"))
     }
 }
 struct PaneButton: View {
@@ -131,7 +135,7 @@ struct SidebarSession: View {
     var localPane: Int? { workspace.pane(for: session.id, in: state.id) }
     var body: some View {
         HStack(spacing: 6) {
-            SessionActivity(session: session)
+            SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
             Button { AppDelegate.shared.select(session, state: state) } label: {
                 Text(session.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).layoutPriority(-1)
@@ -147,7 +151,8 @@ struct SidebarSession: View {
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)")
             }.fixedSize(horizontal: true, vertical: false)
         }.padding(.horizontal, 4).padding(.vertical, 3)
-            .background(localPane == nil ? Color.clear : Color.accentColor.opacity(0.05))
+            .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
+            .foregroundStyle(workspace.showsParkedApproval(session) ? Color.black : Color.primary)
             .contentShape(Rectangle())
             .background(SidebarHoverDetails(text: session.sidebarSummary(workspace: workspace, windowID: state.id), state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onAppear { if session.accountStatus.isEmpty { Store.shared.refreshSidebarStatus(session) } }

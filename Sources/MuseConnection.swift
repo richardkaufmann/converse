@@ -136,6 +136,20 @@ final class MuseRequestAnswers: ObservableObject {
     @Published var selections: [String: Set<String>] = [:]
     @Published var text: [String: String] = [:]
 }
+struct ApprovalHeading: View {
+    let detail: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.title2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("PERMISSION REQUIRED").font(.system(size: 14, weight: .heavy))
+                Text(detail).font(.callout)
+            }
+            Spacer(minLength: 0)
+        }.foregroundStyle(.black).padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.yellow)
+    }
+}
 struct MuseRequestView: View {
     @ObservedObject var session: Session
     let request: MuseRequest
@@ -154,7 +168,9 @@ struct MuseRequestView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(request.kind == "approval" ? "Muse needs your approval" : "Muse has a question").fontWeight(.semibold)
+            if request.kind == "approval" {
+                ApprovalHeading(detail: "Review this action and choose whether to allow it.")
+            } else { Text("Muse has a question").fontWeight(.semibold) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if request.kind == "approval" {
@@ -212,6 +228,9 @@ struct MuseRequestView: View {
                 }
             }
             if session.answeringRequest { Text("Sending decision…").font(.caption).foregroundStyle(.secondary) }
-        }.padding(10).background(Color(nsColor: .controlBackgroundColor)).disabled(session.answeringRequest)
+        }.padding(10)
+            .background(request.kind == "approval" ? Color.yellow.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+            .overlay(Rectangle().stroke(request.kind == "approval" ? Color.yellow : Color.clear, lineWidth: 3))
+            .disabled(session.answeringRequest)
     }
 }

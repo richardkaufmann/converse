@@ -39,7 +39,11 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     session.accountStatus = "person@example.invalid"; session.toolStatus.model = "test-model"
     session.toolStatus.effort = "high"; session.toolStatus.access = "read-only"; session.status = "Working…"
     session.pending = [PendingPrompt(text: "held", images: [])]
+    session.requests = [MuseRequest(id: "approval", kind: "approval", params: [:])]
+    check(workspace.showsParkedApproval(session), "Parked approval requests flag the sidebar row")
     workspace.assign(session.id, to: second.id, pane: 3)
+    check(!workspace.showsParkedApproval(session), "Approval requests already displayed in another window stay out of the sidebar alert")
+    session.requests = []
     let detail = session.sidebarSummary(workspace: workspace, windowID: first.id)
     check(detail.contains("person@example.invalid") && detail.contains("test-model") && detail.contains("Research · pane 3") && detail.contains("Parked in this window") && detail.contains("queued: 1"), "Row hover includes account email, model, activity, queue and exact window location")
     workspace.park(session.id)

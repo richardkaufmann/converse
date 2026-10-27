@@ -87,6 +87,10 @@ final class Session: ObservableObject, Identifiable {
     var quotaRefreshedAt: Date?
     var probingStatus = false
     var statusCallbacks: [() -> Void] = []
+    var needsApproval: Bool {
+        requests.contains { $0.kind == "approval" } ||
+        (status.hasPrefix("Waiting") && (status.localizedCaseInsensitiveContains("approval") || status.localizedCaseInsensitiveContains("permission")))
+    }
     var statusDetails = ""
     var lastOutputAt: TimeInterval?
     var streamedText = false
@@ -1158,6 +1162,9 @@ struct Conversation: View {
                         .disabled(session.busy || session.changingSetting)
                 }.padding(8).background(Color.orange.opacity(0.1))
             }
+            if session.needsApproval && !session.requests.contains(where: { $0.kind == "approval" }) {
+                ApprovalHeading(detail: session.status)
+            }
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
@@ -1331,6 +1338,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AppDelegate.shared = self
         NSApp.appearance = nil
         paneObserver = Workspace.shared.$placements.sink { [weak self] placements in self?.updatePaneWidths(placements) }
+        if ProcessInfo.processInfo.environment["CONVERSE_QA_APPROVAL"] == "1",
+           ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+           ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil,
+           let preview = Store.shared.sessions.first(where: { $0.entry.engine == "muse" }) {
+            preview.requests = [MuseRequest(id: "isolated-approval-preview", kind: "approval", params: ["toolName": "Offline permission preview", "rawArgs": "Read a test file in the isolated QA folder", "availableChoices": [["choiceId": "allow-once", "label": "Allow once"], ["choiceId": "deny", "label": "Deny"]]])]
+            preview.status = "Waiting for your approval"
+        }
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
     }
     func buildMenu() {
@@ -1645,11 +1659,11 @@ func selfTest() {
     store.sendMuse(fixture, prompt: "fixture", display: "fixture", images: [], responseID: fixtureID)
     let approvalDeadline = Date().addingTimeInterval(10)
     while fixture.requests.isEmpty && fixture.busy && Date() < approvalDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-    check(fixture.status == "Waiting for your approval" && fixture.requests.first?.kind == "approval", "Approval request reaches conversation instead of hiding behind Working")
+    check(fixture.status == "Waiting for your approval" && fixture.requests.first?.kind == "approval" && fixture.needsApproval, "Approval request reaches conversation instead of hiding behind Working")
     if let request = fixture.requests.first { store.answerMuse(fixture, request: request, choice: "allow-once") }
     let questionDeadline = Date().addingTimeInterval(10)
     while fixture.requests.first?.kind != "question" && fixture.busy && Date() < questionDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-    check(fixture.status == "Waiting for your answer" && fixture.requests.first?.kind == "question", "Question request remains visible and blocks until the user answers")
+    check(fixture.status == "Waiting for your answer" && fixture.requests.first?.kind == "question" && !fixture.needsApproval, "Question request remains visible and blocks until the user answers")
     if let request = fixture.requests.first { store.answerMuse(fixture, request: request, answers: [["questionId": "single", "selectedLabel": "B"], ["questionId": "multiple", "selectedLabels": ["X", "Y"]], ["questionId": "free", "freeText": "hello"]]) }
     let fixtureDeadline = Date().addingTimeInterval(10)
     while fixture.busy && Date() < fixtureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }

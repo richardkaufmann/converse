@@ -207,3 +207,5 @@ Agents must check `live` is `true` and `transcriptUuid` matches their own transc
 Right-clicking submitted text offers **Copy this prompt** or **Copy this response** for that message alone. Drafts and gaps do not offer a whole-message copy action; the standard selection Copy remains available.
 
 The line-number gutter uses white behind responses and very light grey behind prompts (including the editable draft), with midpoint grey numbers. Prompt shading spans wrapped lines and attached images so input blocks remain easy to find while scrolling.
+
+Permission requests use a bright yellow PERMISSION REQUIRED heading and bordered approval card in the session pane. If a conversation awaiting approval is parked everywhere, its sidebar row turns yellow with an exclamation point. Assigning it to any pane clears the sidebar alert; approval controls stay in that pane.

@@ -4,6 +4,8 @@
 Run after ./build.sh. Launch the printed .app path manually or with native UI tools.
 The app, fixtures, working folder and data all live in Application Support. This
 helper never launches the app, requests permissions or copies real account data.
+Use --approval-preview for a static permission UI preview; its choices are not
+connected to a CLI. Actual approval round trips are checked by test.sh.
 """
 import json
 import os
@@ -13,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import uuid
+import sys
 
 repo = Path(__file__).resolve().parents[1]
 built = Path(os.environ.get("CONVERSE_APP_OUTPUT", str(repo / ".build/Converse.app"))).resolve()
@@ -35,7 +38,7 @@ info = plistlib.loads((built / "Contents/Info.plist").read_bytes())
 info.update(CFBundleIdentifier="local.converse.IsolatedQA", CFBundleName="Converse Isolated QA", CFBundleDisplayName="Converse Isolated QA")
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))
 wrapper = contents / "MacOS/Converse"
-wrapper.write_text("#!/bin/zsh\ncd " + shlex.quote(str(work)) + "\n"
+wrapper.write_text("#!/bin/zsh\n" + ("export CONVERSE_QA_APPROVAL=1\n" if "--approval-preview" in sys.argv else "") + "cd " + shlex.quote(str(work)) + "\n"
                    "export CONVERSE_TEST_COMMAND=offline-fixture\n"
                    "export XDG_CONFIG_HOME=" + shlex.quote(str(root / "Config")) + "\n"
                    "export XDG_DATA_HOME=" + shlex.quote(str(root / "RuntimeData")) + "\n"

@@ -207,3 +207,7 @@ Header logos use Meta blue, Claude clay, and the uncolored OpenAI mark.
 
 The line-number gutter is white for responses and very light grey for prompts,
 with midpoint-grey numbers. Wrapped prompts and the draft keep the same shading.
+
+Approvals stand out with a bright yellow PERMISSION REQUIRED card in the pane.
+A session awaiting approval that is parked everywhere gets a yellow sidebar row
+and an exclamation point. Showing it in any pane clears that sidebar alert.
