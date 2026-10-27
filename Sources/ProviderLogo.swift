@@ -9,6 +9,13 @@ struct ProviderLogo: View {
     private var label: String {
         ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI"][engine] ?? engine.capitalized
     }
+    private var brandColor: Color {
+        switch engine {
+        case "muse": return Color(red: 4 / 255, green: 103 / 255, blue: 223 / 255)
+        case "claude": return Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
+        default: return .primary // OpenAI specifies an uncolored Blossom.
+        }
+    }
     var body: some View {
         Group {
             if let url = Bundle.main.url(forResource: provider, withExtension: "svg", subdirectory: "ProviderLogos"),
@@ -17,7 +24,7 @@ struct ProviderLogo: View {
             } else {
                 Text(String(label.prefix(1))).font(.system(size: 14, weight: .bold))
             }
-        }.frame(width: 20, height: 20).foregroundStyle(.primary)
+        }.frame(width: 20, height: 20).foregroundStyle(brandColor)
             .accessibilityLabel(label).help(label)
     }
 }

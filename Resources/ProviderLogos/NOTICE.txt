@@ -3,3 +3,7 @@ SVG artwork from Simple Icons 14.15.0:
 https://github.com/simple-icons/simple-icons/tree/14.15.0/icons
 Distributed under CC0 1.0; see LICENSE.md in this folder.
 The company names and marks belong to their respective owners.
+
+Header colors: Meta blue #0467DF and Claude clay #D97757 (Simple Icons
+14.15.0 metadata, with Claude color identifying the Anthropic session).
+OpenAI stays black/white according to https://openai.com/brand/ .

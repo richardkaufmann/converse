@@ -8,6 +8,16 @@ destination="${1:-$HOME/Applications/Converse.app}"
 destination="${destination:A}"
 [[ "$destination" == *.app ]] || { print -u2 'Destination must end in .app'; exit 1; }
 [[ "$source_app" != "$destination" ]] || { print -u2 'Build and installation paths must differ'; exit 1; }
+# launchd has a different macOS privacy identity from the interactive app.
+# A background replacement in a protected folder may be denied after quit.
+case "$destination" in
+    "$HOME/Documents/"*|"$HOME/Desktop/"*|"$HOME/Downloads/"*)
+        if ps -axo comm= | /usr/bin/grep -Fxq "$destination/Contents/MacOS/Converse"; then
+            print -u2 'Cannot queue a reliable background update inside Documents, Desktop or Downloads.'
+            print -u2 'Install into ~/Applications/Converse.app instead, then quit and open that copy.'
+            exit 2
+        fi ;;
+esac
 codesign --verify --deep --strict "$source_app"
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$source_app/Contents/Info.plist")
 root="$HOME/Library/Application Support/Converse Updates"

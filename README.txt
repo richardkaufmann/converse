@@ -166,8 +166,9 @@ Muse: models, efforts and available permission profiles come from the host.
 CLI catalogs supply model IDs and supported effort levels for the selected login.
 
 PANE SIZING
-Adding a pane compacts the sidebar until the model column is hidden, then divides
-the remaining window width evenly. Removing a pane keeps the sidebar width and
+Adding a pane caps a wide sidebar until the model column is hidden, preserves
+a deliberately narrow sidebar, then divides the remaining width evenly.
+Removing a pane keeps the sidebar width and
 evenly redistributes the remaining panes. Replacing a pane's conversation leaves
 its gutter positions unchanged. Gutters remain adjustable.
 
@@ -198,3 +199,8 @@ and their own transcriptUuid. Parking/window closing leaves the conversation liv
 There is no agent API to change titles. Same-user unrestricted file tools retain
 normal macOS access. Isolated developer runs use their isolated data directory.
 Right-click text to copy only that prompt or response, according to the message.
+
+Window resizing preserves manually chosen session-pane proportions. In small
+windows the sidebar shrinks; growing restores its preferred width and pane
+proportions. Temporary readable-minimum clamping does not erase your settings.
+Header logos use Meta blue, Claude clay, and the uncolored OpenAI mark.

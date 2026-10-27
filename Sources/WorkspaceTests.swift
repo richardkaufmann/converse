@@ -1,6 +1,13 @@
 import Foundation
 
 func workspaceSelfTests(_ check: (Bool, String) -> Void) {
+    let wide = PaneSizing.widths(available: 1200, weights: [2, 1, 1])
+    let tight = PaneSizing.widths(available: 750, weights: [2, 1, 1])
+    check(wide == [600, 300, 300] && tight == [310, 220, 220], "Window sizing preserves session proportions until readable minimums require clamping")
+    let smallSidebar = PaneSizing.sidebar(preferred: 410, reference: 1400, window: 834, limit: 480, paneCount: 3)
+    let restoredSidebar = PaneSizing.sidebar(preferred: 410, reference: 1400, window: 1400, limit: 480, paneCount: 3)
+    check(smallSidebar == 162 && restoredSidebar == 410, "Sidebar compresses in small windows and restores the preferred width as space returns")
+    check(PaneSizing.sidebar(preferred: 200, reference: 1100, window: 1100, limit: 359, paneCount: 2) == 200, "Adding panes retains an intentionally narrow sidebar instead of expanding it")
     let workspace = Workspace()
     let first = WindowState(workspace: workspace), second = WindowState(workspace: workspace)
     check(first.title == "Converse" && second.title == "Converse 2", "New windows have distinct names and independent empty panes")
@@ -9,7 +16,7 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     workspace.assign(b, to: first.id, pane: 2)
     workspace.assign(c, to: first.id, pane: 3)
     check((1...3).compactMap { workspace.session(in: first.id, pane: $0) } == [a, b, c], "Three independent panes retain three different conversations")
-    check(workspace.minimumWidth(in: first.id) >= PaneSizing.compactSidebar + 3 * PaneSizing.minimumPane, "Three panes request enough native window width to stay visible")
+    check(workspace.minimumWidth(in: first.id) >= PaneSizing.minimumSidebar + 3 * PaneSizing.minimumPane, "Three panes request enough native window width to stay visible")
     workspace.assign(d, to: first.id, pane: 1)
     check(workspace.placements[a] == nil && workspace.session(in: first.id, pane: 1) == d && workspace.placements[b]?.pane == 2, "Replacing a pane parks only its previous occupant")
     workspace.assign(b, to: second.id, pane: 3)

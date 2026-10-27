@@ -1239,7 +1239,7 @@ struct RootView: View {
                     Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
                 }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
-            }.frame(minWidth: 200, idealWidth: 340, maxWidth: 480)
+            }.frame(minWidth: PaneSizing.minimumSidebar, idealWidth: 340, maxWidth: 480)
             WorkspacePanes(workspace: workspace, state: state)
         }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
     }
@@ -1312,8 +1312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate!
     var windows: [(NSWindow, WindowState)] = []
     var paneObserver: AnyCancellable?
-    var paneCounts: [UUID: Int] = [:]
-    var paneLayoutRevision: [UUID: Int] = [:]
+    var paneLayouts: [UUID: WindowPaneLayout] = [:]
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -1358,31 +1357,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.addTitlebarAccessoryViewController(title)
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
         if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }
-        windows.append((window, state)); window.makeKeyAndOrderFront(nil)
+        windows.append((window, state)); paneLayouts[state.id] = WindowPaneLayout(window: window); window.makeKeyAndOrderFront(nil)
+        paneLayouts[state.id]?.setPaneCount(0)
         NSApp.addWindowsItem(window, title: state.title, filename: false)
     }
     func updatePaneWidths(_ placements: [UUID: PaneLocation]) {
-        for (window, state) in windows where window.isVisible {
-            let count = placements.values.filter { $0.windowID == state.id }.count
-            let previous = paneCounts[state.id] ?? 0
-            paneCounts[state.id] = count
-            guard count != previous else { continue }
-            let sidebar = count > previous ? PaneSizing.compactSidebar : (PaneSizing.sidebarWidth(in: window) ?? PaneSizing.compactSidebar)
-            let minimum = max(760, sidebar + max(310, CGFloat(count) * PaneSizing.minimumPane) + 12)
-            window.contentMinSize = NSSize(width: minimum, height: 540)
-            let size = window.contentRect(forFrameRect: window.frame).size
-            if size.width < minimum { window.setContentSize(NSSize(width: minimum, height: max(540, size.height))) }
-            let revision = (paneLayoutRevision[state.id] ?? 0) + 1
-            paneLayoutRevision[state.id] = revision
-            // SwiftUI publishes placement changes before updating its native split
-            // views. Apply once those views contain the new number of panes.
-            func arrange(_ attempts: Int) {
-                guard self.paneLayoutRevision[state.id] == revision, window.isVisible else { return }
-                if !PaneSizing.apply(to: window, sidebar: sidebar, paneCount: count), attempts > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { arrange(attempts - 1) }
-                }
-            }
-            DispatchQueue.main.async { arrange(6) }
+        for (_, state) in windows {
+            paneLayouts[state.id]?.setPaneCount(placements.values.filter { $0.windowID == state.id }.count)
         }
     }
     func sessionWasDeleted(_ session: Session) { Workspace.shared.park(session.id) }
@@ -1462,6 +1443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
+        paneLayouts.removeValue(forKey: state.id)
         Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
@@ -1710,6 +1692,7 @@ func selfTest() {
     check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
+    paneSizingSelfTests(check)
     identitySelfTests(check)
     print("All checks passed")
 }
@@ -1737,6 +1720,10 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--pane-sizing-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    paneSizingSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }; exit(0)
 }
 if CommandLine.arguments.contains("--provider-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh --providers-only for isolated tests.\n", stderr); exit(2) }
