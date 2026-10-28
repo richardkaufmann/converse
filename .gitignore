@@ -5,3 +5,9 @@ Converse.iconset/
 .build/
 
 __pycache__/
+
+# Local signing assets never belong in the source repository.
+*.p12
+*.p8
+*.cer
+*.certSigningRequest

@@ -1,15 +1,12 @@
 #!/bin/zsh
-set -eu
+set -euo pipefail
 cd "${0:A:h}"
+source ./signing.sh
+signing_identity=$(converse_signing_identity)
 app="${CONVERSE_APP_OUTPUT:-$PWD/.build/Converse.app}"
 app="${app:A}"
-# Never replace a running bundle: ad-hoc signatures change on every build and
-# invalidate macOS privacy consent for the app and its child tools.
-if ps -axo comm= | /usr/bin/grep -Fxq "$app/Contents/MacOS/Converse"; then
-  print -u2 "Refusing to rebuild a running app: $app"
-  print -u2 'Quit that app first, or choose a different CONVERSE_APP_OUTPUT.'
-  exit 1
-fi
+# Never replace code or resources in a running app bundle.
+converse_require_stopped_app "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 if [[ "${CONVERSE_SKIP_ICON_BUILD:-0}" != 1 ]]; then
   swift Sources/Icon.swift Converse.iconset
@@ -38,13 +35,19 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Converse</string>
 <key>CFBundleDisplayName</key><string>Converse</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.3</string>
-<key>CFBundleVersion</key><string>16</string>
+<key>CFBundleShortVersionString</key><string>0.4.4</string>
+<key>CFBundleVersion</key><string>17</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>Converse connects to your other Macs so you can view and control sessions across devices.</string>
 <key>NSBonjourServices</key><array><string>_converse._tcp</string></array>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$app"
+if [[ "$signing_identity" == - ]]; then
+  codesign --force --sign - "$app"
+  print 'Local ad-hoc signature (not a notarized release).'
+else
+  codesign --force --options runtime --timestamp --sign "$signing_identity" "$app"
+fi
+codesign --verify --deep --strict "$app"
 printf 'Built %s\n' "$app"

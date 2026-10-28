@@ -1,10 +1,10 @@
-Converse — macOS preview 0.4.2
+Converse — macOS preview 0.4.4
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
-It is ad-hoc signed, not Developer ID signed or notarized.
+This release is Developer ID signed and notarized by Apple.
 Drag Converse.app to Applications. Install and sign in to your assistant CLIs separately.
-If macOS blocks the app, see https://support.apple.com/102445 for Apple's guidance.
+macOS shows its normal confirmation when first opening a downloaded app.
 The source and build script are included; no Xcode project or third-party dependencies are required. This preview was built and tested on this Mac with its installed macOS SDK.
 
 FIRST LAUNCH
@@ -68,12 +68,16 @@ Claude text streams as it arrives. Some tools only emit their answer at turn com
 Muse displays approval choices and tool questions above the transcript and sends your decisions back. Status distinguishes waits, reviews, retries, background checks and completion. Claude/Codex interactive approvals and full slash-command menus are not embedded; /login opens a login picker; new logins and Sign in again open Terminal authentication. Explicit session access selections apply to subsequent turns, including resumes.
 
 BUILD / TEST
-./build.sh builds .build/Converse.app using swiftc and applies a local ad-hoc signature.
+./build.sh builds .build/Converse.app using swiftc. It uses the sole valid Developer ID
+Application identity when installed, or an ad-hoc signature for local builds without one.
+./release.sh requires Developer ID signing and Apple notarization before packaging.
+See docs/signed-releases.md for setup, testing, and release instructions.
 Keep the checkout outside Documents, Desktop and Downloads while developing.
 Running app bundles cannot be overwritten; use CONVERSE_APP_OUTPUT for another destination.
 ./test.sh runs isolated offline checks using the installed Muse echo provider.
 Sources/main.swift contains the app, session engine, adapters, and checks.
-The current UI is macOS only. An iPad client and remote session service are future work.
+The current UI is macOS only. Paired Macs can view and control home sessions;
+Windows and iPad clients are future work.
 
 Output cleanup: Muse workspace root/trust diagnostics are hidden, including in saved
 conversations. Successful tool activity is hidden; failures remain visible. Gaps of ten seconds or more

@@ -19,7 +19,7 @@ It's a bit "opinionated" to match how I work.  Feel free to rip it off and make 
 
 [Download the latest Mac preview](https://github.com/richardkaufmann/converse/releases/latest). Unzip, drag **Converse.app** into **Applications**, and open it. The universal download targets **macOS 14 or later**, on **Apple Silicon and Intel**. It is tested on an Apple Silicon Mac; older macOS versions and Intel hardware have not been tested directly.
 
-This preview is ad-hoc signed, **not notarized**. macOS may block its first launch; see [Apple’s app-opening guidance](https://support.apple.com/102445). Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
+Version **0.4.4** and later releases are **Developer ID signed and notarized by Apple**. macOS shows its normal first-open confirmation. Earlier previews were ad-hoc signed. Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
 
 ## First launch
 
@@ -131,13 +131,13 @@ This preview is built and tested on an Apple Silicon Mac using Apple's Command L
 open .build/Converse.app
 ```
 
-`./release.sh` builds both CPU architectures and packages the downloadable ZIP under `.build/release/`.
+`./release.sh` builds both CPU architectures, signs with Developer ID, notarizes with Apple, staples the ticket, checks Gatekeeper, and packages the downloadable ZIP under `.build/release/`. It requires a valid **Developer ID Application** identity and a Keychain notarization profile named `ConverseNotary` (override with `CONVERSE_NOTARY_PROFILE`). See [signed releases](docs/signed-releases.md) for the one-time setup and release checks. A local ad-hoc build cannot pass the release gates.
 
 **Building or publishing does not update an installed copy.** Run `./install.sh` to install the verified build into `~/Applications/Converse.app`, or pass the exact app path you normally launch: `./install.sh /path/to/Converse.app`. For an installation outside protected folders, if that copy is running, installation waits for it to quit, retains the previous bundle as a backup, and replaces the app at that same path. Running copies inside Documents, Desktop or Downloads cannot be reliably updated by the background helper because macOS gives it a different privacy identity; the installer rejects that queue request and recommends installing into `~/Applications/Converse.app`. Quit the old app and open the new Applications copy explicitly; an old Dock shortcut may still target the old copy. Wait a few seconds after quitting before reopening. Conversations and credentials are not touched. The script prints a status-file path; check it for `INSTALLED` before claiming the installed copy is current. This is a local developer installation helper, not an automatic release updater.
 
 Keep your checkout outside Documents, Desktop and Downloads (for example, `~/Developer/Converse`) to avoid macOS protected-folder prompts during development. Builds go into `.build`; use `CONVERSE_APP_OUTPUT=/path/to/Converse.app` to choose another destination. The build refuses to replace a running app because changing an ad-hoc signature can invalidate its privacy permissions.
 
-The build generates the sneaker artwork with a plain circular badge, creates `.build/Converse.app`, and applies a local ad-hoc signature. Generated app and icon bundles are excluded from Git; their source is included.
+The build generates the sneaker artwork with a plain circular badge and creates `.build/Converse.app`. When exactly one valid Developer ID Application identity is installed, builds use it automatically with hardened runtime and a secure timestamp. If several are installed, select one with `CONVERSE_SIGN_IDENTITY` (certificate SHA-1 or full name). Without a Developer ID identity, local builds use an ad-hoc signature; `CONVERSE_SIGN_IDENTITY=-` explicitly requests one. Local builds are not automatically notarized. Generated app and icon bundles are excluded from Git; their source is included.
 
 Install and authenticate the assistant CLIs separately. Configure each entry with the matching adapter; Converse uses Muse’s interactive MSP host and the other adapters’ headless modes. Command lines run through your login shell. Homebrew and `~/.local/bin` are included in the executable search path.
 
