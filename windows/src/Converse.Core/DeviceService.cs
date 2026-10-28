@@ -101,6 +101,7 @@ internal sealed class Peer
     public DeviceHello? Hello { get; set; }
     public DeviceFrameDecoder Decoder { get; } = new();
     public List<byte> Buffer { get; } = new();
+    public volatile bool Alive = true;
     public bool TrustedReady { get; set; }
     public bool HumanConfirmed { get; set; }
     public bool LocalConfirmed { get; set; }
@@ -368,7 +369,7 @@ public sealed class DeviceSyncService : IDisposable
         lock (_fabricGate)
         {
             var preferInitiator = string.CompareOrdinal(DeviceId, peer.Hello.DeviceID) < 0;
-            foreach (var other in _peers.Values.Where(p => p != peer && p.Keys is not null && p.Hello?.DeviceID == peer.Hello.DeviceID).ToList())
+            foreach (var other in _peers.Values.Where(p => p != peer && p.Alive && p.Keys is not null && p.Hello?.DeviceID == peer.Hello.DeviceID).ToList())
             {
                 if (other.TrustedReady || (other.IsInitiator == preferInitiator && peer.IsInitiator != preferInitiator)) { Disconnect(peer); return; }
                 Disconnect(other);
@@ -442,10 +443,12 @@ public sealed class DeviceSyncService : IDisposable
 
     private void Disconnect(Peer peer)
     {
+        if (!peer.Alive) return;
+        peer.Alive = false;
         peer.Client.Dispose();
         var key = _peers.FirstOrDefault(p => p.Value == peer).Key;
         if (key != Guid.Empty) _peers.TryRemove(key, out _);
-        if (peer.Hello is { } hello && !_peers.Values.Any(p => p.TrustedReady && p.Hello?.DeviceID == hello.DeviceID))
+        if (peer.Hello is { } hello && !_peers.Values.Any(p => p.Alive && p.TrustedReady && p.Hello?.DeviceID == hello.DeviceID))
         {
             if (Homes.TryGetValue(hello.DeviceID, out var home))
             {
