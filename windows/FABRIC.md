@@ -12,10 +12,10 @@ computer. The pairing dialog states this explicitly.
 
 `fabric.members` payloads are arrays of exact Swift-compatible lower-case-key
 records (deviceID, name, publicKey, pairedAt, lastHost, lastPort, generation,
-changedBy, removed). Public keys are base64; pairedAt is seconds since Apple's
+changedBy, removed, metadataGeneration, metadataBy). Public keys are base64; pairedAt is seconds since Apple's
 2001 epoch. Merge by greatest (generation, removed, changedBy) per identity,
 ordinal string comparison. Records enter only through an authenticated member.
-Removals are versioned tombstones; stale rosters cannot revive them. Trust is
+Removals are versioned tombstones; stale rosters cannot revive them. Active reconnects preserve membership rank and use a separate metadata revision for hint updates. Removed devices never self-pin over tombstones; only explicit fresh sponsor approval can readmit them. Names are bounded to 200 UTF-8 bytes at Unicode scalar boundaries. Trust is
 persisted atomically before granting access. Legacy saved trust keys decode
 case-insensitively. All members are administrators; this is intentionally
 transitive trust, not a partially trusted organization model. Offline partitions

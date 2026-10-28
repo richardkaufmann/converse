@@ -350,6 +350,66 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { foreach (var service in services) service.Dispose(); }
 }
 
+// Metadata updates have no admission authority; UTF-8 name bounds match Swift.
+{
+    var folder = Directory.CreateTempSubdirectory("converse-metadata-").FullName;
+    var trust = new DeviceTrustStore(folder);
+    var key = X25519.GenerateKeyPair().Item2;
+    var id = DeviceBlob.DeviceIdForPublicKey(key);
+    trust.Pin(new TrustedDevice(id, "First", key, null, null), "admin-a");
+    var first = trust.Records.Single();
+    trust.Pin(new TrustedDevice(id, "Renamed", key, "192.0.2.5", 49000), "admin-b", allowAdmission: false);
+    var refreshed = trust.Records.Single();
+    Check(refreshed.Generation == first.Generation && refreshed.ChangedBy == first.ChangedBy && refreshed.MetadataGeneration > first.MetadataGeneration, "C# endpoint updates do not mint membership generations");
+    Check(refreshed.PairedAt > 0, "C# admissions record a real Apple-reference pairing date");
+    var mirror = new DeviceTrustStore(Path.Combine(folder, "mirror")); mirror.Merge(new[] { first }); mirror.Merge(new[] { refreshed });
+    Check(mirror.Devices.Single().LastHost == "192.0.2.5" && mirror.Devices.Single().Generation == first.Generation, "C# equal-rank hint updates converge without granting admission");
+    var name = string.Concat(Enumerable.Repeat("🙂", 60));
+    Check(DeviceTrustStore.BoundedName(name) == string.Concat(Enumerable.Repeat("🙂", 50)), "C# fabric names share Swift's 200 UTF-8 byte limit");
+}
+
+// Revoked R must not revive itself via stale X, even when endpoints/names drift.
+{
+    var root = Directory.CreateTempSubdirectory("converse-revocation-").FullName;
+    var live = new List<DeviceSyncService>();
+    DeviceSyncService Make(string name)
+    {
+        var folder = Path.Combine(root, name); var service = new DeviceSyncService(folder, new SessionStore(folder, new FakeRunner()), name);
+        service.PairingConfirmation = _ => Task.FromResult(true); live.Add(service); return service;
+    }
+    async Task<bool> WaitRevocation(Func<bool> done)
+    {
+        var until = DateTime.UtcNow.AddSeconds(8);
+        while (!done() && DateTime.UtcNow < until) await Task.Delay(20);
+        return done();
+    }
+    try
+    {
+        var a = Make("A"); var r = Make("R"); var x = Make("X");
+        await a.StartAsync(0); await r.StartAsync(0); await x.StartAsync(0);
+        await r.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+        await WaitRevocation(() => a.Trust.Devices.Count == 2 && r.Trust.Devices.Count == 2);
+        await x.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+        Check(await WaitRevocation(() => live.All(s => s.Homes.Values.Count(h => h.Online) == 2)), "Revocation regression starts with a connected fabric");
+        x.Dispose(); r.Dispose();
+        a.ForgetDevice(a.Trust.Devices.First(d => d.DeviceID == r.DeviceId));
+        var tombstone = a.Trust.Records.First(d => d.DeviceID == r.DeviceId);
+        new DeviceTrustStore(Path.Combine(root, "R")).Merge(new[] { tombstone });
+        a.Dispose();
+        r = Make("R"); x = Make("X"); await r.StartAsync(0); await x.StartAsync(0);
+        await r.ConnectManualAsync("127.0.0.1", x.ListeningPort);
+        await WaitRevocation(() => x.Trust.Records.Any(d => d.DeviceID == r.DeviceId && d.Removed == true));
+        var all = a.Trust.Records.Concat(r.Trust.Records).Concat(x.Trust.Records).Where(d => d.DeviceID == r.DeviceId);
+        Check(all.All(d => d.Removed == true && d.Generation == tombstone.Generation), "Removed C# device cannot self-readmit through a stale member on reconnect");
+        Check(await WaitRevocation(() => r.Homes.GetValueOrDefault(x.DeviceId)?.Online != true && x.Homes.GetValueOrDefault(r.DeviceId)?.Online != true), "Stale C# member learns removal and disconnects R");
+        a = Make("A"); await a.StartAsync(0); await r.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+        Check(await WaitRevocation(() => r.Trust.Records.Any(d => d.DeviceID == r.DeviceId && d.Removed != true) && a.Homes.GetValueOrDefault(r.DeviceId)?.Online == true), "Explicit up-to-date C# sponsor readmission succeeds");
+        var readmitted = a.Trust.Records.First(d => d.DeviceID == r.DeviceId);
+        Check(readmitted.Removed != true && readmitted.Generation > tombstone.Generation && readmitted.ChangedBy == a.DeviceId, "C# readmission generation belongs to the approving sponsor");
+    }
+    finally { foreach (var service in live) service.Dispose(); }
+}
+
 if (int.TryParse(Environment.GetEnvironmentVariable("CONVERSE_MAC_INTEROP_PORT"), out var macPort) && macPort > 0)
 {
     var root = Directory.CreateTempSubdirectory("converse-mac-fabric-").FullName;

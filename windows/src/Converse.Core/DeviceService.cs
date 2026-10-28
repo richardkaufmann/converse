@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
 
@@ -18,7 +19,9 @@ public sealed record TrustedDevice(
     [property: JsonPropertyName("pairedAt")] double PairedAt = 0,
     [property: JsonPropertyName("generation")] ulong? Generation = null,
     [property: JsonPropertyName("changedBy")] string? ChangedBy = null,
-    [property: JsonPropertyName("removed")] bool? Removed = null);
+    [property: JsonPropertyName("removed")] bool? Removed = null,
+    [property: JsonPropertyName("metadataGeneration")] ulong? MetadataGeneration = null,
+    [property: JsonPropertyName("metadataBy")] string? MetadataBy = null);
 
 // Same versioned membership records as Swift. Authentication of the sender
 // grants fabric-administration authority; records are never accepted pre-trust.
@@ -33,20 +36,45 @@ public sealed class DeviceTrustStore
     {
         Directory.CreateDirectory(folder); _file = Path.Combine(folder, "devices.json");
         if (File.Exists(_file)) _records = JsonSerializer.Deserialize<List<TrustedDevice>>(File.ReadAllBytes(_file), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidDataException("Invalid trust store");
+        _records = _records.Select(d => d with { Name = BoundedName(d.Name) }).ToList();
     }
     public string Check(string id, byte[] key)
     {
         var device = Devices.FirstOrDefault(d => d.DeviceID == id);
         return device is null ? "unknown" : device.PublicKey.AsSpan().SequenceEqual(key) ? "trusted" : "keyChanged";
     }
-    private ulong NextGeneration() => checked((_records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max()) + 1);
-    public void Pin(TrustedDevice device, string? issuer = null)
+    private ulong NextGeneration()
+    {
+        var highest = _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max();
+        if (highest >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
+        return highest + 1;
+    }
+    public static string BoundedName(string name)
+    {
+        var result = new System.Text.StringBuilder(); var bytes = 0;
+        foreach (var rune in name.EnumerateRunes()) { if (bytes + rune.Utf8SequenceLength > 200) break; result.Append(rune.ToString()); bytes += rune.Utf8SequenceLength; }
+        return result.ToString();
+    }
+    public void Pin(TrustedDevice device, string? issuer = null, bool allowAdmission = true)
     {
         lock (_gate)
         {
-            var old = _records.FirstOrDefault(d => d.DeviceID == device.DeviceID && d.Removed != true);
-            if (old is not null && old.PublicKey.AsSpan().SequenceEqual(device.PublicKey) && old.Name == device.Name && (device.LastHost is null || old.LastHost == device.LastHost) && (device.LastPort is null || old.LastPort == device.LastPort)) return;
-            var next = _records.Where(d => d.DeviceID != device.DeviceID).Append(device with { Generation = NextGeneration(), ChangedBy = issuer ?? device.DeviceID, Removed = false, LastHost = device.LastHost ?? old?.LastHost, LastPort = device.LastPort ?? old?.LastPort }).ToList();
+            device = device with { Name = BoundedName(device.Name) };
+            var old = _records.FirstOrDefault(d => d.DeviceID == device.DeviceID);
+            var active = old is not null && old.Removed != true && old.PublicKey.AsSpan().SequenceEqual(device.PublicKey);
+            if (!active && !allowAdmission) throw new InvalidDataException("Fresh human admission required");
+            if (active && old!.Name == device.Name && (device.LastHost is null || old.LastHost == device.LastHost) && (device.LastPort is null || old.LastPort == device.LastPort)) return;
+            if ((old?.MetadataGeneration ?? 0) >= ulong.MaxValue - 2) throw new InvalidDataException("Metadata counter exhausted");
+            var pairedAt = active && old!.PairedAt > 0 ? old.PairedAt : (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200);
+            var member = device with {
+                Generation = active ? old!.Generation : NextGeneration(),
+                ChangedBy = active ? old!.ChangedBy : issuer ?? device.DeviceID,
+                Removed = false, PairedAt = pairedAt,
+                LastHost = device.LastHost ?? old?.LastHost, LastPort = device.LastPort ?? old?.LastPort,
+                MetadataGeneration = checked((old?.MetadataGeneration ?? 0) + 1), MetadataBy = issuer ?? device.DeviceID
+            };
+            var next = _records.Where(d => d.DeviceID != device.DeviceID).Append(member).ToList();
+            if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
             AtomicJson.Write(_file, next); _records = next;
         }
     }
@@ -63,7 +91,7 @@ public sealed class DeviceTrustStore
     {
         lock (_gate)
         {
-            if (incoming.Count > 512 || incoming.Any(d => d.PublicKey.Length != 32 || DeviceBlob.DeviceIdForPublicKey(d.PublicKey) != d.DeviceID || d.Name.Length > 200 || (d.ChangedBy?.Length ?? 0) > 64 || (d.LastHost?.Length ?? 0) > 253 || d.LastPort is < 1 or > 65535 || (d.Generation ?? 0) >= ulong.MaxValue - 1)) throw new InvalidDataException("Invalid membership");
+            if (incoming.Count > 512 || incoming.Any(d => d.PublicKey.Length != 32 || DeviceBlob.DeviceIdForPublicKey(d.PublicKey) != d.DeviceID || System.Text.Encoding.UTF8.GetByteCount(d.Name) > 200 || (d.MetadataBy?.Length ?? 0) > 64 || (d.MetadataGeneration ?? 0) >= ulong.MaxValue - 1 || (d.ChangedBy?.Length ?? 0) > 64 || (d.LastHost?.Length ?? 0) > 253 || d.LastPort is < 1 or > 65535 || (d.Generation ?? 0) >= ulong.MaxValue - 1)) throw new InvalidDataException("Invalid membership");
             var next = _records.ToList(); var changed = false;
             foreach (var member in incoming)
             {
@@ -74,6 +102,12 @@ public sealed class DeviceTrustStore
                     || ((member.Generation ?? 0) == (old.Generation ?? 0) && ((member.Removed == true && old.Removed != true)
                     || ((member.Removed == true) == (old.Removed == true) && string.CompareOrdinal(member.ChangedBy ?? "", old.ChangedBy ?? "") > 0)));
                 if (newer) { next[index] = member; changed = true; }
+                else if ((member.Generation ?? 0) == (old.Generation ?? 0) && (member.Removed == true) == (old.Removed == true) && (member.ChangedBy ?? "") == (old.ChangedBy ?? "") && old.PublicKey.AsSpan().SequenceEqual(member.PublicKey)
+                    && ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0) || ((member.MetadataGeneration ?? 0) == (old.MetadataGeneration ?? 0) && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0)))
+                {
+                    next[index] = old with { Name = member.Name, LastHost = member.LastHost, LastPort = member.LastPort, MetadataGeneration = member.MetadataGeneration, MetadataBy = member.MetadataBy };
+                    changed = true;
+                }
             }
             if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
             if (!changed) return false;
@@ -233,6 +267,7 @@ public sealed class DeviceSyncService : IDisposable
         Changed?.Invoke();
     }
 
+    private bool LocallyRemoved => Trust.Records.Any(d => d.DeviceID == DeviceId && d.Removed == true);
     private DeviceHello Hello() => new() { DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.0-windows-dev", ListenPort = ListeningPort };
 
     private async Task AcceptLoopAsync(CancellationToken token)
@@ -403,8 +438,10 @@ public sealed class DeviceSyncService : IDisposable
         {
             if (!peer.HumanConfirmed && Trust.Check(peer.Hello.DeviceID, peer.Keys.RemoteStatic) != "trusted") { peer.Client.Dispose(); return; }
             var host = peer.ManualHost ?? (peer.Client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
-            Trust.Pin(new TrustedDevice(peer.Hello.DeviceID, peer.Hello.DeviceName, peer.Keys.RemoteStatic, host, peer.Hello.ListenPort ?? peer.ManualPort), DeviceId);
-            Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate), null, null), DeviceId);
+            Trust.Pin(new TrustedDevice(peer.Hello.DeviceID, peer.Hello.DeviceName, peer.Keys.RemoteStatic, host, peer.Hello.ListenPort ?? peer.ManualPort), DeviceId, allowAdmission: peer.HumanConfirmed);
+            // Only a sponsor's fresh human admission may supersede our tombstone.
+            if (!Trust.Records.Any(d => d.DeviceID == DeviceId && d.Removed == true))
+                Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate), null, null), DeviceId);
         }
         catch { LastOutcome = "Could not save paired device. Control not granted."; peer.Client.Dispose(); return; }
         peer.TrustedReady = true;
@@ -413,7 +450,7 @@ public sealed class DeviceSyncService : IDisposable
             DeviceID = peer.Hello.DeviceID, DeviceName = peer.Hello.DeviceName, Online = true,
             Rows = Homes.GetValueOrDefault(peer.Hello.DeviceID)?.Rows ?? new(),
         };
-        _ = SendSidebarAsync(peer);
+        if (!LocallyRemoved) _ = SendSidebarAsync(peer);
         _ = BroadcastFabricAsync();
         Changed?.Invoke();
     }
@@ -692,18 +729,21 @@ public sealed class DeviceSyncService : IDisposable
         }
         if (!peer.TrustedReady || peer.Hello is null) return;
         var peerHome = peer.Hello.DeviceID;
+        if (LocallyRemoved && envelope.Kind is not ("fabric.members" or DeviceKind.Ping or DeviceKind.Pong)) return;
         switch (envelope.Kind)
         {
             case "fabric.members":
                 if (!peer.Hello.Capabilities.Contains("fabric-membership-v1") || envelope.Payload is null) break;
                 try
                 {
+                    var wasRemoved = LocallyRemoved;
                     if (!Trust.Merge(DeviceJson.Decode<List<TrustedDevice>>(envelope.Payload))) break;
                     var active = Trust.Devices.Select(d => d.DeviceID).ToHashSet();
                     foreach (var connection in _peers.Values.Where(p => p.TrustedReady && !active.Contains(p.Hello?.DeviceID ?? "")).ToList()) Disconnect(connection);
                     foreach (var member in Trust.Devices.Where(d => d.DeviceID != DeviceId)) Homes.TryAdd(member.DeviceID, new RemoteHomeState { DeviceID = member.DeviceID, DeviceName = member.Name });
                     foreach (var removed in Trust.Records.Where(d => d.Removed == true)) Homes.TryRemove(removed.DeviceID, out _);
-                    if (Trust.Records.Any(d => d.DeviceID == DeviceId && d.Removed == true)) { foreach (var connection in _peers.Values.ToList()) Disconnect(connection); break; }
+                    if (LocallyRemoved && !wasRemoved) { foreach (var connection in _peers.Values.ToList()) Disconnect(connection); break; }
+                    if (wasRemoved && !LocallyRemoved) await SendSidebarAsync(peer);
                     await BroadcastFabricAsync(); _ = ReconnectFabricAsync(); Changed?.Invoke();
                 }
                 catch { LastOutcome = "Could not save fabric membership. No new trust granted."; }
@@ -878,7 +918,7 @@ public sealed class DeviceSyncService : IDisposable
 
     // ---- Viewer side ----
     private Peer? PeerForHome(string home) =>
-        _peers.Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == home && Homes.GetValueOrDefault(home)?.Online == true);
+        LocallyRemoved ? null : _peers.Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == home && Homes.GetValueOrDefault(home)?.Online == true);
 
     public async Task AcquireRemoteAsync(string globalId)
     {
