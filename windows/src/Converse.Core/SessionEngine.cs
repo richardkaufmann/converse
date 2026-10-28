@@ -1,0 +1,417 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+
+namespace Converse.Core;
+
+// Session engine mirroring the Mac Store/Session turn pipeline for the
+// claude/codex JSONL providers. Muse uses its exec JSON mode here; the
+// long-lived MSP connection (approvals/questions) is milestone 3 and must
+// not be faked: answer commands ack failed until then.
+public sealed class AgentEntry
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = "";
+    public string Command { get; set; } = "";
+    public string Directory { get; set; } = "";
+    public string Engine { get; set; } = "";
+    public string? AccountName { get; set; }
+    public string? AccountDirectory { get; set; }
+    public bool? UseDefaultAccountStore { get; set; }
+}
+
+public sealed class SessionChoices
+{
+    public string? Model { get; set; }
+    public string? ModelProvider { get; set; }
+    public string? ModelProfile { get; set; }
+    public string? Effort { get; set; }
+    public string? Access { get; set; }
+    public string? Approval { get; set; }
+}
+
+public sealed class ChatMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Role { get; set; } = "";
+    public string Text { get; set; } = "";
+    public List<string> Images { get; set; } = new();
+    public DateTime? CreatedAt { get; set; }
+    public string? FinalReply { get; set; }
+}
+
+public sealed class PendingPrompt
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Text { get; set; } = "";
+    public List<string> Images { get; set; } = new();
+}
+
+public sealed class ChatSession
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Title { get; set; } = "New session";
+    public AgentEntry Entry { get; set; } = new();
+    public List<ChatMessage> Messages { get; set; } = new();
+    public List<PendingPrompt> Pending { get; set; } = new();
+    public string Draft { get; set; } = "";
+    public List<string> Attachments { get; set; } = new();
+    public SessionChoices Choices { get; set; } = new();
+    public string? RemoteID { get; set; }
+    public bool Started { get; set; }
+    public bool QueuePaused { get; set; }
+    // Runtime-only state.
+    [System.Text.Json.Serialization.JsonIgnore] public bool Busy { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public string Status { get; set; } = "Ready";
+    [System.Text.Json.Serialization.JsonIgnore] public bool TurnFailed { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public bool Interrupted { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal bool StreamedText { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal Process? RunningProcess { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal CancellationTokenSource? TurnCancellation { get; set; }
+}
+
+public interface IAgentRunner
+{
+    // Runs one turn, invoking onLine for each stdout/stderr line. Returns exit code.
+    Task<int> RunAsync(ChatSession session, IReadOnlyList<string> arguments, string prompt,
+        Action<string> onLine, CancellationToken cancellationToken);
+}
+
+public sealed class ProcessAgentRunner : IAgentRunner
+{
+    public async Task<int> RunAsync(ChatSession session, IReadOnlyList<string> arguments, string prompt,
+        Action<string> onLine, CancellationToken cancellationToken)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = session.Entry.Command,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var arg in arguments) start.ArgumentList.Add(arg);
+        start.ArgumentList.Add("--");
+        start.ArgumentList.Add(prompt);
+        if (System.IO.Directory.Exists(session.Entry.Directory)) start.WorkingDirectory = session.Entry.Directory;
+        start.Environment["NO_COLOR"] = "1";
+        start.Environment["TERM"] = "dumb";
+        if (!string.IsNullOrEmpty(session.Entry.AccountDirectory))
+        {
+            if (session.Entry.Engine == "codex")
+            {
+                start.Environment.Remove("CODEX_ACCESS_TOKEN");
+                start.Environment.Remove("OPENAI_API_KEY");
+                start.Environment["CODEX_HOME"] = session.Entry.AccountDirectory;
+            }
+            if (session.Entry.Engine == "claude")
+            {
+                start.Environment.Remove("ANTHROPIC_API_KEY");
+                start.Environment.Remove("ANTHROPIC_AUTH_TOKEN");
+                if (session.Entry.UseDefaultAccountStore != true)
+                    start.Environment["CLAUDE_CONFIG_DIR"] = session.Entry.AccountDirectory;
+            }
+        }
+        if (session.Entry.Engine == "claude" && session.Choices.Effort is { } effort)
+            start.Environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort;
+        using var process = new Process { StartInfo = start };
+        session.RunningProcess = process;
+        process.Start();
+        process.StandardInput.Close();
+        using var registration = cancellationToken.Register(() =>
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+        });
+        var outputTask = ReadLinesAsync(process.StandardOutput, onLine);
+        var errorTask = ReadLinesAsync(process.StandardError, onLine);
+        await process.WaitForExitAsync(CancellationToken.None);
+        await Task.WhenAll(outputTask, errorTask);
+        session.RunningProcess = null;
+        return process.ExitCode;
+    }
+
+    private static async Task ReadLinesAsync(StreamReader reader, Action<string> onLine)
+    {
+        while (await reader.ReadLineAsync() is { } line) onLine(line);
+    }
+}
+
+public static class TurnArguments
+{
+    public static List<string> For(ChatSession session, IReadOnlyList<string> images)
+    {
+        var choices = session.Choices;
+        var entry = session.Entry;
+        var args = new List<string>();
+        if (entry.Engine == "claude")
+        {
+            args.AddRange(new[] { "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages" });
+            if (session.Started || session.RemoteID is not null) { args.Add("--resume"); args.Add(session.RemoteID ?? session.Id.ToString("D")); }
+            else { args.Add("--session-id"); args.Add(session.Id.ToString("D")); }
+            if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
+            if (choices.Effort is not null) { args.Add("--effort"); args.Add(choices.Effort); }
+            if (choices.Access is not null) { args.Add("--permission-mode"); args.Add(choices.Access); }
+            foreach (var dir in images.Select(Path.GetDirectoryName).Where(d => d is not null).Distinct().OrderBy(d => d))
+            { args.Add("--add-dir"); args.Add(dir!); }
+        }
+        else if (entry.Engine == "muse")
+        {
+            args.AddRange(new[] { "exec", "--json", "--session-id", session.Id.ToString("D") });
+            if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
+            if (choices.Effort is not null) { args.Add("--reasoning-effort"); args.Add(choices.Effort); }
+            if (choices.Access is not null) { args.Add("--permission-profile"); args.Add(choices.Access); }
+            foreach (var image in images) { args.Add("--image"); args.Add(image); }
+        }
+        else
+        {
+            args.Add("exec");
+            if (session.RemoteID is not null) { args.Add("resume"); args.Add(session.RemoteID); }
+            args.AddRange(new[] { "--json", "--skip-git-repo-check" });
+            if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
+            if (choices.Effort is not null) { args.Add("-c"); args.Add("model_reasoning_effort=" + Toml(choices.Effort)); }
+            if (choices.Access is not null) { args.Add("-c"); args.Add("sandbox_mode=" + Toml(choices.Access)); }
+            if (choices.Approval is not null) { args.Add("-c"); args.Add("approval_policy=" + Toml(choices.Approval)); }
+            foreach (var image in images) { args.Add("--image"); args.Add(image); }
+        }
+        return args;
+    }
+    private static string Toml(string value) => "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+}
+
+public sealed class SessionStore
+{
+    public string Folder { get; }
+    public List<ChatSession> Sessions { get; private set; } = new();
+    public List<AgentEntry> Entries { get; private set; } = new();
+    public event Action? Changed;
+    private readonly IAgentRunner _runner;
+    private sealed class Archive
+    {
+        public List<AgentEntry> Entries { get; set; } = new();
+        public List<ChatSession> Sessions { get; set; } = new();
+    }
+
+    public SessionStore(string folder, IAgentRunner? runner = null)
+    {
+        Folder = folder;
+        _runner = runner ?? new ProcessAgentRunner();
+        Directory.CreateDirectory(Folder);
+        var file = Path.Combine(Folder, "sessions.json");
+        if (File.Exists(file))
+        {
+            var archive = JsonSerializer.Deserialize<Archive>(File.ReadAllBytes(file));
+            if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; }
+        }
+        if (Entries.Count == 0) Entries = DefaultEntries();
+    }
+
+    public static List<AgentEntry> DefaultEntries() => new()
+    {
+        new AgentEntry { Name = "Muse", Command = "claude", Engine = "claude", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
+        new AgentEntry { Name = "Codex", Command = "codex", Engine = "codex", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
+        new AgentEntry { Name = "Muse", Command = "muse", Engine = "muse", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
+    };
+
+    public ChatSession Create(AgentEntry entry)
+    {
+        var session = new ChatSession { Entry = entry, Title = entry.Name };
+        session.Messages.Add(new ChatMessage { Role = "system", Text = "", CreatedAt = DateTime.UtcNow });
+        Sessions.Add(session);
+        Save();
+        return session;
+    }
+
+    public void DeleteSession(ChatSession session)
+    {
+        Stop(session);
+        Sessions.Remove(session);
+        Save();
+    }
+
+    public void Save()
+    {
+        AtomicJson.Write(Path.Combine(Folder, "sessions.json"), new Archive { Entries = Entries, Sessions = Sessions });
+        Changed?.Invoke();
+    }
+
+    public static string VisibleText(string text)
+    {
+        // Strip fenced switchboard command blocks from display text.
+        var builder = new StringBuilder();
+        var inFence = false;
+        foreach (var line in text.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("```converse")) { inFence = true; continue; }
+            if (inFence && trimmed.StartsWith("```")) { inFence = false; continue; }
+            if (!inFence) builder.Append(line).Append('\n');
+        }
+        return builder.ToString().Trim('\n');
+    }
+
+    public void Submit(ChatSession session)
+    {
+        var text = session.Draft;
+        if (string.IsNullOrWhiteSpace(text) && session.Attachments.Count == 0) return;
+        var images = new List<string>(session.Attachments);
+        session.Draft = "";
+        session.Attachments.Clear();
+        if (session.Busy || session.QueuePaused)
+        {
+            session.Pending.Add(new PendingPrompt { Text = text, Images = images });
+            session.Messages.Add(new ChatMessage { Role = "user", Text = text, Images = images, CreatedAt = DateTime.UtcNow });
+            Save();
+            return;
+        }
+        session.Messages.Add(new ChatMessage { Role = "user", Text = text, Images = images, CreatedAt = DateTime.UtcNow });
+        _ = RunTurnAsync(session, text, images);
+    }
+
+    public void RunNext(ChatSession session)
+    {
+        if (session.Busy || session.QueuePaused || session.Pending.Count == 0) return;
+        var next = session.Pending[0];
+        session.Pending.RemoveAt(0);
+        _ = RunTurnAsync(session, next.Text, next.Images, alreadyDisplayed: true);
+    }
+
+    public void InjectPending(ChatSession session, Guid? id = null)
+    {
+        PendingPrompt? target = id is null ? session.Pending.FirstOrDefault() : session.Pending.FirstOrDefault(p => p.Id == id);
+        if (target is null) return;
+        session.Pending.Remove(target);
+        session.QueuePaused = false;
+        if (session.Busy) Stop(session);
+        _ = RunTurnAsync(session, target.Text, target.Images, alreadyDisplayed: true);
+    }
+
+    public void Stop(ChatSession session)
+    {
+        session.Interrupted = true;
+        session.TurnCancellation?.Cancel();
+    }
+
+    private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images, bool alreadyDisplayed = false)
+    {
+        session.Busy = true;
+        session.Interrupted = false;
+        session.TurnFailed = false;
+        session.StreamedText = false;
+        session.Status = "Working…";
+        var response = new ChatMessage { Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow };
+        session.Messages.Add(response);
+        session.TurnCancellation = new CancellationTokenSource();
+        var args = TurnArguments.For(session, images);
+        string? finalDirectory = null;
+        if (session.Entry.Engine == "codex")
+        {
+            finalDirectory = Directory.CreateTempSubdirectory("converse-final-").FullName;
+            args.Add("--output-last-message");
+            args.Add(Path.Combine(finalDirectory, "answer.txt"));
+        }
+        Save();
+        var exit = -1;
+        try
+        {
+            exit = await _runner.RunAsync(session, args, prompt,
+                line => Consume(line, session, response), session.TurnCancellation.Token);
+        }
+        catch (Exception error)
+        {
+            session.Messages.Add(new ChatMessage { Role = "notice", Text = error.Message });
+        }
+        string? finalReply = null;
+        if (finalDirectory is not null)
+        {
+            var answerPath = Path.Combine(finalDirectory, "answer.txt");
+            if (File.Exists(answerPath)) finalReply = await File.ReadAllTextAsync(answerPath);
+            try { Directory.Delete(finalDirectory, recursive: true); } catch { /* temp cleanup best effort */ }
+        }
+        session.Busy = false;
+        var success = exit == 0 && !session.TurnFailed;
+        session.Status = session.Interrupted ? "Interrupted" : success ? "Ready" : "Failed · exit " + exit;
+        if (exit == 0) session.Started = true;
+        if (session.Entry.Engine == "codex" && success && !session.Interrupted)
+        {
+            response.FinalReply = finalReply;
+            if (string.IsNullOrEmpty(response.Text) && finalReply is not null)
+                response.Text = VisibleText(finalReply);
+        }
+        if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
+        if (!success && !session.Interrupted) session.QueuePaused = session.Pending.Count > 0;
+        Save();
+        if (success) RunNext(session);
+        Changed?.Invoke();
+    }
+
+    // JSONL consumption mirroring Store.consume for claude/codex/muse-exec.
+    public void Consume(string line, ChatSession session, ChatMessage response)
+    {
+        if (string.IsNullOrEmpty(line)) return;
+        JsonDocument? doc;
+        try { doc = JsonDocument.Parse(line); }
+        catch { session.Messages.Add(new ChatMessage { Role = "activity", Text = line }); return; }
+        using var document = doc;
+        var obj = document.RootElement;
+        string? text = null;
+        var replace = false;
+        var delta = false;
+        var type = GetString(obj, "type") ?? "";
+        if (session.Entry.Engine == "muse")
+        {
+            var kind = GetString(obj, "payload_type") ?? "";
+            var payload = obj.TryGetProperty("payload", out var p) ? p : default;
+            if (kind.StartsWith("run.terminal")) { text = GetString(payload, "text"); replace = true; }
+            else if (kind == "run.output.delta" || kind.Contains("text.delta") || kind.Contains("text_delta"))
+            { text = GetString(payload, "delta") ?? GetString(payload, "text"); delta = true; }
+        }
+        else if (session.Entry.Engine == "claude")
+        {
+            if (GetString(obj, "session_id") is { } sid) session.RemoteID = sid;
+            if (type == "stream_event" && obj.TryGetProperty("event", out var ev) &&
+                ev.TryGetProperty("delta", out var chunk) && GetString(chunk, "type") == "text_delta")
+            { text = GetString(chunk, "text"); delta = true; session.StreamedText = true; }
+            if (type == "assistant" && obj.TryGetProperty("message", out var message) &&
+                message.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var block in content.EnumerateArray())
+                {
+                    if (GetString(block, "text") is { } value && !session.StreamedText) text = (text ?? "") + value;
+                    if (GetString(block, "type") == "tool_use")
+                        session.Messages.Add(new ChatMessage { Role = "activity", Text = "Using " + (GetString(block, "name") ?? "tool") });
+                }
+            }
+            else if (type == "result")
+            {
+                if (obj.TryGetProperty("is_error", out var isError) && isError.ValueKind == JsonValueKind.True) session.TurnFailed = true;
+                if (GetString(obj, "result") is { } result) { text = result; replace = true; }
+            }
+        }
+        else
+        {
+            if (type == "thread.started") session.RemoteID = GetString(obj, "thread_id");
+            if (type == "item.completed" && obj.TryGetProperty("item", out var item))
+            {
+                if (GetString(item, "type") == "agent_message") text = GetString(item, "text");
+                else if (GetString(item, "command") is { } command)
+                    session.Messages.Add(new ChatMessage { Role = "activity", Text = command });
+            }
+            if (type is "error" or "turn.failed")
+            {
+                session.TurnFailed = true;
+                session.Messages.Add(new ChatMessage { Role = "notice", Text = GetString(obj, "message") ?? "Command failed" });
+            }
+        }
+        if (text is null) return;
+        var visible = VisibleText(text);
+        if (string.IsNullOrEmpty(visible)) return;
+        var separator = string.IsNullOrEmpty(response.Text) || delta ? "" : "\n";
+        response.Text = replace ? visible : response.Text + separator + visible;
+    }
+
+    private static string? GetString(JsonElement obj, string name) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
+}
+

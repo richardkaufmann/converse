@@ -53,6 +53,17 @@ public sealed class DeviceLeaseManager
             _leases.Remove(session);
     }
 
+    public void ForceRelease(Guid session, string device)
+    {
+        if (_leases.TryGetValue(session, out var lease) && lease.Device == device) _leases.Remove(session);
+    }
+
+    public (string Device, ulong Epoch)? Holder(Guid session)
+    {
+        if (!_leases.TryGetValue(session, out var lease) || lease.ExpiresAt <= _now()) return null;
+        return (lease.Device, lease.Epoch);
+    }
+
     public List<(Guid Session, string Device)> SweepExpired()
     {
         var expired = _leases.Where(pair => pair.Value.ExpiresAt <= _now())

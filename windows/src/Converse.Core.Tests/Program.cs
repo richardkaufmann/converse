@@ -113,5 +113,74 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Directory.Delete(root, recursive: true); }
 }
 
+// Session engine with fake runner: codex JSONL consume + queue + final reply.
+{
+    var root = Directory.CreateTempSubdirectory("converse-engine-").FullName;
+    try
+    {
+        var store = new SessionStore(root, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        session.Draft = "hello engine";
+        store.Submit(session);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (session.Busy && DateTime.UtcNow < deadline) await Task.Delay(20);
+        Check(session.Messages.Any(m => m.Role == "assistant" && m.Text.Contains("fake reply")), "Engine consumes Codex JSONL into assistant text");
+        Check(session.RemoteID == "thread-1" && session.Status == "Ready", "Engine records Codex thread and ready status");
+        Check(session.Messages.Any(m => m.FinalReply == "fake reply\n"), "Engine captures Codex final-answer file");
+    }
+    finally { Directory.Delete(root, recursive: true); }
+}
+
+// Loopback device service: pair, take, rename, bound ack over real TCP.
+{
+    var homeRoot = Directory.CreateTempSubdirectory("converse-home-").FullName;
+    var viewerRoot = Directory.CreateTempSubdirectory("converse-viewer-").FullName;
+    try
+    {
+        var homeStore = new SessionStore(homeRoot, new FakeRunner());
+        var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "codex"));
+        homeSession.Title = "Loopback home";
+        homeSession.Draft = "home words";
+        using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
+        using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        home.PairingConfirmation = _ => Task.FromResult(true);
+        viewer.PairingConfirmation = _ => Task.FromResult(true);
+        await home.StartAsync(0);
+        await viewer.StartAsync(0);
+        await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort);
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
+        Check(await Until(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Loopback pairing publishes home sidebar");
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
+        var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
+        Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+    }
+    finally
+    {
+        Directory.Delete(homeRoot, recursive: true);
+        Directory.Delete(viewerRoot, recursive: true);
+    }
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
+
+sealed class FakeRunner : Converse.Core.IAgentRunner
+{
+    public Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
+        Action<string> onLine, CancellationToken cancellationToken)
+    {
+        onLine("{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}");
+        onLine("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fake reply\"}}");
+        var finalIndex = arguments.ToList().IndexOf("--output-last-message");
+        if (finalIndex >= 0) File.WriteAllText(arguments[finalIndex + 1], "fake reply\n");
+        onLine("{\"type\":\"turn.completed\"}");
+        return Task.FromResult(0);
+    }
+}

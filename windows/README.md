@@ -38,15 +38,19 @@ cannot drift from `Sources/Device*.swift`.
 
 ## Milestones
 
-1. **Core (this commit):** protocol DTOs + framing, X25519 + Noise XX,
+1. **Core (done, tested):** protocol DTOs + framing, X25519 + Noise XX,
    lease/draft/command/outbox stores, vector + harness tests. Runs with
    plain `dotnet` — no NuGet packages beyond the BCL.
-2. **App shell:** WinUI 3 window, sidebar/panes, local echo/test provider,
-   pairing by manual address, viewer take/send against a Mac home.
-3. **Windows home:** real `claude`/`codex` JSONL + `muse` MSP adapters,
-   approvals/questions, queue/inject parity, attachments.
-4. **Discovery + hardening:** mDNS advertise/browse, sleep/wake,
-   firewall prompt guidance, signed MSIX packaging.
+2. **Engine + service (done, tested):** `SessionEngine.cs` runs real
+   `claude`/`codex` JSONL turns (Codex final-answer capture included);
+   `DeviceService.cs` pairs over TCP, serves home leases/transcripts/
+   commands/blobs, and views remote homes with a durable outbox.
+   Loopback pair → take → rename is covered in the test runner.
+3. **App shell (wired, first compile on PC):** WinUI 3 sidebar + pane +
+   composer bound to the real store/service; manual-address connect and
+   8-group pairing dialog. Muse MSP approvals/questions and mDNS remain.
+4. **Next:** Muse MSP connection, approvals/questions parity, mDNS
+   advertise/browse, sleep/wake, signed MSIX packaging.
 
 ## Build and test (on the Windows box)
 
