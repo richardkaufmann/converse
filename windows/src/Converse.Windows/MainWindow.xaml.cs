@@ -668,13 +668,19 @@ public sealed partial class MainWindow : Window
                 ? Math.Min(selection.Length, Math.Max(0, _draftText.Length - (draftRelative ?? 0))) : 0;
 
             Transcript.Document.SetText(TextSetOptions.None, _historyText + _draftText);
-            // Single-spaced paragraphs with no before/after gap: any extra
-            // paragraph spacing accumulates into gutter drift on long
-            // transcripts, and this is a no-op when already the default.
+            // Locked row pitch: every paragraph is exactly 18pt (= 24px, the
+            // gutter TextBlock's LineHeight), so editor rows and gutter rows
+            // cannot drift apart no matter how long the transcript gets.
+            // 24px leaves headroom over the ~19px a 16px line needs, so
+            // fallback glyphs (emoji etc.) don't clip. Both controls run
+            // zero top padding so row 1 starts at the same offset.
+            // Known limit: wrapped editor lines have no gutter counterpart;
+            // the gutter counts paragraphs, like an outline margin.
             var whole = Transcript.Document.GetRange(0, CurrentDocLength());
             whole.ParagraphFormat.SpaceBefore = 0;
             whole.ParagraphFormat.SpaceAfter = 0;
-            whole.ParagraphFormat.LineSpacingRule = LineSpacingRule.Single;
+            whole.ParagraphFormat.LineSpacingRule = LineSpacingRule.Exactly;
+            whole.ParagraphFormat.LineSpacing = 18;
             var (_, runs, _) = BuildHistory();
             foreach (var (start, runLength) in runs)
             {

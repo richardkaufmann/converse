@@ -140,12 +140,13 @@
                     <ScrollViewer x:Name="GutterScroller" Grid.Column="0"
                                   VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Hidden"
                                   HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled">
-                        <TextBlock x:Name="LineGutter" FontSize="16" MinWidth="28" Margin="0,8,0,0"
-                                   Padding="0,0,6,0" TextAlignment="Right"
+                        <TextBlock x:Name="LineGutter" FontSize="16" MinWidth="28" Margin="0,0,0,0"
+                                   Padding="0,0,6,0" TextAlignment="Right" LineHeight="24"
+                                   LineStackingStrategy="BlockLineHeight"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
                     </ScrollViewer>
                     <!-- One seamless document: protected history plus an editable blue draft tail. -->
-                    <RichEditBox x:Name="Transcript" Grid.Column="1" FontSize="16"
+                    <RichEditBox x:Name="Transcript" Grid.Column="1" FontSize="16" Padding="0"
                                  PlaceholderText="Select a conversation to begin."
                                  IsSpellCheckEnabled="True"
                                  PreviewKeyDown="OnTranscriptKeyDown"
