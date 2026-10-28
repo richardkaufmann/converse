@@ -410,6 +410,7 @@ extension DeviceSyncService {
                 return
             }
             if let group = currentGroup, hello.joinGroupID == group.id {
+                pruneGroupRequests()
                 guard sponsoredRequests.count < 16 else { disconnect(peer); return }
                 let request = GroupJoinRequest(id: peer.id, groupID: group.id, requesterID: hello.deviceID,
                                                requesterName: String(hello.deviceName.prefix(100)), sponsorID: identity?.deviceID ?? "", expiresAt: Date().addingTimeInterval(180))
@@ -548,6 +549,7 @@ extension DeviceSyncService {
     private func tick() {
         tickCount += 1
         let now = Date()
+        if pruneGroupRequests(at: now) { publishGroupRequests() }
         for peer in Array(peers.values) {
             if !peer.trustedReady && now.timeIntervalSince(peer.startedAt) > 180 { disconnect(peer); continue }
             if peer.trustedReady {
@@ -1273,7 +1275,8 @@ extension DeviceSyncService {
     private func initializeGroups(folder: URL) throws {
         let existed = FileManager.default.fileExists(atPath: folder.appendingPathComponent("converse-groups.json").path)
         let store = try ConverseGroupStore(folder: folder)
-        if !existed, !locallyRemoved, let migrated = ConverseGroupStore.migration(trustStore?.records ?? []) {
+        if !existed, !locallyRemoved, let ownID = identity?.deviceID,
+           let migrated = ConverseGroupStore.migration(trustStore?.records ?? [], ownDeviceID: ownID) {
             try trustStore?.migrateLegacyGroup(migrated.id); try store.adopt(migrated)
         }
         groupStore = store; refreshGroupMembers()
@@ -1388,8 +1391,24 @@ extension DeviceSyncService {
         sendEnvelope(peer, DeviceEnvelope(kind: "group.state", payload: data))
     }
     private func publishGroupRequests() {
+        pruneGroupRequests()
         guard let id = currentGroup?.id, let data = try? JSONEncoder().encode(Array(sponsoredRequests.values).filter { $0.groupID == id }) else { return }
         for member in Array(peers.values) where member.trustedReady && !member.controlOnly { sendEnvelope(member, DeviceEnvelope(kind: "group.requests", payload: data)) }
+    }
+    @discardableResult private func pruneGroupRequests(at now: Date = Date()) -> Bool {
+        let expired = Set(sponsoredRequests.values.filter { $0.expiresAt <= now }.map(\.id))
+        let oldCount = groupRequests.count
+        // Remove records before disconnect: disconnect's withdrawal path must
+        // not recursively republish the entries being expired here.
+        for id in expired { sponsoredRequests.removeValue(forKey: id) }
+        groupRequests.removeAll { $0.expiresAt <= now || expired.contains($0.id) }
+        if let review = groupReview, review.request.expiresAt <= now || expired.contains(review.id) { groupReview = nil }
+        for id in expired { if let peer = peers[id] { disconnect(peer) } }
+        return !expired.isEmpty || groupRequests.count != oldCount
+    }
+    func expireGroupRequestsForTesting(at now: Date) {
+        guard isTestEnvironment, testFolder != nil else { return }
+        if pruneGroupRequests(at: now) { publishGroupRequests() }
     }
     private func withdrawGroupRequest(_ id: UUID) {
         sponsoredRequests.removeValue(forKey: id); groupRequests.removeAll { $0.id == id }

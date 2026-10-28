@@ -25,7 +25,17 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         check(!bad.valid, "Group identities are validated independently of display names")
         let keyA = Data(repeating: 1, count: 32), keyB = Data(repeating: 2, count: 32)
         let records = [TrustedDevice(deviceID: DeviceBlob.sha256Hex(keyA), name: "A", publicKey: keyA, pairedAt: Date()), TrustedDevice(deviceID: DeviceBlob.sha256Hex(keyB), name: "B", publicKey: keyB, pairedAt: Date())]
-        check(ConverseGroupStore.migration(records) == ConverseGroupStore.migration(Array(records.reversed())), "Existing fabric migration assigns the same group irrespective of roster order")
+        // Shared Mac/Windows migration vector, also documented in docs/groups.md.
+        let ownKey = Data(repeating: 3, count: 32), ownID = DeviceBlob.sha256Hex(ownKey)
+        let ownRecord = TrustedDevice(deviceID: ownID, name: "Self", publicKey: ownKey, pairedAt: Date())
+        let migrated = ConverseGroupStore.migration(records, ownDeviceID: ownID)
+        check(migrated?.id == "27be22ea-df62-15e3-f5ca-dc1771d8f526" && migrated?.creator == ownID, "Migration includes a missing self pin when self is the smallest identity (shared vector)")
+        check(migrated == ConverseGroupStore.migration(Array(records.reversed()) + [ownRecord, ownRecord], ownDeviceID: ownID), "Migration deduplicates self and is independent of roster order")
+        check(ConverseGroupStore.migration([], ownDeviceID: ownID) == nil && ConverseGroupStore.migration([ownRecord], ownDeviceID: ownID) == nil, "A standalone device does not automatically create a group")
+        var revoked = ownRecord; revoked.removed = true
+        check(ConverseGroupStore.migration(records + [revoked], ownDeviceID: ownID) == nil, "Migration cannot readmit a locally revoked device")
+        var removedPeer = records[0]; removedPeer.removed = true
+        check(ConverseGroupStore.migration([removedPeer], ownDeviceID: ownID) == nil, "Removed peers do not turn a standalone device into a migrated group")
         func make(_ name: String) throws -> DeviceSyncService {
             let service = DeviceSyncService(); service.deviceNameOverride = name
             try service.configureForTesting(folder: root.appendingPathComponent(name)); try service.enableGroupsForTesting()
@@ -58,7 +68,19 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         c.deviceNameOverride = "Groups B" // Two same-named devices must remain distinct.
         c.joinGroupByAddress(host: "127.0.0.1", port: Int(aPort))
         pump { c.pairingPrompt != nil && b.groupRequests.contains { $0.requesterID == c.identity?.deviceID } }
+        guard let expiring = b.groupRequests.first(where: { $0.requesterID == c.identity?.deviceID }) else { check(false, "Expiry fixture reaches another member"); return }
+        b.reviewGroupRequest(expiring); pump { b.groupReview != nil }
+        let staleReview = b.groupReview
+        a.expireGroupRequestsForTesting(at: expiring.expiresAt)
+        pump { c.pairingPrompt == nil && !b.groupRequests.contains(where: { $0.id == expiring.id }) }
+        check(c.currentGroup == nil && c.pairingPrompt == nil && a.groupRequests.isEmpty && b.groupRequests.isEmpty && b.groupReview == nil, "Expiry disconnects the pending join and withdraws requests and open reviews group-wide")
+        b.groupReview = staleReview; b.approveGroupReview()
+        pump({ false }, seconds: 0.1)
+        check(c.currentGroup == nil && a.trusted.count == 1, "An expired relayed review cannot admit the disconnected requester")
+        c.joinGroupByAddress(host: "127.0.0.1", port: Int(aPort))
+        pump { c.pairingPrompt != nil && b.groupRequests.contains { $0.requesterID == c.identity?.deviceID } }
         guard let promptC = c.pairingPrompt, let requestC = b.groupRequests.first(where: { $0.requesterID == c.identity?.deviceID }) else { check(false, "Every existing member sees the new join request"); return }
+        check(requestC.id != expiring.id, "A new join after expiry gets a fresh request and can use the released sponsor slot")
         check(a.groupReview == nil && b.groupReview == nil, "Broadcast join requests carry no visible security number before Review")
         b.reviewGroupRequest(requestC)
         pump { b.groupReview != nil }

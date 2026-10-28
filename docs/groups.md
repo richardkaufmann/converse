@@ -51,9 +51,21 @@ Only a device pinned to that group may convey its dissolution. Removed pins cann
 
 An existing ungrouped fabric migrates once, preserving keys, sessions and logins.
 Its group UUID is deterministically derived from the lexically smallest active
-device ID. The default name is `Converse Group`. All members must upgrade; old
+device ID, including this device even when its old store lacks a self pin. Deduplicate
+the active IDs, ignore removed peers, and refuse migration if self is revoked.
+Fewer than two distinct active identities stays outside a group. The default name
+is `Converse Group`. All members must upgrade; old
 clients without the groups capability are refused with upgrade guidance rather
 than allowed to bypass the new group boundary.
+
+Shared migration vector: take public keys consisting of 32 repetitions of byte
+`01`, `02`, and `03`; IDs are their lowercase SHA-256 hashes. Self is key `03`
+(`648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b`),
+the smallest ID, even if only the other two pins appear in its store. Hash the UTF-8
+string `Converse legacy group v1/` plus that ID, take the first 32 hex characters,
+and insert UUID dashes at 8/12/16/20 without changing version/variant bits.
+Expected group ID: `27be22ea-df62-15e3-f5ca-dc1771d8f526`; creator is self's ID.
+Reordering or including duplicate self pins must yield the same result.
 
 ## Wire additions
 

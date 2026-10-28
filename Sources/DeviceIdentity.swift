@@ -209,9 +209,12 @@ final class ConverseGroupStore {
         if next.currentID == group.id { next.currentID = nil }
         guard next.groups.count <= 2048 else { throw CocoaError(.coderInvalidValue) }; try save(next)
     }
-    static func migration(_ members: [TrustedDevice]) -> ConverseGroup? {
-        let active = members.filter { $0.removed != true }
-        guard active.count > 1, let first = active.map(\.deviceID).sorted().first else { return nil }
+    static func migration(_ members: [TrustedDevice], ownDeviceID: String) -> ConverseGroup? {
+        // Older stores may omit their own pin. Include this identity exactly
+        // once, but never migrate a device whose own membership was revoked.
+        guard !members.contains(where: { $0.deviceID == ownDeviceID && $0.removed == true }) else { return nil }
+        let active = Set(members.filter { $0.removed != true }.map(\.deviceID)).union([ownDeviceID])
+        guard active.count > 1, let first = active.sorted().first else { return nil }
         let digest = DeviceBlob.sha256Hex(Data(("Converse legacy group v1/" + first).utf8))
         let chars = Array(digest.prefix(32)); let raw = String(chars)
         let id = [String(raw.prefix(8)), String(raw.dropFirst(8).prefix(4)), String(raw.dropFirst(12).prefix(4)), String(raw.dropFirst(16).prefix(4)), String(raw.dropFirst(20))].joined(separator: "-")
