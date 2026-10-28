@@ -16,6 +16,22 @@ byte[] FixedKey(byte value)
 }
 byte[] Utf8(string value) => System.Text.Encoding.UTF8.GetBytes(value);
 
+// Loopback peers can still flush a store write while a test tears down;
+// retry cleanup instead of crashing the whole run on a busy directory.
+void Cleanup(params string[] dirs)
+{
+    foreach (var dir in dirs)
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+                break;
+            }
+            catch when (attempt < 8) { Thread.Sleep(100); }
+        }
+}
+
 // Groups admission helper: home owns a group, the joiner connects with
 // intent, the sponsor approves its own pending request, and the joiner's
 // PairingConfirmation callback presses Pair. Returns when both sides agree.
@@ -140,7 +156,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         viewerDraft.Adopt("s", 5, "preserved");
         Check(viewerDraft.Bump("s", "edit") == 6 && homeDraft.Apply("s", 6, "edit"), "New holder adopts home draft version");
     }
-    finally { Directory.Delete(root, recursive: true); }
+    finally { Cleanup(root); }
 }
 
 // Session engine with fake runner: codex JSONL consume + queue + final reply.
@@ -158,7 +174,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(session.RemoteID == "thread-1" && session.Status == "Ready", "Engine records Codex thread and ready status");
         Check(session.Messages.Any(m => m.FinalReply == "fake reply\n"), "Engine captures Codex final-answer file");
     }
-    finally { Directory.Delete(root, recursive: true); }
+    finally { Cleanup(root); }
 }
 
 // Loopback device service: pair, take, rename, bound ack over real TCP.
@@ -192,8 +208,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
     finally
     {
-        Directory.Delete(homeRoot, recursive: true);
-        Directory.Delete(viewerRoot, recursive: true);
+        Cleanup(homeRoot);
+        Cleanup(viewerRoot);
     }
 }
 
@@ -256,7 +272,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally
     {
         listener.Stop();
-        Directory.Delete(root, recursive: true);
+        Cleanup(root);
     }
 }
 
@@ -565,8 +581,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
     finally
     {
-        Directory.Delete(homeRoot, recursive: true);
-        Directory.Delete(viewerRoot, recursive: true);
+        Cleanup(homeRoot);
+        Cleanup(viewerRoot);
     }
 }
 
@@ -584,7 +600,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         var back = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(file));
         Check(back.RootElement.TryGetProperty("worker", out _), "Concurrent atomic saves never throw and leave valid JSON");
     }
-    finally { Directory.Delete(root, recursive: true); }
+    finally { Cleanup(root); }
 }
 
 // devices.json merge-preserve: fabric extras and tombstones survive our saves.
@@ -619,7 +635,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && o["removed"]?.GetValue<bool>() == true)
         && new Converse.Core.DeviceTrustStore(dir).Devices.All(d => d.DeviceID != "aa"),
         "Forget tombstones with a bumped generation while reloads skip it");
-    Directory.Delete(dir, recursive: true);
+    Cleanup(dir);
 }
 
 // Queue semantics with a gated runner: enqueue-only, unpause, clean clear,
@@ -678,7 +694,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && merged.Messages.First(m => m.Role == "user").Text == "alpha\n\nbeta",
             "Inject-all merges the queue into one prompt (Mac parity)");
     }
-    finally { Directory.Delete(root, recursive: true); }
+    finally { Cleanup(root); }
 }
 
 // Claude text-block separators mirror the Mac: blocks stay separated in
@@ -719,7 +735,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         && migrated.Sessions.Single(s => s.Title == "Claude").Entry.Name == "Claude"
         && migrated.Sessions.Single(s => s.Title == "Custom").Entry.Name == "Claude",
         "Stored claude entry misnamed Claude Code migrates, keeping custom titles");
-    Directory.Delete(dir, recursive: true);
+    Cleanup(dir);
 }
 
 // Group store: adopt/leave/dissolve, tombstone permanence, immutability, caps.
@@ -747,7 +763,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(threw, "Invalid group IDs refuse adoption");
     var reloaded = new Converse.Core.ConverseGroupStore(dir);
     Check(reloaded.Existed && reloaded.Groups.Single().Dissolved, "Tombstones persist across restarts");
-    Directory.Delete(dir, recursive: true);
+    Cleanup(dir);
 }
 
 // Legacy migration: hand-computed vector, independent of the implementation.
@@ -802,7 +818,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     trust.Pin(new Converse.Core.TrustedDevice("dd", "D2", key, "h", 1), "dd", true, gb);
     Check(trust.Devices.Single().Generation == moved.Generation && trust.Devices.Single().LastHost == "h",
         "Same-group re-pin updates metadata without new membership");
-    Directory.Delete(dir, recursive: true);
+    Cleanup(dir);
 }
 
 // Join codes match: the joiner's prompt equals the sponsor's live review code.
@@ -826,7 +842,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && home.GroupReview.Code.Length == 39,
             "Sponsor review reproduces the joiner's 8-group code");
     }
-    finally { Directory.Delete(homeRoot, recursive: true); Directory.Delete(viewerRoot, recursive: true); }
+    finally { Cleanup(homeRoot); Cleanup(viewerRoot); }
 }
 
 // Three-device admission: a NON-sponsor member reviews with a stable code.
@@ -865,9 +881,9 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
     finally
     {
-        Directory.Delete(aRoot, recursive: true);
-        Directory.Delete(bRoot, recursive: true);
-        Directory.Delete(cRoot, recursive: true);
+        Cleanup(aRoot);
+        Cleanup(bRoot);
+        Cleanup(cRoot);
     }
 }
 
@@ -902,7 +918,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => a.GroupRequests.Count == 0) && b.CurrentGroup is null,
             "Canceled join withdraws the request and keeps no group");
     }
-    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+    finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
 // The joiner pressing Pair alone, or the sponsor approving alone, admits nobody.
@@ -929,7 +945,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(!a.Trust.Devices.Any(d => d.DeviceID == b.DeviceId) && b.CurrentGroup is null,
             "Joiner Pair without sponsor approval admits nobody");
     }
-    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+    finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
 // Cross-group and legacy peers are refused without pairing.
@@ -952,7 +968,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && !Converse.Core.DeviceSyncService.RefusesLegacy(new DeviceHello()),
             "Legacy capability sets refuse while current ones pass");
     }
-    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(dRoot, recursive: true); }
+    finally { Cleanup(aRoot); Cleanup(dRoot); }
 }
 
 // Offline dissolution converges over a control-only reconnect, sessions hidden.
@@ -997,7 +1013,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Reconnecting member learns the tombstone over control-only");
         Check(!b2.Homes.Values.Any(h => h.Rows.Count > 0), "Dissolved member sees no remote sessions");
     }
-    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+    finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
 // Leave parks remote views immediately; local work survives.
@@ -1026,7 +1042,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(b.CurrentGroup is null && b.Homes.Count == 0 && bStore.Sessions.Single(s => s.Id == local.Id).Draft == "keep me",
             "Leave hides remotes while local drafts survive");
     }
-    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+    finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
 // mDNS TXT hints: group/device parse, invalid UUIDs ignored.
@@ -1069,7 +1085,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(saved.OfType<System.Text.Json.Nodes.JsonObject>().Any(o => o["deviceID"]?.GetValue<string>() == "bb"
         && o["groupID"]?.GetValue<string>() == gid && o["pairedAt"]?.GetValue<double>() > 0),
         "Pins persist groupID with a stamped pairedAt");
-    Directory.Delete(dir, recursive: true);
+    Cleanup(dir);
 }
 
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
