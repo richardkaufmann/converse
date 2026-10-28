@@ -141,7 +141,9 @@ public sealed partial class MainWindow : Window
     private async void OnHelpClick(object sender, RoutedEventArgs e)
     {
         var help = HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "Assets", "help.json"))
-                   ?? HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "help.json"));
+                   ?? HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "Assets", "Content.json"))
+                   ?? HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "help.json"))
+                   ?? HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "Content.json"));
         var search = new TextBox { PlaceholderText = "Search help…" };
         var topics = new ListView { SelectionMode = ListViewSelectionMode.Single, Height = 140 };
         var body = new TextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
@@ -149,7 +151,8 @@ public sealed partial class MainWindow : Window
         {
             Text = help is null
                 ? "Help content is generated at build time from README.md (scripts/build-help.py); this build does not include it yet."
-                : $"Converse Help · version {help.AppVersion} · source {help.Source} @{help.SourceCommit}",
+                : $"Converse Help · version {help.AppVersion}" + (help.AppBuild.Length > 0 ? $" ({help.AppBuild})" : "")
+                  + $" · source {help.Source} @{help.SourceCommit}",
             TextWrapping = TextWrapping.Wrap,
         };
         void ShowTopic(HelpTopic? topic) => body.Text = topic is null ? "" : RenderMarkdownPlain(topic.Markdown);

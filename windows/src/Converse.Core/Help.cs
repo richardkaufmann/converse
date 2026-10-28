@@ -14,8 +14,13 @@ public sealed class HelpDocument
     public const int CurrentSchemaVersion = 1;
 
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; }
+    // Locked shared metadata (schema 1). Unknown fields are ignored on load.
+    [JsonPropertyName("title")] public string Title { get; set; } = "";
     [JsonPropertyName("appVersion")] public string AppVersion { get; set; } = "unknown";
+    [JsonPropertyName("appBuild")] public string AppBuild { get; set; } = "";
     [JsonPropertyName("sourceCommit")] public string SourceCommit { get; set; } = "unknown";
+    [JsonPropertyName("sourceURL")] public string SourceURL { get; set; } = "";
+    [JsonPropertyName("sourceSHA256")] public string SourceSHA256 { get; set; } = "";
     [JsonPropertyName("source")] public string Source { get; set; } = "README.md";
     [JsonPropertyName("topics")] public List<HelpTopic> Topics { get; set; } = new();
 
@@ -38,14 +43,19 @@ public sealed class HelpDocument
         catch { return null; }
     }
 
-    /// <summary>Case-insensitive substring search over topic titles and plain text.</summary>
+    /// <summary>
+    /// Case-insensitive substring search over topic titles and plain text,
+    /// with title hits ranked first (document order within each rank).
+    /// </summary>
     public IReadOnlyList<HelpTopic> Search(string? query)
     {
         if (string.IsNullOrWhiteSpace(query)) return Topics;
         var needle = query.Trim();
-        return Topics.Where(t =>
-            t.Title.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
-            t.PlainText.Contains(needle, StringComparison.OrdinalIgnoreCase)).ToList();
+        var titleHits = Topics.Where(t => t.Title.Contains(needle, StringComparison.OrdinalIgnoreCase));
+        var bodyOnly = Topics.Where(t =>
+            !t.Title.Contains(needle, StringComparison.OrdinalIgnoreCase) &&
+            t.PlainText.Contains(needle, StringComparison.OrdinalIgnoreCase));
+        return titleHits.Concat(bodyOnly).ToList();
     }
 
     public HelpTopic? Topic(string id) => Topics.FirstOrDefault(t => t.Id == id);

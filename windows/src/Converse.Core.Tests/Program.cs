@@ -261,14 +261,22 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
 
 // Help artifact: generated schema loads, search matches titles + body, bad schema fails closed.
 {
-    var json = "{\"schemaVersion\":1,\"appVersion\":\"0.4.3\",\"sourceCommit\":\"abc1234\",\"source\":\"README.md\",\"topics\":["
-        + "{\"id\":\"overview\",\"title\":\"Converse\",\"markdown\":\"Intro\",\"plainText\":\"Manage conversations\"},"
+    var json = "{\"schemaVersion\":1,\"title\":\"Converse\",\"appVersion\":\"0.4.5\",\"appBuild\":\"18\","
+        + "\"sourceCommit\":\"0123456789abcdef0123456789abcdef01234567-dirty\","
+        + "\"sourceURL\":\"https://github.com/richardkaufmann/converse/blob/main/README.md\","
+        + "\"sourceSHA256\":\"deadbeef\",\"futureMetadata\":{\"anything\":true},\"topics\":["
+        + "{\"id\":\"overview\",\"title\":\"Converse\",\"markdown\":\"Intro\",\"plainText\":\"Manage conversations about pairing\"},"
+        + "{\"id\":\"pairing\",\"title\":\"Pairing devices\",\"markdown\":\"Steps\",\"plainText\":\"Compare all 8 groups\"},"
         + "{\"id\":\"connect-two-macs\",\"title\":\"Connect two Macs\",\"markdown\":\"Pairing steps\",\"plainText\":\"Compare all 8 groups\"}]}";
     var help = HelpDocument.Load(json);
-    Check(help.Topics.Count == 2 && help.AppVersion == "0.4.3" && help.Topic("connect-two-macs")?.Title == "Connect two Macs",
-        "Help artifact loads with versioned topics");
-    Check(help.Search("8 GROUPS").Count == 1 && help.Search("macs").Count == 1 && help.Search("").Count == 2 && help.Search("nonexistent-term").Count == 0,
+    Check(help.Topics.Count == 3 && help.AppVersion == "0.4.5" && help.AppBuild == "18" && help.Title == "Converse"
+        && help.SourceSHA256 == "deadbeef" && help.Topic("connect-two-macs")?.Title == "Connect two Macs",
+        "Help artifact loads locked metadata and ignores unknown fields");
+    Check(help.Search("8 GROUPS").Count == 2 && help.Search("macs").Count == 1 && help.Search("").Count == 3 && help.Search("nonexistent-term").Count == 0,
         "Help search is case-insensitive over titles and plain text");
+    var ranked = help.Search("pairing");
+    Check(ranked.Count == 2 && ranked[0].Id == "pairing" && ranked[1].Id == "overview",
+        "Help search ranks title hits before body-only hits");
     var rejected = false;
     try { HelpDocument.Load("{\"schemaVersion\":99,\"topics\":[]}"); } catch (InvalidDataException) { rejected = true; }
     Check(rejected, "Help loader rejects unsupported schema versions");

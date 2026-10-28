@@ -61,10 +61,16 @@ cannot drift from `Sources/Device*.swift`.
    presence + data folder); **Help > Converse Help** is searchable offline
    documentation rendered from the shared versioned artifact generated at
    build time by `scripts/build-help.py` from the tracked `README.md`
-   (schema 1: `{schemaVersion, appVersion, sourceCommit, topics[{id,
-   title, markdown, plainText}]}`; generated `Assets/help.json` is not
-   checked in). `Converse.Core/Help.cs` loads/searches it identically for
-   any future host.
+   (locked schema 1: `{schemaVersion, title, appVersion, appBuild,
+   sourceCommit (full hash, -dirty in development), sourceURL,
+   sourceSHA256, topics[{id, title, markdown, plainText}]}`; version from
+   the authoritative root `VERSION.json`; code fences never create
+   topics; relative links become absolute GitHub links; unknown metadata
+   is ignored on load). The script's default output is repo-root
+   `Help/Content.json`; the Windows build passes `--out
+   Assets/help.json`, which is generated and never checked in.
+   `Converse.Core/Help.cs` loads either name and searches case-insensitively
+   with title hits ranked first.
 5. **Next:** three-pane workspace placements, blue-draft native editor
    parity, DPAPI identity protection in the app layer, sleep/wake,
    signed MSIX packaging (`windows/packaging/Package.appxmanifest`).
