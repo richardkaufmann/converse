@@ -8,7 +8,7 @@ namespace Converse.Core;
 // Minimal mDNS for _converse._tcp.local (RFC 6762/6763 subset): PTR/SRV/A
 // advertise + PTR browse with compression-aware decoding. Discovery is
 // unauthenticated hints only; pairing remains the trust boundary.
-public sealed record MdnsService(string Name, string Host, int Port);
+public sealed record MdnsService(string Name, string Host, int Port, ConverseGroup? Group = null, string? DeviceID = null);
 
 public sealed class MdnsDiscovery : IDisposable
 {
@@ -17,13 +17,17 @@ public sealed class MdnsDiscovery : IDisposable
     private readonly UdpClient _udp;
     private readonly string _instanceName;
     private readonly int _port;
+    private ConverseGroup? _group;
+    private string _deviceId;
     private CancellationTokenSource? _shutdown;
     public event Action<MdnsService>? Found;
 
-    public MdnsDiscovery(string instanceName, int port)
+    public MdnsDiscovery(string instanceName, int port, ConverseGroup? group = null, string deviceId = "")
     {
         _instanceName = instanceName;
         _port = port;
+        _group = group;
+        _deviceId = deviceId;
         _udp = new UdpClient(AddressFamily.InterNetwork);
         _udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         _udp.Client.Bind(new IPEndPoint(IPAddress.Any, 5353));
@@ -48,6 +52,14 @@ public sealed class MdnsDiscovery : IDisposable
     {
         var response = BuildResponse(queryName: ServiceType);
         await _udp.SendAsync(response, response.Length, new IPEndPoint(Group, 5353));
+    }
+
+    // Group changes re-announce with fresh TXT hints.
+    public void UpdateGroup(ConverseGroup? group, string deviceId)
+    {
+        _group = group;
+        _deviceId = deviceId;
+        _ = AnnounceAsync();
     }
 
     private async Task LoopAsync(CancellationToken token)
@@ -88,6 +100,7 @@ public sealed class MdnsDiscovery : IDisposable
         string? instance = null;
         string? host = null;
         var port = 0;
+        Dictionary<string, string>? txt = null;
         var addresses = new Dictionary<string, string>();
         var records = answers + ((packet[8] << 8) | packet[9]) + ((packet[10] << 8) | packet[11]);
         for (var i = 0; i < records && offset + 10 <= packet.Length; i++)
@@ -111,13 +124,20 @@ public sealed class MdnsDiscovery : IDisposable
             {
                 addresses[name] = $"{packet[rdOffset]}.{packet[rdOffset + 1]}.{packet[rdOffset + 2]}.{packet[rdOffset + 3]}";
             }
+            else if (type == 16 && rdLength > 0)
+            {
+                txt ??= new Dictionary<string, string>();
+                foreach (var (key, value) in ParseTxt(packet.Skip(rdOffset).Take(rdLength).ToArray()))
+                    txt[key] = value;
+            }
             offset = rdOffset + rdLength;
         }
         if (instance is not null && host is not null && port > 0)
         {
             var display = instance.Split('.')[0];
             if (!string.Equals(display, _instanceName, StringComparison.OrdinalIgnoreCase))
-                Found?.Invoke(new MdnsService(display, addresses.GetValueOrDefault(host, host), port));
+                Found?.Invoke(new MdnsService(display, addresses.GetValueOrDefault(host, host), port,
+                    GroupHint(txt), txt?.GetValueOrDefault("device")));
         }
     }
 
@@ -126,7 +146,7 @@ public sealed class MdnsDiscovery : IDisposable
         var hostName = Dns.GetHostName().Split('.')[0] + ".local";
         var instance = _instanceName + "." + ServiceType;
         using var stream = new MemoryStream();
-        WriteHeader(stream, flags: 0x8400, questions: 0, answers: 3);
+        WriteHeader(stream, flags: 0x8400, questions: 0, answers: 4);
         WriteName(stream, queryName);
         WriteRecordHeader(stream, type: 12, ttl: 120, data: EncodeName(instance));
         WriteName(stream, instance);
@@ -134,10 +154,61 @@ public sealed class MdnsDiscovery : IDisposable
         srv.Write(new byte[] { 0, 0, 0, 0, (byte)(_port >> 8), (byte)_port });
         WriteName(srv, hostName);
         WriteRecordHeader(stream, type: 33, ttl: 120, data: srv.ToArray());
+        WriteName(stream, instance);
+        WriteRecordHeader(stream, type: 16, ttl: 120, data: EncodeTxt());
         WriteName(stream, hostName);
         var address = LocalIPv4();
         WriteRecordHeader(stream, type: 1, ttl: 120, data: address.GetAddressBytes());
         return stream.ToArray();
+    }
+
+    // TXT hints mirror Swift txtRecord keys exactly: device/group always,
+    // name/creator only with a group, dissolved only when true. Newlines in
+    // names escape as backslash-n; hints are never trusted for admission.
+    private byte[] EncodeTxt()
+    {
+        var entries = new List<string> { "device=" + _deviceId };
+        if (_group is { } group)
+        {
+            entries.Add("group=" + group.Id);
+            entries.Add("name=" + group.Name.Replace("\n", "\\n"));
+            entries.Add("creator=" + group.Creator);
+            if (group.Dissolved) entries.Add("dissolved=1");
+        }
+        using var stream = new MemoryStream();
+        foreach (var entry in entries)
+        {
+            var bytes = Encoding.UTF8.GetBytes(entry);
+            stream.WriteByte((byte)Math.Min(bytes.Length, 255));
+            stream.Write(bytes, 0, Math.Min(bytes.Length, 255));
+        }
+        return stream.ToArray();
+    }
+
+    internal static List<(string Key, string Value)> ParseTxt(byte[] rdata)
+    {
+        var entries = new List<(string, string)>();
+        var offset = 0;
+        while (offset < rdata.Length)
+        {
+            var length = rdata[offset++];
+            if (length == 0 || offset + length > rdata.Length) break;
+            var text = Encoding.UTF8.GetString(rdata, offset, length);
+            offset += length;
+            var equals = text.IndexOf('=');
+            if (equals > 0) entries.Add((text[..equals], text[(equals + 1)..]));
+        }
+        return entries;
+    }
+
+    internal static ConverseGroup? GroupHint(Dictionary<string, string>? txt)
+    {
+        if (txt is null || !txt.TryGetValue("group", out var id) || !Guid.TryParse(id, out _)) return null;
+        return new ConverseGroup
+        {
+            Id = id, Name = txt.GetValueOrDefault("name", ""),
+            Creator = txt.GetValueOrDefault("creator", ""), Dissolved = txt.GetValueOrDefault("dissolved") == "1",
+        };
     }
 
     private static IPAddress LocalIPv4() =>

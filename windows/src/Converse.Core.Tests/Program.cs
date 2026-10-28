@@ -16,6 +16,23 @@ byte[] FixedKey(byte value)
 }
 byte[] Utf8(string value) => System.Text.Encoding.UTF8.GetBytes(value);
 
+// Groups admission helper: home owns a group, the joiner connects with
+// intent, the sponsor approves its own pending request, and the joiner's
+// PairingConfirmation callback presses Pair. Returns when both sides agree.
+async Task<bool> JoinPair(DeviceSyncService home, DeviceSyncService joiner, Func<bool> done)
+{
+    if (home.CurrentGroup is null) await home.CreateGroupAsync("Test Group");
+    await joiner.ConnectManualAsync("127.0.0.1", home.ListeningPort, home.CurrentGroup!.Id);
+    var deadline = DateTime.UtcNow.AddSeconds(15);
+    while (home.GroupRequests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
+    if (home.GroupRequests.Count == 0) return false;
+    await home.ReviewGroupRequestAsync(home.GroupRequests[0]);
+    await home.ApproveGroupReviewAsync();
+    deadline = DateTime.UtcNow.AddSeconds(15);
+    while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+    return done();
+}
+
 Console.WriteLine("ChaCha20Poly1305 supported: " + ChaCha20Poly1305.IsSupported);
 Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on Windows/Linux)");
 
@@ -160,7 +177,6 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         viewer.PairingConfirmation = _ => Task.FromResult(true);
         await home.StartAsync(0);
         await viewer.StartAsync(0);
-        await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -168,7 +184,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             return done();
         }
         var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
-        Check(await Until(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Loopback pairing publishes home sidebar");
+        Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Loopback pairing publishes home sidebar");
         await viewer.AcquireRemoteAsync(gid);
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
@@ -506,7 +522,6 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         viewer.PairingConfirmation = _ => Task.FromResult(true);
         await home.StartAsync(0);
         await viewer.StartAsync(0);
-        await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -514,7 +529,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             return done();
         }
         var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
-        Check(await Until(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true),
+        Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true),
             "Round-two pairing publishes the claude home sidebar");
         await viewer.AcquireRemoteAsync(gid);
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } t
@@ -598,9 +613,12 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "New pins store canonical keys with endpoint metadata");
     trust.Forget("aa");
     var after = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "devices.json")))!.AsArray();
-    Check(after.OfType<System.Text.Json.Nodes.JsonObject>().All(o => o["deviceID"]?.GetValue<string>() != "aa")
-        && after.OfType<System.Text.Json.Nodes.JsonObject>().Any(o => o["deviceID"]?.GetValue<string>() == "bb"),
-        "Forget drops the entry but keeps unrelated tombstones");
+    var tombed = after.OfType<System.Text.Json.Nodes.JsonObject>().First(o => o["deviceID"]?.GetValue<string>() == "aa");
+    Check(tombed["removed"]?.GetValue<bool>() == true && (tombed["generation"]?.GetValue<int>() ?? 0) > 0
+        && after.OfType<System.Text.Json.Nodes.JsonObject>().Any(o => o["deviceID"]?.GetValue<string>() == "bb"
+            && o["removed"]?.GetValue<bool>() == true)
+        && new Converse.Core.DeviceTrustStore(dir).Devices.All(d => d.DeviceID != "aa"),
+        "Forget tombstones with a bumped generation while reloads skip it");
     Directory.Delete(dir, recursive: true);
 }
 
@@ -701,6 +719,356 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         && migrated.Sessions.Single(s => s.Title == "Claude").Entry.Name == "Claude"
         && migrated.Sessions.Single(s => s.Title == "Custom").Entry.Name == "Claude",
         "Stored claude entry misnamed Claude Code migrates, keeping custom titles");
+    Directory.Delete(dir, recursive: true);
+}
+
+// Group store: adopt/leave/dissolve, tombstone permanence, immutability, caps.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-groups-").FullName;
+    var store = new Converse.Core.ConverseGroupStore(dir);
+    Check(store.Current is null && !store.Existed, "Fresh group store starts groupless");
+    var group = new Converse.Core.ConverseGroup { Id = Guid.NewGuid().ToString("d"), Name = "Team", Creator = new string('c', 64) };
+    store.Adopt(group);
+    Check(store.Current?.Id == group.Id, "Adopt sets the current group");
+    var renamed = new Converse.Core.ConverseGroup { Id = group.Id, Name = "Renamed", Creator = group.Creator };
+    var threw = false;
+    try { store.Adopt(renamed); } catch { threw = true; }
+    Check(threw, "Group identity is immutable");
+    store.Leave();
+    Check(store.Current is null && store.Groups.Count == 1, "Leave keeps the group known but currentless");
+    store.Dissolve(group);
+    Check(store.Current is null && store.Groups.Single().Dissolved, "Dissolve writes a permanent tombstone");
+    threw = false;
+    try { store.Adopt(group); } catch { threw = true; }
+    Check(threw, "Adopting a dissolved group refuses");
+    var bad = new Converse.Core.ConverseGroup { Id = "not-a-uuid", Name = "Bad", Creator = new string('c', 64) };
+    threw = false;
+    try { store.Adopt(bad); } catch { threw = true; }
+    Check(threw, "Invalid group IDs refuse adoption");
+    var reloaded = new Converse.Core.ConverseGroupStore(dir);
+    Check(reloaded.Existed && reloaded.Groups.Single().Dissolved, "Tombstones persist across restarts");
+    Directory.Delete(dir, recursive: true);
+}
+
+// Legacy migration: hand-computed vector, independent of the implementation.
+{
+    var ids = new[] { new string('b', 64), new string('a', 64) };
+    var first = ids.OrderBy(x => x, StringComparer.Ordinal).First();
+    var hash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("Converse legacy group v1/" + first))).ToLowerInvariant();
+    var raw = hash[..32];
+    var expected = $"{raw[..8]}-{raw[8..12]}-{raw[12..16]}-{raw[16..20]}-{raw[20..32]}";
+    var group = Converse.Core.ConverseGroupStore.Migrate(ids);
+    Check(group is not null && group.Id == expected && group.Name == "Converse Group" && group.Creator == first,
+        "Migration derives the deterministic default group ID");
+    Check(Converse.Core.ConverseGroupStore.Migrate(ids.Reverse().ToArray())?.Id == expected,
+        "Migration is roster-order independent");
+    Check(Converse.Core.ConverseGroupStore.Migrate(new[] { ids[0] }) is null
+        && Converse.Core.ConverseGroupStore.Migrate(Array.Empty<string>()) is null,
+        "Solo or empty rosters migrate to no group");
+}
+
+// Request binding: exact-double equality plus liveness.
+{
+    var live = new Converse.Core.GroupJoinRequest
+    {
+        Id = Guid.NewGuid(), GroupID = "g", RequesterID = new string('r', 64),
+        RequesterName = "R", SponsorID = "s", ExpiresAt = Converse.Core.DeviceTrustStore.AppleNow() + 60, Approved = false,
+    };
+    var copy = new Converse.Core.GroupJoinRequest
+    {
+        Id = live.Id, GroupID = live.GroupID, RequesterID = live.RequesterID, RequesterName = live.RequesterName,
+        SponsorID = live.SponsorID, ExpiresAt = live.ExpiresAt, Approved = live.Approved,
+    };
+    Check(Converse.Core.GroupJoinRequests.Same(live, copy) && Converse.Core.GroupJoinRequests.Live(live),
+        "Identical requests bind and report live");
+    copy.ExpiresAt = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(copy.ExpiresAt) + 1);
+    Check(!Converse.Core.GroupJoinRequests.Same(live, copy), "One-ulp expiry drift breaks binding (exact doubles)");
+    live.Approved = true;
+    Check(!Converse.Core.GroupJoinRequests.Live(live), "Approved requests are no longer live");
+}
+
+// Pins scope to groups: same device/key in another group is a fresh admission.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-pinscope-").FullName;
+    var trust = new Converse.Core.DeviceTrustStore(dir);
+    var key = new byte[32];
+    var ga = Guid.NewGuid().ToString("d");
+    var gb = Guid.NewGuid().ToString("d");
+    trust.Pin(new Converse.Core.TrustedDevice("dd", "D", key, null, null), "dd", true, ga);
+    var firstGen = trust.Devices.Single().Generation;
+    trust.Pin(new Converse.Core.TrustedDevice("dd", "D", key, null, null), "dd", true, gb);
+    var moved = trust.Devices.Single();
+    Check(moved.GroupID == gb && moved.Generation != firstGen, "Re-pin to another group mints fresh membership");
+    trust.Pin(new Converse.Core.TrustedDevice("dd", "D2", key, "h", 1), "dd", true, gb);
+    Check(trust.Devices.Single().Generation == moved.Generation && trust.Devices.Single().LastHost == "h",
+        "Same-group re-pin updates metadata without new membership");
+    Directory.Delete(dir, recursive: true);
+}
+
+// Join codes match: the joiner's prompt equals the sponsor's live review code.
+{
+    var homeRoot = Directory.CreateTempSubdirectory("converse-codeeq-").FullName;
+    var viewerRoot = Directory.CreateTempSubdirectory("converse-codeeqv-").FullName;
+    try
+    {
+        using var home = new DeviceSyncService(homeRoot, new SessionStore(homeRoot, new FakeRunner()), "HomePC");
+        using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        viewer.PairingConfirmation = _ => Task.FromResult(true);
+        await home.StartAsync(0);
+        await viewer.StartAsync(0);
+        await home.CreateGroupAsync("Codes");
+        await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort, home.CurrentGroup!.Id);
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (home.GroupRequests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
+        await home.ReviewGroupRequestAsync(home.GroupRequests[0]);
+        Check(viewer.GroupPairingPrompts.Count == 1 && home.GroupReview is not null
+            && home.GroupReview.Code == viewer.GroupPairingPrompts[0].Code
+            && home.GroupReview.Code.Length == 39,
+            "Sponsor review reproduces the joiner's 8-group code");
+    }
+    finally { Directory.Delete(homeRoot, recursive: true); Directory.Delete(viewerRoot, recursive: true); }
+}
+
+// Three-device admission: a NON-sponsor member reviews with a stable code.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-3a-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-3b-").FullName;
+    var cRoot = Directory.CreateTempSubdirectory("converse-3c-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
+        using var c = new DeviceSyncService(cRoot, new SessionStore(cRoot, new FakeRunner()), "C");
+        a.PairingConfirmation = _ => Task.FromResult(true);
+        b.PairingConfirmation = _ => Task.FromResult(true);
+        c.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0);
+        await b.StartAsync(0);
+        await c.StartAsync(0);
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        Check(await JoinPair(a, b, () => b.CurrentGroup?.Id == a.CurrentGroup?.Id), "Member B joins through sponsor A");
+        await c.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
+        Check(await Until(() => b.GroupRequests.Count == 1), "Sponsor publishes the join request to members");
+        await b.ReviewGroupRequestAsync(b.GroupRequests[0]);
+        string? joinerCode = null;
+        Check(await Until(() => b.GroupReview is not null
+            && (joinerCode = c.GroupPairingPrompts.FirstOrDefault()?.Code) is not null
+            && b.GroupReview.Code == joinerCode), "Review by another member reproduces the joiner's code");
+        await b.ApproveGroupReviewAsync();
+        Check(await Until(() => c.CurrentGroup?.Id == a.CurrentGroup?.Id
+            && a.Trust.Devices.Any(d => d.DeviceID == c.DeviceId)), "Relayed approval admits the joiner");
+    }
+    finally
+    {
+        Directory.Delete(aRoot, recursive: true);
+        Directory.Delete(bRoot, recursive: true);
+        Directory.Delete(cRoot, recursive: true);
+    }
+}
+
+// Wrong codes and missing gates refuse admission silently.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-ng1-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-ng2-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
+        b.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0);
+        await b.StartAsync(0);
+        await a.CreateGroupAsync("Gates");
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        await b.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
+        Check(await Until(() => a.GroupRequests.Count == 1), "Negative setup sponsors the join");
+        await a.ReviewGroupRequestAsync(a.GroupRequests[0]);
+        var live = a.GroupReview!;
+        a.GroupReview = new Converse.Core.GroupJoinReview { Request = live.Request, Code = "0000 0000 0000 0000 0000 0000 0000 0000" };
+        await a.ApproveGroupReviewAsync();
+        await Task.Delay(500);
+        Check(!a.Trust.Devices.Any(d => d.DeviceID == b.DeviceId) && b.CurrentGroup is null,
+            "Tampered approval code refuses admission");
+        b.RejectPairing(b.GroupPairingPrompts[0].PeerId);
+        Check(await Until(() => a.GroupRequests.Count == 0) && b.CurrentGroup is null,
+            "Canceled join withdraws the request and keeps no group");
+    }
+    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+}
+
+// The joiner pressing Pair alone, or the sponsor approving alone, admits nobody.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-1g1-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-1g2-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
+        b.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0);
+        await b.StartAsync(0);
+        await a.CreateGroupAsync("Gates");
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        await b.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
+        Check(await Until(() => b.GroupPairingPrompts.Count == 1 && a.GroupRequests.Count == 1), "One-gate setup reaches both prompts");
+        await Task.Delay(500);
+        Check(!a.Trust.Devices.Any(d => d.DeviceID == b.DeviceId) && b.CurrentGroup is null,
+            "Joiner Pair without sponsor approval admits nobody");
+    }
+    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+}
+
+// Cross-group and legacy peers are refused without pairing.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-iso1-").FullName;
+    var dRoot = Directory.CreateTempSubdirectory("converse-iso2-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        using var d = new DeviceSyncService(dRoot, new SessionStore(dRoot, new FakeRunner()), "D");
+        await a.StartAsync(0);
+        await d.StartAsync(0);
+        await a.CreateGroupAsync("Alpha");
+        await d.CreateGroupAsync("Beta");
+        await d.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+        await Task.Delay(500);
+        Check(!a.Trust.Devices.Any(x => x.DeviceID == d.DeviceId) && a.LastOutcome.Contains("Groups"),
+            "Cross-group reconnect refuses without generic pairing");
+        Check(Converse.Core.DeviceSyncService.RefusesLegacy(new DeviceHello { Capabilities = new[] { "sidebar" } })
+            && !Converse.Core.DeviceSyncService.RefusesLegacy(new DeviceHello()),
+            "Legacy capability sets refuse while current ones pass");
+    }
+    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(dRoot, recursive: true); }
+}
+
+// Offline dissolution converges over a control-only reconnect, sessions hidden.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-dis1-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-dis2-").FullName;
+    try
+    {
+        var bStore = new SessionStore(bRoot, new FakeRunner());
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        a.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0);
+        await a.CreateGroupAsync("Doomed");
+        string groupId;
+        {
+            using var b = new DeviceSyncService(bRoot, bStore, "B");
+            b.PairingConfirmation = _ => Task.FromResult(true);
+            await b.StartAsync(0);
+            async Task<bool> Until(Func<bool> done)
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(15);
+                while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+                return done();
+            }
+            groupId = a.CurrentGroup!.Id;
+            Check(await JoinPair(a, b, () => b.CurrentGroup?.Id == groupId), "Dissolve setup joins B");
+        }
+        await a.DissolveGroupAsync(a.KnownGroups.First(g => g.Id == groupId));
+        Check(a.CurrentGroup is null && a.KnownGroups.Any(g => g.Id == groupId && g.Dissolved),
+            "Dissolve clears current and stores the tombstone");
+        using var b2 = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
+        await b2.StartAsync(0);
+        Check(b2.CurrentGroup?.Id == groupId, "Offline member still believes in the group");
+        await b2.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+        async Task<bool> Until2(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        Check(await Until2(() => b2.CurrentGroup is null && b2.KnownGroups.Any(g => g.Id == groupId && g.Dissolved)),
+            "Reconnecting member learns the tombstone over control-only");
+        Check(!b2.Homes.Values.Any(h => h.Rows.Count > 0), "Dissolved member sees no remote sessions");
+    }
+    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+}
+
+// Leave parks remote views immediately; local work survives.
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-leave1-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-leave2-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        var bStore = new SessionStore(bRoot, new FakeRunner());
+        using var b = new DeviceSyncService(bRoot, bStore, "B");
+        a.PairingConfirmation = _ => Task.FromResult(true);
+        b.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0);
+        await b.StartAsync(0);
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        var local = bStore.Create(bStore.Entries.First(e => e.Engine == "codex"));
+        local.Draft = "keep me";
+        Check(await JoinPair(a, b, () => b.Homes.ContainsKey(a.DeviceId)), "Leave setup joins B");
+        await b.LeaveGroupAsync();
+        Check(b.CurrentGroup is null && b.Homes.Count == 0 && bStore.Sessions.Single(s => s.Id == local.Id).Draft == "keep me",
+            "Leave hides remotes while local drafts survive");
+    }
+    finally { Directory.Delete(aRoot, recursive: true); Directory.Delete(bRoot, recursive: true); }
+}
+
+// mDNS TXT hints: group/device parse, invalid UUIDs ignored.
+{
+    static byte[] Txt(params string[] entries)
+    {
+        using var stream = new MemoryStream();
+        foreach (var entry in entries)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(entry);
+            stream.WriteByte((byte)bytes.Length);
+            stream.Write(bytes);
+        }
+        return stream.ToArray();
+    }
+    var id = Guid.NewGuid().ToString("d");
+    var parsed = Converse.Core.MdnsDiscovery.ParseTxt(Txt("device=" + new string('d', 64), "group=" + id, "name=G", "creator=" + new string('c', 64)));
+    var hint = Converse.Core.MdnsDiscovery.GroupHint(parsed.ToDictionary(e => e.Key, e => e.Value));
+    Check(hint is not null && hint.Id == id && hint.Name == "G" && !hint.Dissolved, "TXT hints parse group identity");
+    var bad = Converse.Core.MdnsDiscovery.GroupHint(new Dictionary<string, string> { ["group"] = "nope" });
+    Check(bad is null, "Invalid group UUID hints are ignored");
+    var dead = Converse.Core.MdnsDiscovery.GroupHint(new Dictionary<string, string> { ["group"] = id, ["dissolved"] = "1" });
+    Check(dead is not null && dead.Dissolved, "Dissolved flag survives the hint round-trip");
+}
+
+// devices.json carries groupID; Mac-shaped records decode fully.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-gid-").FullName;
+    var key = Convert.ToBase64String(new byte[32]);
+    var gid = Guid.NewGuid().ToString("d");
+    File.WriteAllText(Path.Combine(dir, "devices.json"),
+        "[{\"deviceID\":\"aa\",\"name\":\"Mac\",\"publicKey\":\"" + key + "\",\"pairedAt\":789123456.5,\"generation\":2,\"changedBy\":\"aa\","
+        + "\"metadataGeneration\":3,\"metadataBy\":\"aa\",\"groupID\":\"" + gid + "\"}]");
+    var trust = new Converse.Core.DeviceTrustStore(dir);
+    var loaded = trust.Devices.Single();
+    Check(loaded.GroupID == gid && loaded.PairedAt == 789123456.5 && loaded.Generation == 2 && loaded.MetadataBy == "aa",
+        "Mac-shaped membership records decode with group and counters");
+    trust.Pin(new Converse.Core.TrustedDevice("bb", "B", new byte[32], null, null), "bb", true, gid);
+    var saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "devices.json")))!.AsArray();
+    Check(saved.OfType<System.Text.Json.Nodes.JsonObject>().Any(o => o["deviceID"]?.GetValue<string>() == "bb"
+        && o["groupID"]?.GetValue<string>() == gid && o["pairedAt"]?.GetValue<double>() > 0),
+        "Pins persist groupID with a stamped pairedAt");
     Directory.Delete(dir, recursive: true);
 }
 

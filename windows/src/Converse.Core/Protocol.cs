@@ -56,6 +56,12 @@ public static class DeviceKind
     public const string Ping = "ping";
     public const string Pong = "pong";
     public const string PairConfirm = "pair.confirm";
+    public const string FabricMembers = "fabric.members";
+    public const string GroupState = "group.state";
+    public const string GroupRequests = "group.requests";
+    public const string GroupReview = "group.review";
+    public const string GroupReviewDetail = "group.review.detail";
+    public const string GroupApprove = "group.approve";
 }
 
 public static class DeviceFrame
@@ -133,7 +139,44 @@ public sealed class DeviceHello
     [JsonPropertyName("deviceName")] public string DeviceName { get; set; } = "";
     [JsonPropertyName("converseVersion")] public string ConverseVersion { get; set; } = "";
     [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; set; } = 1;
-    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "transcript", "commands", "blobs" };
+    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1" };
+    [JsonPropertyName("listenPort")] public int? ListenPort { get; set; }
+    [JsonPropertyName("group")] public ConverseGroup? Group { get; set; }
+    [JsonPropertyName("joinGroupID")] public string? JoinGroupID { get; set; }
+}
+
+// A group is an immutable identity/name plus a permanent dissolution
+// tombstone. Discovery supplies hints; only an authenticated member may
+// convey state. JSON keys match Swift ConverseGroup Codable exactly.
+public sealed class ConverseGroup
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("creator")] public string Creator { get; set; } = "";
+    [JsonPropertyName("dissolved")] public bool Dissolved { get; set; }
+    public bool Valid =>
+        Guid.TryParse(Id, out _) && Name.Trim().Length > 0
+        && System.Text.Encoding.UTF8.GetByteCount(Name) <= 120
+        && Creator.Length == 64 && Creator.All(c => Uri.IsHexDigit(c) && !char.IsUpper(c));
+}
+
+public sealed class GroupJoinRequest
+{
+    [JsonPropertyName("id")] public Guid Id { get; set; }
+    [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
+    [JsonPropertyName("requesterID")] public string RequesterID { get; set; } = "";
+    [JsonPropertyName("requesterName")] public string RequesterName { get; set; } = "";
+    [JsonPropertyName("sponsorID")] public string SponsorID { get; set; } = "";
+    // Apple-epoch DOUBLE, preserved exactly end to end. Never convert to
+    // DateTime ticks: tick rounding breaks request equality checks.
+    [JsonPropertyName("expiresAt")] public double ExpiresAt { get; set; }
+    [JsonPropertyName("approved")] public bool Approved { get; set; }
+}
+
+public sealed class GroupJoinReview
+{
+    [JsonPropertyName("request")] public GroupJoinRequest Request { get; set; } = new();
+    [JsonPropertyName("code")] public string Code { get; set; } = "";
 }
 
 public sealed class DeviceSidebarRow

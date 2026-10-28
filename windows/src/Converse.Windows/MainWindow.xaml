@@ -55,6 +55,7 @@
         <MenuBar Grid.Row="0">
             <MenuBarItem Title="Converse">
                 <MenuFlyoutItem Text="Setup" Click="OnSetupClick"/>
+                <MenuFlyoutItem Text="Converse Groups…" Click="OnGroupsClick"/>
                 <MenuFlyoutItem Text="Connect to Other Converses…" Click="OnConnectClick"/>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="New session" Click="OnNewSessionClick"/>
@@ -85,6 +86,7 @@
                           ItemTemplateSelector="{StaticResource SidebarSelector}"/>
                 <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Padding="8">
                     <Button Content="New session" Click="OnNewSessionClick"/>
+                    <Button Content="Groups…" Click="OnGroupsClick"/>
                     <Button Content="Connect…" Click="OnConnectClick"/>
                 </StackPanel>
             </Grid>

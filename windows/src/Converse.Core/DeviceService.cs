@@ -1,34 +1,50 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Converse.Core;
 
 // Pairwise device sync mirroring DeviceTransport/DeviceIdentity/DeviceSync.
 // Home-authoritative sessions, one fenced display lease per session,
 // durable command dedup with honest uncertain recovery.
-public sealed record TrustedDevice(string DeviceID, string Name, byte[] PublicKey, string? LastHost, int? LastPort);
+//
+// Versioned membership records, same shape and rules as Swift: the JSON
+// keys must match Mac TrustedDevice Codable exactly because both sides
+// decode fabric.members (pairedAt is REQUIRED on the Mac side). The
+// sender's authentication grants fabric-administration authority;
+// records are never accepted pre-trust.
+public sealed record TrustedDevice(
+    [property: JsonPropertyName("deviceID")] string DeviceID,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("publicKey")] byte[] PublicKey,
+    [property: JsonPropertyName("lastHost")] string? LastHost,
+    [property: JsonPropertyName("lastPort")] int? LastPort,
+    [property: JsonPropertyName("pairedAt")] double PairedAt = 0,
+    [property: JsonPropertyName("generation")] ulong? Generation = null,
+    [property: JsonPropertyName("changedBy")] string? ChangedBy = null,
+    [property: JsonPropertyName("removed")] bool? Removed = null,
+    [property: JsonPropertyName("metadataGeneration")] ulong? MetadataGeneration = null,
+    [property: JsonPropertyName("metadataBy")] string? MetadataBy = null,
+    [property: JsonPropertyName("groupID")] string? GroupID = null);
 
 public sealed class DeviceTrustStore
 {
     private readonly string _file;
-    public List<TrustedDevice> Devices { get; private set; } = new();
-    private sealed record Saved(string? DeviceID, string? Name, byte[]? PublicKey, string? LastHost, int? LastPort, bool Removed = false);
-    // The fabric branch writes this file camelCase with membership fields
-    // (generation, removed, ...); read it tolerantly and skip tombstones so a
-    // shared data folder cannot null-key the sidebar homes at startup.
+    private readonly object _gate = new();
+    private List<TrustedDevice> _records = new();
+    public List<TrustedDevice> Records { get { lock (_gate) return _records.ToList(); } }
+    public List<TrustedDevice> Devices { get { lock (_gate) return _records.Where(d => d.Removed != true).ToList(); } }
     private static readonly JsonSerializerOptions ReadOptions = new() { PropertyNameCaseInsensitive = true };
     public DeviceTrustStore(string folder)
     {
         Directory.CreateDirectory(folder);
         _file = Path.Combine(folder, "devices.json");
         if (File.Exists(_file))
-        {
-            var saved = JsonSerializer.Deserialize<List<Saved>>(File.ReadAllBytes(_file), ReadOptions) ?? new();
-            Devices = saved
-                .Where(s => !s.Removed && !string.IsNullOrEmpty(s.DeviceID) && s.PublicKey is { Length: > 0 })
-                .Select(s => new TrustedDevice(s.DeviceID!, s.Name ?? s.DeviceID!, s.PublicKey!, s.LastHost, s.LastPort)).ToList();
-        }
+            _records = (JsonSerializer.Deserialize<List<TrustedDevice>>(File.ReadAllBytes(_file), ReadOptions) ?? new())
+                .Where(d => !string.IsNullOrEmpty(d.DeviceID) && d.PublicKey is { Length: 32 })
+                .Select(d => d with { Name = BoundedName(string.IsNullOrEmpty(d.Name) ? d.DeviceID : d.Name) }).ToList();
     }
     public string Check(string deviceId, byte[] publicKey)
     {
@@ -36,25 +52,134 @@ public sealed class DeviceTrustStore
         if (device is null) return "unknown";
         return device.PublicKey.AsSpan().SequenceEqual(publicKey) ? "trusted" : "keyChanged";
     }
-    public void Pin(TrustedDevice device)
+    private ulong NextGeneration()
     {
-        var next = Devices.Where(d => d.DeviceID != device.DeviceID).Concat(new[] { device }).ToList();
-        Save(next, new HashSet<string>());
-        Devices = next;
+        var highest = _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max();
+        if (highest >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
+        return highest + 1;
     }
-    public void Forget(string deviceId)
+    public static double AppleNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200;
+    public static string BoundedName(string name)
     {
-        var next = Devices.Where(d => d.DeviceID != deviceId).ToList();
-        Save(next, new HashSet<string> { deviceId });
-        Devices = next;
+        var result = new System.Text.StringBuilder();
+        var bytes = 0;
+        foreach (var rune in name.EnumerateRunes())
+        {
+            if (bytes + rune.Utf8SequenceLength > 200) break;
+            result.Append(rune.ToString());
+            bytes += rune.Utf8SequenceLength;
+        }
+        return result.ToString();
     }
-    // Merge-preserve write: the fabric branch stores membership fields
-    // (generation, removed tombstones, ...) beside our keys, so a save must
-    // never rewrite the file from our projection alone. Known keys are
-    // stored in canonical fabric (camelCase) casing; unknown fields and
-    // tombstones we never loaded ride along untouched. Pinning clears a
-    // tombstone only for the device just approved by a human on both sides.
-    private void Save(List<TrustedDevice> devices, HashSet<string> removed)
+    // Pin scopes to a group: same device/key in another group is a fresh
+    // admission, never an update. Only fresh human admission (reviewed
+    // join) may supersede a tombstone.
+    public void Pin(TrustedDevice device, string? issuer = null, bool allowAdmission = true, string? groupID = null)
+    {
+        lock (_gate)
+        {
+            device = device with { Name = BoundedName(device.Name) };
+            var old = _records.FirstOrDefault(d => d.DeviceID == device.DeviceID);
+            var active = old is not null && old.Removed != true
+                && old.PublicKey.AsSpan().SequenceEqual(device.PublicKey) && old.GroupID == groupID;
+            if (!active && !allowAdmission) throw new InvalidDataException("Fresh human admission required");
+            if (active && old!.Name == device.Name && (device.LastHost is null || old.LastHost == device.LastHost)
+                && (device.LastPort is null || old.LastPort == device.LastPort)) return;
+            if ((old?.MetadataGeneration ?? 0) >= ulong.MaxValue - 2) throw new InvalidDataException("Metadata counter exhausted");
+            var member = device with
+            {
+                Generation = active ? old!.Generation : NextGeneration(),
+                ChangedBy = active ? old!.ChangedBy : issuer ?? device.DeviceID,
+                Removed = false,
+                PairedAt = active && old!.PairedAt > 0 ? old.PairedAt : AppleNow(),
+                LastHost = device.LastHost ?? old?.LastHost,
+                LastPort = device.LastPort ?? old?.LastPort,
+                MetadataGeneration = checked((old?.MetadataGeneration ?? 0) + 1),
+                MetadataBy = issuer ?? device.DeviceID,
+                GroupID = groupID,
+            };
+            var next = _records.Where(d => d.DeviceID != device.DeviceID).Append(member).ToList();
+            if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
+            Save(next);
+            _records = next;
+        }
+    }
+    // Forget writes a versioned removal tombstone (Mac parity) so the
+    // removal propagates; it never just deletes the row.
+    public void Forget(string deviceId, string? issuer = null)
+    {
+        lock (_gate)
+        {
+            var old = _records.FirstOrDefault(d => d.DeviceID == deviceId);
+            if (old is null) return;
+            var next = _records.Where(d => d.DeviceID != deviceId)
+                .Append(old with { Generation = NextGeneration(), ChangedBy = issuer ?? deviceId, Removed = true }).ToList();
+            Save(next);
+            _records = next;
+        }
+    }
+    public void MigrateLegacyGroup(string id)
+    {
+        lock (_gate)
+        {
+            var next = _records.Select(d => d.GroupID is null ? d with { GroupID = id } : d).ToList();
+            Save(next);
+            _records = next;
+        }
+    }
+    public bool Merge(IReadOnlyList<TrustedDevice> incoming)
+    {
+        lock (_gate)
+        {
+            if (incoming.Count > 512 || incoming.Any(d => d.PublicKey.Length != 32
+                || DeviceBlob.DeviceIdForPublicKey(d.PublicKey) != d.DeviceID
+                || (d.GroupID is not null && !Guid.TryParse(d.GroupID, out _))
+                || System.Text.Encoding.UTF8.GetByteCount(d.Name) > 200
+                || (d.MetadataBy?.Length ?? 0) > 64 || (d.MetadataGeneration ?? 0) >= ulong.MaxValue - 1
+                || (d.ChangedBy?.Length ?? 0) > 64 || (d.LastHost?.Length ?? 0) > 253 || d.LastPort is < 1 or > 65535
+                || (d.Generation ?? 0) >= ulong.MaxValue - 1)) throw new InvalidDataException("Invalid membership");
+            var next = _records.ToList();
+            var changed = false;
+            foreach (var member in incoming)
+            {
+                var index = next.FindIndex(d => d.DeviceID == member.DeviceID);
+                if (index < 0) { next.Add(member); changed = true; continue; }
+                var old = next[index];
+                var newer = (member.Generation ?? 0) > (old.Generation ?? 0)
+                    || ((member.Generation ?? 0) == (old.Generation ?? 0) && ((member.Removed == true && old.Removed != true)
+                    || ((member.Removed == true) == (old.Removed == true) && string.CompareOrdinal(member.ChangedBy ?? "", old.ChangedBy ?? "") > 0)));
+                if (newer) { next[index] = member; changed = true; }
+                else if ((member.Generation ?? 0) == (old.Generation ?? 0) && (member.Removed == true) == (old.Removed == true)
+                    && (member.ChangedBy ?? "") == (old.ChangedBy ?? "") && old.PublicKey.AsSpan().SequenceEqual(member.PublicKey)
+                    && ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0)
+                    || ((member.MetadataGeneration ?? 0) == (old.MetadataGeneration ?? 0)
+                    && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0)))
+                {
+                    next[index] = old with
+                    {
+                        Name = member.Name, LastHost = member.LastHost, LastPort = member.LastPort,
+                        MetadataGeneration = member.MetadataGeneration, MetadataBy = member.MetadataBy,
+                    };
+                    changed = true;
+                }
+            }
+            if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
+            if (!changed) return false;
+            Save(next);
+            _records = next;
+            return true;
+        }
+    }
+    // Merge-preserve write: unknown future keys ride along untouched while
+    // every known membership key is stored canonically. Tombstones are
+    // ordinary records here (Forget tombstones, never deletes), so no
+    // separate removed set is needed.
+    private static readonly string[] KnownKeys =
+        { "deviceID", "DeviceID", "name", "Name", "publicKey", "PublicKey", "pairedAt", "PairedAt",
+          "lastHost", "LastHost", "lastPort", "LastPort", "generation", "Generation", "changedBy", "ChangedBy",
+          "removed", "Removed", "metadataGeneration", "MetadataGeneration", "metadataBy", "MetadataBy",
+          "groupID", "GroupID" };
+    private void Save(List<TrustedDevice> devices)
     {
         System.Text.Json.Nodes.JsonArray existing = new();
         try
@@ -78,24 +203,28 @@ public sealed class DeviceTrustStore
             var entry = byId.TryGetValue(device.DeviceID, out var prior)
                 ? (System.Text.Json.Nodes.JsonObject)prior.DeepClone()
                 : new System.Text.Json.Nodes.JsonObject();
-            foreach (var key in new[] { "DeviceID", "Name", "PublicKey", "LastHost", "LastPort", "Removed", "removed" })
-                entry.Remove(key);
+            foreach (var key in KnownKeys) entry.Remove(key);
             entry["deviceID"] = device.DeviceID;
             entry["name"] = device.Name;
             entry["publicKey"] = Convert.ToBase64String(device.PublicKey);
-            entry.Remove("lastHost");
-            entry.Remove("lastPort");
+            entry["pairedAt"] = device.PairedAt;
             if (device.LastHost is not null) entry["lastHost"] = device.LastHost;
             if (device.LastPort is not null) entry["lastPort"] = device.LastPort;
+            if (device.Generation is not null) entry["generation"] = device.Generation.Value;
+            if (device.ChangedBy is not null) entry["changedBy"] = device.ChangedBy;
+            if (device.Removed is not null) entry["removed"] = device.Removed.Value;
+            if (device.MetadataGeneration is not null) entry["metadataGeneration"] = device.MetadataGeneration.Value;
+            if (device.MetadataBy is not null) entry["metadataBy"] = device.MetadataBy;
+            if (device.GroupID is not null) entry["groupID"] = device.GroupID;
             next.Add(entry);
         }
         foreach (var (id, entry) in byId)
-            if (!seen.Contains(id) && !removed.Contains(id)) next.Add((System.Text.Json.Nodes.JsonNode)entry.DeepClone());
+            if (!seen.Contains(id)) next.Add((System.Text.Json.Nodes.JsonNode)entry.DeepClone());
         AtomicJson.Write(_file, next);
     }
 }
 
-public sealed record PairingPrompt(string PeerName, string Fingerprint, string Code, bool KeyChanged, bool IsInitiator = false);
+public sealed record PairingPrompt(string PeerName, string Fingerprint, string Code, bool KeyChanged, bool IsInitiator = false, Guid PeerId = default);
 
 public sealed class RemoteHomeState
 {
@@ -107,6 +236,7 @@ public sealed class RemoteHomeState
 
 internal sealed class Peer
 {
+    public required Guid Id { get; init; }
     public required TcpClient Client { get; init; }
     public required bool IsInitiator { get; init; }
     public DeviceHandshake? Handshake { get; set; }
@@ -115,8 +245,13 @@ internal sealed class Peer
     public DeviceFrameDecoder Decoder { get; } = new();
     public List<byte> Buffer { get; } = new();
     public bool TrustedReady { get; set; }
+    public bool HumanConfirmed { get; set; }
     public bool LocalConfirmed { get; set; }
     public bool RemoteConfirmed { get; set; }
+    public string? JoiningGroupID { get; set; }
+    public bool WantsJoin { get; set; }
+    public ConverseGroup? AdmissionGroup { get; set; }
+    public bool ControlOnly { get; set; }
     public HashSet<Guid> LeasedSessions { get; } = new();
     public string? ManualHost { get; init; }
     public int? ManualPort { get; init; }
@@ -138,6 +273,16 @@ public sealed class DeviceSyncService : IDisposable
     public event Action? Changed;
     public Func<PairingPrompt, Task<bool>>? PairingConfirmation { get; set; }
 
+    // Converse Groups state, mirroring Swift DeviceTransport.
+    public ConverseGroupStore GroupStore { get; }
+    public ConverseGroup? CurrentGroup => GroupStore.Current;
+    public List<ConverseGroup> KnownGroups { get; private set; } = new();
+    public List<GroupJoinRequest> GroupRequests { get; } = new();
+    public GroupJoinReview? GroupReview { get; set; }
+    public List<PairingPrompt> GroupPairingPrompts { get; } = new();
+    public string ServiceStatus { get; private set; } = "";
+    private readonly Dictionary<Guid, GroupJoinRequest> _sponsoredRequests = new();
+
     private readonly byte[] _staticPrivate;
     private readonly SessionStore _store;
     private readonly string _folder;
@@ -150,6 +295,8 @@ public sealed class DeviceSyncService : IDisposable
     private readonly Dictionary<string, List<byte>> _staged = new();
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
+    private readonly SemaphoreSlim _pairingQueue = new(1, 1);
+    private readonly ConcurrentDictionary<string, byte> _connecting = new();
     private ulong _homeSeq;
     private ulong _boot = 1;
     public List<MdnsService> DiscoveredDevices { get; } = new();
@@ -171,10 +318,55 @@ public sealed class DeviceSyncService : IDisposable
         _commands = new DeviceCommandStore(folder);
         _outbox = new DeviceOutboxStore(folder);
         _leases = new DeviceLeaseManager();
-        // Fabric membership lists this device too; it is not a remote home.
-        foreach (var device in Trust.Devices.Where(d => d.DeviceID != DeviceId))
-            Homes[device.DeviceID] = new RemoteHomeState { DeviceID = device.DeviceID, DeviceName = device.Name };
+        GroupStore = new ConverseGroupStore(folder);
+        KnownGroups = GroupStore.Groups.ToList();
+        InitializeGroups();
+        RefreshGroupMembers();
         _store.Changed += PublishSidebars;
+    }
+
+    // First launch with pre-group trust: deterministic legacy migration
+    // adopts the shared default group and stamps every unstamped record.
+    private void InitializeGroups()
+    {
+        if (GroupStore.Existed) return;
+        var active = Trust.Records.Where(d => d.Removed != true).Select(d => d.DeviceID);
+        var legacy = ConverseGroupStore.Migrate(active);
+        if (legacy is null || CurrentGroup is not null) return;
+        Trust.MigrateLegacyGroup(legacy.Id);
+        GroupStore.Adopt(legacy);
+        KnownGroups = GroupStore.Groups.ToList();
+    }
+
+    public bool LocallyRemoved =>
+        Trust.Records.FirstOrDefault(d => d.DeviceID == DeviceId)?.Removed == true;
+
+    // Remote homes exist only for current-group members; leaving all
+    // groups hides every remote session without touching local work.
+    public void RefreshGroupMembers()
+    {
+        KnownGroups = GroupStore.Groups.ToList();
+        var trusted = CurrentGroup is null
+            ? new List<TrustedDevice>()
+            : Trust.Devices.Where(d => d.DeviceID != DeviceId && d.GroupID == CurrentGroup.Id).ToList();
+        foreach (var device in trusted)
+            if (!Homes.TryGetValue(device.DeviceID, out var home))
+                Homes[device.DeviceID] = new RemoteHomeState { DeviceID = device.DeviceID, DeviceName = device.Name };
+            else home.DeviceName = device.Name;
+        foreach (var stale in Homes.Keys.Where(id => trusted.All(d => d.DeviceID != id)).ToList())
+            DropHome(stale);
+        Changed?.Invoke();
+    }
+
+    private void DropHome(string deviceId)
+    {
+        if (!Homes.Remove(deviceId, out var home)) return;
+        foreach (var row in home.Rows)
+        {
+            RemoteLeases.Remove(row.GlobalID);
+            RemoteTranscripts.Remove(row.GlobalID);
+            RemoteOffline.Remove(row.GlobalID);
+        }
     }
 
     private static byte[] CreateKeyFile(string keyFile)
@@ -194,7 +386,7 @@ public sealed class DeviceSyncService : IDisposable
         ListeningPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
         try
         {
-            _mdns = new MdnsDiscovery(DeviceName, ListeningPort);
+            _mdns = new MdnsDiscovery(DeviceName + " [" + DeviceId[..8] + "]", ListeningPort, CurrentGroup, DeviceId);
             _mdns.Found += found =>
             {
                 lock (DiscoveredDevices)
@@ -203,6 +395,7 @@ public sealed class DeviceSyncService : IDisposable
                     DiscoveredDevices.Add(found);
                 }
                 Changed?.Invoke();
+                _ = ReconnectFabricAsync();
             };
             _mdns.Start();
         }
@@ -220,26 +413,51 @@ public sealed class DeviceSyncService : IDisposable
         foreach (var peer in _peers.Values.ToList()) peer.Client.Dispose();
     }
 
-    public async Task ConnectManualAsync(string host, int port)
+    public async Task ConnectManualAsync(string host, int port, string? joiningGroupID = null)
+    {
+        var id = Guid.NewGuid();
+        await ConnectAsync(id, host, port, joiningGroupID, joiningGroupID is not null);
+    }
+
+    private async Task ConnectAsync(Guid id, string host, int port, string? joiningGroupID, bool wantsJoin)
     {
         if (port is < 1 or > 65535) { LastOutcome = "Port must be between 1 and 65535."; return; }
-        var client = new TcpClient();
-        await client.ConnectAsync(host, port);
-        var peer = new Peer { Client = client, IsInitiator = true, ManualHost = host, ManualPort = port };
-        peer.Handshake = new DeviceHandshake(true, _staticPrivate);
-        _peers[Guid.NewGuid()] = peer;
-        await SendRawAsync(peer, peer.Handshake.WriteMessage(DeviceJson.Encode(Hello())));
-        _ = ReceiveLoopAsync(peer);
+        if (!_connecting.TryAdd(host + ":" + port, 0)) return;
+        try
+        {
+            var client = new TcpClient();
+            await client.ConnectAsync(host, port);
+            var peer = new Peer
+            {
+                Id = id, Client = client, IsInitiator = true, ManualHost = host, ManualPort = port,
+                JoiningGroupID = joiningGroupID, WantsJoin = wantsJoin,
+            };
+            peer.Handshake = new DeviceHandshake(true, _staticPrivate);
+            _peers[id] = peer;
+            await SendRawAsync(peer, peer.Handshake.WriteMessage(DeviceJson.Encode(Hello(wantsJoin ? joiningGroupID : null))));
+            _ = ReceiveLoopAsync(peer);
+        }
+        finally { _connecting.TryRemove(host + ":" + port, out _); }
     }
 
     public void ForgetDevice(TrustedDevice device)
     {
-        Trust.Forget(device.DeviceID);
-        Homes.Remove(device.DeviceID);
-        Changed?.Invoke();
+        // Forget is a versioned removal: tombstone, broadcast, disconnect,
+        // and drop the home. Tombstones converge to every member.
+        Trust.Forget(device.DeviceID, DeviceId);
+        foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == device.DeviceID).ToList())
+            Disconnect(peer);
+        DropHome(device.DeviceID);
+        RefreshGroupMembers();
+        _ = BroadcastFabricAsync();
     }
 
-    private DeviceHello Hello() => new() { DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.0-windows-dev" };
+    private DeviceHello Hello(string? joinGroupID = null) => new()
+    {
+        DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.1-windows-dev",
+        ListenPort = ListeningPort > 0 ? ListeningPort : null,
+        Group = CurrentGroup, JoinGroupID = joinGroupID,
+    };
 
     private async Task AcceptLoopAsync(CancellationToken token)
     {
@@ -248,19 +466,24 @@ public sealed class DeviceSyncService : IDisposable
             TcpClient client;
             try { client = await _listener.AcceptTcpClientAsync(token); }
             catch { break; }
-            var peer = new Peer { Client = client, IsInitiator = false };
+            var id = Guid.NewGuid();
+            var peer = new Peer { Id = id, Client = client, IsInitiator = false };
             peer.Handshake = new DeviceHandshake(false, _staticPrivate);
-            _peers[Guid.NewGuid()] = peer;
+            _peers[id] = peer;
             _ = ReceiveLoopAsync(peer);
         }
     }
 
     private async Task HeartbeatLoopAsync(CancellationToken token)
     {
+        var ticks = 0;
         while (!token.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(5), token).ContinueWith(_ => { });
             if (token.IsCancellationRequested) break;
+            ticks++;
+            SweepExpiredSponsors();
+            if (ticks % 6 == 0) await ReconnectFabricAsync();
             foreach (var expired in _leases.SweepExpired())
             {
                 foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == expired.Device))
@@ -337,7 +560,7 @@ public sealed class DeviceSyncService : IDisposable
                 var finished = TryFinish(handshake);
                 if (finished is null)
                 {
-                    await SendRawAsync(peer, handshake.WriteMessage(DeviceJson.Encode(Hello())));
+                    await SendRawAsync(peer, handshake.WriteMessage(DeviceJson.Encode(Hello(peer.WantsJoin ? peer.JoiningGroupID : null))));
                     if (peer.IsInitiator)
                     {
                         peer.Keys = handshake.Finish();
@@ -366,51 +589,176 @@ public sealed class DeviceSyncService : IDisposable
         try { return handshake.Finish(); } catch { return null; }
     }
 
+    internal static bool RefusesLegacy(DeviceHello hello) =>
+        !hello.Capabilities.Contains("converse-groups-v1");
+
     private async Task BeginTrustAsync(Peer peer)
     {
         if (peer.Keys is null || peer.Hello is null) { peer.Client.Dispose(); return; }
-        if (peer.Hello.DeviceID != DeviceBlob.DeviceIdForPublicKey(peer.Keys.RemoteStatic)) { peer.Client.Dispose(); return; }
-        var check = Trust.Check(peer.Hello.DeviceID, peer.Keys.RemoteStatic);
-        if (check == "trusted")
+        var hello = peer.Hello;
+        if (hello.DeviceID != DeviceBlob.DeviceIdForPublicKey(peer.Keys.RemoteStatic)) { peer.Client.Dispose(); return; }
+        if (hello.DeviceID == DeviceId) { peer.Client.Dispose(); return; } // never trust self
+        if (RefusesLegacy(hello)) { LastOutcome = "Update the other device to use Converse Groups."; peer.Client.Dispose(); return; }
+        // Duplicate-connection arbitration: keep exactly one channel per peer.
+        var preferInitiator = string.CompareOrdinal(DeviceId, hello.DeviceID) < 0;
+        var other = _peers.Values.FirstOrDefault(p => p != peer && p.Hello?.DeviceID == hello.DeviceID && p.Keys is not null);
+        if (other is not null)
         {
+            if (other.TrustedReady || (other.IsInitiator == preferInitiator && peer.IsInitiator != preferInitiator))
+            { Disconnect(peer); return; }
+            Disconnect(other);
+        }
+        var check = Trust.Check(hello.DeviceID, peer.Keys.RemoteStatic);
+        if (peer.WantsJoin)
+        {
+            // Joiner path: an authenticated group definition is required, and
+            // the join target must match it (unless joining by raw address,
+            // which learns the group from the responder).
+            if (peer.JoiningGroupID is null && hello.JoinGroupID is null) { /* address join learns below */ }
+            if (hello.Group is not { } claimed || !claimed.Valid || claimed.Dissolved
+                || (peer.JoiningGroupID is not null && claimed.Id != peer.JoiningGroupID)
+                || KnownGroups.FirstOrDefault(g => g.Id == claimed.Id) is { Dissolved: true })
+            { LastOutcome = "Join failed: no valid group offered."; peer.Client.Dispose(); return; }
+            if (peer.JoiningGroupID is null) peer.JoiningGroupID = claimed.Id;
+            peer.AdmissionGroup = claimed;
+            OfferPairing(peer, claimed, check == "keyChanged");
+            return;
+        }
+        if (hello.JoinGroupID is not null)
+        {
+            // Sponsor path: only members of the requested group may anchor.
+            if (CurrentGroup is null || hello.JoinGroupID != CurrentGroup.Id || _sponsoredRequests.Count >= 16)
+            { peer.Client.Dispose(); return; }
+            var request = new GroupJoinRequest
+            {
+                Id = peer.Id, GroupID = CurrentGroup.Id, RequesterID = hello.DeviceID,
+                RequesterName = DeviceTrustStore.BoundedName(hello.DeviceName), SponsorID = DeviceId,
+                ExpiresAt = DeviceTrustStore.AppleNow() + 180, Approved = false,
+            };
+            _sponsoredRequests[peer.Id] = request;
+            GroupRequests.Add(request);
+            await PublishGroupRequestsAsync();
+            ServiceStatus = hello.DeviceName + " asked to join " + CurrentGroup.Name + ".";
+            Changed?.Invoke();
+            return;
+        }
+        var pinned = Trust.Devices.FirstOrDefault(d => d.DeviceID == hello.DeviceID);
+        var member = pinned is not null && pinned.GroupID == CurrentGroup?.Id && CurrentGroup is not null;
+        if (member && check == "trusted")
+        {
+            peer.HumanConfirmed = true;
             peer.LocalConfirmed = true;
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
             FinishTrust(peer);
             return;
         }
-        var prompt = new PairingPrompt(peer.Hello.DeviceName,
+        // Reconnect from a known pin outside the current group: control-only
+        // membership exchange when either side carries a dissolution, or the
+        // group matches our current one. Nothing else flows here.
+        var knownGroup = pinned?.GroupID is string gid ? KnownGroups.FirstOrDefault(g => g.Id == gid) : null;
+        var id = pinned?.GroupID;
+        if (pinned is not null && id is not null && check == "trusted"
+            && ((knownGroup?.Dissolved == true && hello.Group?.Id == id)
+                || (CurrentGroup?.Id == id && (hello.Group is null || hello.Group.Id == id))))
+        {
+            peer.ControlOnly = true;
+            peer.LocalConfirmed = true;
+            await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
+            FinishTrust(peer);
+            return;
+        }
+        // Group-scoped reconnect can never mint generic pairing.
+        LastOutcome = member ? "Stored key mismatch." : "Use Converse Groups to join.";
+        peer.Client.Dispose();
+    }
+
+    // Serialized join prompts: the joiner sees its code immediately in the
+    // Groups dialog; the optional callback lets tests approve directly.
+    private void OfferPairing(Peer peer, ConverseGroup group, bool keyChanged)
+    {
+        var prompt = new PairingPrompt(peer.Hello!.DeviceName,
             peer.Hello.DeviceID[..Math.Min(16, peer.Hello.DeviceID.Length)].ToUpperInvariant(),
-            DeviceSas.Code(peer.Keys.HandshakeHash), check == "keyChanged", peer.IsInitiator);
-        var accepted = PairingConfirmation is not null && await PairingConfirmation(prompt);
-        if (!accepted) { peer.Client.Dispose(); return; }
+            DeviceSas.Code(peer.Keys!.HandshakeHash), keyChanged, peer.IsInitiator, peer.Id);
+        GroupPairingPrompts.RemoveAll(p => p.PeerId == peer.Id);
+        GroupPairingPrompts.Add(prompt);
+        ServiceStatus = "Verify the security number to join " + group.Name + ".";
+        Changed?.Invoke();
+        if (PairingConfirmation is not null)
+            _ = Task.Run(async () =>
+            {
+                await _pairingQueue.WaitAsync();
+                try
+                {
+                    if (await PairingConfirmation(prompt)) await ConfirmPairing(peer.Id);
+                    else RejectPairing(peer.Id);
+                }
+                finally { _pairingQueue.Release(); }
+            });
+    }
+
+    public async Task ConfirmPairing(Guid peerId)
+    {
+        if (!_peers.TryGetValue(peerId, out var peer) || peer.Hello is null || peer.Keys is null) return;
+        peer.HumanConfirmed = true;
         peer.LocalConfirmed = true;
         await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
         FinishTrust(peer);
     }
 
+    public void RejectPairing(Guid peerId)
+    {
+        GroupPairingPrompts.RemoveAll(p => p.PeerId == peerId);
+        if (_peers.TryGetValue(peerId, out var peer)) Disconnect(peer);
+        Changed?.Invoke();
+    }
+
     private void FinishTrust(Peer peer)
     {
         if (!peer.LocalConfirmed || !peer.RemoteConfirmed || peer.TrustedReady || peer.Hello is null || peer.Keys is null) return;
+        if (peer.WantsJoin)
+        {
+            if (!peer.HumanConfirmed || peer.AdmissionGroup is null) return;
+            try { ActivateGroup(peer.AdmissionGroup, peer.Id); }
+            catch { LastOutcome = "Could not save group."; peer.Client.Dispose(); return; }
+        }
+        if (!(peer.HumanConfirmed || Trust.Check(peer.Hello.DeviceID, peer.Keys.RemoteStatic) == "trusted")) return;
+        var port = peer.Hello.ListenPort ?? peer.ManualPort;
         try
         {
-            Trust.Pin(new TrustedDevice(peer.Hello.DeviceID, peer.Hello.DeviceName, peer.Keys.RemoteStatic, peer.ManualHost, peer.ManualPort));
+            Trust.Pin(new TrustedDevice(peer.Hello.DeviceID, peer.Hello.DeviceName, peer.Keys.RemoteStatic,
+                peer.ManualHost, port), DeviceId, true, peer.ControlOnly ? peer.Hello.Group?.Id : CurrentGroup?.Id);
+            Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+                null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, CurrentGroup?.Id);
         }
         catch { LastOutcome = "Could not save paired device. Control not granted."; peer.Client.Dispose(); return; }
         peer.TrustedReady = true;
+        if (peer.ControlOnly)
+        {
+            _ = SendGroupStateAsync(peer);
+            Changed?.Invoke();
+            return;
+        }
+        GroupPairingPrompts.RemoveAll(p => p.PeerId == peer.Id);
+        WithdrawGroupRequest(peer.Id);
         Homes[peer.Hello.DeviceID] = new RemoteHomeState
         {
             DeviceID = peer.Hello.DeviceID, DeviceName = peer.Hello.DeviceName, Online = true,
             Rows = Homes.GetValueOrDefault(peer.Hello.DeviceID)?.Rows ?? new(),
         };
+        RefreshGroupMembers();
         _ = SendSidebarAsync(peer);
+        _ = SendGroupStateAsync(peer);
+        _ = BroadcastFabricAsync();
+        _ = ReconnectFabricAsync();
         Changed?.Invoke();
     }
 
     private void Disconnect(Peer peer)
     {
         peer.Client.Dispose();
-        var key = _peers.FirstOrDefault(p => p.Value == peer).Key;
-        if (key != Guid.Empty) _peers.Remove(key);
+        _peers.Remove(peer.Id);
+        GroupPairingPrompts.RemoveAll(p => p.PeerId == peer.Id);
+        WithdrawGroupRequest(peer.Id);
         if (peer.Hello is { } hello)
         {
             if (Homes.TryGetValue(hello.DeviceID, out var home))
@@ -431,6 +779,392 @@ public sealed class DeviceSyncService : IDisposable
         }
         Changed?.Invoke();
     }
+
+    // ---- Fabric membership ----
+    public async Task BroadcastFabricAsync()
+    {
+        if (CurrentGroup is null) return;
+        var records = Trust.Records.Where(d => d.GroupID == CurrentGroup.Id).ToList();
+        foreach (var peer in _peers.Values.Where(CanExchangeFabric).ToList())
+            await SendEnvelopeAsync(peer, new DeviceEnvelope
+            { Kind = DeviceKind.FabricMembers, Payload = DeviceJson.Encode(records) });
+    }
+
+    private bool CanExchangeFabric(Peer peer) =>
+        peer is { TrustedReady: true, Hello: not null }
+        && peer.Hello.Capabilities.Contains("fabric-membership-v1")
+        && !peer.ControlOnly
+        && Trust.Devices.Any(d => d.DeviceID == peer.Hello.DeviceID && d.GroupID == CurrentGroup?.Id);
+
+    public async Task ReconnectFabricAsync()
+    {
+        if (CurrentGroup is null || LocallyRemoved) return;
+        foreach (var device in Trust.Devices.Where(d => d.DeviceID != DeviceId && d.GroupID == CurrentGroup.Id).ToList())
+        {
+            if (_peers.Values.Any(p => p.Hello?.DeviceID == device.DeviceID && p.Keys is not null)) continue;
+            var endpoint = (device.LastHost, device.LastPort) switch
+            {
+                (string host, int port) => (host, port),
+                _ => DiscoveredEndpoint(device.DeviceID),
+            };
+            if (endpoint is not { } address) continue;
+            _ = ConnectAsync(Guid.NewGuid(), address.host, address.port, null, false);
+        }
+        await Task.CompletedTask;
+    }
+
+    private (string host, int port)? DiscoveredEndpoint(string deviceId)
+    {
+        lock (DiscoveredDevices)
+        {
+            var found = DiscoveredDevices.FirstOrDefault(d =>
+                d.DeviceID == deviceId || d.Name.EndsWith("[" + deviceId[..8] + "]", StringComparison.Ordinal));
+            return found is null ? null : (found.Host, found.Port);
+        }
+    }
+
+    // ---- Converse Groups ----
+    public List<ConverseGroup> AvailableGroups()
+    {
+        var groups = KnownGroups.Where(g => !g.Dissolved).ToList();
+        lock (DiscoveredDevices)
+        {
+            foreach (var found in DiscoveredDevices)
+            {
+                if (found.Group is { } hint && hint.Valid && !hint.Dissolved
+                    && KnownGroups.All(g => g.Id != hint.Id || g.Dissolved)
+                    && groups.All(g => g.Id != hint.Id))
+                    groups.Add(hint);
+            }
+        }
+        return groups.OrderBy(g => g.Name.ToLowerInvariant()).ThenBy(g => g.Id, StringComparer.Ordinal).ToList();
+    }
+
+    public List<(string DeviceID, string Label)> GroupDevices(ConverseGroup group)
+    {
+        var rows = new List<(string, string)>();
+        var members = Trust.Devices.Where(d => d.GroupID == group.Id && d.DeviceID != DeviceId)
+            .OrderBy(d => d.Name.ToLowerInvariant()).ThenBy(d => d.DeviceID, StringComparer.Ordinal).ToList();
+        foreach (var device in members)
+            rows.Add((device.DeviceID, device.Name + " [" + device.DeviceID[..8] + "]"));
+        rows.Add((DeviceId, DeviceName + " [this device]"));
+        lock (DiscoveredDevices)
+        {
+            foreach (var found in DiscoveredDevices.Where(d => d.Group?.Id == group.Id && d.Group.Valid && !d.Group.Dissolved))
+            {
+                var id = found.DeviceID;
+                if (id is not null && (id == DeviceId || members.Any(d => d.DeviceID == id))) continue;
+                var label = id is null ? found.Name + " (unverified)"
+                    : members.Any(d => d.Name == found.Name)
+                        ? found.Name + " [" + id[..8] + "]" : found.Name;
+                rows.Add((id ?? found.Name, label));
+            }
+        }
+        return rows;
+    }
+
+    public bool CanJoinGroup(string id) =>
+        AvailableGroups().Any(g => g.Id == id) && CurrentGroup?.Id != id
+        && !_peers.Values.Any(p => p.WantsJoin && p.JoiningGroupID == id);
+
+    public async Task JoinGroupAsync(ConverseGroup group)
+    {
+        MdnsService? target;
+        lock (DiscoveredDevices)
+            target = DiscoveredDevices.FirstOrDefault(d => d.Group?.Id == group.Id && d.Group.Valid && !d.Group.Dissolved);
+        if (target is null) { LastOutcome = "No reachable member advertises that group."; return; }
+        await ConnectAsync(Guid.NewGuid(), target.Host, target.Port, group.Id, true);
+    }
+
+    public async Task JoinGroupByAddressAsync(string host, int port, string groupID)
+    {
+        if (port is < 1 or > 65535) { LastOutcome = "Port must be between 1 and 65535."; return; }
+        ConverseGroup? group = null;
+        if (!string.IsNullOrWhiteSpace(groupID))
+        {
+            group = KnownGroups.FirstOrDefault(g => g.Id == groupID && !g.Dissolved);
+            if (group is null) { LastOutcome = "Unknown group."; return; }
+        }
+        await ConnectAsync(Guid.NewGuid(), host.Trim(), port, group?.Id, true);
+    }
+
+    public async Task CreateGroupAsync(string name)
+    {
+        var trimmed = name.Trim();
+        if (trimmed.Length == 0 || System.Text.Encoding.UTF8.GetByteCount(trimmed) > 120)
+        { LastOutcome = "Group name must be 1..120 bytes."; return; }
+        if (AvailableGroups().Any(g => string.Equals(g.Name, trimmed, StringComparison.OrdinalIgnoreCase)))
+        { LastOutcome = "A visible group already has that name."; return; }
+        var group = new ConverseGroup { Id = Guid.NewGuid().ToString("d"), Name = trimmed, Creator = DeviceId };
+        GroupStore.Adopt(group);
+        Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+            null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, group.Id);
+        RefreshGroupMembers();
+        Reannounce();
+        ServiceStatus = "Created " + trimmed + ".";
+        Changed?.Invoke();
+        await BroadcastFabricAsync();
+        await ReconnectFabricAsync();
+    }
+
+    public void ActivateGroup(ConverseGroup group, Guid keepPeerId)
+    {
+        if (!group.Valid || group.Dissolved) throw new InvalidDataException("Invalid group.");
+        var previous = CurrentGroup;
+        if (previous?.Id == group.Id)
+        {
+            Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+                null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, group.Id);
+            RefreshGroupMembers();
+            return;
+        }
+        GroupStore.Adopt(group);
+        RefreshGroupMembers();
+        if (previous is not null)
+        {
+            Trust.Forget(DeviceId, DeviceId);
+            _ = BroadcastFabricAsync();
+        }
+        ParkGroupViews(silent: true);
+        foreach (var id in _peers.Keys.Where(k => k != keepPeerId).ToList())
+            if (_peers.TryGetValue(id, out var peer))
+                Disconnect(peer);
+        ServiceStatus = "Joined " + group.Name + ".";
+        Reannounce();
+        Changed?.Invoke();
+    }
+
+    public async Task LeaveGroupAsync()
+    {
+        var group = CurrentGroup;
+        if (group is null) return;
+        ParkGroupViews(silent: true);
+        Trust.Forget(DeviceId, DeviceId);
+        GroupStore.Leave();
+        RefreshGroupMembers();
+        Reannounce();
+        await BroadcastFabricAsync();
+        ServiceStatus = "Left " + group.Name + ". Devices remember the group for rejoining.";
+        Changed?.Invoke();
+        await Task.Delay(300);
+        foreach (var peer in _peers.Values.ToList()) Disconnect(peer);
+    }
+
+    public async Task DissolveGroupAsync(ConverseGroup group)
+    {
+        if (!group.Valid) { LastOutcome = "Unknown group."; return; }
+        GroupStore.Dissolve(group);
+        RefreshGroupMembers();
+        Reannounce();
+        foreach (var peer in _peers.Values.Where(p => p is { TrustedReady: true, ControlOnly: false }).ToList())
+        {
+            await SendGroupStateAsync(peer);
+            peer.ControlOnly = true;
+        }
+        ParkGroupViews(silent: true);
+        ServiceStatus = "Dissolved " + group.Name + ".";
+        Changed?.Invoke();
+        await Task.Delay(300);
+        foreach (var peer in _peers.Values.ToList()) Disconnect(peer);
+        await BroadcastFabricAsync();
+    }
+
+    // Moving groups parks remote views and marks pending sends uncertain;
+    // local panes, drafts and queues are untouched.
+    public void ParkGroupViews(bool silent = false)
+    {
+        foreach (var globalId in RemoteLeases.Keys.ToList())
+            _ = ReleaseRemoteAsync(globalId);
+        RemoteLeases.Clear();
+        RemoteTranscripts.Clear();
+        RemoteOffline.Clear();
+        foreach (var record in Outbox) _outbox.Resolve(record.CommandID, "uncertain", "Group changed.");
+        if (!silent) Changed?.Invoke();
+    }
+
+    private void SweepExpiredSponsors()
+    {
+        var now = DeviceTrustStore.AppleNow();
+        foreach (var id in _sponsoredRequests.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList())
+            WithdrawGroupRequest(id);
+    }
+
+    private async Task PublishGroupRequestsAsync()
+    {
+        SweepExpiredSponsors();
+        var requests = _sponsoredRequests.Values.Where(r => CurrentGroup is not null && r.GroupID == CurrentGroup.Id).ToList();
+        foreach (var peer in _peers.Values.Where(CanExchangeFabric).ToList())
+            await SendEnvelopeAsync(peer, new DeviceEnvelope
+            { Kind = DeviceKind.GroupRequests, Payload = DeviceJson.Encode(requests) });
+    }
+
+    private void WithdrawGroupRequest(Guid requestId)
+    {
+        if (_sponsoredRequests.Remove(requestId))
+        {
+            GroupRequests.RemoveAll(r => r.Id == requestId);
+            _ = PublishGroupRequestsAsync();
+        }
+    }
+
+    private async Task SendGroupStateAsync(Peer peer)
+    {
+        if (peer.Hello is null) return;
+        await SendEnvelopeAsync(peer, new DeviceEnvelope
+        { Kind = DeviceKind.GroupState, Payload = DeviceJson.Encode(KnownGroups) });
+    }
+
+    // A member reviews through the sponsor: the sponsor's own connection
+    // anchors the request; direct sponsors read the live code locally.
+    public async Task ReviewGroupRequestAsync(GroupJoinRequest request)
+    {
+        if (CurrentGroup is null || request.GroupID != CurrentGroup.Id
+            || !GroupJoinRequests.Live(request)) return;
+        if (_sponsoredRequests.TryGetValue(request.Id, out var live)
+            && _peers.TryGetValue(request.Id, out var joinPeer)
+            && joinPeer is { Keys: not null, Hello: not null } && !joinPeer.TrustedReady)
+        {
+            GroupReview = new GroupJoinReview { Request = live, Code = DeviceSas.Code(joinPeer.Keys.HandshakeHash) };
+            Changed?.Invoke();
+            return;
+        }
+        var sponsor = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == request.SponsorID && CanExchangeFabric(p));
+        if (sponsor is null) { LastOutcome = "Sponsor is unreachable."; return; }
+        await SendEnvelopeAsync(sponsor, new DeviceEnvelope
+        { Kind = DeviceKind.GroupReview, Payload = DeviceJson.Encode(new GroupJoinReview { Request = request, Code = "" }) });
+    }
+
+    public async Task ApproveGroupReviewAsync()
+    {
+        // Approval always follows a human-reviewed code, even when the
+        // reviewer is the sponsor itself: the stored code is verified
+        // against the live join channel either way. No direct path.
+        if (GroupReview is not { } stored) return;
+        GroupReview = null;
+        if (_sponsoredRequests.ContainsKey(stored.Request.Id))
+        {
+            await ApproveSponsoredAsync(stored);
+            return;
+        }
+        var sponsor = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == stored.Request.SponsorID && CanExchangeFabric(p));
+        if (sponsor is null) { LastOutcome = "Sponsor is unreachable."; return; }
+        await SendEnvelopeAsync(sponsor, new DeviceEnvelope
+        { Kind = DeviceKind.GroupApprove, Payload = DeviceJson.Encode(stored) });
+    }
+
+    // The approve gate: the request must equal the live sponsored original
+    // field-for-field, and the reviewed code must match the join channel's
+    // current handshake hash — verified for direct and relayed reviews
+    // alike. Either side failing refuses admission silently.
+    private async Task ApproveSponsoredAsync(GroupJoinReview review)
+    {
+        if (CurrentGroup is null || review.Request.GroupID != CurrentGroup.Id || !GroupJoinRequests.Live(review.Request)) return;
+        if (!_sponsoredRequests.TryGetValue(review.Request.Id, out var original)
+            || !GroupJoinRequests.Same(original, review.Request)) return;
+        if (!_peers.TryGetValue(review.Request.Id, out var peer)
+            || peer is not { Keys: not null, Hello: not null } || peer.TrustedReady) return;
+        if (review.Code != DeviceSas.Code(peer.Keys.HandshakeHash)) return;
+        original.Approved = true;
+        _sponsoredRequests[review.Request.Id] = original;
+        GroupRequests.RemoveAll(r => r.Id == review.Request.Id);
+        await PublishGroupRequestsAsync();
+        peer.HumanConfirmed = true;
+        peer.LocalConfirmed = true;
+        await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
+        FinishTrust(peer);
+    }
+
+    private async Task HandleGroupEnvelopeAsync(Peer peer, DeviceEnvelope envelope)
+    {
+        if (peer.Hello is null) return;
+        switch (envelope.Kind)
+        {
+            case DeviceKind.GroupState:
+            {
+                // Conveys the full known list; only entries dissolved by a
+                // member pinned to that same group take effect. Live groups
+                // are announcements and change nothing.
+                if (envelope.Payload is null) break;
+                List<ConverseGroup> groups;
+                try { groups = DeviceJson.Decode<List<ConverseGroup>>(envelope.Payload); }
+                catch { break; }
+                if (groups.Count > 2048) break;
+                var issuer = Trust.Records.FirstOrDefault(d => d.DeviceID == peer.Hello.DeviceID
+                    && d.Removed != true && d.PublicKey.AsSpan().SequenceEqual(peer.Keys?.RemoteStatic ?? Array.Empty<byte>()));
+                if (issuer is null) break;
+                foreach (var group in groups.Where(g => g.Valid && g.Dissolved && g.Id == issuer.GroupID))
+                {
+                    try
+                    {
+                        var affected = CurrentGroup?.Id == group.Id;
+                        GroupStore.Dissolve(group);
+                        KnownGroups = GroupStore.Groups.ToList();
+                        if (!affected) continue;
+                        foreach (var connection in _peers.Values.Where(p => p.TrustedReady && p.Id != peer.Id).ToList())
+                            await SendGroupStateAsync(connection);
+                        RefreshGroupMembers();
+                        ParkGroupViews(silent: true);
+                        Reannounce();
+                        var old = _peers.Values.ToList();
+                        foreach (var connection in old) connection.ControlOnly = true;
+                        _ = Task.Run(async () => { await Task.Delay(300); foreach (var connection in old) Disconnect(connection); });
+                        ServiceStatus = "Group dissolved by another member. Local sessions keep running.";
+                    }
+                    catch { LastOutcome = "Could not persist group dissolution."; }
+                }
+                Changed?.Invoke();
+                break;
+            }
+            case DeviceKind.GroupRequests:
+            {
+                if (envelope.Payload is null) break;
+                List<GroupJoinRequest> incoming;
+                try { incoming = DeviceJson.Decode<List<GroupJoinRequest>>(envelope.Payload); }
+                catch { break; }
+                if (incoming.Count > 16 || !incoming.All(r => r.GroupID == CurrentGroup?.Id
+                    && r.SponsorID == peer.Hello.DeviceID && r.RequesterID.Length == 64
+                    && System.Text.Encoding.UTF8.GetByteCount(r.RequesterName) <= 400)) break;
+                GroupRequests.RemoveAll(r => r.SponsorID == peer.Hello.DeviceID);
+                GroupRequests.AddRange(incoming.Where(r => r.ExpiresAt > DeviceTrustStore.AppleNow()));
+                Changed?.Invoke();
+                break;
+            }
+            case DeviceKind.GroupReview:
+            {
+                if (envelope.Payload is null) break;
+                var review = DeviceJson.Decode<GroupJoinReview>(envelope.Payload);
+                if (!_sponsoredRequests.TryGetValue(review.Request.Id, out var original)
+                    || !GroupJoinRequests.Same(original, review.Request) || !GroupJoinRequests.Live(original)) break;
+                if (!_peers.TryGetValue(review.Request.Id, out var joinPeer)
+                    || joinPeer is not { Keys: not null, Hello: not null } || joinPeer.TrustedReady) break;
+                await SendEnvelopeAsync(peer, new DeviceEnvelope
+                {
+                    Kind = DeviceKind.GroupReviewDetail,
+                    Payload = DeviceJson.Encode(new GroupJoinReview
+                    { Request = original, Code = DeviceSas.Code(joinPeer.Keys.HandshakeHash) }),
+                });
+                break;
+            }
+            case DeviceKind.GroupReviewDetail:
+            {
+                if (envelope.Payload is null) break;
+                var review = DeviceJson.Decode<GroupJoinReview>(envelope.Payload);
+                if (review.Request.GroupID != CurrentGroup?.Id || !GroupJoinRequests.Live(review.Request)
+                    || review.Code.Length != 39) break;
+                GroupReview = review;
+                Changed?.Invoke();
+                break;
+            }
+            case DeviceKind.GroupApprove:
+            {
+                if (envelope.Payload is null) break;
+                await ApproveSponsoredAsync(DeviceJson.Decode<GroupJoinReview>(envelope.Payload));
+                break;
+            }
+        }
+    }
+
+    private void Reannounce() => _mdns?.UpdateGroup(CurrentGroup, DeviceId);
 
     internal async Task SendEnvelopeAsync(Peer peer, DeviceEnvelope envelope)
     {
@@ -475,7 +1209,8 @@ public sealed class DeviceSyncService : IDisposable
 
     private void PublishSidebars()
     {
-        foreach (var peer in _peers.Values.Where(p => p.TrustedReady)) _ = SendSidebarAsync(peer);
+        if (CurrentGroup is null || LocallyRemoved) return;
+        foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly)) _ = SendSidebarAsync(peer);
     }
 
     private string ImageHash(string path)
@@ -660,8 +1395,57 @@ public sealed class DeviceSyncService : IDisposable
         }
         if (!peer.TrustedReady || peer.Hello is null) return;
         var peerHome = peer.Hello.DeviceID;
+        // Removed devices exchange membership only, never sessions.
+        if (LocallyRemoved && envelope.Kind != DeviceKind.FabricMembers
+            && envelope.Kind != DeviceKind.Ping && envelope.Kind != DeviceKind.Pong) return;
+        // Control-only peers carry dissolution state and nothing else.
+        if (peer.ControlOnly)
+        {
+            if (envelope.Kind == DeviceKind.GroupState) await HandleGroupEnvelopeAsync(peer, envelope);
+            return;
+        }
         switch (envelope.Kind)
         {
+            case DeviceKind.FabricMembers:
+            {
+                if (envelope.Payload is null
+                    || !peer.Hello.Capabilities.Contains("fabric-membership-v1")
+                    || !Trust.Devices.Any(d => d.DeviceID == peerHome && d.GroupID == CurrentGroup?.Id)) break;
+                List<TrustedDevice> incoming;
+                try { incoming = DeviceJson.Decode<List<TrustedDevice>>(envelope.Payload); }
+                catch { peer.Client.Dispose(); return; }
+                incoming = incoming.Where(d => d.GroupID == CurrentGroup?.Id).ToList();
+                var wasRemoved = LocallyRemoved;
+                bool merged;
+                try { merged = Trust.Merge(incoming); }
+                catch { peer.Client.Dispose(); return; }
+                if (LocallyRemoved && !wasRemoved)
+                {
+                    // Freshly removed: leave quietly, park remotes, go dark.
+                    GroupStore.Leave();
+                    ParkGroupViews(silent: true);
+                    RefreshGroupMembers();
+                    ServiceStatus = "Removed by a group member.";
+                    Changed?.Invoke();
+                }
+                var active = Trust.Devices.Where(d => d.GroupID == CurrentGroup?.Id).Select(d => d.DeviceID).ToHashSet();
+                foreach (var gone in _peers.Values
+                    .Where(p => p is { TrustedReady: true, Hello: not null } && !active.Contains(p.Hello.DeviceID)).ToList())
+                    Disconnect(gone);
+                RefreshGroupMembers();
+                if (merged) _ = BroadcastFabricAsync();
+                _ = ReconnectFabricAsync();
+                Changed?.Invoke();
+                break;
+            }
+            case DeviceKind.GroupState:
+            case DeviceKind.GroupRequests:
+            case DeviceKind.GroupReview:
+            case DeviceKind.GroupReviewDetail:
+            case DeviceKind.GroupApprove:
+                if (Trust.Devices.Any(d => d.DeviceID == peerHome && d.GroupID == CurrentGroup?.Id))
+                    await HandleGroupEnvelopeAsync(peer, envelope);
+                break;
             case DeviceKind.Ping:
                 await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.Pong });
                 break;
@@ -862,7 +1646,8 @@ public sealed class DeviceSyncService : IDisposable
 
     // ---- Viewer side ----
     private Peer? PeerForHome(string home) =>
-        _peers.Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == home && Homes.GetValueOrDefault(home)?.Online == true);
+        _peers.Values.FirstOrDefault(p => p.TrustedReady && !p.ControlOnly && p.Hello?.DeviceID == home
+            && Homes.GetValueOrDefault(home)?.Online == true);
 
     public async Task AcquireRemoteAsync(string globalId)
     {

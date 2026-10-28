@@ -76,6 +76,13 @@ public sealed partial class MainWindow : Window
     private string? _notice;
     private readonly Dictionary<string, RequestAnswerState> _answerStates = new();
     private readonly Dictionary<string, List<string>> _remoteHashes = new();
+    private StackPanel? _groupsPanel;
+    private string _groupsSignature = "";
+    private string _groupsCreateName = "";
+    private string _groupsJoinHost = "";
+    private string _groupsJoinPort = "";
+    private string? _groupsArmDissolve;
+    private readonly HashSet<Guid> _groupsSeen = new();
 
     public MainWindow()
     {
@@ -86,7 +93,9 @@ public sealed partial class MainWindow : Window
         _layout = SidebarLayoutState.Load(folder);
         _store = new SessionStore(folder);
         _devices = new DeviceSyncService(folder, _store);
-        _devices.PairingConfirmation = ShowPairingPromptAsync;
+        // No modal pairing prompt: joins surface as codes in the Groups
+        // dialog, where both sides compare all eight groups. (The
+        // PairingConfirmation callback stays for headless tests only.)
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
         _ = _devices.StartAsync();
@@ -262,27 +271,6 @@ public sealed partial class MainWindow : Window
         return text.Replace("**", "").Replace("`", "").Trim();
     }
 
-    private async Task<bool> ShowPairingPromptAsync(PairingPrompt prompt)
-    {
-        var done = new TaskCompletionSource<bool>();
-        DispatcherQueue.TryEnqueue(async () =>
-        {
-            var dialog = new ContentDialog
-            {
-                Title = "Pair with " + prompt.PeerName + "?",
-                Content = "Compare EVERY group on both devices. Pair only if all 8 groups match exactly:\n\n"
-                          + prompt.Code + "\n\nFingerprint " + prompt.Fingerprint
-                          + (prompt.KeyChanged ? "\n\nWarning: stored key mismatch." : "")
-                          + "\n\nPairing allows remote prompts and tool execution on the home device.",
-                PrimaryButtonText = prompt.IsInitiator ? "Pair" : "Approve",
-                CloseButtonText = "Reject",
-                XamlRoot = Content.XamlRoot,
-            };
-            done.TrySetResult(await dialog.ShowAsync() == ContentDialogResult.Primary);
-        });
-        return await done.Task;
-    }
-
     private void Refresh()
     {
         if (!DispatcherQueue.HasThreadAccess)
@@ -290,13 +278,24 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(Refresh);
             return;
         }
+        // Parked by a group move: the selected home no longer exists.
+        if (_selected?.GlobalID is { } gid && DeviceGlobalID.Parse(gid) is { } parsed
+            && !_devices.Homes.ContainsKey(parsed.Home))
+            SelectSession(null, caretToEnd: false);
         RefreshSidebar();
         RenderPane();
+        RenderGroupsDialog();
+        AutoOpenGroups();
     }
 
     private void RefreshSidebar()
     {
         var items = new List<SidebarItem>();
+        // Group heading above the sessions; remote homes appear only while
+        // this device belongs to the group (the service scopes Homes).
+        if (_devices.CurrentGroup is { } current)
+            items.Add(new SidebarHeader("group", "Group: " + current.Name,
+                _devices.Trust.Devices.Count(d => d.GroupID == current.Id) + " member(s)"));
         items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
         foreach (var session in _store.Sessions)
             items.Add(new SidebarSession("local:" + session.Id, (session.Busy ? "● " : "") + session.Title,
@@ -1419,6 +1418,214 @@ public sealed partial class MainWindow : Window
         }
         if (result == ContentDialogResult.Primary && int.TryParse(portBox.Text, out var parsed))
             await _devices.ConnectManualAsync(hostBox.Text.Trim(), parsed);
+    }
+
+    // ---- Converse Groups dialog (mirrors Mac GroupView) ----
+    private void OnGroupsClick(object sender, RoutedEventArgs e) => OpenGroupsDialog();
+
+    private void OpenGroupsDialog()
+    {
+        if (_groupsPanel is not null) return;
+        _groupsSignature = "";
+        _groupsArmDissolve = null;
+        var panel = new StackPanel { Spacing = 8, Width = 620 };
+        _groupsPanel = panel;
+        RenderGroupsDialog();
+        var dialog = new ContentDialog
+        {
+            Title = "Converse Groups",
+            Content = new ScrollViewer { Content = panel, MaxHeight = 560 },
+            CloseButtonText = "Done",
+            XamlRoot = Content.XamlRoot,
+        };
+        _ = dialog.ShowAsync().AsTask().ContinueWith(_ =>
+        {
+            DispatcherQueue.TryEnqueue(() => _groupsPanel = null);
+        });
+    }
+
+    private void AutoOpenGroups()
+    {
+        // New join requests surface automatically, like the Mac.
+        var fresh = _devices.GroupRequests
+            .Where(r => !r.Approved && r.ExpiresAt > DeviceTrustStore.AppleNow() && !_groupsSeen.Contains(r.Id)).ToList();
+        foreach (var request in fresh) _groupsSeen.Add(request.Id);
+        foreach (var stale in _groupsSeen.Where(id => _devices.GroupRequests.All(r => r.Id != id)).ToList())
+            _groupsSeen.Remove(stale);
+        if (fresh.Count > 0 && _groupsPanel is null) OpenGroupsDialog();
+    }
+
+    private void RenderGroupsDialog()
+    {
+        if (_groupsPanel is not { } panel) return;
+        var signature = new System.Text.StringBuilder();
+        signature.Append("g:").Append(_devices.CurrentGroup?.Id ?? "none");
+        foreach (var prompt in _devices.GroupPairingPrompts) signature.Append("|p:").Append(prompt.PeerId).Append(prompt.Code);
+        if (_devices.GroupReview is { } review) signature.Append("|r:").Append(review.Request.Id).Append(review.Code);
+        foreach (var request in _devices.GroupRequests)
+            signature.Append("|q:").Append(request.Id).Append(request.Approved).Append(request.RequesterName);
+        foreach (var group in _devices.AvailableGroups())
+            signature.Append("|a:").Append(group.Id).Append(group.Name)
+                .Append(string.Join(",", _devices.GroupDevices(group).Select(d => d.DeviceID + d.Label)));
+        signature.Append("|s:").Append(_devices.ServiceStatus).Append(_devices.LastOutcome).Append(_groupsArmDissolve ?? "");
+        var text = signature.ToString();
+        if (text == _groupsSignature) return;
+        _groupsSignature = text;
+        panel.Children.Clear();
+
+        TextBlock Note(string value) => new() { Text = value, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        TextBlock Mono(string value) => new()
+        {
+            Text = value, FontFamily = new FontFamily("Consolas"), FontSize = 14,
+            IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap,
+        };
+
+        panel.Children.Add(Note(_devices.CurrentGroup is { } current
+            ? "This device is in " + current.Name + "."
+            : "This device is not in a group."));
+        panel.Children.Add(Note("Admission through any member joins the whole group. "
+            + "Compare EVERY number group on both devices; join only if all 8 match exactly. "
+            + "Any member can admit or dissolve. Remote sessions are visible only while grouped."));
+
+        var prompt = _devices.GroupPairingPrompts.FirstOrDefault();
+        if (prompt is not null)
+        {
+            panel.Children.Add(new TextBlock { Text = "Join requested", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            panel.Children.Add(Note("Your security number — read it to the reviewing member:"));
+            panel.Children.Add(Mono(prompt.Code));
+            if (prompt.KeyChanged)
+                panel.Children.Add(Note("Warning: stored key mismatch."));
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            var pair = new Button { Content = "Pair" };
+            var peerId = prompt.PeerId;
+            pair.Click += async (_, _) => { await _devices.ConfirmPairing(peerId); Refresh(); };
+            var cancel = new Button { Content = "Cancel" };
+            cancel.Click += (_, _) => { _devices.RejectPairing(peerId); Refresh(); };
+            row.Children.Add(pair);
+            row.Children.Add(cancel);
+            panel.Children.Add(row);
+        }
+
+        if (_devices.GroupReview is { } detail)
+        {
+            var code = detail.Code;
+            panel.Children.Add(new TextBlock { Text = "Reviewing " + detail.Request.RequesterName, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            panel.Children.Add(Note("Compare against the number the joiner reads out. Pair only if all 8 match:"));
+            panel.Children.Add(Mono(code));
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            var back = new Button { Content = "Back" };
+            back.Click += (_, _) => { _devices.GroupReview = null; Refresh(); };
+            var pair = new Button { Content = "Pair" };
+            pair.Click += async (_, _) => { await _devices.ApproveGroupReviewAsync(); Refresh(); };
+            row.Children.Add(back);
+            row.Children.Add(pair);
+            panel.Children.Add(row);
+        }
+
+        var live = _devices.GroupRequests
+            .Where(r => !r.Approved && r.ExpiresAt > DeviceTrustStore.AppleNow()).ToList();
+        if (live.Count > 0)
+        {
+            panel.Children.Add(new TextBlock { Text = "Join requests", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            foreach (var request in live)
+            {
+                var row = new Grid();
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                var name = new TextBlock
+                {
+                    Text = request.RequesterName + " wants to join",
+                    VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap,
+                };
+                Grid.SetColumn(name, 0);
+                row.Children.Add(name);
+                var reviewButton = new Button { Content = "Review", FontSize = 12 };
+                reviewButton.Click += async (_, _) => { await _devices.ReviewGroupRequestAsync(request); Refresh(); };
+                Grid.SetColumn(reviewButton, 1);
+                row.Children.Add(reviewButton);
+                panel.Children.Add(row);
+            }
+        }
+
+        panel.Children.Add(new TextBlock { Text = "Groups", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        foreach (var group in _devices.AvailableGroups())
+        {
+            var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            header.Children.Add(new TextBlock
+            {
+                Text = group.Name + (group.Id == _devices.CurrentGroup?.Id ? " (current)" : ""),
+                FontWeight = Microsoft.UI.Text.FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center,
+            });
+            if (group.Id == _devices.CurrentGroup?.Id)
+            {
+                var leave = new Button { Content = "Leave", FontSize = 12 };
+                leave.Click += async (_, _) => { await _devices.LeaveGroupAsync(); Refresh(); };
+                header.Children.Add(leave);
+            }
+            else if (_devices.CanJoinGroup(group.Id))
+            {
+                var join = new Button { Content = "Join", FontSize = 12 };
+                join.Click += async (_, _) => { await _devices.JoinGroupAsync(group); Refresh(); };
+                header.Children.Add(join);
+            }
+            var dissolve = new Button
+            {
+                Content = _groupsArmDissolve == group.Id ? "Confirm dissolve" : "Dissolve",
+                FontSize = 12,
+            };
+            dissolve.Click += async (_, _) =>
+            {
+                // Two-step in place of a nested confirmation dialog.
+                if (_groupsArmDissolve != group.Id) { _groupsArmDissolve = group.Id; _groupsSignature = ""; Refresh(); return; }
+                _groupsArmDissolve = null;
+                await _devices.DissolveGroupAsync(group);
+                Refresh();
+            };
+            header.Children.Add(dissolve);
+            panel.Children.Add(header);
+            foreach (var (_, label) in _devices.GroupDevices(group))
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "    " + label, FontSize = 12,
+                    Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                });
+        }
+        if (_groupsArmDissolve is not null)
+            panel.Children.Add(Note("Dissolving removes every device. Press Confirm dissolve to proceed."));
+
+        var createRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var createBox = new TextBox { PlaceholderText = "New group name", Width = 280, Text = _groupsCreateName };
+        createBox.TextChanged += (_, _) => _groupsCreateName = createBox.Text;
+        var create = new Button { Content = "Create Group", FontSize = 12 };
+        create.Click += async (_, _) =>
+        {
+            await _devices.CreateGroupAsync(_groupsCreateName);
+            _groupsCreateName = "";
+            Refresh();
+        };
+        createRow.Children.Add(createBox);
+        createRow.Children.Add(create);
+        panel.Children.Add(createRow);
+
+        var joinRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var hostBox = new TextBox { PlaceholderText = "Host or IP", Width = 200, Text = _groupsJoinHost };
+        hostBox.TextChanged += (_, _) => _groupsJoinHost = hostBox.Text;
+        var portBox = new TextBox { PlaceholderText = "Port", Width = 80, Text = _groupsJoinPort };
+        portBox.TextChanged += (_, _) => _groupsJoinPort = portBox.Text;
+        var joinByAddress = new Button { Content = "Join by address", FontSize = 12 };
+        joinByAddress.Click += async (_, _) =>
+        {
+            if (int.TryParse(_groupsJoinPort, out var port))
+                await _devices.JoinGroupByAddressAsync(_groupsJoinHost, port, "");
+            Refresh();
+        };
+        joinRow.Children.Add(hostBox);
+        joinRow.Children.Add(portBox);
+        joinRow.Children.Add(joinByAddress);
+        panel.Children.Add(joinRow);
+
+        if (_devices.ServiceStatus.Length > 0) panel.Children.Add(Note(_devices.ServiceStatus));
+        if (_devices.LastOutcome.Length > 0) panel.Children.Add(Note(_devices.LastOutcome));
     }
 
     private async void OnTakeHereClick(object sender, RoutedEventArgs e)
