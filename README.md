@@ -141,6 +141,8 @@ Claude’s normal installed CLI login is kept distinct from an explicit `CLAUDE_
 
 Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
 
+Each distributed preview advances its visible patch version and build number (for example, **0.5.1 (26)** → **0.5.2 (27)**). Check **Converse → About Converse** on Mac or the **…** menu on iPad to identify the installed update. `VERSION.json` is the shared version source for both apps.
+
 ## Build and run
 
 This preview is built and tested on an Apple Silicon Mac using Apple's Command Line Tools and the installed macOS SDK, targeting macOS 14. No third-party libraries or Xcode project are required.
