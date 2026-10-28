@@ -168,6 +168,30 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     store.sendMuse(muse, prompt: "after interrupt", display: "after interrupt", images: [], responseID: reply)
     pump { !muse.busy }
     check(muse.remoteID == museRemote && muse.messages.last?.text == "answer: after interrupt", "Muse resumes its retained session after interruption")
+    let previousMuseTransport = store.usesInteractiveMuse
+    store.usesInteractiveMuse = true
+    for mode in ["muse-stuck", "muse-no-ack", "muse-rejected-interrupt"] {
+        var entry = museEntry
+        entry.command = "python3 " + ProviderCommand.quote(fixture) + " " + mode
+        let stuck = store.create(entry)
+        stuck.draft = "slow"; store.submit(stuck)
+        pump { stuck.messages.last?.text == "partial" }
+        guard let old = stuck.muse, stuck.messages.last?.text == "partial" else {
+            check(false, mode + " starts the interactive fixture: " + stuck.status)
+            continue
+        }
+        let remote = stuck.remoteID
+        old.interruptionGrace = 0.15; old.terminationGrace = 0.15
+        stuck.pending = [PendingPrompt(text: "replacement", images: [])]
+        stuck.draft = "keep newer typing"
+        store.stop(stuck)
+        store.injectPending(stuck, id: stuck.pending[0].id)
+        pump { !stuck.busy && stuck.pending.isEmpty }
+        check(!old.process.isRunning && !stuck.busy && stuck.pending.isEmpty && stuck.remoteID == remote && stuck.messages.last(where: { $0.role == "assistant" })?.text == "answer: replacement" && stuck.draft == "keep newer typing", mode + " Stop then Inject recovers after host exit with exact session and draft")
+        let count = stuck.messages.filter { $0.role == "user" && $0.text == "replacement" }.count
+        check(count == 1 && stuck.messages.contains { $0.role == "notice" && $0.text.contains("local host") }, mode + " recovery submits once and explains forced host stop")
+    }
+    store.usesInteractiveMuse = previousMuseTransport
     muse.switchboardEnabled = true; muse.queuePaused = true
     muse.switchboardTurnStart = muse.messages.count
     reply = UUID(); muse.busy = true; muse.messages.append(Message(id: reply, role: "assistant", text: ""))

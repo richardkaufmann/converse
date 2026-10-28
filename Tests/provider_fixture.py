@@ -6,7 +6,7 @@ def emit(value): print(json.dumps(value), flush=True)
 models = [{'model': 'fixture-sol', 'displayName': 'Fixture Sol', 'isDefault': True, 'defaultReasoningEffort': 'low', 'supportedReasoningEfforts': [{'reasoningEffort': e} for e in ['low', 'high']]},
           {'model': 'fixture-small', 'displayName': 'Fixture Small', 'isDefault': False, 'defaultReasoningEffort': 'low', 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}]}]
 if args == ['serve']:
-    assert kind == 'muse'
+    assert kind.startswith('muse')
     session, turn = None, None
     def notify(method, **params): emit({'method': method, 'params': dict(sessionId=session, **params)})
     for line in sys.stdin:
@@ -19,6 +19,15 @@ if args == ['serve']:
             emit({'id':rid,'error':{'code':-32030,'message':'Saved model no longer available'}})
         elif method == 'turn/start':
             turn = p['commandId']; prompt = p['input'][0]['text']
+            if kind != 'muse':
+                from pathlib import Path
+                marker = Path(os.environ['CONVERSE_DATA_DIR']) / (kind + '.pid')
+                if prompt == 'slow': marker.write_text(str(os.getpid()))
+                elif marker.exists():
+                    try: os.kill(int(marker.read_text()), 0)
+                    except ProcessLookupError: pass
+                    else: raise AssertionError('Replacement started before previous host exited')
+            if kind == 'muse-stuck': signal.signal(signal.SIGTERM, signal.SIG_IGN)
             emit({'id':rid,'result':{'turnId':turn}})
             notify('turn/started', turnId=turn)
             notify('item/started', item={'itemId':'reply','kind':'agentMessage','text':''})
@@ -27,7 +36,11 @@ if args == ['serve']:
             if prompt != 'slow': notify('turn/completed', turnId=turn, terminal='completed')
         elif method == 'turn/interrupt':
             assert session == p['sessionId'] and turn == p['turnId']
-            emit({'id':rid,'result':{}}); notify('turn/completed', turnId=turn, terminal='cancelled')
+            if kind == 'muse-no-ack': continue
+            if kind == 'muse-rejected-interrupt':
+                emit({'id':rid,'error':{'code':-32030,'message':'Interrupt unavailable'}})
+            else: emit({'id':rid,'result':{}})
+            if kind == 'muse': notify('turn/completed', turnId=turn, terminal='cancelled')
         elif method != 'initialized': raise AssertionError(method)
     sys.exit()
 if args == ['app-server']:

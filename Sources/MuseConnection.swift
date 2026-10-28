@@ -10,10 +10,13 @@ final class MuseConnection {
     var event: ((String, [String: Any]) -> Void)?
     var disconnected: ((String) -> Void)?
     var sessionID: String
+    var interruptionGrace: TimeInterval = 5
+    var terminationGrace: TimeInterval = 5
     var turnID: String?
     private(set) var settingWarning: String?
     private var ready = false
     private var closing = false
+    private var interruptWatchdogStarted = false
     private var errorTail = ""
     init(sessionID: String) { self.sessionID = sessionID.lowercased() }
     func start(entry: Entry, arguments: [String] = [], completion: @escaping (Result<[String: Any], Error>) -> Void) {
@@ -68,6 +71,7 @@ final class MuseConnection {
         catch { closed() }
     }
     func receive(_ object: [String: Any]) {
+        guard !closing else { return }
         if let method = object["method"] as? String {
             let params = object["params"] as? [String: Any] ?? [:]
             if let session = params["sessionId"] as? String, session.lowercased() != sessionID { return }
@@ -137,12 +141,33 @@ final class MuseConnection {
             completion(result)
         }
     }
-    func interrupt() {
+    func interrupt(onForcedStop: @escaping () -> Void = {}) {
         var params: [String: Any] = ["commandId": MuseStatusProbe.commandID(), "sessionId": sessionID]
         if let turnID { params["turnId"] = turnID }
+        guard !closing else { return }
         rpc("turn/interrupt", params)
+        // An RPC receipt is not completion. Some hosts acknowledge cancellation
+        // but never emit turn/completed, or remain blocked in a tool/approval.
+        guard !interruptWatchdogStarted else { return }
+        interruptWatchdogStarted = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + interruptionGrace) { [weak self] in
+            guard let self, !self.closing else { return }
+            self.close()
+            let process = self.process
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.terminationGrace) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                process.waitUntilExit()
+                DispatchQueue.main.async { onForcedStop() }
+            }
+        }
     }
-    func close() { closing = true; try? input.fileHandleForWriting.close(); if process.isRunning { process.terminate() } }
+    func close() {
+        closing = true; callbacks.removeAll()
+        try? input.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
+    }
     private func closed() {
         let pending = callbacks; callbacks = [:]
         let message = errorTail.isEmpty ? "Muse connection closed." : "Muse connection closed: " + errorTail

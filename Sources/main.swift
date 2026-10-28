@@ -141,6 +141,7 @@ final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     let folder: URL
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
+    var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     var pendingSave: DispatchWorkItem?
@@ -213,7 +214,14 @@ final class Store: ObservableObject {
         guard s.busy else { return }
         s.interrupted = true
         if s.agent != nil { MainActor.assumeIsolated { AgentRuntime.shared.cancel(s) }; s.status = "Stopping…"; return }
-        if let muse = s.muse { s.status = "Stopping…"; muse.interrupt(); return }
+        if let muse = s.muse {
+            s.status = "Stopping…"
+            muse.interrupt { [weak self, weak s] in
+                guard let self, let s, s.muse === muse else { return }
+                self.finishMuse(s, status: "Interrupted", notice: "Muse did not finish interrupting; its local host was stopped. The saved conversation, queued input and draft were retained.")
+            }
+            return
+        }
         guard let p = s.process, p.isRunning else { return }
         s.status = "Stopping…"; p.interrupt()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
@@ -307,7 +315,7 @@ final class Store: ObservableObject {
             prompt += "\n[Converse image output: save images you create or download in " + imageFolder.path + "; include each as ![caption](file:///absolute/path.png) in your reply. Converse displays these in the conversation, including on remote devices. Do not open Preview or another desktop viewer.]"
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
-        if s.entry.engine == "muse" && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
+        if s.entry.engine == "muse" && usesInteractiveMuse {
             sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
         }
         switch s.entry.engine {
@@ -398,14 +406,16 @@ final class Store: ObservableObject {
             self.finishMuse(s, status: "Disconnected", notice: error)
         }
         connection.start(entry: s.entry, arguments: serverArguments) { [weak self, weak s] result in
-            guard let self, let s else { return }
+            guard let self, let s, s.muse === connection else { return }
             if case .failure(let error) = result { self.finishMuse(s, status: "Connection failed", notice: error.localizedDescription); return }
             s.process = connection.process
             connection.load(entry: s.entry, choices: s.choices) { result in
+                guard s.muse === connection else { return }
                 if case .failure(let error) = result { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription); return }
                 if let warning = connection.settingWarning { s.messages.append(Message(role: "notice", text: warning)); s.settingNotice = warning }
                 s.started = true; s.remoteID = connection.sessionID; self.save(); s.status = "Working…"
                 connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
+                    guard s.muse === connection else { return }
                     if case .failure(let error) = result { self.finishMuse(s, status: "Turn not acknowledged", notice: error.localizedDescription) }
                     else if s.interrupted { connection.interrupt() }
                 }
