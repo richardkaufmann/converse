@@ -66,6 +66,9 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] public bool TurnFailed { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool Interrupted { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal bool StreamedText { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal bool ResumeAfterInterrupt { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal bool ClaudeTextBlockPending { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal List<(int Location, int Length)> ClaudeStreamSeparators { get; } = new();
     [System.Text.Json.Serialization.JsonIgnore] public List<MuseRequest> Requests { get; set; } = new();
     [System.Text.Json.Serialization.JsonIgnore] public bool AnsweringRequest { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal MuseMspClient? Muse { get; set; }
@@ -210,16 +213,17 @@ public sealed class SessionStore
             if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; }
         }
         if (Entries.Count == 0) Entries = DefaultEntries();
-        // One-time repair: early builds named the claude entry "Muse". Sessions
-        // embed their own entry copy, so repair those too, plus untouched
-        // session titles that still carry the default wrong name.
+        // One-time repair: early builds named the claude entry "Muse" or
+        // "Claude Code". Sessions embed their own entry copy, so repair
+        // those too, plus untouched session titles that still carry a
+        // default wrong name. Mac parity is "Claude".
         var renamed = false;
         foreach (var entry in Entries)
-            if (entry.Engine == "claude" && entry.Name == "Muse") { entry.Name = "Claude"; renamed = true; }
-        foreach (var session in Sessions.Where(s => s.Entry.Engine == "claude" && s.Entry.Name == "Muse"))
+            if (entry.Engine == "claude" && entry.Name is "Muse" or "Claude Code") { entry.Name = "Claude"; renamed = true; }
+        foreach (var session in Sessions.Where(s => s.Entry.Engine == "claude" && s.Entry.Name is "Muse" or "Claude Code"))
         {
+            if (session.Title == session.Entry.Name) session.Title = "Claude";
             session.Entry.Name = "Claude";
-            if (session.Title == "Muse") session.Title = "Claude";
             renamed = true;
         }
         if (renamed) Save();
@@ -269,6 +273,10 @@ public sealed class SessionStore
         return builder.ToString().Trim('\n');
     }
 
+    // Mac Store.submit parity: a busy session (or a nonempty queue)
+    // enqueues only — the user message enters the transcript when the turn
+    // actually starts, so clearing a queued prompt leaves no trace of an
+    // unsent message. Submitting unpauses the queue, like the Mac.
     public void Submit(ChatSession session)
     {
         var text = session.Draft;
@@ -276,14 +284,16 @@ public sealed class SessionStore
         var images = new List<string>(session.Attachments);
         session.Draft = "";
         session.Attachments.Clear();
-        if (session.Busy || session.QueuePaused)
+        if (text.Length == 0 && images.Count > 0) text = "Please examine the attached image.";
+        if (session.Busy || session.Pending.Count > 0)
         {
             session.Pending.Add(new PendingPrompt { Text = text, Images = images });
-            session.Messages.Add(new ChatMessage { Role = "user", Text = text, Images = images, CreatedAt = DateTime.UtcNow });
+            session.QueuePaused = false;
+            if (!session.Busy) RunNext(session);
             Save();
             return;
         }
-        session.Messages.Add(new ChatMessage { Role = "user", Text = text, Images = images, CreatedAt = DateTime.UtcNow });
+        AppendUserMessage(session, text, images);
         _ = RunTurnAsync(session, text, images);
     }
 
@@ -292,17 +302,43 @@ public sealed class SessionStore
         if (session.Busy || session.QueuePaused || session.Pending.Count == 0) return;
         var next = session.Pending[0];
         session.Pending.RemoveAt(0);
-        _ = RunTurnAsync(session, next.Text, next.Images, alreadyDisplayed: true);
+        AppendUserMessage(session, next.Text, next.Images);
+        _ = RunTurnAsync(session, next.Text, next.Images);
     }
 
+    // Mac injectPending parity: a named prompt moves to the front; with no
+    // id the whole queue merges into one prompt. A busy session is
+    // interrupted and the prompt runs when the old turn winds down (never
+    // alongside it), via ResumeAfterInterrupt.
     public void InjectPending(ChatSession session, Guid? id = null)
     {
-        PendingPrompt? target = id is null ? session.Pending.FirstOrDefault() : session.Pending.FirstOrDefault(p => p.Id == id);
-        if (target is null) return;
-        session.Pending.Remove(target);
+        if (session.Pending.Count == 0) return;
+        if (id is null && session.Pending.Count > 1)
+        {
+            var merged = string.Join("\n\n", session.Pending.Select(p => p.Text));
+            var images = session.Pending.SelectMany(p => p.Images).ToList();
+            session.Pending.Clear();
+            session.Pending.Add(new PendingPrompt { Text = merged, Images = images });
+        }
+        else if (id is not null)
+        {
+            var target = session.Pending.FirstOrDefault(p => p.Id == id);
+            if (target is null) return;
+            session.Pending.Remove(target);
+            session.Pending.Insert(0, target);
+        }
         session.QueuePaused = false;
-        if (session.Busy) Stop(session);
-        _ = RunTurnAsync(session, target.Text, target.Images, alreadyDisplayed: true);
+        if (session.Busy) { session.ResumeAfterInterrupt = true; Stop(session); }
+        else RunNext(session);
+    }
+
+    private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images)
+    {
+        var first = !session.Messages.Any(m => m.Role == "user");
+        session.Messages.Add(new ChatMessage
+        { Role = "user", Text = text, Images = new List<string>(images), CreatedAt = DateTime.UtcNow });
+        if (first && (session.Title == "New session" || session.Title == session.Entry.Name))
+            session.Title = text.Length <= 45 ? text : text[..45];
     }
 
     public void Stop(ChatSession session)
@@ -319,6 +355,7 @@ public sealed class SessionStore
     {
         session.Busy = true;
         session.Interrupted = false;
+        session.ResumeAfterInterrupt = false;
         session.Status = "Connecting…";
         session.Requests.Clear();
         session.MuseItems.Clear();
@@ -364,9 +401,13 @@ public sealed class SessionStore
         session.Status = status;
         session.Messages.RemoveAll(m => m.Role == "assistant" && string.IsNullOrEmpty(m.Text));
         if (!string.IsNullOrEmpty(notice)) session.Messages.Add(new ChatMessage { Role = "notice", Text = notice });
-        if (status != "Ready" && session.Pending.Count > 0) session.QueuePaused = true;
+        // Mac finishQueue parity: an interrupted turn runs the queue only
+        // when an inject asked for the resume; anything else held pauses.
+        var shouldRun = status == "Ready" || (session.Interrupted && session.ResumeAfterInterrupt);
+        session.ResumeAfterInterrupt = false;
+        if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
         Save();
-        if (status == "Ready") RunNext(session);
+        if (shouldRun) RunNext(session);
         Changed?.Invoke();
     }
 
@@ -482,13 +523,16 @@ public sealed class SessionStore
         }
     }
 
-    private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images, bool alreadyDisplayed = false)
+    private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
     {
         if (session.Entry.Engine == "muse") { await RunMuseTurnAsync(session, prompt, images); return; }
         session.Busy = true;
         session.Interrupted = false;
+        session.ResumeAfterInterrupt = false;
         session.TurnFailed = false;
         session.StreamedText = false;
+        session.ClaudeTextBlockPending = false;
+        session.ClaudeStreamSeparators.Clear();
         session.Status = "Working…";
         var response = new ChatMessage { Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow };
         session.Messages.Add(response);
@@ -530,9 +574,11 @@ public sealed class SessionStore
                 response.Text = VisibleText(finalReply);
         }
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
-        if (!success && !session.Interrupted) session.QueuePaused = session.Pending.Count > 0;
+        var shouldRun = success || (session.Interrupted && session.ResumeAfterInterrupt);
+        session.ResumeAfterInterrupt = false;
+        if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
         Save();
-        if (success) RunNext(session);
+        if (shouldRun) RunNext(session);
         Changed?.Invoke();
     }
 
@@ -548,6 +594,7 @@ public sealed class SessionStore
         string? text = null;
         var replace = false;
         var delta = false;
+        var startsTextBlock = false;
         var type = GetString(obj, "type") ?? "";
         if (session.Entry.Engine == "muse")
         {
@@ -560,9 +607,25 @@ public sealed class SessionStore
         else if (session.Entry.Engine == "claude")
         {
             if (GetString(obj, "session_id") is { } sid) session.RemoteID = sid;
-            if (type == "stream_event" && obj.TryGetProperty("event", out var ev) &&
-                ev.TryGetProperty("delta", out var chunk) && GetString(chunk, "type") == "text_delta")
-            { text = GetString(chunk, "text"); delta = true; session.StreamedText = true; }
+            if (type == "stream_event" && obj.TryGetProperty("event", out var ev) && ev.ValueKind == JsonValueKind.Object)
+            {
+                if (GetString(ev, "type") == "content_block_start" && ev.TryGetProperty("content_block", out var started)
+                    && started.ValueKind == JsonValueKind.Object && GetString(started, "type") == "text")
+                {
+                    session.ClaudeTextBlockPending = true;
+                    if (GetString(started, "text") is { } initial && initial.Length > 0)
+                    {
+                        text = initial; delta = true; startsTextBlock = true;
+                        session.ClaudeTextBlockPending = false; session.StreamedText = true;
+                    }
+                }
+                if (ev.TryGetProperty("delta", out var chunk) && chunk.ValueKind == JsonValueKind.Object
+                    && GetString(chunk, "type") == "text_delta" && GetString(chunk, "text") is { } value && value.Length > 0)
+                {
+                    text = value; delta = true; startsTextBlock = session.ClaudeTextBlockPending;
+                    session.ClaudeTextBlockPending = false; session.StreamedText = true;
+                }
+            }
             if (type == "assistant" && obj.TryGetProperty("message", out var message) &&
                 message.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
             {
@@ -576,7 +639,20 @@ public sealed class SessionStore
             else if (type == "result")
             {
                 if (obj.TryGetProperty("is_error", out var isError) && isError.ValueKind == JsonValueKind.True) session.TurnFailed = true;
-                if (GetString(obj, "result") is { } result) { text = result; replace = true; }
+                if (GetString(obj, "result") is { } result)
+                {
+                    // Some CLI final snapshots join text blocks directly.
+                    // Keep only our display separators when the content is
+                    // otherwise byte-for-byte the same; genuine corrections
+                    // and error results still replace the accumulated text.
+                    var accumulated = response.Text;
+                    var unseparated = accumulated;
+                    foreach (var (location, length) in session.ClaudeStreamSeparators.OrderByDescending(s => s.Location))
+                        if (location + length <= unseparated.Length) unseparated = unseparated.Remove(location, length);
+                    text = !session.TurnFailed && session.ClaudeStreamSeparators.Count > 0 && unseparated == result
+                        ? accumulated : result;
+                    replace = true;
+                }
             }
         }
         else
@@ -597,7 +673,13 @@ public sealed class SessionStore
         if (text is null) return;
         var visible = VisibleText(text);
         if (string.IsNullOrEmpty(visible)) return;
-        var separator = string.IsNullOrEmpty(response.Text) || delta ? "" : "\n";
+        string separator;
+        if (string.IsNullOrEmpty(response.Text)) separator = "";
+        else if (startsTextBlock && !response.Text.EndsWith('\n')) separator = "\n\n";
+        else if (delta) separator = "";
+        else separator = "\n";
+        if (session.Entry.Engine == "claude" && startsTextBlock && !replace && separator.Length > 0)
+            session.ClaudeStreamSeparators.Add((response.Text.Length, separator.Length));
         response.Text = replace ? visible : response.Text + separator + visible;
     }
 

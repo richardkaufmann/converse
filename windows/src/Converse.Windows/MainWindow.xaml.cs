@@ -67,6 +67,7 @@ public sealed partial class MainWindow : Window
     private string _sidebarSignature = "";
     private string _bannerSignature = "";
     private bool _suppressSettings;
+    private bool _modelEditing;
     private ScrollViewer? _transcriptScroller;
     private int _draftSeq;
     private DateTime _lastDraftFlush = DateTime.MinValue;
@@ -377,10 +378,14 @@ public sealed partial class MainWindow : Window
             SendButton.IsEnabled = false;
             StopButton.IsEnabled = false;
             AttachButton.IsEnabled = false;
-            SettingsRow.IsEnabled = false;
+            ModelBox.IsEnabled = EffortBox.IsEnabled = AccessBox.IsEnabled = false; // WinUI 3 panels have no IsEnabled
             TakeButton.Visibility = Visibility.Collapsed;
             BusyRing.IsActive = false;
-            if (_historyText != "" || _draftText != "") { _historyText = ""; _draftText = ""; RebuildDocument(caretToEnd: true); }
+            // Always rebuild: the cleared state may equal the tracked state
+            // while the document still shows the old session, greyed out.
+            _historyText = "";
+            _draftText = "";
+            RebuildDocument(caretToEnd: true);
             RenderBanners();
             UpdateEarlier();
             UpdateHint();
@@ -388,12 +393,14 @@ public sealed partial class MainWindow : Window
         }
         PaneTitle.Text = _selected.Title;
         // Adopt the home draft only into an untouched tail; never over typing.
+        // Stored drafts use \n; the document uses \r, so normalize on adopt —
+        // otherwise the gutter, tint, and sent-text comparison all skew.
         var homeDraft = _selected.LocalSessionID is { } localId
             ? _store.Sessions.FirstOrDefault(s => s.Id == localId)?.Draft ?? ""
             : _devices.RemoteTranscripts.GetValueOrDefault(_selected.GlobalID ?? "")?.Draft ?? "";
-        if (_draftText == "" && homeDraft != "" && homeDraft != _lastSentText) _draftText = homeDraft;
+        if (_draftText == "" && homeDraft != "" && homeDraft != _lastSentText) _draftText = Breaks(homeDraft);
         // A remote draft clears only after its exact sent text is acknowledged.
-        if (_selected.GlobalID is not null && _lastSentText is not null && homeDraft == "" && _draftText == _lastSentText)
+        if (_selected.GlobalID is not null && _lastSentText is not null && homeDraft == "" && _draftText == Breaks(_lastSentText))
         {
             _draftText = "";
             _lastSentText = null;
@@ -432,24 +439,31 @@ public sealed partial class MainWindow : Window
         SendButton.IsEnabled = allowed;
         StopButton.IsEnabled = allowed;
         AttachButton.IsEnabled = allowed;
-        SettingsRow.IsEnabled = allowed;
+        ModelBox.IsEnabled = EffortBox.IsEnabled = AccessBox.IsEnabled = allowed; // WinUI 3 panels have no IsEnabled
         var showTake = _selected?.GlobalID is string gid
             && (!_devices.RemoteLeases.ContainsKey(gid) || _devices.RemoteOffline.Contains(gid));
         TakeButton.Visibility = showTake ? Visibility.Visible : Visibility.Collapsed;
         if (showTake && DeviceGlobalID.Parse(_selected!.GlobalID!) is { } parsed)
             TakeButton.IsEnabled = _devices.Homes.GetValueOrDefault(parsed.Home)?.Online == true;
+        Transcript.PlaceholderText = _selected is null ? "Select a conversation to begin." : "";
     }
 
     private void UpdateBusy()
     {
+        // Live status, never the selected sidebar snapshot: the snapshot
+        // freezes at selection time and disagrees with the sidebar.
         bool busy;
-        var parts = new List<string> { _selected?.Subtitle ?? "" };
+        var parts = new List<string>();
         if (_selected?.LocalSessionID is { } localId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);
             busy = session?.Busy == true;
-            if (session is not null && session.Pending.Count > 0)
-                parts.Add(session.Pending.Count + " queued" + (session.QueuePaused ? " (paused)" : ""));
+            if (session is not null)
+            {
+                parts.Add(session.Entry.Name + " · " + session.Status);
+                if (session.Pending.Count > 0)
+                    parts.Add(session.Pending.Count + " queued" + (session.QueuePaused ? " (paused)" : ""));
+            }
         }
         else if (_selected?.GlobalID is { } globalId)
         {
@@ -457,6 +471,7 @@ public sealed partial class MainWindow : Window
             busy = transcript?.Busy == true;
             if (transcript is not null)
             {
+                parts.Add(transcript.Status);
                 if (!string.IsNullOrEmpty(transcript.AccountName)) parts.Add(transcript.AccountName);
                 if (transcript.Pending.Count > 0)
                     parts.Add(transcript.Pending.Count + " queued" + (transcript.QueuePaused ? " (paused)" : ""));
@@ -546,10 +561,14 @@ public sealed partial class MainWindow : Window
         _suppressSettings = true;
         try
         {
-            SyncCombo(ModelBox, modelItems, model ?? "");
             // Never overwrite a model ID the user is still typing: streaming
-            // refreshes arrive while the box has focus.
-            if (!ModelBox.IsDropDownOpen && ModelBox.FocusState == FocusState.Unfocused) ModelBox.Text = model ?? CliDefault;
+            // refreshes arrive while the box has focus, and re-selecting an
+            // item in an editable ComboBox replaces its text too.
+            if (!ModelBox.IsDropDownOpen && !_modelEditing)
+            {
+                SyncCombo(ModelBox, modelItems, model ?? "");
+                ModelBox.Text = model ?? CliDefault;
+            }
             SyncCombo(EffortBox, effortItems, effort ?? "");
             SyncCombo(AccessBox, accessItems, access ?? "");
         }
@@ -578,17 +597,34 @@ public sealed partial class MainWindow : Window
             ApplySetting(box == EffortBox ? "effort" : "access", item.Id == "" ? null : item.Id);
     }
 
+    // Focus lands on the editable ComboBox's inner TextBox, so ModelBox.FocusState
+    // stays Unfocused while typing; track editing from the bubbled focus events.
+    private void OnModelGotFocus(object sender, RoutedEventArgs e) => _modelEditing = true;
+
     private void OnModelCommitted(object sender, RoutedEventArgs e)
     {
-        if (_suppressSettings || _selected is null) return;
-        var text = ModelBox.Text.Trim();
-        if (text == CliDefault) text = "";
-        ApplySetting("model", text == "" ? null : text);
+        _modelEditing = false;
+        CommitModel(ModelBox.Text);
     }
 
-    private void OnModelKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    // An editable ComboBox consumes Enter itself and raises TextSubmitted instead of KeyDown.
+    private void OnModelTextSubmitted(ComboBox sender, ComboBoxTextSubmittedEventArgs e)
     {
-        if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; OnModelCommitted(sender, e); }
+        e.Handled = true;
+        // Let the refresh select the submitted ID; otherwise the box reverts to
+        // its old selection and the next LostFocus commits that instead.
+        _modelEditing = false;
+        CommitModel(e.Text);
+    }
+
+    private void CommitModel(string raw)
+    {
+        if (_suppressSettings || _selected is null) return;
+        var text = raw.Trim();
+        // The box shows labels; map a shown label back to its model ID.
+        if ((ModelBox.ItemsSource as List<SettingItem>)?.FirstOrDefault(i => i.Label == text) is { } shown) text = shown.Id;
+        if (text == CliDefault) text = "";
+        ApplySetting("model", text == "" ? null : text);
     }
 
     private void ApplySetting(string kind, string? value)
@@ -632,6 +668,13 @@ public sealed partial class MainWindow : Window
                 ? Math.Min(selection.Length, Math.Max(0, _draftText.Length - (draftRelative ?? 0))) : 0;
 
             Transcript.Document.SetText(TextSetOptions.None, _historyText + _draftText);
+            // Single-spaced paragraphs with no before/after gap: any extra
+            // paragraph spacing accumulates into gutter drift on long
+            // transcripts, and this is a no-op when already the default.
+            var whole = Transcript.Document.GetRange(0, CurrentDocLength());
+            whole.ParagraphFormat.SpaceBefore = 0;
+            whole.ParagraphFormat.SpaceAfter = 0;
+            whole.ParagraphFormat.LineSpacingRule = LineSpacingRule.Single;
             var (_, runs, _) = BuildHistory();
             foreach (var (start, runLength) in runs)
             {
@@ -668,7 +711,9 @@ public sealed partial class MainWindow : Window
                 length = Math.Min(selection.Length, newDocLength - position);
             }
             Transcript.Document.Selection.SetRange(position, position + length);
-            if (caretToEnd || wasAtEnd) ScrollTranscriptToEnd();
+            // Deferred past layout: ScrollableHeight is stale synchronously
+            // after SetText, which parks the view at the top on send.
+            if (caretToEnd || wasAtEnd) DispatcherQueue.TryEnqueue(ScrollTranscriptToEnd);
             UpdateGutter();
         }
         finally { _rebuilding = false; }
@@ -743,6 +788,10 @@ public sealed partial class MainWindow : Window
                 Text = (i + 1) + (i + 1 < count ? "\n" : ""),
                 Foreground = prompt.Contains(i) ? accent : normal,
             });
+        // Resync immediately (toggle-on while scrolled shows stale numbers
+        // until the next scroll event otherwise).
+        if (TranscriptScroller() is { } scroller)
+            GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
     }
 
     private void OnLineNumbersToggled(object sender, RoutedEventArgs e)
@@ -820,9 +869,9 @@ public sealed partial class MainWindow : Window
         _lastSentText = null;
         _localCap = 200;
         if (session?.LocalSessionID is { } localId)
-            _draftText = _store.Sessions.FirstOrDefault(s => s.Id == localId)?.Draft ?? "";
+            _draftText = Breaks(_store.Sessions.FirstOrDefault(s => s.Id == localId)?.Draft ?? "");
         else if (session?.GlobalID is { } globalId)
-            _draftText = _devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Draft ?? "";
+            _draftText = Breaks(_devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Draft ?? "");
         RenderPane();
         if (caretToEnd) { RebuildDocument(caretToEnd: true); Transcript.Focus(FocusState.Programmatic); }
     }
@@ -1070,6 +1119,7 @@ public sealed partial class MainWindow : Window
             { Action = "answer", RequestID = view.Id, ChoiceID = choiceId });
             Refresh();
         }
+        Transcript.Focus(FocusState.Programmatic);
     }
 
     private async Task AnswerQuestionsAsync(RequestView view, RequestAnswerState state, ChatSession? local, string? gid)
@@ -1091,11 +1141,38 @@ public sealed partial class MainWindow : Window
             { Action = "answer", RequestID = view.Id, AnswersJson = json });
             Refresh();
         }
+        Transcript.Focus(FocusState.Programmatic);
     }
 
     private StackPanel BuildPendingPanel(List<(Guid Id, string Text)> pending, bool paused, ChatSession? local, string? gid)
     {
         var panel = new StackPanel { Spacing = 4 };
+        if (pending.Count == 0)
+        {
+            // Paused with nothing held: a slim Resume row instead of a
+            // "0 queued (paused)" banner. Focus returns to the composer so
+            // Return keeps sending instead of re-clicking Resume.
+            var slim = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            slim.Children.Add(new TextBlock
+            {
+                Text = "Queue paused",
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            var resume = new Button { Content = "Resume queue", FontSize = 12 };
+            resume.Click += (_, _) =>
+            {
+                if (local is not null) { local.QueuePaused = false; _store.Save(); _store.RunNext(local); Refresh(); }
+                else if (gid is not null)
+                {
+                    _ = _devices.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "resumeQueue" });
+                }
+                Transcript.Focus(FocusState.Programmatic);
+            };
+            slim.Children.Add(resume);
+            panel.Children.Add(slim);
+            return panel;
+        }
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         controls.Children.Add(new TextBlock
         {
@@ -1118,6 +1195,7 @@ public sealed partial class MainWindow : Window
                 _ = _devices.SendRemoteCommandAsync(gid,
                     new DeviceCommandPayload { Action = paused ? "resumeQueue" : "pauseQueue" });
             }
+            Transcript.Focus(FocusState.Programmatic);
         };
         controls.Children.Add(pause);
         var clear = new Button { Content = "Clear queue", FontSize = 12 };
@@ -1128,6 +1206,7 @@ public sealed partial class MainWindow : Window
             {
                 _ = _devices.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "clearQueue" });
             }
+            Transcript.Focus(FocusState.Programmatic);
         };
         controls.Children.Add(clear);
         panel.Children.Add(controls);
@@ -1154,6 +1233,7 @@ public sealed partial class MainWindow : Window
                     _ = _devices.SendRemoteCommandAsync(gid,
                         new DeviceCommandPayload { Action = "inject", PendingID = id });
                 }
+                Transcript.Focus(FocusState.Programmatic);
             };
             Grid.SetColumn(inject, 1);
             row.Children.Add(inject);
@@ -1184,10 +1264,10 @@ public sealed partial class MainWindow : Window
         if (record.Outcome == "uncertain")
         {
             var check = new Button { Content = "Check home", FontSize = 12 };
-            check.Click += async (_, _) => { await _devices.QueryOutboxAsync(record); Refresh(); };
+            check.Click += async (_, _) => { await _devices.QueryOutboxAsync(record); Refresh(); Transcript.Focus(FocusState.Programmatic); };
             row.Children.Add(check);
             var discard = new Button { Content = "Discard", FontSize = 12 };
-            discard.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); };
+            discard.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); Transcript.Focus(FocusState.Programmatic); };
             row.Children.Add(discard);
         }
         else if (record.Outcome is "failed" or "rejected")
@@ -1202,22 +1282,23 @@ public sealed partial class MainWindow : Window
                 }
                 _devices.DiscardOutbox(record.CommandID);
                 Refresh();
+                Transcript.Focus(FocusState.Programmatic);
             };
             row.Children.Add(restore);
             var discard = new Button { Content = "Discard", FontSize = 12 };
-            discard.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); };
+            discard.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); Transcript.Focus(FocusState.Programmatic); };
             row.Children.Add(discard);
         }
         else if (record.Outcome == "accepted")
         {
             var dismiss = new Button { Content = "Dismiss", FontSize = 12 };
-            dismiss.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); };
+            dismiss.Click += (_, _) => { _devices.DiscardOutbox(record.CommandID); Refresh(); Transcript.Focus(FocusState.Programmatic); };
             row.Children.Add(dismiss);
         }
         else
         {
             var resend = new Button { Content = "Resend same ID", FontSize = 12 };
-            resend.Click += async (_, _) => { await _devices.RetryOutboxAsync(record); Refresh(); };
+            resend.Click += async (_, _) => { await _devices.RetryOutboxAsync(record); Refresh(); Transcript.Focus(FocusState.Programmatic); };
             row.Children.Add(resend);
         }
         panel.Children.Add(row);
@@ -1297,10 +1378,11 @@ public sealed partial class MainWindow : Window
         var portBox = new TextBox { Text = DeviceSyncService.DefaultPort.ToString() };
         panel.Children.Add(hostBox);
         panel.Children.Add(portBox);
-        if (_devices.Trust.Devices.Count > 0)
+        var peers = _devices.Trust.Devices.Where(d => d.DeviceID != _devices.DeviceId).ToList();
+        if (peers.Count > 0)
         {
             panel.Children.Add(new TextBlock { Text = "Paired devices:" });
-            foreach (var device in _devices.Trust.Devices)
+            foreach (var device in peers)
             {
                 var row = new Grid();
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

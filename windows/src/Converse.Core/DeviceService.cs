@@ -39,17 +39,60 @@ public sealed class DeviceTrustStore
     public void Pin(TrustedDevice device)
     {
         var next = Devices.Where(d => d.DeviceID != device.DeviceID).Concat(new[] { device }).ToList();
-        Save(next);
+        Save(next, new HashSet<string>());
         Devices = next;
     }
     public void Forget(string deviceId)
     {
         var next = Devices.Where(d => d.DeviceID != deviceId).ToList();
-        Save(next);
+        Save(next, new HashSet<string> { deviceId });
         Devices = next;
     }
-    private void Save(List<TrustedDevice> devices) =>
-        AtomicJson.Write(_file, devices.Select(d => new Saved(d.DeviceID, d.Name, d.PublicKey, d.LastHost, d.LastPort)).ToList());
+    // Merge-preserve write: the fabric branch stores membership fields
+    // (generation, removed tombstones, ...) beside our keys, so a save must
+    // never rewrite the file from our projection alone. Known keys are
+    // stored in canonical fabric (camelCase) casing; unknown fields and
+    // tombstones we never loaded ride along untouched. Pinning clears a
+    // tombstone only for the device just approved by a human on both sides.
+    private void Save(List<TrustedDevice> devices, HashSet<string> removed)
+    {
+        System.Text.Json.Nodes.JsonArray existing = new();
+        try
+        {
+            if (File.Exists(_file))
+                existing = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllBytes(_file))
+                    as System.Text.Json.Nodes.JsonArray ?? new();
+        }
+        catch { /* corrupted file: rebuild from memory */ }
+        var byId = new Dictionary<string, System.Text.Json.Nodes.JsonObject>();
+        foreach (var node in existing.OfType<System.Text.Json.Nodes.JsonObject>())
+        {
+            var id = node["deviceID"]?.GetValue<string>() ?? node["DeviceID"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(id)) byId[id!] = node;
+        }
+        var next = new System.Text.Json.Nodes.JsonArray();
+        var seen = new HashSet<string>();
+        foreach (var device in devices)
+        {
+            seen.Add(device.DeviceID);
+            var entry = byId.TryGetValue(device.DeviceID, out var prior)
+                ? (System.Text.Json.Nodes.JsonObject)prior.DeepClone()
+                : new System.Text.Json.Nodes.JsonObject();
+            foreach (var key in new[] { "DeviceID", "Name", "PublicKey", "LastHost", "LastPort", "Removed", "removed" })
+                entry.Remove(key);
+            entry["deviceID"] = device.DeviceID;
+            entry["name"] = device.Name;
+            entry["publicKey"] = Convert.ToBase64String(device.PublicKey);
+            entry.Remove("lastHost");
+            entry.Remove("lastPort");
+            if (device.LastHost is not null) entry["lastHost"] = device.LastHost;
+            if (device.LastPort is not null) entry["lastPort"] = device.LastPort;
+            next.Add(entry);
+        }
+        foreach (var (id, entry) in byId)
+            if (!seen.Contains(id) && !removed.Contains(id)) next.Add((System.Text.Json.Nodes.JsonNode)entry.DeepClone());
+        AtomicJson.Write(_file, next);
+    }
 }
 
 public sealed record PairingPrompt(string PeerName, string Fingerprint, string Code, bool KeyChanged, bool IsInitiator = false);

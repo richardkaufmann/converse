@@ -208,6 +208,14 @@ def main() -> int:
         return 1
 
     out = Path(args.out) if args.out else repo_root / "Help" / "Content.json"
+    if document["sourceCommit"] == "unknown" and out.exists():
+        # No git (e.g. an unzipped source drop): keep the packager's stamp for the same README.
+        try:
+            previous = json.loads(out.read_text(encoding="utf-8"))
+            if previous.get("sourceSHA256") == document["sourceSHA256"]:
+                document["sourceCommit"] = previous.get("sourceCommit") or "unknown"
+        except (OSError, ValueError):
+            pass
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"build-help: wrote {out} ({len(document['topics'])} topics, "

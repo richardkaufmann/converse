@@ -177,7 +177,8 @@
                 <StackPanel x:Name="SettingsRow" Grid.Row="5" Orientation="Horizontal" Spacing="6" Padding="8,0,8,8" VerticalAlignment="Center">
                     <TextBlock Text="Model:" VerticalAlignment="Center" FontSize="12"/>
                     <ComboBox x:Name="ModelBox" Width="200" IsEditable="True" FontSize="12"
-                              SelectionChanged="OnSettingChanged" LostFocus="OnModelCommitted" KeyDown="OnModelKeyDown"/>
+                              SelectionChanged="OnSettingChanged" GotFocus="OnModelGotFocus" LostFocus="OnModelCommitted"
+                              TextSubmitted="OnModelTextSubmitted"/>
                     <TextBlock Text="Effort:" VerticalAlignment="Center" FontSize="12" Margin="6,0,0,0"/>
                     <ComboBox x:Name="EffortBox" Width="130" FontSize="12" SelectionChanged="OnSettingChanged"/>
                     <TextBlock Text="Access:" VerticalAlignment="Center" FontSize="12" Margin="6,0,0,0"/>

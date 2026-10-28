@@ -215,10 +215,16 @@ public sealed class DeviceDraftTracker
 
 internal static class AtomicJson
 {
+    // Concurrent saves of one store share a .tmp path; Windows rejects that as a sharing violation.
+    static readonly object Gate = new();
     public static void Write<T>(string file, T value)
     {
-        var temp = file + ".tmp";
-        File.WriteAllBytes(temp, JsonSerializer.SerializeToUtf8Bytes(value));
-        File.Move(temp, file, overwrite: true);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        lock (Gate)
+        {
+            var temp = file + ".tmp";
+            File.WriteAllBytes(temp, bytes);
+            File.Move(temp, file, overwrite: true);
+        }
     }
 }

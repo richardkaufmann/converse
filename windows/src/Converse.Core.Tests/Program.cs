@@ -555,8 +555,175 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
 }
 
+// AtomicJson: concurrent saves of one store cannot collide on Windows.
+{
+    var root = Directory.CreateTempSubdirectory("converse-atomic-").FullName;
+    try
+    {
+        var file = Path.Combine(root, "store.json");
+        var tasks = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            for (var i = 0; i < 25; i++) Converse.Core.AtomicJson.Write(file, new { worker, i });
+        })).ToArray();
+        Task.WaitAll(tasks);
+        var back = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(file));
+        Check(back.RootElement.TryGetProperty("worker", out _), "Concurrent atomic saves never throw and leave valid JSON");
+    }
+    finally { Directory.Delete(root, recursive: true); }
+}
+
+// devices.json merge-preserve: fabric extras and tombstones survive our saves.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-merge-").FullName;
+    var key = Convert.ToBase64String(new byte[32]);
+    File.WriteAllText(Path.Combine(dir, "devices.json"),
+        "[{\"deviceID\":\"aa\",\"name\":\"Mac\",\"publicKey\":\"" + key + "\",\"generation\":4,\"changedBy\":\"aa\",\"custom\":true},"
+        + "{\"deviceID\":\"bb\",\"name\":\"Gone\",\"publicKey\":\"" + key + "\",\"generation\":9,\"removed\":true},"
+        + "{\"DeviceID\":\"cc\",\"Name\":\"Old\",\"PublicKey\":\"" + key + "\"}]");
+    var trust = new Converse.Core.DeviceTrustStore(dir);
+    Check(trust.Devices.Count == 2, "Merge setup loads live entries and skips tombstones");
+    trust.Pin(new Converse.Core.TrustedDevice("dd", "New", new byte[32], "h", 1));
+    var saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "devices.json")))!.AsArray();
+    var aa = saved.OfType<System.Text.Json.Nodes.JsonObject>().First(o => o["deviceID"]?.GetValue<string>() == "aa");
+    var bb = saved.OfType<System.Text.Json.Nodes.JsonObject>().First(o => o["deviceID"]?.GetValue<string>() == "bb");
+    var cc = saved.OfType<System.Text.Json.Nodes.JsonObject>().First(o => o["deviceID"]?.GetValue<string>() == "cc");
+    var dd = saved.OfType<System.Text.Json.Nodes.JsonObject>().First(o => o["deviceID"]?.GetValue<string>() == "dd");
+    Check(aa["generation"]?.GetValue<int>() == 4 && aa["changedBy"]?.GetValue<string>() == "aa" && aa["custom"]?.GetValue<bool>() == true,
+        "Pin preserves fabric membership fields on untouched entries");
+    Check(bb["removed"]?.GetValue<bool>() == true && bb["generation"]?.GetValue<int>() == 9,
+        "Pin carries tombstones it never loaded");
+    Check(cc["DeviceID"] is null && cc["deviceID"]?.GetValue<string>() == "cc",
+        "PascalCase entries migrate to canonical fabric casing");
+    Check(dd["name"]?.GetValue<string>() == "New" && dd["lastHost"]?.GetValue<string>() == "h" && dd["lastPort"]?.GetValue<int>() == 1,
+        "New pins store canonical keys with endpoint metadata");
+    trust.Forget("aa");
+    var after = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "devices.json")))!.AsArray();
+    Check(after.OfType<System.Text.Json.Nodes.JsonObject>().All(o => o["deviceID"]?.GetValue<string>() != "aa")
+        && after.OfType<System.Text.Json.Nodes.JsonObject>().Any(o => o["deviceID"]?.GetValue<string>() == "bb"),
+        "Forget drops the entry but keeps unrelated tombstones");
+    Directory.Delete(dir, recursive: true);
+}
+
+// Queue semantics with a gated runner: enqueue-only, unpause, clean clear,
+// inject ordering, merged inject-all, title from first prompt.
+{
+    var root = Directory.CreateTempSubdirectory("converse-queue-").FullName;
+    try
+    {
+        var gated = new GatedRunner();
+        var store = new SessionStore(root, gated);
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        int UserCount() => session.Messages.Count(m => m.Role == "user");
+        session.Draft = "first prompt here";
+        store.Submit(session);
+        Check(session.Busy && UserCount() == 1, "Idle submit starts a turn with its user message");
+        session.Draft = "second";
+        store.Submit(session);
+        Check(session.Pending.Count == 1 && UserCount() == 1, "Busy submit enqueues without a transcript message");
+        session.QueuePaused = true;
+        session.Draft = "third";
+        store.Submit(session);
+        Check(!session.QueuePaused && session.Pending.Count == 2, "Submit unpauses the queue (Mac parity)");
+        session.Pending.Clear();
+        store.Save();
+        Check(session.Pending.Count == 0 && UserCount() == 1, "Clear leaves no unsent transcript trace");
+        Check(session.Title == "first prompt here", "Session title comes from the first prompt");
+        gated.Gate.SetResult(true);
+        Check(await Until(() => !session.Busy && session.Status == "Ready"), "Gated turn completes after release");
+
+        var injected = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        injected.Draft = "one";
+        store.Submit(injected);
+        injected.Draft = "two";
+        store.Submit(injected);
+        var target = injected.Pending[0].Id;
+        store.InjectPending(injected, target);
+        Check(injected.Pending.Count == 1 && injected.Busy, "Inject while busy holds the prompt for the wind-down");
+        Check(await Until(() => injected.Messages.Any(m => m.Role == "user" && m.Text == "two") && injected.Pending.Count == 0),
+            "Injected prompt runs after the interrupted turn, never alongside");
+        gated.Gate.SetResult(true);
+        Check(await Until(() => !injected.Busy) && gated.Prompts.TakeLast(2).SequenceEqual(new[] { "one", "two" }),
+            "Interrupted turn yields to the injected prompt in order");
+
+        var mergeStore = new SessionStore(root, new FakeRunner());
+        var merged = mergeStore.Create(mergeStore.Entries.First(e => e.Engine == "codex"));
+        merged.Pending.Add(new Converse.Core.PendingPrompt { Text = "alpha" });
+        merged.Pending.Add(new Converse.Core.PendingPrompt { Text = "beta" });
+        mergeStore.InjectPending(merged);
+        Check(merged.Pending.Count == 0 && merged.Messages.Count(m => m.Role == "user") == 1
+            && merged.Messages.First(m => m.Role == "user").Text == "alpha\n\nbeta",
+            "Inject-all merges the queue into one prompt (Mac parity)");
+    }
+    finally { Directory.Delete(root, recursive: true); }
+}
+
+// Claude text-block separators mirror the Mac: blocks stay separated in
+// interrupted streams, and glued final snapshots keep our separators only.
+{
+    var store = new SessionStore(Directory.CreateTempSubdirectory("converse-sep-").FullName, new FakeRunner());
+    var session = store.Create(store.Entries.First(e => e.Engine == "claude"));
+    var response = new ChatMessage { Role = "assistant", Text = "" };
+    void Line(string json) => store.Consume(json, session, response);
+    Line("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+    Line("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}}");
+    Check(response.Text == "Hello", "First streamed block needs no separator");
+    Line("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+    Line("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"World\"}}}");
+    Check(response.Text == "Hello\n\nWorld", "Later text blocks separate with a blank line");
+    Line("{\"type\":\"result\",\"result\":\"HelloWorld\"}");
+    Check(response.Text == "Hello\n\nWorld", "Glued final snapshot keeps display separators");
+    Line("{\"type\":\"result\",\"result\":\"Something new\"}");
+    Check(response.Text == "Something new", "Genuinely new final text still replaces");
+    var failed = store.Create(store.Entries.First(e => e.Engine == "claude"));
+    var failedResponse = new ChatMessage { Role = "assistant", Text = "" };
+    store.Consume("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}", failed, failedResponse);
+    store.Consume("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"part\"}}}", failed, failedResponse);
+    store.Consume("{\"type\":\"result\",\"is_error\":true,\"result\":\"part\"}", failed, failedResponse);
+    Check(failedResponse.Text == "part" && failed.TurnFailed, "Error results replace without separator games");
+}
+
+// Entry naming repairs "Claude Code" as well as "Muse".
+{
+    var dir = Directory.CreateTempSubdirectory("converse-code-").FullName;
+    var entryJson = "{\"Name\":\"Claude Code\",\"Command\":\"claude\",\"Directory\":\"C:\\\\u\",\"Engine\":\"claude\"}";
+    File.WriteAllText(Path.Combine(dir, "sessions.json"),
+        "{\"Entries\":[" + entryJson + "],\"Sessions\":["
+        + "{\"Id\":\"" + Guid.NewGuid() + "\",\"Entry\":" + entryJson + ",\"Title\":\"Claude Code\",\"Messages\":[]},"
+        + "{\"Id\":\"" + Guid.NewGuid() + "\",\"Entry\":" + entryJson + ",\"Title\":\"Custom\",\"Messages\":[]}]}");
+    var migrated = new Converse.Core.SessionStore(dir, new FakeRunner());
+    Check(migrated.Entries[0].Name == "Claude"
+        && migrated.Sessions.Single(s => s.Title == "Claude").Entry.Name == "Claude"
+        && migrated.Sessions.Single(s => s.Title == "Custom").Entry.Name == "Claude",
+        "Stored claude entry misnamed Claude Code migrates, keeping custom titles");
+    Directory.Delete(dir, recursive: true);
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
+
+sealed class GatedRunner : Converse.Core.IAgentRunner
+{
+    public TaskCompletionSource<bool> Gate { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public List<string> Prompts { get; } = new();
+    public async Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
+        Action<string> onLine, CancellationToken cancellationToken)
+    {
+        Prompts.Add(prompt);
+        var done = await Task.WhenAny(Gate.Task, Task.Delay(-1, cancellationToken));
+        if (done != Gate.Task) return 1;
+        Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        onLine("{\"type\":\"thread.started\",\"thread_id\":\"t\"}");
+        onLine("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"gated reply\"}}");
+        onLine("{\"type\":\"turn.completed\"}");
+        return 0;
+    }
+}
 
 sealed class FakeRunner : Converse.Core.IAgentRunner
 {
