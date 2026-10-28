@@ -130,8 +130,8 @@ struct RemoteSidebarRow: View {
     }
     var body: some View {
         HStack(spacing: 6) {
-            Circle().fill(row.busy ? Color.orange : Color.clear).frame(width: 12, height: 12)
-                .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 0.5))
+            ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.status.hasPrefix("Waiting"))
+                .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
             Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
             if row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }

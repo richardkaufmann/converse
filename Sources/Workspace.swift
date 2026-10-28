@@ -73,17 +73,28 @@ struct SessionActivity: View {
     @ObservedObject var session: Session
     var showApproval = false
     var body: some View {
+        ConversationActivity(busy: session.busy, status: session.status,
+                             waiting: !session.requests.isEmpty || session.status.hasPrefix("Waiting"), showApproval: showApproval)
+    }
+}
+// Both home and remote rows render the same animation and waiting state.
+struct ConversationActivity: View {
+    var busy: Bool
+    var status: String
+    var waiting = false
+    var showApproval = false
+    var body: some View {
         Group {
             if showApproval {
                 Circle().fill(.yellow).overlay(Text("!").font(.system(size: 10, weight: .heavy)).foregroundStyle(.black))
-            } else if session.busy && session.requests.isEmpty && !session.status.hasPrefix("Waiting") {
+            } else if busy && !waiting {
                 TimelineView(.animation(minimumInterval: 1.0 / 20)) { context in
                     Circle().fill(AngularGradient(colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .red], center: .center))
                         .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 0.5))
                         .rotationEffect(.degrees(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.5) * 240))
                 }
             } else { Color.clear }
-        }.frame(width: 12, height: 12).accessibilityLabel(showApproval ? "Permission required" : (session.busy ? session.status : "Idle"))
+        }.frame(width: 12, height: 12).accessibilityLabel(showApproval ? "Permission required" : (busy ? status : "Idle"))
     }
 }
 struct PaneButton: View {

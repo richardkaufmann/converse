@@ -39,7 +39,8 @@ info.update(CFBundleIdentifier="local.converse.IsolatedQA", CFBundleName="Conver
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))
 wrapper = contents / "MacOS/Converse"
 wrapper.write_text("#!/bin/zsh\n" + ("export CONVERSE_QA_APPROVAL=1\n" if "--approval-preview" in sys.argv else "")
-                   + ("export CONVERSE_QA_REMOTE=1\n" if "--remote-preview" in sys.argv or "--pairing-preview" in sys.argv else "")
+                   + ("export CONVERSE_QA_REMOTE=1\n" if "--remote-preview" in sys.argv or "--pairing-preview" in sys.argv or "--busy-preview" in sys.argv else "")
+                   + ("export CONVERSE_QA_BUSY=1\n" if "--busy-preview" in sys.argv else "")
                    + ("export CONVERSE_QA_PAIRING=1\n" if "--pairing-preview" in sys.argv else "") + "cd " + shlex.quote(str(work)) + "\n"
                    "export CONVERSE_TEST_COMMAND=offline-fixture\n"
                    "export XDG_CONFIG_HOME=" + shlex.quote(str(root / "Config")) + "\n"
