@@ -73,6 +73,19 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(Leg(0x61, 0x11, true) != Leg(0x62, 0x22, false), "MITM legs with different keys show different 128-bit codes");
 }
 
+// RFC 7748 section 6.1 vectors + low-order rejection.
+{
+    var alicePriv = Hex.Decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+    var alicePub = Hex.Decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+    var bobPriv = Hex.Decode("5dab087ebb8a74e5a7d8f44d526b2d87247d7469f3f34e13fd5a1d57a4277b7a");
+    var bobPub = Hex.Decode("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+    Check(Hex.Encode(X25519.PublicKeyFromPrivate(alicePriv)) == Hex.Encode(alicePub), "RFC7748 Alice public key matches");
+    Check(Hex.Encode(X25519.SharedSecret(alicePriv, bobPub)) == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "RFC7748 shared secret matches");
+    var rejected = false;
+    try { X25519.SharedSecret(alicePriv, new byte[32]); } catch { rejected = true; }
+    Check(rejected, "All-zero (low-order) public key is rejected");
+}
+
 // Lease fencing + expiry.
 {
     var now = DateTimeOffset.FromUnixTimeSeconds(1000);
@@ -166,6 +179,84 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Directory.Delete(homeRoot, recursive: true);
         Directory.Delete(viewerRoot, recursive: true);
     }
+}
+
+// Muse MSP over loopback TCP: approval request surfaces and decides.
+{
+    var root = Directory.CreateTempSubdirectory("converse-msp-").FullName;
+    var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+    string? decidedChoice = null;
+    string sid = "";
+    var serverTask = Task.Run(async () =>
+    {
+        using var server = await listener.AcceptTcpClientAsync();
+        var stream = server.GetStream();
+        using var reader = new StreamReader(stream, leaveOpen: true);
+        async Task Send(string json) => await stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(json + "\n"));
+        while (await reader.ReadLineAsync() is { } line)
+        {
+            var obj = System.Text.Json.Nodes.JsonNode.Parse(line)!.AsObject();
+            var method = obj["method"]?.GetValue<string>();
+            var id = obj["id"]?.DeepClone();
+            if (method == "initialize") await Send($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{}}}}".Replace("{id}", id!.ToJsonString()));
+            else if (method == "session/read") { sid = obj["params"]?["sessionId"]?.GetValue<string>() ?? ""; await Send($"{{\"jsonrpc\":\"2.0\",\"id\":{id!.ToJsonString()},\"error\":{{\"code\":-32000,\"message\":\"missing\",\"data\":{{\"kind\":\"sessionNotFound\"}}}}}}"); }
+            else if (method == "session/start") { sid = obj["params"]?["sessionId"]?.GetValue<string>() ?? sid; await Send($"{{\"jsonrpc\":\"2.0\",\"id\":{id!.ToJsonString()},\"result\":{{}}}}"); }
+            else if (method == "turn/start")
+            {
+                await Send($"{{\"jsonrpc\":\"2.0\",\"id\":{id!.ToJsonString()},\"result\":{{\"turnId\":\"t1\"}}}}");
+                await Send("{\"jsonrpc\":\"2.0\",\"id\":900,\"method\":\"approval/request\",\"params\":{\"sessionId\":\"" + sid + "\",\"approvalId\":\"a1\",\"currentRequirementId\":\"r1\",\"toolName\":\"Bash\",\"rawArgs\":\"ls\",\"availableChoices\":[{\"choiceId\":\"allow-once\",\"label\":\"Allow once\"},{\"choiceId\":\"deny\",\"label\":\"Deny\"}]}}");
+            }
+            else if (method == "approval/decide")
+            {
+                decidedChoice = obj["params"]?["choiceId"]?.GetValue<string>();
+                await Send($"{{\"jsonrpc\":\"2.0\",\"id\":{id!.ToJsonString()},\"result\":{{}}}}");
+                await Send("{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\",\"params\":{\"sessionId\":\"" + sid + "\",\"terminal\":\"completed\"}}");
+            }
+        }
+    });
+    try
+    {
+        var store = new SessionStore(root, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "muse"));
+        store.MuseFactory = (entry, s) =>
+        {
+            var tcp = new System.Net.Sockets.TcpClient();
+            tcp.Connect(System.Net.IPAddress.Loopback, port);
+            return MuseMspClient.OverStream(s.Id.ToString("D"), tcp.GetStream());
+        };
+        // Fake server expects its sessionId echo; align by using any id (client filters mismatches).
+        session.Draft = "do it";
+        store.Submit(session);
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (session.Requests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
+        Check(session.Requests.Count == 1 && session.Requests[0].Kind == "approval", "MSP approval request surfaces on session");
+        if (session.Requests.Count == 1)
+            Check(await store.AnswerMuseAsync(session, session.Requests[0], choice: "deny"), "MSP approval decision accepted by client");
+        while (session.Busy && DateTime.UtcNow < deadline) await Task.Delay(25);
+        Check(decidedChoice == "deny" && session.Status == "Ready", "MSP decide reaches host and turn completes");
+    }
+    finally
+    {
+        listener.Stop();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// mDNS name decoding with compression pointer.
+{
+    var packet = new List<byte>();
+    packet.AddRange(new byte[12]);
+    void Label(string value) { packet.Add((byte)value.Length); packet.AddRange(System.Text.Encoding.UTF8.GetBytes(value)); }
+    Label("_converse"); Label("_tcp"); Label("local"); packet.Add(0);
+    var pointerTarget = 12;
+    packet.AddRange(new byte[] { 3, (byte)'M', (byte)'a', (byte)'c', (byte)(0xC0 | (pointerTarget >> 8)), (byte)pointerTarget });
+    var bytes = packet.ToArray();
+    var offset = 12;
+    var first = Converse.Core.MdnsDiscovery.ReadName(bytes, ref offset);
+    var second = Converse.Core.MdnsDiscovery.ReadName(bytes, ref offset);
+    Check(first == "_converse._tcp.local" && second == "Mac._converse._tcp.local", "mDNS names decode with compression pointers");
 }
 
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");

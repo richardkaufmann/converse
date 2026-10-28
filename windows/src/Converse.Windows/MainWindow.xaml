@@ -31,6 +31,8 @@
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
                                 <Button Content="P" Click="OnParkClick" Tag="{Binding}"/>
                                 <Button Content="1" Click="OnTakeClick" Tag="{Binding}"/>
+                                <Button Content="2" Click="OnTakeClick" Tag="{Binding}"/>
+                                <Button Content="3" Click="OnTakeClick" Tag="{Binding}"/>
                             </StackPanel>
                         </Grid>
                     </DataTemplate>
@@ -62,7 +64,8 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="Composer" Grid.Column="0" AcceptsReturn="True" TextWrapping="Wrap"
-                         PlaceholderText="Message… (Enter sends from Send button in this milestone)"/>
+                         PreviewKeyDown="OnComposerKeyDown"
+                         PlaceholderText="Message… Return sends · Ctrl+Return for newline"/>
                 <Button Grid.Column="1" Content="Stop" Margin="6,0,0,0" Click="OnStopClick"/>
                 <Button Grid.Column="2" Content="Send" Margin="6,0,0,0" Click="OnSendClick"/>
             </Grid>

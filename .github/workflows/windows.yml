@@ -1,0 +1,28 @@
+name: Windows core + app
+on:
+  push:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "windows/**"
+jobs:
+  core-tests:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Core checks (Noise vectors, engine, loopback sync, MSP)
+        run: dotnet run --project windows/src/Converse.Core.Tests -c Release
+  app-build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build WinUI app (x64)
+        run: dotnet build windows/src/Converse.Windows -c Release -p:Platform=x64

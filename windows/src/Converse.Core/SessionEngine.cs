@@ -66,6 +66,11 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] public bool TurnFailed { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool Interrupted { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal bool StreamedText { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public List<MuseRequest> Requests { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore] public bool AnsweringRequest { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal MuseMspClient? Muse { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal Dictionary<string, Guid> MuseItems { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore] internal TaskCompletionSource<(string Status, string? Notice)>? MuseTurnDone { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal Process? RunningProcess { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal CancellationTokenSource? TurnCancellation { get; set; }
 }
@@ -290,10 +295,182 @@ public sealed class SessionStore
     {
         session.Interrupted = true;
         session.TurnCancellation?.Cancel();
+        if (session.Muse is not null) _ = session.Muse.InterruptAsync();
+    }
+
+    // Factory seam so tests can drive MSP over a loopback stream.
+    public Func<AgentEntry, ChatSession, MuseMspClient>? MuseFactory { get; set; }
+
+    private async Task RunMuseTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
+    {
+        session.Busy = true;
+        session.Interrupted = false;
+        session.Status = "Connecting…";
+        session.Requests.Clear();
+        session.MuseItems.Clear();
+        var response = new ChatMessage { Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow };
+        session.Messages.Add(response);
+        var responseId = response.Id;
+        var client = MuseFactory?.Invoke(session.Entry, session)
+            ?? MuseMspClient.StartProcess(session.Entry, session.RemoteID ?? session.Id.ToString("D"));
+        session.Muse = client;
+        session.MuseTurnDone = new TaskCompletionSource<(string, string?)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.Event += (method, @params) => ConsumeMuse(method, @params, session, responseId);
+        client.Disconnected += error => session.MuseTurnDone?.TrySetResult(("Disconnected", error));
+        Save();
+        try
+        {
+            await client.InitializeAsync();
+            await client.LoadAsync(session.Entry, session.Choices);
+            if (client.SettingWarning is { } warning) session.Messages.Add(new ChatMessage { Role = "notice", Text = warning });
+            session.Started = true;
+            session.RemoteID = client.SessionId;
+            session.Status = "Working…";
+            session.TurnCancellation = new CancellationTokenSource();
+            using var registration = session.TurnCancellation.Token.Register(() => _ = client.InterruptAsync());
+            await client.SubmitAsync(prompt, prompt, images, session.Choices.Effort);
+            if (session.Interrupted) await client.InterruptAsync();
+            var (status, notice) = await session.MuseTurnDone.Task;
+            FinishMuse(session, status, notice);
+        }
+        catch (Exception error)
+        {
+            FinishMuse(session, "Connection failed", error.Message);
+        }
+    }
+
+    private void FinishMuse(ChatSession session, string status, string? notice)
+    {
+        var client = session.Muse;
+        session.Muse = null;
+        client?.Dispose();
+        session.Busy = false;
+        session.Requests.Clear();
+        session.AnsweringRequest = false;
+        session.Status = status;
+        session.Messages.RemoveAll(m => m.Role == "assistant" && string.IsNullOrEmpty(m.Text));
+        if (!string.IsNullOrEmpty(notice)) session.Messages.Add(new ChatMessage { Role = "notice", Text = notice });
+        if (status != "Ready" && session.Pending.Count > 0) session.QueuePaused = true;
+        Save();
+        if (status == "Ready") RunNext(session);
+        Changed?.Invoke();
+    }
+
+    public void ConsumeMuse(string method, System.Text.Json.Nodes.JsonObject @params, ChatSession session, Guid responseId)
+    {
+        switch (method)
+        {
+            case "turn/started":
+                session.Busy = true;
+                session.Muse!.TurnId = @params["turnId"]?.GetValue<string>();
+                session.Status = "Working…";
+                break;
+            case "turn/completed":
+                var terminal = @params["terminal"]?.GetValue<string>() ?? "unknown";
+                var notice = (@params["error"] as System.Text.Json.Nodes.JsonObject)?["message"]?.GetValue<string>()
+                    ?? @params["reason"]?.GetValue<string>();
+                session.MuseTurnDone?.TrySetResult((terminal == "completed" ? "Ready" : char.ToUpperInvariant(terminal[0]) + terminal[1..], notice));
+                break;
+            case "session/statusChanged":
+                var attention = (@params["attention"] as System.Text.Json.Nodes.JsonArray)?.Select(a => a?.GetValue<string>()).ToList() ?? new();
+                if (attention.Contains("inputPending")) session.Status = "Waiting for your answer";
+                else if (attention.Contains("approvalPending")) session.Status = "Waiting for approval";
+                break;
+            case "approval/request":
+            case "userInput/request":
+                var kind = method == "approval/request" ? "approval" : "question";
+                var id = @params[kind == "approval" ? "approvalId" : "userInputId"]?.GetValue<string>() ?? "";
+                if (string.IsNullOrEmpty(id)) return;
+                session.Requests.RemoveAll(r => r.Id == id);
+                session.Requests.Add(new MuseRequest { Id = id, Kind = kind, Params = @params });
+                session.Status = kind == "approval" ? "Waiting for approval" : "Waiting for your answer";
+                break;
+            case "approval/updated":
+                if (@params["approvalId"]?.GetValue<string>() is { } updatedId &&
+                    session.Requests.FirstOrDefault(r => r.Id == updatedId) is { } existing)
+                {
+                    foreach (var pair in @params) existing.Params[pair.Key] = pair.Value?.DeepClone();
+                }
+                break;
+            case "approval/resolved":
+            case "userInput/settled":
+                var settledId = @params["approvalId"]?.GetValue<string>() ?? @params["userInputId"]?.GetValue<string>();
+                session.Requests.RemoveAll(r => r.Id == settledId);
+                session.AnsweringRequest = false;
+                session.Status = session.Requests.Count == 0 ? "Working…" : "Waiting for your answer";
+                break;
+            case "item/started":
+            case "item/updated":
+            case "item/completed":
+                if (@params["item"] is System.Text.Json.Nodes.JsonObject item && item["itemId"]?.GetValue<string>() is { } itemId)
+                {
+                    if (item["kind"]?.GetValue<string>() == "agentMessage")
+                    {
+                        if (!session.MuseItems.ContainsKey(itemId))
+                        {
+                            if (session.MuseItems.Count == 0) session.MuseItems[itemId] = responseId;
+                            else
+                            {
+                                var newId = Guid.NewGuid();
+                                session.MuseItems[itemId] = newId;
+                                session.Messages.Add(new ChatMessage { Id = newId, Role = "assistant", Text = "" });
+                            }
+                        }
+                        if (item["text"]?.GetValue<string>() is { } value) UpdateMuseText(value, append: false, itemId, session);
+                    }
+                    else if (item["kind"]?.GetValue<string>() == "toolCall" && method == "item/completed" && item["status"]?.GetValue<string>() == "failed")
+                        session.Messages.Add(new ChatMessage { Role = "notice", Text = item["failureReason"]?.GetValue<string>() ?? "Tool failed" });
+                }
+                break;
+            case "item/delta":
+                if ((@params["field"]?.GetValue<string>() ?? "text") == "text" &&
+                    @params["itemId"]?.GetValue<string>() is { } deltaItem &&
+                    @params["delta"]?.GetValue<string>() is { } delta)
+                    UpdateMuseText(delta, append: true, deltaItem, session);
+                break;
+        }
+        Changed?.Invoke();
+    }
+
+    private static void UpdateMuseText(string value, bool append, string itemId, ChatSession session)
+    {
+        if (!session.MuseItems.TryGetValue(itemId, out var id)) return;
+        var message = session.Messages.FirstOrDefault(m => m.Id == id);
+        if (message is null) return;
+        message.Text = append ? message.Text + value : value;
+    }
+
+    public async Task<bool> AnswerMuseAsync(ChatSession session, MuseRequest request, string? choice = null,
+        System.Text.Json.Nodes.JsonArray? answers = null, bool cancel = false)
+    {
+        if (session.Muse is not { } client || session.AnsweringRequest) return false;
+        session.AnsweringRequest = true;
+        try
+        {
+            if (request.Kind == "approval")
+            {
+                if (choice is null) { session.AnsweringRequest = false; return false; }
+                await client.AnswerApprovalAsync(request, choice);
+            }
+            else await client.AnswerQuestionAsync(request, answers ?? new System.Text.Json.Nodes.JsonArray(), cancel);
+            return true;
+        }
+        catch
+        {
+            session.AnsweringRequest = false;
+            try
+            {
+                var (approvals, questions) = await client.ListPendingAsync();
+                session.Requests = approvals.Concat(questions).ToList();
+            }
+            catch { /* keep current requests on refresh failure */ }
+            return false;
+        }
     }
 
     private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images, bool alreadyDisplayed = false)
     {
+        if (session.Entry.Engine == "muse") { await RunMuseTurnAsync(session, prompt, images); return; }
         session.Busy = true;
         session.Interrupted = false;
         session.TurnFailed = false;

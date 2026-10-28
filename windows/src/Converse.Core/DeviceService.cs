@@ -46,7 +46,7 @@ public sealed class DeviceTrustStore
         AtomicJson.Write(_file, devices.Select(d => new Saved(d.DeviceID, d.Name, d.PublicKey, d.LastHost, d.LastPort)).ToList());
 }
 
-public sealed record PairingPrompt(string PeerName, string Fingerprint, string Code, bool KeyChanged);
+public sealed record PairingPrompt(string PeerName, string Fingerprint, string Code, bool KeyChanged, bool IsInitiator = false);
 
 public sealed class RemoteHomeState
 {
@@ -102,6 +102,8 @@ public sealed class DeviceSyncService : IDisposable
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
     private ulong _homeSeq;
     private ulong _boot = 1;
+    public List<MdnsService> DiscoveredDevices { get; } = new();
+    private MdnsDiscovery? _mdns;
     private TcpListener? _listener;
     private CancellationTokenSource? _shutdown;
 
@@ -139,6 +141,21 @@ public sealed class DeviceSyncService : IDisposable
         _listener = new TcpListener(IPAddress.Any, port);
         _listener.Start();
         ListeningPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        try
+        {
+            _mdns = new MdnsDiscovery(DeviceName, ListeningPort);
+            _mdns.Found += found =>
+            {
+                lock (DiscoveredDevices)
+                {
+                    DiscoveredDevices.RemoveAll(d => d.Name == found.Name);
+                    DiscoveredDevices.Add(found);
+                }
+                Changed?.Invoke();
+            };
+            _mdns.Start();
+        }
+        catch { /* discovery is best-effort; manual connect remains */ }
         _ = AcceptLoopAsync(_shutdown.Token);
         _ = HeartbeatLoopAsync(_shutdown.Token);
         await Task.CompletedTask;
@@ -147,6 +164,7 @@ public sealed class DeviceSyncService : IDisposable
     public void Dispose()
     {
         _shutdown?.Cancel();
+        _mdns?.Dispose();
         _listener?.Stop();
         foreach (var peer in _peers.Values.ToList()) peer.Client.Dispose();
     }
@@ -311,7 +329,7 @@ public sealed class DeviceSyncService : IDisposable
         }
         var prompt = new PairingPrompt(peer.Hello.DeviceName,
             peer.Hello.DeviceID[..Math.Min(16, peer.Hello.DeviceID.Length)].ToUpperInvariant(),
-            DeviceSas.Code(peer.Keys.HandshakeHash), check == "keyChanged");
+            DeviceSas.Code(peer.Keys.HandshakeHash), check == "keyChanged", peer.IsInitiator);
         var accepted = PairingConfirmation is not null && await PairingConfirmation(prompt);
         if (!accepted) { peer.Client.Dispose(); return; }
         peer.LocalConfirmed = true;
@@ -440,6 +458,23 @@ public sealed class DeviceSyncService : IDisposable
             Draft = session.Draft, DraftVersion = _drafts.Version(draftKey),
             DraftImageHashes = session.Attachments.Where(File.Exists).Select(ImageHash).ToArray(),
             Pending = session.Pending.Select(p => new DevicePendingDto { Id = p.Id, Text = p.Text }).ToList(),
+            Requests = session.Requests.Select(request => new DeviceRequestDto
+            {
+                Id = request.Id, Kind = request.Kind,
+                ToolName = request.Params["toolName"]?.GetValue<string>(),
+                RawArgs = request.Params["rawArgs"]?.GetValue<string>(),
+                Choices = (request.Params["availableChoices"] as System.Text.Json.Nodes.JsonArray ?? new())
+                    .OfType<System.Text.Json.Nodes.JsonObject>()
+                    .Where(c => c["choiceId"] is not null)
+                    .Select(c => new DeviceChoiceDto
+                    {
+                        Id = c["choiceId"]!.GetValue<string>(),
+                        Label = c["label"]?.GetValue<string>() ?? c["choiceId"]!.GetValue<string>(),
+                        Detail = c["rulePreview"]?.GetValue<string>() ?? c["scope"]?.GetValue<string>(),
+                    }).ToList(),
+                QuestionsJson = request.Params["questions"] is { } questions
+                    ? System.Text.Encoding.UTF8.GetBytes(questions.ToJsonString()) : null,
+            }).ToList(),
             Busy = session.Busy, Status = session.Status, Title = session.Title, Engine = session.Entry.Engine,
             AccountName = session.Entry.AccountName,
             Model = session.Choices.Model ?? "", Effort = session.Choices.Effort ?? "", Access = session.Choices.Access ?? "",
@@ -511,9 +546,21 @@ public sealed class DeviceSyncService : IDisposable
         }
         if (command.Action == "answer")
         {
-            // Muse MSP approvals land in milestone 3; never fake success.
-            _commands.MarkFailed(commandId);
-            await SendAckAsync(peer, commandId, envelope.SessionID, "failed", "Approvals are not supported on Windows home yet.", envelope.Epoch);
+            var request = session.Requests.FirstOrDefault(r => r.Id == command.RequestID);
+            System.Text.Json.Nodes.JsonArray? answers = null;
+            if (command.AnswersJson is not null)
+                answers = System.Text.Json.Nodes.JsonNode.Parse(command.AnswersJson) as System.Text.Json.Nodes.JsonArray;
+            var answered = request is not null && await _store.AnswerMuseAsync(session, request, command.ChoiceID, answers);
+            if (!answered)
+            {
+                _commands.MarkFailed(commandId);
+                await SendAckAsync(peer, commandId, envelope.SessionID, "failed", "Request is no longer pending on home.", envelope.Epoch);
+                return;
+            }
+            _commands.MarkRunning(commandId);
+            _commands.MarkCompleted(commandId);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Decision sent on home.", envelope.Epoch);
+            await SendTranscriptAsync(peer, session);
             return;
         }
         _commands.MarkRunning(commandId);

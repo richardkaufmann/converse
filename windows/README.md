@@ -38,19 +38,23 @@ cannot drift from `Sources/Device*.swift`.
 
 ## Milestones
 
-1. **Core (done, tested):** protocol DTOs + framing, X25519 + Noise XX,
-   lease/draft/command/outbox stores, vector + harness tests. Runs with
-   plain `dotnet` — no NuGet packages beyond the BCL.
+1. **Core (done, tested):** protocol DTOs + framing, Noise XX with
+   BouncyCastle X25519 (vetted constant-time primitive; all-zero outputs
+   rejected), lease/draft/command/outbox stores, vector + harness tests.
 2. **Engine + service (done, tested):** `SessionEngine.cs` runs real
-   `claude`/`codex` JSONL turns (Codex final-answer capture included);
+   `claude`/`codex` JSONL turns (Codex final-answer capture included) and
+   Muse over MSP (`MuseMsp.cs`: initialize/load/submit/interrupt,
+   approvals + questions with server-minted choice IDs);
    `DeviceService.cs` pairs over TCP, serves home leases/transcripts/
    commands/blobs, and views remote homes with a durable outbox.
-   Loopback pair → take → rename is covered in the test runner.
-3. **App shell (wired, first compile on PC):** WinUI 3 sidebar + pane +
-   composer bound to the real store/service; manual-address connect and
-   8-group pairing dialog. Muse MSP approvals/questions and mDNS remain.
-4. **Next:** Muse MSP connection, approvals/questions parity, mDNS
-   advertise/browse, sleep/wake, signed MSIX packaging.
+   Loopback pair → take → rename and MSP approval → decide are covered.
+3. **Discovery + app shell (wired, first compile on PC):** minimal mDNS
+   advertise/browse for `_converse._tcp` (`Mdns.cs`, hints only); WinUI 3
+   sidebar + pane + composer bound to the real store/service,
+   manual-address connect, discovered-device rows, Pair/Approve dialog.
+4. **Next:** three-pane workspace placements, blue-draft native editor
+   parity, DPAPI identity protection in the app layer, sleep/wake,
+   signed MSIX packaging (`windows/packaging/Package.appxmanifest`).
 
 ## Build and test (on the Windows box)
 

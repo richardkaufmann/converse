@@ -40,7 +40,7 @@ public sealed partial class MainWindow : Window
                           + prompt.Code + "\n\nFingerprint " + prompt.Fingerprint
                           + (prompt.KeyChanged ? "\n\nWarning: stored key mismatch." : "")
                           + "\n\nPairing allows remote prompts and tool execution on the home device.",
-                PrimaryButtonText = "Pair",
+                PrimaryButtonText = prompt.IsInitiator ? "Pair" : "Approve",
                 CloseButtonText = "Reject",
                 XamlRoot = Content.XamlRoot,
             };
@@ -59,10 +59,16 @@ public sealed partial class MainWindow : Window
         }
         var rows = new List<SidebarRowItem>();
         foreach (var session in _store.Sessions)
-            rows.Add(new SidebarRowItem(session.Title, session.Entry.Name + " · this PC · " + session.Status, null, session.Id));
+            rows.Add(new SidebarRowItem((session.Busy ? "● " : "") + session.Title, session.Entry.Name + " · this PC · " + session.Status, null, session.Id));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
+        {
+            if (home.Rows.Count == 0)
+                rows.Add(new SidebarRowItem(home.DeviceName, home.Online ? "No sessions available" : "Offline", null, null));
             foreach (var row in home.Rows)
-                rows.Add(new SidebarRowItem(row.Title, home.DeviceName + (home.Online ? " · home" : " · offline") + " · " + row.Status, row.GlobalID, null));
+                rows.Add(new SidebarRowItem((row.Busy ? "● " : "") + row.Title, home.DeviceName + (home.Online ? " · home" : " · offline") + " · " + row.Status, row.GlobalID, null));
+        }
+        foreach (var found in _devices.DiscoveredDevices)
+            rows.Add(new SidebarRowItem(found.Name, "Nearby · " + found.Host + ":" + found.Port, "discover:" + found.Host + ":" + found.Port, null));
         Sidebar.ItemsSource = rows;
         RenderPane();
     }
@@ -132,9 +138,26 @@ public sealed partial class MainWindow : Window
     private async void OnTakeClick(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: SidebarRowItem row } || row.GlobalID is null) return;
+        if (row.GlobalID.StartsWith("discover:"))
+        {
+            var parts = row.GlobalID["discover:".Length..].Split(':');
+            if (parts.Length == 2 && int.TryParse(parts[1], out var port)) await _devices.ConnectManualAsync(parts[0], port);
+            return;
+        }
         _selected = row;
         await _devices.AcquireRemoteAsync(row.GlobalID);
         Refresh();
+    }
+
+    private void OnComposerKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        // Mac parity: Return sends; Control+Return inserts a newline.
+        if (e.Key != Windows.System.VirtualKey.Enter) return;
+        var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (ctrl) return;
+        e.Handled = true;
+        OnSendClick(sender, e);
     }
 
     private async void OnParkClick(object sender, RoutedEventArgs e)
