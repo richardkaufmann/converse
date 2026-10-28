@@ -17,6 +17,11 @@ struct PairingPrompt: Identifiable {
     var code: String
     var keyChanged: Bool
     var nameCollision: Bool = false
+    var isInitiator: Bool = true
+    var actionLabel: String { isInitiator ? "Pair" : "Approve" }
+    var instruction: String {
+        isInitiator ? "Compare all eight code groups with the other Mac, then click Pair here and Approve there." : "The other Mac requested a connection. Compare all eight code groups, then click Approve here and Pair there."
+    }
 }
 
 struct RemoteHomeState: Equatable {
@@ -307,12 +312,16 @@ extension DeviceSyncService {
                                           fingerprint: String(hello.deviceID.prefix(16)).uppercased(),
                                           code: DeviceSAS.code(keys.handshakeHash),
                                           keyChanged: trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .keyChanged,
-                                          nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID))
+                                          nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID), isInitiator: peer.isInitiator)
+            if !peer.isInitiator, !isTestEnvironment {
+                DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
+            }
         }
     }
     func confirmPairing() {
         guard let prompt = pairingPrompt, let peer = peers[prompt.connectionID] else { return }
         peer.localConfirmed = true
+        serviceStatus = peer.isInitiator ? "Waiting for Approve on " + prompt.peerName + "…" : "Approved. Waiting for Pair on " + prompt.peerName + "…"
         sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); pairingPrompt = nil; finishTrustIfReady(peer)
     }
     func rejectPairing() {

@@ -6,6 +6,8 @@ final class DeviceConnectForm: ObservableObject {
     @Published var port = "48721"
 }
 final class RemoteComposer: ObservableObject {
+    // Presentation only: never registered with Store or attached to a CLI.
+    let editor = Session(entry: Entry(name: "Remote", command: "", directory: "", engine: "remote"))
     @Published var draft = ""
     @Published var blobHashes: [String] = []
     @Published var sentCommandID: UUID?
@@ -14,6 +16,14 @@ final class RemoteComposer: ObservableObject {
     var hydratedKey = ""
     @Published var answers: [String: String] = [:]
     @Published var selections: [String: Set<String>] = [:]
+    func updateEditor(transcript: DeviceTranscriptPayload?, cache: [String: URL]) {
+        editor.messages = (transcript?.messages ?? []).map { message in
+            Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: nil)
+        }
+        editor.draft = draft
+        editor.attachments = blobHashes.compactMap { cache[$0]?.path }
+        editor.busy = transcript?.busy ?? false
+    }
 }
 
 struct DeviceConnectView: View {
@@ -24,7 +34,25 @@ struct DeviceConnectView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Connect to Other Converses").font(.title2.bold())
             Text(service.serviceStatus + " · " + service.localCodeNote).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-            Text("Pairing lets each Mac view history and send prompts on the other Mac. Prompts run tools on the home Mac under its logins. Pair only with your own devices.").font(.callout)
+            Text("1. Click Connect on ONE Mac.\n2. On both Macs, compare all eight code groups.\n3. Click Pair on the initiating Mac and Approve on the receiving Mac.").font(.callout)
+            Text("Pairing lets both Macs view history and send prompts that run tools on the home Mac under its logins. Pair only devices you trust.").font(.caption).foregroundStyle(.secondary)
+            if let prompt = service.pairingPrompt {
+                GroupBox(prompt.isInitiator ? "Pair with " + prompt.peerName : "Connection request from " + prompt.peerName) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(prompt.instruction).font(.callout)
+                        Text(prompt.code).font(.system(size: 20, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                        Text("All 8 groups must match exactly on both screens.").font(.caption)
+                        if prompt.keyChanged { Text("Stored key mismatch. Continue only if you expect a new device identity.").foregroundStyle(.red) }
+                        if prompt.nameCollision { Text("A different paired device has the same name. Check the fingerprint.").foregroundStyle(.orange) }
+                        Text("Fingerprint " + prompt.fingerprint).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        HStack {
+                            Button("Reject") { service.rejectPairing() }
+                            Spacer()
+                            Button(prompt.actionLabel) { service.confirmPairing() }.buttonStyle(.borderedProminent)
+                        }
+                    }.padding(4)
+                }
+            }
             GroupBox("Nearby devices") {
                 if service.discovered.isEmpty { Text("No nearby Converse found yet. Keep both apps open on the same network.").font(.caption).foregroundStyle(.secondary) }
                 ForEach(service.discovered) { device in
@@ -55,12 +83,7 @@ struct DeviceConnectView: View {
             if !service.lastOutcome.isEmpty { Text(service.lastOutcome).font(.caption).textSelection(.enabled) }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 560)
-            .alert(item: $service.pairingPrompt) { prompt in
-                Alert(title: Text("Pair with " + prompt.peerName + "?"),
-                      message: Text("Compare EVERY group on both Macs. Pair only if all 8 groups match exactly:\n\n" + prompt.code + "\n\nFingerprint " + prompt.fingerprint + (prompt.keyChanged ? "\n\nWarning: stored key mismatch. Pair again only if you expect this." : "") + (prompt.nameCollision ? "\n\nNote: a different paired device already uses this name. Check the fingerprint." : "") + "\n\nPairing allows remote prompts and tool execution on the home Mac."),
-                      primaryButton: .default(Text("Pair")) { service.confirmPairing() },
-                      secondaryButton: .cancel(Text("Reject")) { service.rejectPairing() })
-            }
+
     }
 }
 
@@ -130,11 +153,12 @@ struct RemotePane: View {
     let pane: Int
     @ObservedObject var service = DeviceSyncService.shared
     @ObservedObject var workspace: Workspace
+    @ObservedObject var store = Store.shared
     @StateObject private var composer = RemoteComposer()
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
-    var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first }
+    var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first { $0.payload.action == "submit" } }
     var placement: UUID { service.placementID(forGlobal: globalID) }
     var body: some View {
         VStack(spacing: 0) {
@@ -146,6 +170,21 @@ struct RemotePane: View {
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
             }.padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
+            HStack {
+                Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
+                Button {
+                    let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true
+                    if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { attach(image) } } }
+                } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot").disabled(offline || !hasLease)
+                if !composer.blobHashes.isEmpty { Button("Clear images") { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []); syncEditor() } }
+                if transcript?.busy == true {
+                    if transcript?.requests.isEmpty != false { ProgressView().controlSize(.small) }
+                    Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(offline || !hasLease)
+                }
+            }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
             if offline {
                 Text("Home offline. Last transcript shown. Sending disabled; nothing replays silently.").font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.12))
@@ -187,14 +226,13 @@ struct RemotePane: View {
             if let conflict = service.draftConflicts[globalID] {
                 Text(conflict).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.10))
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if let transcript, transcript.offset > 0 {
-                        Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }
-                    }
-                    ForEach(transcript?.messages ?? []) { message in RemoteMessageView(globalID: globalID, message: message) }
-                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            if let transcript, transcript.offset > 0 {
+                Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
+            ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
+                                  onSubmit: send,
+                                  onDraftChanged: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) },
+                                  onImagePaste: attach)
             Divider()
             if let transcript {
                 HStack(spacing: 10) {
@@ -206,28 +244,21 @@ struct RemotePane: View {
                     Menu(transcript.access) { ForEach(transcript.accessOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access", access: option.id)) } } }.menuStyle(.borderlessButton).fixedSize()
                 }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(!hasLease)
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message home session… Return sends", text: Binding(get: { composer.draft }, set: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) }), axis: .vertical).lineLimit(1...6).textFieldStyle(.roundedBorder)
-                    .disabled(offline || !hasLease)
-                    .onSubmit { send() }
-                Button("Attach") {
-                    let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = false
-                    if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url), let hash = service.sendRemoteBlob(globalID: globalID, data: data) { composer.blobHashes.append(hash); service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes) }
-                }.disabled(offline || !hasLease)
-                Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(!hasLease)
-                Button("Send", action: send).disabled(!canSend)
-            }.padding(10)
             if !composer.blobHashes.isEmpty {
                 Text(composer.blobHashes.allSatisfy { service.blobReady[$0] == true } ? "Attachments stored on home. Ready to send." : "Uploading attachments to home… Send waits for home storage.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !service.lastOutcome.isEmpty {
+            if service.lastOutcome.hasPrefix("failed") || service.lastOutcome.hasPrefix("Attachment failed") {
                 Text(service.lastOutcome).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).padding(.horizontal, 10).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading)
             }
         }.background(Color(nsColor: .textBackgroundColor)).frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: service.remoteLeases[globalID]) { _, _ in hydrate(force: true) }
+            .onChange(of: service.remoteLeases[globalID]) { _, _ in hydrate(force: true); syncEditor() }
             .onChange(of: service.remoteTranscripts[globalID]?.draftVersion) { _, _ in hydrate() }
             .onChange(of: service.remoteTranscripts[globalID]?.globalID) { _, _ in hydrate() }
-            .onAppear { hydrate() }
+            .onAppear { hydrate(); syncEditor() }
+            .onChange(of: service.remoteTranscripts[globalID]?.homeSeq) { _, _ in hydrate(); syncEditor() }
+            .onChange(of: composer.draft) { _, _ in syncEditor() }
+            .onChange(of: composer.blobHashes) { _, _ in syncEditor() }
+            .onChange(of: service.blobCache) { _, _ in syncEditor() }
             .onChange(of: service.completedCommands) { _, completed in
                 // Only explicit completion clears, and only exact matches.
                 // Edited text is never prefix-stripped; discard never clears.
@@ -260,34 +291,27 @@ struct RemotePane: View {
         for hash in composer.blobHashes where service.blobReady[hash] != true { service.queryBlob(globalID: globalID, hash: hash) }
         if let record = pendingRecord { composer.sentCommandID = record.commandID; composer.sentText = record.payload.text ?? ""; composer.sentHashes = record.payload.blobHashes }
     }
+    func syncEditor() {
+        composer.updateEditor(transcript: transcript, cache: service.blobCache)
+        let hashes = (transcript?.messages ?? []).flatMap(\.imageHashes) + composer.blobHashes
+        for hash in Set(hashes) where service.blobCache[hash] == nil { service.fetchBlob(globalID: globalID, hash: hash) }
+    }
+    func attach(_ image: NSImage) {
+        guard hasLease, !offline, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let data = bitmap.representation(using: .png, properties: [:]), let hash = service.sendRemoteBlob(globalID: globalID, data: data) else { return }
+        let folder = Store.shared.folder.appendingPathComponent("RemoteCache")
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let path = folder.appendingPathComponent(hash + ".png"); try data.write(to: path, options: .atomic)
+            service.blobCache[hash] = path
+        } catch { service.lastOutcome = "Attachment failed: " + error.localizedDescription }
+        composer.blobHashes.append(hash); service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+        syncEditor()
+    }
     func send() {
         guard canSend else { return }
         composer.sentText = composer.draft; composer.sentHashes = composer.blobHashes
         composer.sentCommandID = service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "submit", text: composer.draft, blobHashes: composer.blobHashes))
-    }
-}
-
-struct RemoteMessageView: View {
-    let globalID: String
-    let message: DeviceWireMessage
-    @ObservedObject var service = DeviceSyncService.shared
-    var body: some View {
-        let visible = Store.visibleText(message.text)
-        if message.role != "activity" && (!visible.isEmpty || !message.imageHashes.isEmpty) {
-            VStack(alignment: .leading, spacing: 6) {
-                if !visible.isEmpty {
-                    if message.role == "assistant" { Text(AttributedString(MarkdownText.render(visible))).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    else { Text(visible).italic(message.role == "user").textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                }
-                ForEach(message.imageHashes, id: \.self) { hash in
-                    if let url = service.blobCache[hash], let image = NSImage(contentsOf: url) {
-                        Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 260)
-                    } else {
-                        Text("Image on home…").font(.caption).foregroundStyle(.secondary).onAppear { service.fetchBlob(globalID: globalID, hash: hash) }
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -4,6 +4,10 @@ import Network
 import Security
 
 func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
+    let outgoingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: true)
+    let incomingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: false)
+    check(outgoingPrompt.actionLabel == "Pair" && incomingPrompt.actionLabel == "Approve", "Pairing assigns Pair to initiator and Approve to receiving Mac")
+    check(outgoingPrompt.instruction.contains("Approve there") && incomingPrompt.instruction.contains("Approve here"), "Pairing instructions tell each Mac which confirmation happens where")
     // Framing: length-prefixed envelopes round-trip and reject oversize input.
     let commandID = UUID()
     let envelope = DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: "home/session", commandID: commandID, epoch: 3, payload: Data("hello".utf8))

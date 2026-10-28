@@ -1025,10 +1025,11 @@ final class ConversationTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { super.keyDown(with: event); return }
         if event.keyCode == 36 || event.keyCode == 76 {
+            guard isEditable else { return }
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.option) {
                 insertNewline(nil); return
             }
-            submit?(); return
+            if isEditable { submit?() }; return
         }
         // Typing while reading history always goes to the current input.
         if selectedRange().location < inputStart && !event.modifierFlags.contains(.command),
@@ -1065,6 +1066,10 @@ final class ConversationTextView: NSTextView {
 struct ScrollingConversation: NSViewRepresentable {
     @ObservedObject var session: Session
     var lineNumbers: Bool = true
+    var inputEnabled: Bool = true
+    var onSubmit: (() -> Void)? = nil
+    var onDraftChanged: ((String) -> Void)? = nil
+    var onImagePaste: ((NSImage) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(session) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
@@ -1084,8 +1089,10 @@ struct ScrollingConversation: NSViewRepresentable {
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
         text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Command Return inserts a new line.")
-        text.submit = { Store.shared.submit(session) }
-        text.imagePaste = { Store.shared.attach(session, image: $0) }
+        text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
+        text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
+        text.isEditable = inputEnabled
+        context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
         scroll.verticalRulerView = LineNumberRuler(scroll: scroll, text: text)
         scroll.hasVerticalRuler = true; scroll.rulersVisible = lineNumbers
@@ -1101,7 +1108,13 @@ struct ScrollingConversation: NSViewRepresentable {
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         scroll.rulersVisible = lineNumbers
-        if let text = scroll.documentView as? ConversationTextView { context.coordinator.render(text); text.refreshDecorations() }
+        context.coordinator.draftChanged = onDraftChanged
+        if let text = scroll.documentView as? ConversationTextView {
+            text.isEditable = inputEnabled
+            text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
+            text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
+            context.coordinator.render(text); text.refreshDecorations()
+        }
     }
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         coordinator.session.textScrollOrigin = scroll.contentView.bounds.origin
@@ -1112,6 +1125,7 @@ struct ScrollingConversation: NSViewRepresentable {
         var signature = ""
         var markdownCache: [UUID: (String, NSAttributedString)] = [:]
         var rendering = false
+        var draftChanged: ((String) -> Void)?
         init(_ session: Session) { self.session = session }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let text = textView as? ConversationTextView else { return false }
@@ -1129,7 +1143,8 @@ struct ScrollingConversation: NSViewRepresentable {
             text.refreshDecorations()
             text.typingAttributes[.foregroundColor] = NSColor.systemBlue
             text.scrollRangeToVisible(NSRange(location: length, length: 0))
-            Store.shared.saveSoon()
+            if let draftChanged { draftChanged(session.draft) }
+            else { Store.shared.saveSoon() }
         }
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
@@ -1427,6 +1442,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
+        if ProcessInfo.processInfo.environment["CONVERSE_QA_REMOTE"] == "1",
+           ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+           ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil,
+           let state = windows.first?.1 {
+            let devices = DeviceSyncService.shared
+            let id = UUID(); let globalID = DeviceGlobalID(home: "isolated-preview", session: id).string
+            let messages = Store.shared.sessions.first(where: { $0.title == "Gutter style check" })?.messages ?? []
+            devices.homes["isolated-preview"] = RemoteHomeState(deviceID: "isolated-preview", deviceName: "Offline QA Mac", online: true, rows: [DeviceSidebarRow(globalID: globalID, sessionID: id, title: "Remote editor QA", assistant: "Claude", engine: "claude", model: "fixture", effort: "high", access: "Manual", status: "Ready", busy: false, queued: 0, queuePaused: false)])
+            devices.remoteLeases[globalID] = 1
+            devices.remoteTranscripts[globalID] = DeviceTranscriptPayload(globalID: globalID, homeSeq: 1, epoch: 1, messages: messages.map { DeviceWireMessage(id: $0.id, role: $0.role, text: $0.text) }, draft: "A blue remote draft", draftVersion: 1, busy: false, status: "Ready", title: "Remote editor QA", engine: "claude")
+            Workspace.shared.assign(devices.placementID(forGlobal: globalID), to: state.id, pane: 1)
+            if ProcessInfo.processInfo.environment["CONVERSE_QA_PAIRING"] == "1" {
+                devices.pairingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Offline QA Mac", fingerprint: "OFFLINE PREVIEW", code: "1111 2222 3333 4444 5555 6666 7777 8888", keyChanged: false, isInitiator: false)
+                state.deviceConnect = true
+            }
+        }
     }
     func buildMenu() {
         let menu = NSMenu(); let app = NSMenuItem(); menu.addItem(app); let sub = NSMenu(); app.submenu = sub
@@ -1448,7 +1479,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc func showDeviceConnect() {
         if windows.isEmpty { newWindow() }
-        (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.deviceConnect = true
+        guard let (window, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last else { return }
+        state.deviceConnect = true
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc func showSettings() {
         if windows.isEmpty { newWindow() }
@@ -1621,6 +1654,27 @@ func selfTest() {
     let commandEnter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
     native.keyDown(with: commandEnter)
     check(!sent && s.draft.hasSuffix("\n"), "Command Return inserts a newline without sending")
+    let remoteComposer = RemoteComposer()
+    remoteComposer.draft = "remote draft"
+    let remoteHistory = DeviceTranscriptPayload(globalID: "home/" + UUID().uuidString, homeSeq: 1, messages: [DeviceWireMessage(id: UUID(), role: "user", text: "previous prompt"), DeviceWireMessage(id: UUID(), role: "assistant", text: "**remote response**")], draft: "remote draft", draftVersion: 1, busy: true, status: "Working")
+    let localCount = store.sessions.count
+    remoteComposer.updateEditor(transcript: remoteHistory, cache: [:])
+    let remoteText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let remoteCoordinator = ScrollingConversation.Coordinator(remoteComposer.editor)
+    var transmittedDraft = ""; var remoteSubmits = 0
+    remoteCoordinator.draftChanged = { transmittedDraft = $0 }
+    remoteText.delegate = remoteCoordinator; remoteText.submit = { remoteSubmits += 1 }; remoteCoordinator.render(remoteText)
+    remoteText.setSelectedRange(NSRange(location: (remoteText.string as NSString).length, length: 0))
+    remoteText.insertText(" edited", replacementRange: remoteText.selectedRange())
+    check(transmittedDraft == "remote draft edited" && remoteText.typingAttributes[.foregroundColor] as? NSColor == NSColor.systemBlue, "Remote native editor types blue and routes draft edits through transport callback")
+    remoteText.keyDown(with: enter)
+    check(remoteSubmits == 1 && remoteComposer.editor.busy, "Remote Return invokes submission while home is busy so home can queue it")
+    remoteText.keyDown(with: commandEnter)
+    check(remoteSubmits == 1 && transmittedDraft.hasSuffix("\n"), "Remote Command Return edits a multiline draft without sending")
+    check(!remoteCoordinator.textView(remoteText, shouldChangeTextIn: NSRange(location: 0, length: 1), replacementString: "x") && !remoteText.userBlocks.isEmpty, "Remote native transcript protects history and tracks prompt gutter blocks")
+    remoteText.isEditable = false; let offlineText = remoteText.string
+    remoteText.keyDown(with: enter); remoteText.keyDown(with: commandEnter)
+    check(remoteSubmits == 1 && remoteText.string == offlineText && store.sessions.count == localCount, "Offline remote editor cannot send or insert newline and never registers a local CLI session")
     let styledSession = Session(entry: entry)
     styledSession.messages = [Message(role: "user", text: "line one\nline two"), Message(role: "assistant", text: "response")]
     let styled = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
