@@ -35,6 +35,14 @@ cannot drift from `Sources/Device*.swift`.
   Only `completed` clears the outbox. `uncertain` is never auto-resent.
 - Attachments cross as SHA-256 hashes; blobs verify before use; home file
   paths never cross the wire.
+- Groups (`converse-groups-v1`, additive on the v1 envelope): admission
+  through any member joins the whole fabric; membership gossips as
+  versioned records with removal tombstones (`fabric.members`).
+  `group.review` carries the BARE join request; only `group.review.detail`
+  and `group.approve` wrap it with the reviewed code. Session traffic
+  never crosses a group boundary in either direction. Legacy stores
+  migrate deterministically with the shared vector in `docs/groups.md`;
+  a revoked self never migrates and only a reviewed join readmits.
 
 ## Milestones
 

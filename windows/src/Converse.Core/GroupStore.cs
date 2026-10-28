@@ -75,13 +75,17 @@ public sealed class ConverseGroupStore
         Save(next);
     }
 
-    // Deterministic legacy migration, byte-identical to Swift: over the
-    // active roster plus self, groups form only above one device; the UUID
-    // is the dashed first 32 hex chars of the migration hash (no
-    // version/variant bits — same as Swift's raw formatting).
-    public static ConverseGroup? Migrate(IEnumerable<string> activeDeviceIDs)
+    // Deterministic legacy migration, byte-identical to Swift: older
+    // stores may omit their own pin, so this identity joins the distinct
+    // active roster exactly once — but a revoked self never migrates.
+    // Groups form only above one distinct identity; the UUID is the
+    // dashed first 32 hex chars of the migration hash (no version or
+    // variant bits, same as Swift's raw formatting).
+    public static ConverseGroup? Migrate(IReadOnlyList<TrustedDevice> members, string ownDeviceID)
     {
-        var active = activeDeviceIDs.ToList();
+        if (members.Any(d => d.DeviceID == ownDeviceID && d.Removed == true)) return null;
+        var active = members.Where(d => d.Removed != true).Select(d => d.DeviceID)
+            .Append(ownDeviceID).ToHashSet(StringComparer.Ordinal);
         if (active.Count <= 1) return null;
         var first = active.OrderBy(id => id, StringComparer.Ordinal).First();
         var digest = DeviceBlob.Sha256Hex(System.Text.Encoding.UTF8.GetBytes("Converse legacy group v1/" + first));

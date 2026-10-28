@@ -329,11 +329,12 @@ public sealed class DeviceSyncService : IDisposable
     // adopts the shared default group and stamps every unstamped record.
     private void InitializeGroups()
     {
-        if (GroupStore.Existed) return;
-        var active = Trust.Records.Where(d => d.Removed != true).Select(d => d.DeviceID);
-        var legacy = ConverseGroupStore.Migrate(active);
+        if (GroupStore.Existed || LocallyRemoved) return;
+        var legacy = ConverseGroupStore.Migrate(Trust.Records, DeviceId);
         if (legacy is null || CurrentGroup is not null) return;
         Trust.MigrateLegacyGroup(legacy.Id);
+        Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+            null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, legacy.Id);
         GroupStore.Adopt(legacy);
         KnownGroups = GroupStore.Groups.ToList();
     }
@@ -367,6 +368,33 @@ public sealed class DeviceSyncService : IDisposable
             RemoteTranscripts.Remove(row.GlobalID);
             RemoteOffline.Remove(row.GlobalID);
         }
+    }
+
+    // Current-group membership by live roster, like Swift.
+    private bool IsGroupMember(string deviceID) =>
+        CurrentGroup is not null
+        && Trust.Devices.Any(d => d.DeviceID == deviceID && d.GroupID == CurrentGroup.Id);
+
+    // Home-state envelopes must never cross a group boundary, in either
+    // direction: dispatch and every publisher check membership first.
+    private static readonly HashSet<string> SessionKinds = new(StringComparer.Ordinal)
+    {
+        DeviceKind.SidebarSnapshot, DeviceKind.LeaseAcquire, DeviceKind.LeaseGranted,
+        DeviceKind.LeaseDenied, DeviceKind.LeaseStolen, DeviceKind.LeaseHeartbeat,
+        DeviceKind.LeaseRelease, DeviceKind.TranscriptSnapshot, DeviceKind.TranscriptRequest,
+        DeviceKind.DraftPatch, DeviceKind.Command, DeviceKind.CommandQuery, DeviceKind.CommandAck,
+        DeviceKind.BlobOffer, DeviceKind.BlobChunk, DeviceKind.BlobAck,
+        DeviceKind.BlobRequest, DeviceKind.BlobData,
+    };
+
+    // Creating a new group fences home leases held by the old group: only
+    // members of the new group keep their holds, everyone else loses them
+    // immediately so a fresh member can take the session.
+    private void FenceHomeLeases()
+    {
+        foreach (var session in _store.Sessions)
+            if (_leases.Holder(session.Id) is { } holder && !IsGroupMember(holder.Device))
+                _leases.ForceRelease(session.Id, holder.Device);
     }
 
     private static byte[] CreateKeyFile(string keyFile)
@@ -482,7 +510,7 @@ public sealed class DeviceSyncService : IDisposable
             await Task.Delay(TimeSpan.FromSeconds(5), token).ContinueWith(_ => { });
             if (token.IsCancellationRequested) break;
             ticks++;
-            SweepExpiredSponsors();
+            if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
             if (ticks % 6 == 0) await ReconnectFabricAsync();
             foreach (var expired in _leases.SweepExpired())
             {
@@ -626,7 +654,9 @@ public sealed class DeviceSyncService : IDisposable
         }
         if (hello.JoinGroupID is not null)
         {
-            // Sponsor path: only members of the requested group may anchor.
+            // Sponsor path: only members of the requested group may anchor;
+            // expired requests prune before the capacity check.
+            SweepExpiredSponsors();
             if (CurrentGroup is null || hello.JoinGroupID != CurrentGroup.Id || _sponsoredRequests.Count >= 16)
             { peer.Client.Dispose(); return; }
             var request = new GroupJoinRequest
@@ -642,11 +672,15 @@ public sealed class DeviceSyncService : IDisposable
             Changed?.Invoke();
             return;
         }
+        // Removed devices only exchange membership until readmitted: their
+        // reconnects never reach the member or control-only paths below.
+        if (LocallyRemoved) { peer.Client.Dispose(); return; }
         var pinned = Trust.Devices.FirstOrDefault(d => d.DeviceID == hello.DeviceID);
         var member = pinned is not null && pinned.GroupID == CurrentGroup?.Id && CurrentGroup is not null;
         if (member && check == "trusted")
         {
-            peer.HumanConfirmed = true;
+            // Automatic reconnect: no human reviewed THIS connection, so
+            // HumanConfirmed stays false and FinishTrust pins metadata only.
             peer.LocalConfirmed = true;
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
             FinishTrust(peer);
@@ -717,18 +751,27 @@ public sealed class DeviceSyncService : IDisposable
         if (!peer.LocalConfirmed || !peer.RemoteConfirmed || peer.TrustedReady || peer.Hello is null || peer.Keys is null) return;
         if (peer.WantsJoin)
         {
-            if (!peer.HumanConfirmed || peer.AdmissionGroup is null) return;
+            // A join confirm without a reviewed code disconnects: the half
+            // approval must never linger as a trusted socket.
+            if (!peer.HumanConfirmed || peer.AdmissionGroup is null) { Disconnect(peer); return; }
             try { ActivateGroup(peer.AdmissionGroup, peer.Id); }
             catch { LastOutcome = "Could not save group."; peer.Client.Dispose(); return; }
         }
-        if (!(peer.HumanConfirmed || Trust.Check(peer.Hello.DeviceID, peer.Keys.RemoteStatic) == "trusted")) return;
+        if (!(peer.HumanConfirmed || Trust.Check(peer.Hello.DeviceID, peer.Keys.RemoteStatic) == "trusted")) { Disconnect(peer); return; }
         var port = peer.Hello.ListenPort ?? peer.ManualPort;
         try
         {
+            // Only an actually reviewed connection admits: automatic
+            // reconnects refresh metadata on their existing pin, and a
+            // control-only peer keeps its own stamped group.
             Trust.Pin(new TrustedDevice(peer.Hello.DeviceID, peer.Hello.DeviceName, peer.Keys.RemoteStatic,
-                peer.ManualHost, port), DeviceId, true, peer.ControlOnly ? peer.Hello.Group?.Id : CurrentGroup?.Id);
-            Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
-                null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, CurrentGroup?.Id);
+                peer.ManualHost, port), DeviceId, peer.HumanConfirmed,
+                peer.ControlOnly
+                    ? Trust.Records.FirstOrDefault(d => d.DeviceID == peer.Hello.DeviceID)?.GroupID
+                    : CurrentGroup?.Id ?? peer.Hello.Group?.Id);
+            if (!peer.ControlOnly && !LocallyRemoved)
+                Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+                    null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, CurrentGroup?.Id);
         }
         catch { LastOutcome = "Could not save paired device. Control not granted."; peer.Client.Dispose(); return; }
         peer.TrustedReady = true;
@@ -781,20 +824,24 @@ public sealed class DeviceSyncService : IDisposable
     }
 
     // ---- Fabric membership ----
-    public async Task BroadcastFabricAsync()
+    // Leaving broadcasts under the PREVIOUS group: the socket is still open
+    // and the peers are still stamped there, so the tombstone lands before
+    // anyone disconnects.
+    public async Task BroadcastFabricAsync(string? groupID = null)
     {
-        if (CurrentGroup is null) return;
-        var records = Trust.Records.Where(d => d.GroupID == CurrentGroup.Id).ToList();
-        foreach (var peer in _peers.Values.Where(CanExchangeFabric).ToList())
+        var id = groupID ?? CurrentGroup?.Id;
+        if (id is null) return;
+        var records = Trust.Records.Where(d => d.GroupID == id).ToList();
+        foreach (var peer in _peers.Values.Where(p => CanExchangeFabric(p, id)).ToList())
             await SendEnvelopeAsync(peer, new DeviceEnvelope
             { Kind = DeviceKind.FabricMembers, Payload = DeviceJson.Encode(records) });
     }
 
-    private bool CanExchangeFabric(Peer peer) =>
+    private bool CanExchangeFabric(Peer peer, string? groupID = null) =>
         peer is { TrustedReady: true, Hello: not null }
         && peer.Hello.Capabilities.Contains("fabric-membership-v1")
         && !peer.ControlOnly
-        && Trust.Devices.Any(d => d.DeviceID == peer.Hello.DeviceID && d.GroupID == CurrentGroup?.Id);
+        && Trust.Devices.Any(d => d.DeviceID == peer.Hello.DeviceID && d.GroupID == (groupID ?? CurrentGroup?.Id));
 
     public async Task ReconnectFabricAsync()
     {
@@ -899,6 +946,11 @@ public sealed class DeviceSyncService : IDisposable
         GroupStore.Adopt(group);
         Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
             null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, group.Id);
+        // One fenced transition: park my remote views, release old-group
+        // holds on my sessions, then rescope. Queued traffic in both
+        // directions stops at the membership gate from here on.
+        ParkGroupViews(silent: true);
+        FenceHomeLeases();
         RefreshGroupMembers();
         Reannounce();
         ServiceStatus = "Created " + trimmed + ".";
@@ -919,12 +971,13 @@ public sealed class DeviceSyncService : IDisposable
             return;
         }
         GroupStore.Adopt(group);
+        // A human-approved join always stamps self into the new group,
+        // superseding the old self-pin or any removal tombstone: this is
+        // the readmission path. Old-group members converge stale through
+        // reconnect refusal, like Swift; no self-tombstone is written.
+        Trust.Pin(new TrustedDevice(DeviceId, DeviceName, X25519.PublicKeyFromPrivate(_staticPrivate),
+            null, ListeningPort > 0 ? ListeningPort : null), DeviceId, true, group.Id);
         RefreshGroupMembers();
-        if (previous is not null)
-        {
-            Trust.Forget(DeviceId, DeviceId);
-            _ = BroadcastFabricAsync();
-        }
         ParkGroupViews(silent: true);
         foreach (var id in _peers.Keys.Where(k => k != keepPeerId).ToList())
             if (_peers.TryGetValue(id, out var peer))
@@ -938,16 +991,20 @@ public sealed class DeviceSyncService : IDisposable
     {
         var group = CurrentGroup;
         if (group is null) return;
-        ParkGroupViews(silent: true);
-        Trust.Forget(DeviceId, DeviceId);
         GroupStore.Leave();
+        Trust.Forget(DeviceId, DeviceId);
+        // Broadcast under the previous group while the sockets are open, so
+        // members learn the tombstone without needing a disconnect.
+        await BroadcastFabricAsync(group.Id);
+        ParkGroupViews(silent: true);
         RefreshGroupMembers();
         Reannounce();
-        await BroadcastFabricAsync();
         ServiceStatus = "Left " + group.Name + ". Devices remember the group for rejoining.";
         Changed?.Invoke();
+        var old = _peers.Values.ToList();
+        foreach (var peer in old) peer.ControlOnly = true;
         await Task.Delay(300);
-        foreach (var peer in _peers.Values.ToList()) Disconnect(peer);
+        foreach (var peer in old) Disconnect(peer);
     }
 
     public async Task DissolveGroupAsync(ConverseGroup group)
@@ -982,18 +1039,41 @@ public sealed class DeviceSyncService : IDisposable
         if (!silent) Changed?.Invoke();
     }
 
-    private void SweepExpiredSponsors()
+    // Expiry closes the join socket, drops the request everywhere, and
+    // clears a matching review: a stale review must never approve. The
+    // join peer's disconnect withdraws an already-removed request, so no
+    // recursive republish fires. Returns true when anything expired.
+    internal bool SweepExpiredSponsors()
     {
         var now = DeviceTrustStore.AppleNow();
-        foreach (var id in _sponsoredRequests.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList())
-            WithdrawGroupRequest(id);
+        var expired = _sponsoredRequests.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList();
+        foreach (var id in expired)
+        {
+            _sponsoredRequests.Remove(id);
+            GroupRequests.RemoveAll(r => r.Id == id);
+            if (GroupReview?.Request.Id == id) GroupReview = null;
+            if (_peers.TryGetValue(id, out var peer)) Disconnect(peer);
+        }
+        if (expired.Count > 0) Changed?.Invoke();
+        return expired.Count > 0;
+    }
+
+    internal void ExpireJoinForTest(Guid requestId)
+    {
+        if (_sponsoredRequests.TryGetValue(requestId, out var live))
+            _sponsoredRequests[requestId] = new GroupJoinRequest
+            {
+                Id = live.Id, GroupID = live.GroupID, RequesterID = live.RequesterID,
+                RequesterName = live.RequesterName, SponsorID = live.SponsorID,
+                ExpiresAt = DeviceTrustStore.AppleNow() - 1, Approved = live.Approved,
+            };
     }
 
     private async Task PublishGroupRequestsAsync()
     {
         SweepExpiredSponsors();
         var requests = _sponsoredRequests.Values.Where(r => CurrentGroup is not null && r.GroupID == CurrentGroup.Id).ToList();
-        foreach (var peer in _peers.Values.Where(CanExchangeFabric).ToList())
+        foreach (var peer in _peers.Values.Where(p => CanExchangeFabric(p)).ToList())
             await SendEnvelopeAsync(peer, new DeviceEnvelope
             { Kind = DeviceKind.GroupRequests, Payload = DeviceJson.Encode(requests) });
     }
@@ -1030,8 +1110,10 @@ public sealed class DeviceSyncService : IDisposable
         }
         var sponsor = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == request.SponsorID && CanExchangeFabric(p));
         if (sponsor is null) { LastOutcome = "Sponsor is unreachable."; return; }
+        // group.review carries the BARE request on the wire (Swift parity):
+        // the wrapper only exists for review.detail and review.approve.
         await SendEnvelopeAsync(sponsor, new DeviceEnvelope
-        { Kind = DeviceKind.GroupReview, Payload = DeviceJson.Encode(new GroupJoinReview { Request = request, Code = "" }) });
+        { Kind = DeviceKind.GroupReview, Payload = DeviceJson.Encode(request) });
     }
 
     public async Task ApproveGroupReviewAsync()
@@ -1132,10 +1214,10 @@ public sealed class DeviceSyncService : IDisposable
             case DeviceKind.GroupReview:
             {
                 if (envelope.Payload is null) break;
-                var review = DeviceJson.Decode<GroupJoinReview>(envelope.Payload);
-                if (!_sponsoredRequests.TryGetValue(review.Request.Id, out var original)
-                    || !GroupJoinRequests.Same(original, review.Request) || !GroupJoinRequests.Live(original)) break;
-                if (!_peers.TryGetValue(review.Request.Id, out var joinPeer)
+                var review = DeviceJson.Decode<GroupJoinRequest>(envelope.Payload);
+                if (!_sponsoredRequests.TryGetValue(review.Id, out var original)
+                    || !GroupJoinRequests.Same(original, review) || !GroupJoinRequests.Live(original)) break;
+                if (!_peers.TryGetValue(review.Id, out var joinPeer)
                     || joinPeer is not { Keys: not null, Hello: not null } || joinPeer.TrustedReady) break;
                 await SendEnvelopeAsync(peer, new DeviceEnvelope
                 {
@@ -1203,9 +1285,12 @@ public sealed class DeviceSyncService : IDisposable
         }).ToList(),
     };
 
-    private async Task SendSidebarAsync(Peer peer) =>
+    private async Task SendSidebarAsync(Peer peer)
+    {
+        if (peer.Hello is null || !IsGroupMember(peer.Hello.DeviceID)) return;
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         { Kind = DeviceKind.SidebarSnapshot, HomeSeq = ++_homeSeq, Payload = DeviceJson.Encode(SidebarPayload()) });
+    }
 
     private void PublishSidebars()
     {
@@ -1222,7 +1307,7 @@ public sealed class DeviceSyncService : IDisposable
 
     private async Task SendTranscriptAsync(Peer peer, ChatSession session, int? beforeOffset = null)
     {
-        if (peer.Hello is null) return;
+        if (peer.Hello is null || !IsGroupMember(peer.Hello.DeviceID)) return;
         var holder = _leases.Holder(session.Id);
         if (holder is null || holder.Value.Device != peer.Hello.DeviceID) { peer.LeasedSessions.Remove(session.Id); return; }
         var total = session.Messages.Count;
@@ -1404,6 +1489,9 @@ public sealed class DeviceSyncService : IDisposable
             if (envelope.Kind == DeviceKind.GroupState) await HandleGroupEnvelopeAsync(peer, envelope);
             return;
         }
+        // Session traffic never crosses a group boundary: after Create or a
+        // group change, queued sends from stale peers drop here silently.
+        if (SessionKinds.Contains(envelope.Kind) && !IsGroupMember(peerHome)) return;
         switch (envelope.Kind)
         {
             case DeviceKind.FabricMembers:
@@ -1647,7 +1735,7 @@ public sealed class DeviceSyncService : IDisposable
     // ---- Viewer side ----
     private Peer? PeerForHome(string home) =>
         _peers.Values.FirstOrDefault(p => p.TrustedReady && !p.ControlOnly && p.Hello?.DeviceID == home
-            && Homes.GetValueOrDefault(home)?.Online == true);
+            && Homes.GetValueOrDefault(home)?.Online == true && IsGroupMember(home));
 
     public async Task AcquireRemoteAsync(string globalId)
     {
