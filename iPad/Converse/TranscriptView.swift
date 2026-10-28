@@ -169,31 +169,40 @@ struct PadTranscript: UIViewRepresentable {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
             let body = Self.render(message.text)
+            let contentLength = TranscriptStyle.blockContentLength(body.string)
+            body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+            if body.length == 0 && message.imageHashes.isEmpty { continue }
             if prompt { body.addAttribute(.font, value: UIFont.italicSystemFont(ofSize: 16), range: NSRange(location: 0, length: body.length)) }
             body.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: body.length))
-            if result.length > 0 { result.append(Self.separator()) }
             let start = result.length
             if TranscriptStyle.isTraffic(message.text) { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
-            result.append(body); result.append(Self.separator())
+            result.append(body)
             for hash in message.imageHashes {
                 guard let url = images[hash], let image = UIImage(contentsOfFile: url.path) else { continue }
                 let attachment = NSTextAttachment(); attachment.image = image
                 let maxWidth = max(100, view.bounds.width - 40)
                 let ratio = min(1, maxWidth / image.size.width)
                 attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * ratio, height: image.size.height * ratio)
-                result.append(NSAttributedString(attachment: attachment)); result.append(Self.separator())
+                if result.length > 0 && !result.string.hasSuffix("\n") { result.append(Self.separator()) }
+                result.append(NSAttributedString(attachment: attachment))
             }
+            guard result.length > start else { continue }
+            let last = result.length - 1
+            let paragraphRange = (result.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
+            let style = ((result.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? .default).mutableCopy() as! NSMutableParagraphStyle
+            style.paragraphSpacing = TranscriptStyle.blockSpacing
+            result.append(Self.separator())
+            result.addAttribute(.paragraphStyle, value: style, range: NSRange(location: paragraphRange.location, length: result.length - paragraphRange.location))
             let range = NSRange(location: start, length: result.length - start)
             c.messageRanges.append((message.id, range))
             if prompt { view.promptBlocks.append(range) }
             if TranscriptStyle.isTraffic(message.text) { view.trafficBlocks.append(range) }
         }
-        if result.length > 0 { result.append(Self.separator()) }
         c.historyLength = result.length
         view.historyLength = result.length
         result.append(NSAttributedString(string: draft, attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft)]))
         view.textStorage.setAttributedString(result)
-        view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft)]
+        view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft), .paragraphStyle: NSParagraphStyle.default]
         if let relative {
             let position = min(result.length, c.historyLength + relative)
             view.selectedRange = NSRange(location: position, length: min(previousSelection.length, result.length - position))
@@ -263,7 +272,7 @@ struct PadTranscript: UIViewRepresentable {
             lastDraft = text
             let color = PadPalette.draft(text)
             view.textStorage.addAttribute(.foregroundColor, value: color, range: NSRange(location: historyLength, length: view.textStorage.length - historyLength))
-            view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: color]
+            view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: NSParagraphStyle.default]
             (view as? TailTextView)?.gutter.setNeedsDisplay()
             parent.edit(text)
         }

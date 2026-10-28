@@ -11,6 +11,17 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testBlockSpacingDoesNotInsertBlankTranscriptLines() {
+        for tail in ["", "\n", "\n\n", "\r\n"] {
+            let messages = [DeviceWireMessage(id: UUID(), role: "user", text: "Prompt" + tail), DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply" + tail)]
+            let parent = PadTranscript(messages: messages, draft: "Draft\nsecond line\n", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 400)
+            parent.update(view, coordinator: PadTranscript.Coordinator(parent))
+            XCTAssertEqual(view.textStorage.string, "Prompt\nReply\nDraft\nsecond line\n", tail.debugDescription)
+            XCTAssertEqual((view.textStorage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.paragraphSpacing, TranscriptStyle.blockSpacing)
+            XCTAssertEqual(messages[0].text, "Prompt" + tail)
+        }
+    }
     func testUnloadedImageCaptionRemainsClickable() {
         let url = URL(string: "https://upload.wikimedia.org/example.jpg")!
         let rendered = PadTranscript.render("![Grasshopper](" + url.absoluteString + ")")

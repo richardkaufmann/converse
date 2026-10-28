@@ -2,6 +2,14 @@ import Foundation
 
 // Display classification only; never executes JSON or changes stored text.
 enum TranscriptStyle {
+    static let blockSpacing: CGFloat = 8
+    // Trim only display terminators. Internal paragraphs and stored source,
+    // including explicitly typed draft newlines, remain untouched.
+    static func blockContentLength(_ source: String) -> Int {
+        var value = source
+        while value.last?.isNewline == true { value.removeLast() }
+        return (value as NSString).length
+    }
     static func isTraffic(_ source: String) -> Bool {
         let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("[Converse message from ") || text.hasPrefix("[Converse switchboard ") || text.hasPrefix("Switchboard:") { return true }

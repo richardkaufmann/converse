@@ -999,20 +999,37 @@ final class InputClipView: NSClipView {
     }
 }
 final class ConversationScrollView: NSScrollView {
+    private var tiling = false
     override func tile() {
+        guard !tiling else { return }
+        tiling = true; defer { tiling = false }
         super.tile()
-        guard let text = documentView as? ConversationTextView else { return }
-        let height = contentView.bounds.height
-        if text.minSize.height != height { text.minSize.height = height }
-        if text.frame.height < height { text.setFrameSize(NSSize(width: text.frame.width, height: height)) }
+        (documentView as? ConversationTextView)?.fitDocumentHeight()
     }
 }
 final class ConversationTextView: NSTextView {
+    static let inputParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle(); style.lineSpacing = 2; return style
+    }()
+    private var fittingDocument = false
+    func fitDocumentHeight() {
+        guard !fittingDocument, let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer else { return }
+        fittingDocument = true; defer { fittingDocument = false }
+        let minimum = scroll.contentView.bounds.height
+        if minSize.height != minimum { minSize.height = minimum }
+        layout.ensureLayout(for: container)
+        let bottom = max(layout.usedRect(for: container).maxY, layout.extraLineFragmentRect.maxY)
+        let height = max(minimum, ceil(bottom + textContainerInset.height * 2))
+        if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+        let origin = scroll.contentView.constrainBoundsRect(scroll.contentView.bounds).origin
+        if origin != scroll.contentView.bounds.origin { scroll.contentView.scroll(to: origin) }
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
     func focusInput() {
         window?.makeFirstResponder(self)
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         let color = TranscriptPalette.draft((string as NSString).substring(from: min(inputStart, (string as NSString).length)))
-        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: color]
+        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: Self.inputParagraphStyle]
         insertionPointColor = color
         scrollRangeToVisible(selectedRange())
     }
@@ -1221,15 +1238,16 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
-            text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft)]
+            text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
         }
         func textDidChange(_ notification: Notification) {
             guard !rendering, let text = notification.object as? ConversationTextView else { return }
             session.draft = (text.string as NSString).substring(from: min(text.inputStart, (text.string as NSString).length))
             let length = (text.string as NSString).length
-            if length > text.inputStart { text.textStorage?.addAttribute(.foregroundColor, value: TranscriptPalette.draft(session.draft), range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
+            if length > text.inputStart { text.textStorage?.addAttributes([.foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle], range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
             text.refreshDecorations()
             text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
+            text.fitDocumentHeight()
             text.scrollRangeToVisible(NSRange(location: length, length: 0))
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
@@ -1259,12 +1277,13 @@ struct ScrollingConversation: NSViewRepresentable {
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
             }
-            func image(_ path: String) {
-                guard let img = NSImage(contentsOfFile: path) else { return }
+            @discardableResult func image(_ path: String) -> Bool {
+                guard let img = NSImage(contentsOfFile: path) else { return false }
                 let attachment = NSTextAttachment(); attachment.image = img
                 let scale = min(1, 480 / max(img.size.width, 1), 260 / max(img.size.height, 1))
                 attachment.bounds = NSRect(x: 0, y: 0, width: img.size.width * scale, height: img.size.height * scale)
-                document.append(NSAttributedString(attachment: attachment)); append("\n")
+                if document.length > 0 && !document.string.hasSuffix("\n") { append("\n") }
+                document.append(NSAttributedString(attachment: attachment)); return true
             }
             text.userBlocks = []
             text.trafficBlocks = []
@@ -1276,7 +1295,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if message.role == "assistant" {
                     if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
                     else { body = MarkdownText.render(visible); markdownCache[message.id] = (visible, NSAttributedString(attributedString: body)) }
-                } else { body = NSMutableAttributedString(string: visible + "\n", attributes: base) }
+                } else { body = NSMutableAttributedString(string: visible, attributes: base) }
                 for mark in (message.delays ?? []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
                     let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
@@ -1289,7 +1308,9 @@ struct ScrollingConversation: NSViewRepresentable {
                         if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
                     }
                 }
-                if document.length > 0 { append("\n") }
+                let contentLength = TranscriptStyle.blockContentLength(body.string)
+                body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+                if body.length == 0 && message.images.isEmpty { continue }
                 let start = document.length
                 let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
                 if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
@@ -1298,15 +1319,21 @@ struct ScrollingConversation: NSViewRepresentable {
                 }
                 document.append(body)
                 if message.role == "user" || message.role == "assistant" {
-                    let formatted = message.role == "assistant" ? MarkdownText.render(visible) : NSAttributedString(string: visible, attributes: body.attributes(at: 0, effectiveRange: nil))
+                    let formatted = message.role == "assistant" ? MarkdownText.render(visible) : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }
+                guard document.length > start else { continue }
+                let last = document.length - 1
+                let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
+                let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle
+                style.paragraphSpacing = TranscriptStyle.blockSpacing
+                append("\n", [.paragraphStyle: style])
+                document.addAttribute(.paragraphStyle, value: style, range: NSRange(location: paragraphRange.location, length: document.length - paragraphRange.location))
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
-            if document.length > 0 { append("\n") }
-            for path in session.attachments { image(path) }
+            for path in session.attachments { if image(path) { append("\n") } }
             text.inputStart = document.length
             let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: TranscriptPalette.draft(session.draft)]
             append(session.draft, draftStyle)
@@ -1319,8 +1346,13 @@ struct ScrollingConversation: NSViewRepresentable {
             else { text.setSelectedRange(NSRange(location: min(selection.location, document.length), length: 0)) }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.layoutManager?.ensureLayout(for: text.textContainer!)
+            text.fitDocumentHeight()
             if follow { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
-            else { scroll?.contentView.scroll(to: origin); scroll?.reflectScrolledClipView(scroll!.contentView) }
+            else if let scroll {
+                let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
+                scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
             text.refreshDecorations()
             rendering = false
         }
@@ -1745,11 +1777,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    let entry = Entry(name: "Layout fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")
+    for tail in ["", "\n", "\n\n", "\r\n"] {
+        let session = Session(entry: entry)
+        session.messages = [Message(role: "user", text: "Prompt" + tail), Message(role: "assistant", text: "Reply" + tail)]
+        session.draft = "Draft\nsecond line\n"
+        let view = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        ScrollingConversation.Coordinator(session).render(view)
+        check(view.string == "Prompt\nReply\nDraft\nsecond line\n", "Message boundaries have one newline for both roles, preserving the editable draft (" + tail.debugDescription + ")")
+        check(session.messages[0].text == "Prompt" + tail && session.messages[1].text == "Reply" + tail, "Spacing normalization never edits source transcripts")
+    }
+    let session = Session(entry: entry)
+    session.messages = [Message(role: "user", text: "first\n\nsecond"), Message(role: "assistant", text: "alpha\n\nbeta")]
+    let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    scroll.contentView = InputClipView(); scroll.hasVerticalScroller = true
+    let view = ConversationTextView(frame: scroll.contentView.bounds)
+    view.isVerticallyResizable = true; view.isHorizontallyResizable = false
+    view.minSize = NSSize(width: 0, height: 400); view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    view.autoresizingMask = [.width]; view.textContainer?.widthTracksTextView = true
+    view.textContainer?.containerSize = NSSize(width: 700, height: CGFloat.greatestFiniteMagnitude)
+    view.textContainerInset = NSSize(width: 12, height: 12)
+    scroll.documentView = view; scroll.tile()
+    let coordinator = ScrollingConversation.Coordinator(session); coordinator.render(view)
+    check(view.string.contains("first\n\nsecond") && view.string.contains("alpha\n\nbeta"), "Intentional blank lines inside prompts and replies remain intact")
+    // Reproduce the stale frame left by a previously taller viewport/document.
+    view.setFrameSize(NSSize(width: view.frame.width, height: 3000)); scroll.tile()
+    check(view.frame.height <= scroll.contentView.bounds.height + 1, "Mac tiling shrinks a stale document frame instead of leaving a large blank tail")
+    session.messages = [Message(role: "assistant", text: String(repeating: "A long wrapping response line with words. ", count: 600))]
+    coordinator.render(view); scroll.tile()
+    let longHeight = view.frame.height
+    check(longHeight > 1000, "Native layout fixture produces a scrollable transcript")
+    scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+    session.messages.append(Message(role: "assistant", text: "A later streamed answer"))
+    coordinator.render(view)
+    check(abs(scroll.contentView.bounds.minY - 100) < 1, "New output preserves the viewport while reading older messages")
+    session.messages = [Message(role: "assistant", text: "Short reply")]; session.draft = "Typing here"
+    coordinator.render(view); scroll.tile()
+    check(view.frame.height <= scroll.contentView.bounds.height + 1 && scroll.contentView.bounds.minY < 1, "Shortened transcripts shrink and clamp the scroll position before showing the draft")
+    scroll.setFrameSize(NSSize(width: 700, height: 900)); scroll.tile()
+    scroll.setFrameSize(NSSize(width: 700, height: 250)); scroll.tile()
+    check(view.frame.height <= scroll.contentView.bounds.height + 1, "Reducing the window height cannot retain the previous tall document frame")
+}
+
 func selfTest() {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh to run isolated tests.\n", stderr); exit(2) }
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
     providerSelfTests(check)
+    conversationLayoutSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
     let r = UUID(); s.messages.append(Message(id: r, role: "assistant", text: ""))
@@ -1838,7 +1914,7 @@ func selfTest() {
     check(exact.messages[0].delays?.first?.seconds == 10 && Store.delayLabel(10) == "[10 sec]", "Delay threshold includes exactly ten seconds")
     let timedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
     let timedCoordinator = ScrollingConversation.Coordinator(exact); timedCoordinator.render(timedView)
-    check(timedView.string == "[10 sec] Answer\n\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
+    check(timedView.string == "[10 sec] Answer\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
     let glued = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
     let gluedID = UUID(); glued.messages = [Message(id: gluedID, role: "assistant", text: "tracked.")]
     glued.lastOutputAt = ProcessInfo.processInfo.systemUptime - 35
@@ -1918,7 +1994,7 @@ func selfTest() {
     tableView.delegate = tableCoordinator; tableCoordinator.render(tableView); tableView.focusInput()
     tableView.insertText("next input", replacementRange: tableView.selectedRange())
     let inputStyle = tableView.textStorage?.attribute(.paragraphStyle, at: tableView.inputStart, effectiveRange: nil) as? NSParagraphStyle
-    check(tableSession.draft == "next input" && inputStyle?.textBlocks.isEmpty != false, "Input after a rendered table stays outside table cells")
+    check(tableSession.draft == "next input" && inputStyle?.textBlocks.isEmpty != false && inputStyle?.paragraphSpacing == 0, "Input after a rendered table stays outside cells and does not inherit message spacing")
     let copyBoard = NSPasteboard.withUniqueName()
     tableView.copyBlock(0, to: copyBoard)
     let copiedRTF = copyBoard.data(forType: .rtf).flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
@@ -2073,6 +2149,12 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--conversation-layout-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    conversationLayoutSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--pane-sizing-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
