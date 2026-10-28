@@ -98,6 +98,60 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: coordinator.historyLength, effectiveRange: nil) as? UIColor, PadPalette.traffic)
         XCTAssertTrue(view.gutter.isHidden == false)
     }
+    func testNativeReturnSendsWithoutInsertingLineBreaks() {
+        for key in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            var sends = 0
+            let parent = PadTranscript(messages: [], draft: "draft", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: { sends += 1 }, attach: { _ in })
+            let coordinator = PadTranscript.Coordinator(parent)
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 300); view.delegate = coordinator
+            parent.update(view, coordinator: coordinator)
+            view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+            view.insertText(key)
+            XCTAssertEqual(sends, 1, key.debugDescription)
+            XCTAssertEqual(view.text, "draft", "Return must never insert a blank paragraph")
+            view.insertingNewline = true; view.insertText("\n"); view.insertingNewline = false
+            XCTAssertEqual(view.text, "draft\n", "Command-Return inserts exactly one newline")
+            XCTAssertEqual(sends, 1)
+            let hardwareReturn = view.keyCommands!.first { $0.input == "\r" && $0.modifierFlags.isEmpty }!
+            view.perform(hardwareReturn.action, with: hardwareReturn)
+            XCTAssertEqual(sends, 2, "Hardware Return has a direct Send command")
+            view.isEditable = false; view.insertText(key); view.perform(hardwareReturn.action, with: hardwareReturn)
+            XCTAssertEqual(sends, 2, "An offline or read-only pane cannot send")
+            XCTAssertEqual(view.text, "draft\n")
+        }
+    }
+    func testInitialHistoryWaitsForLayoutAndFollowsTailWithoutAnimation() {
+        var parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: String(repeating: "A long transcript line.\n", count: 120))], draft: "draft", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        view.frame = CGRect(x: 0, y: 0, width: 700, height: 300); view.setNeedsLayout(); view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Initial transcript opens at its tail after the view has a real size")
+        parent.messages.append(DeviceWireMessage(id: UUID(), role: "assistant", text: String(repeating: "Streaming update\n", count: 10)))
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Tail following completes synchronously rather than queuing a scroll animation")
+        view.frame.size.height = 180; view.setNeedsLayout(); view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Keyboard resizing retains the tail when already following it")
+    }
+    func testReadingPositionSurvivesAppendAndEarlierHistory() {
+        let messages = (0..<70).map { DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply \($0): " + String(repeating: "readable text ", count: 14)) }
+        var parent = PadTranscript(messages: messages, draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 300); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        view.selectedRange = NSRange(location: 0, length: 0)
+        view.setContentOffset(CGPoint(x: 0, y: 520), animated: false)
+        let oldOffset = view.contentOffset.y
+        parent.messages.append(DeviceWireMessage(id: UUID(), role: "assistant", text: "A streamed update"))
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.contentOffset.y, oldOffset, accuracy: 1, "An update below the reader must not move the viewport")
+        let before = view.layoutManager.characterIndexForGlyph(at: view.layoutManager.glyphIndex(for: CGPoint(x: 0, y: view.contentOffset.y - view.textContainerInset.top), in: view.textContainer))
+        let visibleText = (view.text as NSString).substring(with: NSRange(location: before, length: min(30, view.textStorage.length - before)))
+        parent.messages.insert(DeviceWireMessage(id: UUID(), role: "user", text: String(repeating: "Earlier history ", count: 90)), at: 0)
+        parent.update(view, coordinator: coordinator)
+        let after = view.layoutManager.characterIndexForGlyph(at: view.layoutManager.glyphIndex(for: CGPoint(x: 0, y: view.contentOffset.y - view.textContainerInset.top), in: view.textContainer))
+        XCTAssertEqual((view.text as NSString).substring(with: NSRange(location: after, length: min(30, view.textStorage.length - after))), visibleText, "Loading earlier history keeps the same text at the top")
+    }
     func testFreshLeasePreservesConflictingRecoveredDraftUntilChoice() throws {
         let service = try service(); let model = PadModel(service: service)
         let id = DeviceGlobalID(home: "test-home", session: UUID()).string
