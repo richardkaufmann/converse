@@ -52,7 +52,7 @@ cannot drift from `Sources/Device*.swift`.
 
 ```powershell
 dotnet run --project windows/src/Converse.Core.Tests
-dotnet build windows/src/Converse.App -c Release
+dotnet build windows/src/Converse.Windows -c Release
 ```
 
 The core test runner is a console app with `PASS:`/`FAIL:` lines mirroring
@@ -63,7 +63,7 @@ runner prints platform support and fails loudly if unavailable.
 
 The WinUI app is **unpackaged** WinUI 3 (`Microsoft.WindowsAppSDK` NuGet,
 restored on first build on Windows). It cannot be built on macOS; the
-skeleton in `src/Converse.App` is authored for first compile on the PC.
+skeleton in `src/Converse.Windows` is authored for first compile on the PC.
 
 ## Data locations (Windows)
 
