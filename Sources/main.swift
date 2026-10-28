@@ -1447,9 +1447,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil,
            let state = windows.first?.1 {
             let devices = DeviceSyncService.shared
+            let busyPreview = ProcessInfo.processInfo.environment["CONVERSE_QA_BUSY"] == "1"
             let id = UUID(); let globalID = DeviceGlobalID(home: "isolated-preview", session: id).string
             let messages = Store.shared.sessions.first(where: { $0.title == "Gutter style check" })?.messages ?? []
-            devices.homes["isolated-preview"] = RemoteHomeState(deviceID: "isolated-preview", deviceName: "Offline QA Mac", online: true, rows: [DeviceSidebarRow(globalID: globalID, sessionID: id, title: "Remote editor QA", assistant: "Claude", engine: "claude", model: "fixture", effort: "high", access: "Manual", status: "Ready", busy: false, queued: 0, queuePaused: false)])
+            devices.homes["isolated-preview"] = RemoteHomeState(deviceID: "isolated-preview", deviceName: "Offline QA Mac", online: true, rows: [DeviceSidebarRow(globalID: globalID, sessionID: id, title: "Remote editor QA", assistant: "Claude", engine: "claude", model: "fixture", effort: "high", access: "Manual", status: busyPreview ? "Working…" : "Ready", busy: busyPreview, queued: 0, queuePaused: false)])
             devices.remoteLeases[globalID] = 1
             devices.remoteTranscripts[globalID] = DeviceTranscriptPayload(globalID: globalID, homeSeq: 1, epoch: 1, messages: messages.map { DeviceWireMessage(id: $0.id, role: $0.role, text: $0.text) }, draft: "A blue remote draft", draftVersion: 1, busy: false, status: "Ready", title: "Remote editor QA", engine: "claude")
             Workspace.shared.assign(devices.placementID(forGlobal: globalID), to: state.id, pane: 1)
