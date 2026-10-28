@@ -10,6 +10,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     accountLoginSelfTests(check)
     sessionSetupSelfTests(check)
     deviceSyncSelfTests(check)
+    fabricRevocationReconnectTests(check)
     fabricTrustSelfTests(check)
     deviceFabricSelfTests(check)
     MainActor.assumeIsolated { agentSelfTests(check) }

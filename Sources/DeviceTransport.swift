@@ -94,6 +94,7 @@ final class DeviceSyncService: ObservableObject {
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
         #endif
     }
+    private var locallyRemoved: Bool { trustStore?.records.first(where: { $0.deviceID == identity?.deviceID })?.removed == true }
     private var deviceName: String { deviceNameOverride ?? identity?.deviceName ?? "Converse" }
     private(set) var identity: DeviceIdentity?
     private var trustStore: DeviceTrustStore?
@@ -143,7 +144,7 @@ final class DeviceSyncService: ObservableObject {
         started = true
     }
     func adoptPeerForTesting(_ peer: DevicePeer) { peers[peer.id] = peer }
-    var testingPort: UInt16? { listener?.port?.rawValue }
+    var testingPort: UInt16? { listener?.port.flatMap { $0.rawValue > 0 ? $0.rawValue : nil } }
     func startNetworkForTesting() throws {
         guard isTestEnvironment, testFolder != nil else { throw CocoaError(.executableNotLoadable) }
         try startListener(portOverride: .any)
@@ -244,7 +245,7 @@ final class DeviceSyncService: ObservableObject {
     private func reconnectTrusted() {
         guard trustStore?.records.first(where: { $0.deviceID == identity?.deviceID })?.removed != true else { return }
         for device in trusted where homes[device.deviceID]?.online != true {
-            if let found = discovered.first(where: { $0.name == device.name || $0.name.hasPrefix(device.name + " [") }) { connect(discovered: found) }
+            if let found = discovered.first(where: { $0.name.hasSuffix("[" + String(device.deviceID.prefix(8)) + "]") || $0.name == device.name }) { connect(discovered: found) }
             else if let host = device.lastHost, let port = device.lastPort { connectManual(host: host, port: port) }
         }
     }
@@ -274,7 +275,7 @@ final class DeviceSyncService: ObservableObject {
     }
     private func helloPayload() -> Data {
         let hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
-                                converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.map { Int($0.rawValue) })
+                                converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
     private func sendHandshake(_ peer: DevicePeer) {
@@ -400,8 +401,10 @@ extension DeviceSyncService {
             guard trustStore?.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .trusted || peer.humanConfirmed else { disconnect(peer); return }
             var host = peer.manualHost
             if host == nil, case .hostPort(let endpointHost, _) = peer.connection.endpoint { host = String(describing: endpointHost) }
-            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: host, port: hello.listenPort ?? peer.manualPort, issuer: identity?.deviceID)
-            if let identity { try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID) }
+            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: host, port: hello.listenPort ?? peer.manualPort, issuer: identity?.deviceID, allowAdmission: peer.humanConfirmed)
+            if let identity, trustStore?.records.first(where: { $0.deviceID == identity.deviceID })?.removed != true {
+                try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID)
+            }
             trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? trusted
         } catch {
             lastOutcome = "Could not save paired device. Control not granted."
@@ -409,9 +412,9 @@ extension DeviceSyncService {
         }
         peer.trustedReady = true
         homes[hello.deviceID] = RemoteHomeState(deviceID: hello.deviceID, deviceName: hello.deviceName, online: true, rows: homes[hello.deviceID]?.rows ?? [], lastSeen: Date())
-        sendSidebar(to: peer)
+        if !locallyRemoved { sendSidebar(to: peer) }
         broadcastFabric()
-        serviceStatus = "Connected to " + hello.deviceName + ". Take a session again to control it."
+        serviceStatus = locallyRemoved ? "Membership exchange only. Fresh sponsor approval is required to rejoin." : "Connected to " + hello.deviceName + ". Take a session again to control it."
     }
     private func broadcastFabric() {
         guard let records = trustStore?.records, let data = try? JSONEncoder().encode(records) else { return }
@@ -724,11 +727,13 @@ extension DeviceSyncService {
         peer.lastSeen = Date()
         if envelope.kind == "pair.confirm" { peer.remoteConfirmed = true; finishTrustIfReady(peer); return }
         guard peer.trustedReady, let peerHome = peer.hello?.deviceID else { return }
+        if locallyRemoved && !["fabric.members", "ping", "pong"].contains(envelope.kind) { return }
         switch envelope.kind {
         case "fabric.members":
             guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
                   let members = try? JSONDecoder().decode([TrustedDevice].self, from: data) else { return }
             do {
+                let wasRemoved = locallyRemoved
                 if try trustStore?.merge(members) == true {
                     trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
                     let active = Set(trusted.map(\.deviceID))
@@ -738,10 +743,11 @@ extension DeviceSyncService {
                     for id in removed { homes.removeValue(forKey: id) }
                     // An offline device removed from the fabric cannot rejoin
                     // through an old pin: it must obtain fresh human admission.
-                    if let own = trustStore?.records.first(where: { $0.deviceID == identity?.deviceID }), own.removed == true {
+                    if locallyRemoved && !wasRemoved {
                         for connection in Array(peers.values) { disconnect(connection) }
                         serviceStatus = "This device was removed from the fabric. Pair again to rejoin."; return
                     }
+                    if wasRemoved && !locallyRemoved { sendSidebar(to: peer) }
                     broadcastFabric(); reconnectTrusted()
                 }
             } catch { lastOutcome = "Could not save fabric membership. No new trust granted." }
@@ -972,7 +978,8 @@ extension DeviceSyncService {
     private func recordEpoch(_ record: DeviceOutboxRecord) -> UInt64 { record.epoch }
     // MARK: Viewer actions
     private func peerForHome(_ home: String) -> DevicePeer? {
-        peers.values.first { $0.trustedReady && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
+        guard !locallyRemoved else { return nil }
+        return peers.values.first { $0.trustedReady && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
     }
     func acquireRemote(globalID: String) {
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { lastOutcome = "Home is offline."; return }

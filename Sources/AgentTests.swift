@@ -11,10 +11,23 @@ import Foundation
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-agents-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let store = Store(folder: root)
+    for title in ["Converse Development", "MuseConverse"] {
+        let suggestion = store.create(Entry(name: "Fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")); suggestion.title = title
+    }
     let agent = store.createAgent(); agent.queuePaused = true
+    check(agent.agent?.watchedSessions.isEmpty == true, "New agents have no transcript scope until the user explicitly selects sessions")
     let recipient = store.create(Entry(name: "Fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")); recipient.queuePaused = true
     let blocked = store.create(recipient.entry); blocked.queuePaused = true
     agent.agent?.watchedSessions = [recipient.id]
+    var secretWrites = 0, secretDeletes = 0
+    do {
+        try AgentSecrets.update("fixture", value: "", remove: false, write: { _, _ in secretWrites += 1 }, delete: { _ in secretDeletes += 1 })
+        try AgentSecrets.update("fixture", value: "new test value", remove: false, write: { _, _ in secretWrites += 1 }, delete: { _ in secretDeletes += 1 })
+        try AgentSecrets.update("fixture", value: "", remove: true, write: { _, _ in secretWrites += 1 }, delete: { _ in secretDeletes += 1 })
+        check(secretWrites == 1 && secretDeletes == 1, "Agent credentials support explicit removal while blank fields preserve saved values")
+        do { try AgentSecrets.update("fixture", value: "replacement", remove: true, write: { _, _ in secretWrites += 1 }, delete: { _ in secretDeletes += 1 }); check(false, "Conflicting secret edit rejected") }
+        catch { check(secretWrites == 1 && secretDeletes == 1, "Conflicting credential replacement/removal changes nothing") }
+    } catch { check(false, "Credential edit policy: " + error.localizedDescription) }
     let runtime = AgentRuntime()
     runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id, text: "Please review"), .init(to: blocked.id, text: "Forbidden")]), from: agent, store: store)
     check(recipient.pending.count == 1 && blocked.pending.isEmpty && recipient.pending[0].text.contains(agent.id.uuidString), "Agent messages are visibly attributed and restricted to selected sessions")
@@ -37,9 +50,11 @@ import Foundation
     // Real engine path, fake HTTP. No credentials, external requests or billable calls.
     runtime.keyReader = { _ in "isolated-test-key" }
     var requests: [URLRequest] = []
+    recipient.messages.append(Message(role: "assistant", text: "private scope canary"))
     runtime.api.request = { request in
         requests.append(request)
         let path = request.url!.path
+        if path != "/v1/responses" { agent.agent?.watchedSessions = [] } // Revoke scope while repository requests are in flight.
         var object: Any = [:]
         if path == "/v1/responses" {
             object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[]}"]]]]]
@@ -59,6 +74,9 @@ import Foundation
     check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its scoreboard after the model response")
     let archive = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
     check(!archive.contains("isolated-test-key") && !AgentWidgetExport.html(agent).contains("isolated-test-key"), "Agent credentials never enter persisted sessions or widget exports")
+    let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
+
     let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!
     runtime.api.request = { request in
         let image = request.url?.path == "/v1/images/generations"

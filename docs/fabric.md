@@ -24,18 +24,19 @@ payload is base64-encoded JSON (as all DeviceEnvelope payloads are), containing 
 array of records with these exact keys:
 
 - `deviceID`: lowercase SHA-256 hex of the 32-byte public key.
-- `name`: display name, at most 200 characters.
+- `name`: display name, at most 200 UTF-8 bytes (truncate only at a Unicode scalar boundary).
 - `publicKey`: base64 X25519 public key, never a private key.
 - `pairedAt`: seconds since Apple's 2001-01-01 reference date (informational).
 - `lastHost`, `lastPort`: optional connection hints, not authentication.
 - `generation`: optional unsigned 64-bit counter; absent means zero.
 - `changedBy`: optional issuer device ID, used only as a convergence tie-breaker.
 - `removed`: optional Boolean; absent means false.
+- `metadataGeneration`, `metadataBy`: optional independent hint revision and observer device ID.
 
 For each identity retain the record with greatest tuple
 `(generation, removed ? 1 : 0, changedBy-or-empty)`; compare issuer strings
 ordinally. Local admission/removal uses one more than the greatest locally known
-generation. Reconnect must not mint a new admission for an unchanged active peer.
+generation. Reconnect and metadata refresh never mint a new admission for an active peer. They preserve membership generation/issuer and advance only the independent metadata revision. At equal admission rank and matching key/state, merge hints by greatest `(metadataGeneration-or-zero, metadataBy-or-empty)`. A removed device never self-pins over its tombstone: only an explicit human-approved sponsor admission may supersede it. Unknown/tombstoned peer pinning requires fresh human approval; an automatic reconnect cannot grant membership.
 Reject invalid identity/key binding, invalid endpoints, exhausted counters and
 rosters over 512 records before persistence. Save atomically before granting new
 trust. Removal records remain as tombstones; explicit new human admission uses a

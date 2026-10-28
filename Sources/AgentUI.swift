@@ -7,6 +7,7 @@ struct AgentSetupView: View {
     @State private var metaKey = ""
     @State private var githubKey = ""
     @State private var discordURL = ""
+    @State private var removeSecrets: Set<String> = []
     @State private var error = ""
     var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
@@ -16,9 +17,18 @@ struct AgentSetupView: View {
             Text("Agent Setup · " + session.title).font(.title2.bold())
             Text("Runs on this home computer while Converse is open. Only the selected sessions are sent to Meta. Keys and the Discord webhook stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 8) {
-                SecureField("Meta API key · blank keeps saved key", text: $metaKey)
-                SecureField("GitHub token · optional, blank keeps saved token", text: $githubKey)
-                SecureField("Discord webhook · optional", text: $discordURL)
+                HStack {
+                    SecureField("Meta API key · blank keeps saved key", text: $metaKey)
+                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("meta") }, set: { if $0 { removeSecrets.insert("meta") } else { removeSecrets.remove("meta") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
+                }
+                HStack {
+                    SecureField("GitHub token · optional, blank keeps saved token", text: $githubKey)
+                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("github") }, set: { if $0 { removeSecrets.insert("github") } else { removeSecrets.remove("github") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
+                }
+                HStack {
+                    SecureField("Discord webhook · optional", text: $discordURL)
+                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("discord") }, set: { if $0 { removeSecrets.insert("discord") } else { removeSecrets.remove("discord") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
+                }
                 HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model) }
                 HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("GitHub repository · owner/name", text: $settings.repository) }
                 Text("What should this agent do? How will you judge success?").font(.headline)
@@ -31,7 +41,7 @@ struct AgentSetupView: View {
                 Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
                 Toggle("Speak replies with expressive pace", isOn: $settings.speak)
                 Toggle("Allow Discord webhook alerts", isOn: $settings.discord)
-                Text("Sessions this agent may read and message").font(.headline)
+                Text("Sessions this agent may read and message · select explicitly").font(.headline)
                 ScrollView {
                     VStack(alignment: .leading) {
                         ForEach(Store.shared.sessions.filter { $0.id != session.id && $0.agent == nil }) { other in
@@ -50,9 +60,10 @@ struct AgentSetupView: View {
         guard AgentRepoSnapshot.validRepository(settings.repository), !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Enter a model and a repository as owner/name."; return }
         guard settings.intervalSeconds.isFinite else { error = "Enter a valid interval."; return }
         do {
-            try AgentSecrets.write("meta", value: metaKey.trimmingCharacters(in: .whitespacesAndNewlines))
-            try AgentSecrets.write("github", value: githubKey.trimmingCharacters(in: .whitespacesAndNewlines))
-            try AgentSecrets.write("discord", value: discordURL.trimmingCharacters(in: .whitespacesAndNewlines))
+            guard ![("meta", metaKey), ("github", githubKey), ("discord", discordURL)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
+            try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
+            try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
+            try AgentSecrets.update("discord", value: discordURL, remove: removeSecrets.contains("discord"))
             var current = session.agent ?? AgentConfig()
             current.objective = settings.objective; current.repository = settings.repository; current.model = settings.model
             current.watchedSessions = settings.watchedSessions; current.intervalSeconds = max(60, settings.intervalSeconds)

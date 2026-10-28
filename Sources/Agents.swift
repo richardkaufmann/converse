@@ -70,6 +70,19 @@ enum AgentSecrets {
         guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else { throw AgentFailure.message("Could not read the agent credential from Keychain.") }
         return value
     }
+    static func delete(_ name: String) throws {
+        let status = SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: name] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw AgentFailure.message("Could not remove the saved agent credential from Keychain.") }
+    }
+    static func update(_ name: String, value: String, remove: Bool,
+                       write: (String, String) throws -> Void = AgentSecrets.write,
+                       delete: (String) throws -> Void = AgentSecrets.delete) throws {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if remove {
+            guard value.isEmpty else { throw AgentFailure.message("Choose either replacement or removal for each credential.") }
+            try delete(name)
+        } else if !value.isEmpty { try write(name, value) }
+    }
     static func write(_ name: String, value: String) throws {
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: name]

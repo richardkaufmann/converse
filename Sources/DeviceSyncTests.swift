@@ -512,6 +512,14 @@ func fabricTrustSelfTests(_ check: (Bool, String) -> Void) {
         _ = try b.merge(a.records)
         check(b.devices.first?.name == "Readmitted" && (b.devices.first?.generation ?? 0) > (stale.first?.generation ?? 0), "Explicit fresh admission supersedes a removal")
         check(try DeviceTrustStore(folder: root.appendingPathComponent("b")).records == b.records, "Fabric admission and removal versions survive restart")
+        let membership = a.records.first { $0.deviceID == id }!
+        try a.pin(deviceID: id, name: "New endpoint", publicKey: key, host: "192.0.2.5", port: 49000, issuer: "admin-a", allowAdmission: false)
+        let refreshed = a.records.first { $0.deviceID == id }!
+        check(refreshed.generation == membership.generation && refreshed.changedBy == membership.changedBy && (refreshed.metadataGeneration ?? 0) > (membership.metadataGeneration ?? 0), "Endpoint refresh never creates a new membership generation")
+        _ = try b.merge(a.records)
+        check(b.devices.first?.lastHost == "192.0.2.5" && b.devices.first?.generation == membership.generation, "Equal-admission-rank metadata refresh converges independently")
+        check(DeviceTrustStore.boundedName(String(repeating: "🙂", count: 60)) == String(repeating: "🙂", count: 50), "Fabric names truncate at the same 200 UTF-8 byte boundary on all platforms")
+
         var invalid = a.records[0]; invalid.deviceID = String(repeating: "0", count: 64)
         let before = b.records
         do { _ = try b.merge([invalid]); check(false, "Fabric rejects identity/key mismatch") }
@@ -525,4 +533,53 @@ func fabricTrustSelfTests(_ check: (Bool, String) -> Void) {
         untrusted.handleEnvelope(peer, DeviceEnvelope(kind: "fabric.members", payload: try JSONEncoder().encode(a.records)))
         check(untrusted.trusted.isEmpty, "Unauthenticated peers cannot introduce fabric members")
     } catch { check(false, "Fabric trust regression: " + error.localizedDescription) }
+}
+
+func fabricRevocationReconnectTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-revocation-" + UUID().uuidString)
+    var live: [DeviceSyncService] = []
+    defer { live.forEach { $0.suspendViewer() }; try? FileManager.default.removeItem(at: root) }
+    func make(_ name: String, displayName: String? = nil) throws -> DeviceSyncService {
+        let service = DeviceSyncService(); try service.configureForTesting(folder: root.appendingPathComponent(name))
+        service.deviceNameOverride = displayName ?? name; service.isPlaced = { _ in true }; try service.startNetworkForTesting(); live.append(service); return service
+    }
+    func records(_ name: String) throws -> [TrustedDevice] { try DeviceTrustStore(folder: root.appendingPathComponent(name)).records }
+    func pump(_ done: () -> Bool) -> Bool {
+        let until = Date().addingTimeInterval(8)
+        while !done() && Date() < until {
+            for service in live where service.pairingPrompt != nil { service.confirmPairing() }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return done()
+    }
+    do {
+        var a = try make("A"), r = try make("R"), x = try make("X")
+        guard pump({ live.allSatisfy { ($0.testingPort ?? 0) > 0 } }) else { check(false, "Revocation listeners ready"); return }
+        let rid = r.identity!.deviceID, aid = a.identity!.deviceID, xid = x.identity!.deviceID
+        r.connectManual(host: "127.0.0.1", port: Int(a.testingPort!))
+        guard pump({ a.trusted.count == 1 && r.trusted.count == 1 }) else { check(false, "Initial revocation pair ready"); return }
+        x.connectManual(host: "127.0.0.1", port: Int(a.testingPort!))
+        guard pump({ live.allSatisfy { $0.homes.values.filter(\.online).count == 2 } }) else { check(false, "Initial revocation fabric ready"); return }
+        x.suspendViewer(); r.suspendViewer()
+        a.forgetDevice(a.trusted.first { $0.deviceID == rid }!)
+        let removed = try records("A").first { $0.deviceID == rid }!
+        let rStore = try DeviceTrustStore(folder: root.appendingPathComponent("R")); _ = try rStore.merge([removed])
+        a.suspendViewer() // X remains stale and cannot learn the removal from A.
+        r = try make("R", displayName: "R renamed"); x = try make("X", displayName: "X renamed")
+        guard pump({ (r.testingPort ?? 0) > 0 && (x.testingPort ?? 0) > 0 }) else { check(false, "Reconnect listeners ready"); return }
+        r.connectManual(host: "127.0.0.1", port: Int(x.testingPort!))
+        _ = pump { (try? records("X").first { $0.deviceID == rid }?.removed) == true }
+        let all = try records("A") + records("R") + records("X")
+        if !all.filter({ $0.deviceID == rid }).allSatisfy({ $0.removed == true }) {
+            print("Revocation reconnect diagnostics:", "R:", r.serviceStatus, r.lastOutcome, "pairing:", r.pairingPrompt?.peerName ?? "none", "port:", r.testingPort ?? 0, "X:", x.serviceStatus, x.lastOutcome, "pairing:", x.pairingPrompt?.peerName ?? "none", "port:", x.testingPort ?? 0)
+        }
+        check(all.filter { $0.deviceID == rid }.allSatisfy { $0.removed == true && ($0.generation ?? 0) == (removed.generation ?? 0) }, "Removed device cannot resurrect itself through a stale member during reconnect")
+        check(pump { r.homes[xid]?.online != true && x.homes[rid]?.online != true }, "Stale reconnect converges to the tombstone and disconnects the removed member")
+        a = try make("A", displayName: "A sponsor")
+        guard pump({ (a.testingPort ?? 0) > 0 }) else { check(false, "Sponsor restart ready"); return }
+        r.connectManual(host: "127.0.0.1", port: Int(a.testingPort!))
+        check(pump { r.homes[aid]?.online == true && a.homes[rid]?.online == true && (try? records("R").first { $0.deviceID == rid }?.removed) != true }, "An up-to-date sponsor can explicitly readmit the removed device")
+        let readmitted = try records("A").first { $0.deviceID == rid }!
+        check(readmitted.removed != true && (readmitted.generation ?? 0) > (removed.generation ?? 0) && readmitted.changedBy == aid, "Fresh readmission is issued by the human-approving sponsor")
+    } catch { check(false, "Reconnect revocation regression: " + error.localizedDescription) }
 }

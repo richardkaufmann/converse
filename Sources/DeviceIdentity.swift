@@ -72,6 +72,8 @@ struct TrustedDevice: Codable, Equatable, Identifiable {
     var generation: UInt64? = nil
     var changedBy: String? = nil
     var removed: Bool? = nil
+    var metadataGeneration: UInt64? = nil
+    var metadataBy: String? = nil
 }
 
 final class DeviceTrustStore {
@@ -82,7 +84,7 @@ final class DeviceTrustStore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         file = folder.appendingPathComponent("devices.json")
         if FileManager.default.fileExists(atPath: file.path) {
-            records = try JSONDecoder().decode([TrustedDevice].self, from: Data(contentsOf: file))
+            records = try JSONDecoder().decode([TrustedDevice].self, from: Data(contentsOf: file)).map { var record = $0; record.name = Self.boundedName(record.name); return record }
         }
     }
     func check(deviceID: String, publicKey: Data) -> DeviceTrustCheck {
@@ -91,14 +93,26 @@ final class DeviceTrustStore {
     }
     private func nextGeneration() throws -> UInt64 {
         let highest = records.map { $0.generation ?? 0 }.max() ?? 0
-        guard highest < UInt64.max - 1 else { throw CocoaError(.coderInvalidValue) }
+        guard highest < UInt64.max - 2 else { throw CocoaError(.coderInvalidValue) }
         return highest + 1
     }
-    func pin(deviceID: String, name: String, publicKey: Data, host: String? = nil, port: Int? = nil, issuer: String? = nil) throws {
-        let old = devices.first { $0.deviceID == deviceID }
-        if let old, old.publicKey == publicKey, old.name == name, (host == nil || old.lastHost == host), (port == nil || old.lastPort == port) { return }
+    static func boundedName(_ name: String) -> String {
+        var bytes = Array(name.utf8.prefix(200))
+        while String(bytes: bytes, encoding: .utf8) == nil { bytes.removeLast() }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+    func pin(deviceID: String, name: String, publicKey: Data, host: String? = nil, port: Int? = nil, issuer: String? = nil, allowAdmission: Bool = true) throws {
+        let name = Self.boundedName(name)
+        let old = records.first { $0.deviceID == deviceID }
+        let active = old?.removed != true && old?.publicKey == publicKey
+        guard active || allowAdmission else { throw CocoaError(.coderInvalidValue) }
+        if active, let old, old.name == name, (host == nil || old.lastHost == host), (port == nil || old.lastPort == port) { return }
+        guard (old?.metadataGeneration ?? 0) < UInt64.max - 2 else { throw CocoaError(.coderInvalidValue) }
         var next = records.filter { $0.deviceID != deviceID }
-        next.append(TrustedDevice(deviceID: deviceID, name: String(name.prefix(200)), publicKey: publicKey, pairedAt: old?.pairedAt ?? Date(), lastHost: host ?? old?.lastHost, lastPort: port ?? old?.lastPort, generation: try nextGeneration(), changedBy: issuer ?? deviceID, removed: false))
+        next.append(TrustedDevice(deviceID: deviceID, name: name, publicKey: publicKey, pairedAt: active ? old!.pairedAt : Date(), lastHost: host ?? old?.lastHost, lastPort: port ?? old?.lastPort,
+                                  generation: active ? old!.generation : try nextGeneration(), changedBy: active ? old!.changedBy : issuer ?? deviceID, removed: false,
+                                  metadataGeneration: (old?.metadataGeneration ?? 0) + 1, metadataBy: issuer ?? deviceID))
+        guard next.count <= 512 else { throw CocoaError(.coderInvalidValue) }
         try save(next); records = next
     }
     func forget(deviceID: String, issuer: String? = nil) throws {
@@ -111,7 +125,7 @@ final class DeviceTrustStore {
     // members may admit/remove members; this is intentionally transitive trust.
     // Versioned removals prevent a stale offline roster from resurrecting one.
     func merge(_ incoming: [TrustedDevice]) throws -> Bool {
-        guard incoming.count <= 512, incoming.allSatisfy({ $0.publicKey.count == 32 && DeviceBlob.sha256Hex($0.publicKey) == $0.deviceID && $0.name.count <= 200 && ($0.changedBy?.count ?? 0) <= 64 && ($0.lastHost?.count ?? 0) <= 253 && ($0.lastPort == nil || (1...65535).contains($0.lastPort!)) && ($0.generation ?? 0) < UInt64.max - 1 }) else { throw CocoaError(.coderInvalidValue) }
+        guard incoming.count <= 512, incoming.allSatisfy({ $0.publicKey.count == 32 && DeviceBlob.sha256Hex($0.publicKey) == $0.deviceID && $0.name.utf8.count <= 200 && ($0.metadataBy?.count ?? 0) <= 64 && ($0.metadataGeneration ?? 0) < UInt64.max - 1 && ($0.changedBy?.count ?? 0) <= 64 && ($0.lastHost?.count ?? 0) <= 253 && ($0.lastPort == nil || (1...65535).contains($0.lastPort!)) && ($0.generation ?? 0) < UInt64.max - 1 }) else { throw CocoaError(.coderInvalidValue) }
         var next = records
         for record in incoming {
             if let index = next.firstIndex(where: { $0.deviceID == record.deviceID }) {
@@ -119,6 +133,13 @@ final class DeviceTrustStore {
                 let newRank = (record.generation ?? 0, record.removed == true ? 1 : 0, record.changedBy ?? "")
                 let oldRank = (old.generation ?? 0, old.removed == true ? 1 : 0, old.changedBy ?? "")
                 if newRank > oldRank { next[index] = record }
+                else if newRank == oldRank, record.publicKey == old.publicKey,
+                        (record.metadataGeneration ?? 0, record.metadataBy ?? "") > (old.metadataGeneration ?? 0, old.metadataBy ?? "") {
+                    // Hint freshness is independent of admission authority.
+                    // No amount of metadata churn can beat a tombstone.
+                    next[index].name = record.name; next[index].lastHost = record.lastHost; next[index].lastPort = record.lastPort
+                    next[index].metadataGeneration = record.metadataGeneration; next[index].metadataBy = record.metadataBy
+                }
             } else { next.append(record) }
         }
         guard next.count <= 512 else { throw CocoaError(.coderInvalidValue) }
