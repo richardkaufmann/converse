@@ -1192,7 +1192,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
         text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Command Return inserts a new line.")
-        text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
+        text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.isEditable = inputEnabled
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
@@ -1216,7 +1216,7 @@ struct ScrollingConversation: NSViewRepresentable {
         if let text = scroll.documentView as? ConversationTextView {
             text.isEditable = inputEnabled
             text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
-            text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
+            text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
             context.coordinator.render(text); text.refreshDecorations()
         }
@@ -1232,6 +1232,15 @@ struct ScrollingConversation: NSViewRepresentable {
         var rendering = false
         var draftChanged: ((String) -> Void)?
         init(_ session: Session) { self.session = session }
+        func submissionHandler(_ text: ConversationTextView, action: @escaping () -> Void) -> () -> Void {
+            { [weak self, weak text] in
+                action()
+                // Return is handled before SwiftUI's next update. Consume the
+                // native tail now so later edits/notifications cannot restore
+                // the submitted draft. Failed or awaiting-ack sends keep it.
+                if let self, let text { self.render(text) }
+            }
+        }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let text = textView as? ConversationTextView else { return false }
             return rendering || affectedCharRange.location >= text.inputStart
@@ -1779,6 +1788,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     let entry = Entry(name: "Layout fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")
+    let submitted = Session(entry: entry)
+    submitted.draft = "Send this once"
+    let editor = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    let submission = ScrollingConversation.Coordinator(submitted)
+    editor.delegate = submission; submission.render(editor)
+    editor.submit = submission.submissionHandler(editor) {
+        submitted.messages.append(Message(role: "user", text: submitted.draft)); submitted.draft = ""
+    }
+    let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+    editor.keyDown(with: enter)
+    // A delayed native notification must see the consumed tail immediately,
+    // without relying on a later SwiftUI updateNSView call.
+    submission.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+    check(submitted.draft.isEmpty && editor.inputStart == (editor.string as NSString).length, "Return consumes the native draft synchronously before delayed editor notifications")
+    editor.insertText("New typing", replacementRange: editor.selectedRange())
+    check(submitted.draft == "New typing" && submitted.messages.count == 1 && submitted.messages[0].text == "Send this once", "Typing immediately after Return starts a fresh draft without restoring or resending the prompt")
+    editor.submit = submission.submissionHandler(editor) { /* Failed or awaiting home acknowledgment. */ }
+    editor.keyDown(with: enter)
+    check(submitted.draft == "New typing" && (editor.string as NSString).substring(from: editor.inputStart) == "New typing", "A send that has not consumed its draft keeps the native text intact")
     for tail in ["", "\n", "\n\n", "\r\n"] {
         let session = Session(entry: entry)
         session.messages = [Message(role: "user", text: "Prompt" + tail), Message(role: "assistant", text: "Reply" + tail)]
