@@ -7,11 +7,12 @@
     xmlns:local="using:Converse.App"
     mc:Ignorable="d"
     Title="Converse">
-    <Window.Resources>
+    <Grid>
+    <!-- Resources live on the root Grid: WinUI 3's Window has no Resources
+         property, and <Window.Resources> makes XamlCompiler.exe exit 1 with
+         no diagnostic. Classic {Binding} only throughout. -->
+    <Grid.Resources>
         <local:BoolToVisibilityConverter x:Key="BoolToVis"/>
-        <!-- Classic {Binding} only: the x:Bind compiled-binding surface
-             crashed XamlCompiler.exe with no diagnostic (CI run #9), while
-             the identical layout with classic bindings builds clean. -->
         <DataTemplate x:Key="SidebarHeaderTemplate">
             <StackPanel Padding="8,7,8,2">
                 <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="12"
@@ -49,8 +50,7 @@
         <local:SidebarTemplateSelector x:Key="SidebarSelector"
             HeaderTemplate="{StaticResource SidebarHeaderTemplate}"
             SessionTemplate="{StaticResource SidebarSessionTemplate}"/>
-    </Window.Resources>
-    <Grid>
+    </Grid.Resources>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>

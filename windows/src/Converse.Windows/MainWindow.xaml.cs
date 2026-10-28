@@ -502,9 +502,9 @@ public sealed partial class MainWindow : Window
 
             Transcript.Document.SetText(TextSetOptions.None, _historyText + _draftText);
             var (_, runs) = BuildHistory();
-            foreach (var (start, length) in runs)
+            foreach (var (start, runLength) in runs)
             {
-                var range = Transcript.Document.GetRange(start, start + length);
+                var range = Transcript.Document.GetRange(start, start + runLength);
                 range.CharacterFormat.Italic = FormatEffect.On;
             }
             if (_draftText.Length > 0)

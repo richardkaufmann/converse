@@ -96,7 +96,9 @@ public sealed class ProcessAgentRunner : IAgentRunner
             CreateNoWindow = true,
         };
         var allArgs = arguments.Append("--").Append(prompt);
-        CommandResolution.Apply(start, CommandResolution.Resolve(session.Entry.Command), allArgs);
+        var resolved = CommandResolution.Resolve(session.Entry.Command)
+            ?? new ResolvedCommand(session.Entry.Command, Array.Empty<string>(), session.Entry.Command);
+        CommandResolution.Apply(start, resolved, allArgs);
         if (System.IO.Directory.Exists(session.Entry.Directory)) start.WorkingDirectory = session.Entry.Directory;
         start.Environment["NO_COLOR"] = "1";
         start.Environment["TERM"] = "dumb";
@@ -208,10 +210,18 @@ public sealed class SessionStore
             if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; }
         }
         if (Entries.Count == 0) Entries = DefaultEntries();
-        // One-time repair: early builds named the claude entry "Muse".
+        // One-time repair: early builds named the claude entry "Muse". Sessions
+        // embed their own entry copy, so repair those too, plus untouched
+        // session titles that still carry the default wrong name.
         var renamed = false;
         foreach (var entry in Entries)
             if (entry.Engine == "claude" && entry.Name == "Muse") { entry.Name = "Claude"; renamed = true; }
+        foreach (var session in Sessions.Where(s => s.Entry.Engine == "claude" && s.Entry.Name == "Muse"))
+        {
+            session.Entry.Name = "Claude";
+            if (session.Title == "Muse") session.Title = "Claude";
+            renamed = true;
+        }
         if (renamed) Save();
     }
 

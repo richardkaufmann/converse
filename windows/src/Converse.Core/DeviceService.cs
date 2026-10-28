@@ -13,15 +13,21 @@ public sealed class DeviceTrustStore
 {
     private readonly string _file;
     public List<TrustedDevice> Devices { get; private set; } = new();
-    private sealed record Saved(string DeviceID, string Name, byte[] PublicKey, string? LastHost, int? LastPort);
+    private sealed record Saved(string? DeviceID, string? Name, byte[]? PublicKey, string? LastHost, int? LastPort, bool Removed = false);
+    // The fabric branch writes this file camelCase with membership fields
+    // (generation, removed, ...); read it tolerantly and skip tombstones so a
+    // shared data folder cannot null-key the sidebar homes at startup.
+    private static readonly JsonSerializerOptions ReadOptions = new() { PropertyNameCaseInsensitive = true };
     public DeviceTrustStore(string folder)
     {
         Directory.CreateDirectory(folder);
         _file = Path.Combine(folder, "devices.json");
         if (File.Exists(_file))
         {
-            var saved = JsonSerializer.Deserialize<List<Saved>>(File.ReadAllBytes(_file)) ?? new();
-            Devices = saved.Select(s => new TrustedDevice(s.DeviceID, s.Name, s.PublicKey, s.LastHost, s.LastPort)).ToList();
+            var saved = JsonSerializer.Deserialize<List<Saved>>(File.ReadAllBytes(_file), ReadOptions) ?? new();
+            Devices = saved
+                .Where(s => !s.Removed && !string.IsNullOrEmpty(s.DeviceID) && s.PublicKey is { Length: > 0 })
+                .Select(s => new TrustedDevice(s.DeviceID!, s.Name ?? s.DeviceID!, s.PublicKey!, s.LastHost, s.LastPort)).ToList();
         }
     }
     public string Check(string deviceId, byte[] publicKey)
@@ -121,7 +127,8 @@ public sealed class DeviceSyncService : IDisposable
         _commands = new DeviceCommandStore(folder);
         _outbox = new DeviceOutboxStore(folder);
         _leases = new DeviceLeaseManager();
-        foreach (var device in Trust.Devices)
+        // Fabric membership lists this device too; it is not a remote home.
+        foreach (var device in Trust.Devices.Where(d => d.DeviceID != DeviceId))
             Homes[device.DeviceID] = new RemoteHomeState { DeviceID = device.DeviceID, DeviceName = device.Name };
         _store.Changed += PublishSidebars;
     }

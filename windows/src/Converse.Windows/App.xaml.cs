@@ -6,7 +6,14 @@ namespace Converse.App;
 public partial class App : Application
 {
     private Window? _window;
-    public App() => InitializeComponent();
+
+    public App()
+    {
+        InitializeComponent();
+        // WinUI surfaces startup failures as a bare stowed exception (0xc000027b)
+        // with no message; keep the real one where a user can find it.
+        UnhandledException += (_, e) => WriteCrashLog(e.Exception);
+    }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -22,7 +29,26 @@ public partial class App : Application
         }
         instance.Activated += (_, _) =>
             _window?.DispatcherQueue.TryEnqueue(() => _window.Activate());
-        _window = new MainWindow();
-        _window.Activate();
+        try
+        {
+            _window = new MainWindow();
+            _window.Activate();
+        }
+        catch (Exception ex)
+        {
+            WriteCrashLog(ex);
+            throw;
+        }
+    }
+
+    private static void WriteCrashLog(Exception ex)
+    {
+        try
+        {
+            var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(Path.Combine(folder, "crash.log"), $"{DateTime.Now:O}\n{ex}\n\n");
+        }
+        catch (IOException) { }
     }
 }

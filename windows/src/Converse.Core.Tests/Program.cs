@@ -316,35 +316,67 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(entries.Count == 3 && entries[0].Name == "Claude" && entries[1].Name == "Codex" && entries[2].Name == "Muse",
         "Default entries are named Claude, Codex, Muse");
     var dir = Directory.CreateTempSubdirectory("converse-entries-").FullName;
+    var entryJson = "{\"Name\":\"Muse\",\"Command\":\"claude\",\"Directory\":\"C:\\\\u\",\"Engine\":\"claude\"}";
     File.WriteAllText(Path.Combine(dir, "sessions.json"),
-        "{\"Entries\":[{\"Name\":\"Muse\",\"Command\":\"claude\",\"Directory\":\"C:\\\\u\",\"Engine\":\"claude\"}],\"Sessions\":[]}");
+        "{\"Entries\":[" + entryJson + "],\"Sessions\":["
+        + "{\"Id\":\"" + Guid.NewGuid() + "\",\"Entry\":" + entryJson + ",\"Title\":\"Muse\",\"Messages\":[]},"
+        + "{\"Id\":\"" + Guid.NewGuid() + "\",\"Entry\":" + entryJson + ",\"Title\":\"My chat\",\"Messages\":[]}]}");
     var store = new Converse.Core.SessionStore(dir, new FakeRunner());
-    Check(store.Entries.Count == 1 && store.Entries[0].Name == "Claude" && store.Entries[0].Command == "claude",
-        "Stored claude entry misnamed Muse migrates to Claude");
+    var untouched = store.Sessions.Single(s => s.Title == "My chat");
+    Check(store.Entries.Count == 1 && store.Entries[0].Name == "Claude" && store.Entries[0].Command == "claude"
+        && store.Sessions.Single(s => s.Entry.Name == "Claude" && s.Title == "Claude") is not null
+        && untouched.Entry.Name == "Claude",
+        "Stored claude entry misnamed Muse migrates to Claude, including session copies and default titles");
 }
 
 // Command resolution: .exe preferred, npm .cmd shims wrapped in cmd.exe with safe quoting.
 {
     var bin = Directory.CreateTempSubdirectory("converse-bin-").FullName;
-    File.WriteAllText(Path.Combine(bin, "tool.cmd"), "@echo off\n");
-    var shimOnly = Converse.Core.CommandResolution.Resolve("tool", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
-    Check(shimOnly.UsesCmd && shimOnly.DisplayPath.EndsWith("tool.cmd") && shimOnly.CmdPrefix == "\"" + shimOnly.DisplayPath + "\"",
-        "npm-style .cmd shim resolves to a cmd.exe wrapper");
-    File.WriteAllText(Path.Combine(bin, "tool.exe"), "MZ");
-    var preferred = Converse.Core.CommandResolution.Resolve("tool", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
-    Check(!preferred.UsesCmd && preferred.FileName.EndsWith("tool.exe"),
-        "Native .exe wins over .cmd shim when both exist");
+    var npm = Directory.CreateTempSubdirectory("converse-npm-").FullName;
+    File.WriteAllText(Path.Combine(npm, "codex.cmd"),
+        "@ECHO off\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n");
+    Directory.CreateDirectory(Path.Combine(npm, "node_modules", "@openai", "codex", "bin"));
+    File.WriteAllText(Path.Combine(npm, "node_modules", "@openai", "codex", "bin", "codex.js"), "");
+    File.WriteAllText(Path.Combine(npm, "node.exe"), "");
+    var shim = Converse.Core.CommandResolution.Resolve("codex", true, new[] { bin, npm });
+    Check(shim is not null && shim.FileName == Path.Combine(npm, "node.exe")
+          && shim.PrefixArguments.Count == 1 && shim.PrefixArguments[0].EndsWith("codex.js") && !shim.UsesCmd,
+        "Standard npm .cmd shim unwraps to node + script, never cmd.exe");
+    File.WriteAllText(Path.Combine(npm, "claude.cmd"), "@ECHO off\r\n\"%dp0%\\node_modules\\x\\cli.js\" %*\r\n");
+    File.WriteAllText(Path.Combine(bin, "claude.exe"), "");
+    var native = Converse.Core.CommandResolution.Resolve("claude", true, new[] { npm, bin });
+    Check(native is not null && native.FileName == Path.Combine(bin, "claude.exe") && native.PrefixArguments.Count == 0,
+        "Native .exe wins over a shim in an earlier directory");
+    Check(Converse.Core.CommandResolution.Resolve("muse", true, new[] { bin, npm }) is null,
+        "Missing CLI resolves to null so Setup reports it not found");
+    var absolute = Path.Combine(bin, "claude.exe");
+    Check(Converse.Core.CommandResolution.Resolve(absolute, true, Array.Empty<string>())?.FileName == absolute,
+        "Absolute command path is used as-is");
+    File.WriteAllText(Path.Combine(bin, "weird.cmd"), "@ECHO off\r\ncustom-launcher %*\r\n");
+    var fallback = Converse.Core.CommandResolution.Resolve("weird", true, new[] { bin });
+    Check(fallback is not null && fallback.UsesCmd && fallback.CmdPrefix == "\"" + Path.Combine(bin, "weird.cmd") + "\"",
+        "Unparseable .cmd shim falls back to a quoted cmd.exe wrapper");
     var quoted = Converse.Core.CommandResolution.QuoteCmdArg("say \"hi\" & 100% | done ^<>");
     Check(quoted == "\"say \"\"hi\"\" & 100%% | done ^<>\"",
         "cmd quoting doubles quotes and percents, leaving metachars literal inside quotes");
     var psi = new System.Diagnostics.ProcessStartInfo();
-    Converse.Core.CommandResolution.Apply(psi, shimOnly, new[] { "--print", "a&b" });
+    Converse.Core.CommandResolution.Apply(psi, fallback!, new[] { "--print", "a&b" });
     Check(psi.FileName.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase)
         && psi.Arguments.StartsWith("/d /s /c \"") && psi.Arguments.Contains("\"a&b\""),
         "cmd wrapper builds a /d /s /c line with quoted prompt text");
-    var missing = Converse.Core.CommandResolution.Resolve("no-such-tool-xyz", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
-    Check(!missing.UsesCmd && missing.FileName == "no-such-tool-xyz",
-        "Unknown command passes through for a clear spawn error");
+    var psi2 = new System.Diagnostics.ProcessStartInfo();
+    Converse.Core.CommandResolution.Apply(psi2, shim!, new[] { "--print", "hi" });
+    Check(psi2.FileName.EndsWith("node.exe") && psi2.ArgumentList.Count == 3 && psi2.ArgumentList[1] == "--print",
+        "node unwrap prepends the script ahead of CLI arguments");
+    var fabric = Directory.CreateTempSubdirectory("converse-fabric-").FullName;
+    var key = Convert.ToBase64String(new byte[32]);
+    File.WriteAllText(Path.Combine(fabric, "devices.json"),
+        "[{\"deviceID\":\"aa\",\"name\":\"Mac\",\"publicKey\":\"" + key + "\",\"lastHost\":\"10.0.0.2\",\"lastPort\":48721,\"generation\":1,\"removed\":false},"
+        + "{\"deviceID\":\"bb\",\"name\":\"Gone\",\"publicKey\":\"" + key + "\",\"generation\":3,\"removed\":true},"
+        + "{\"name\":\"NoId\",\"publicKey\":\"" + key + "\"}]");
+    var trust = new Converse.Core.DeviceTrustStore(fabric);
+    Check(trust.Devices.Count == 1 && trust.Devices[0].DeviceID == "aa" && trust.Devices[0].LastPort == 48721,
+        "Fabric-format devices.json (camelCase, tombstones) loads without null IDs");
 }
 
 // Choices catalog: per-engine access/effort options for the settings row.

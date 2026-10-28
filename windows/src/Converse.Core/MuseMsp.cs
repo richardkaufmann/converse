@@ -49,7 +49,9 @@ public sealed class MuseMspClient : IDisposable
             CreateNoWindow = true,
         };
         var serveArgs = (new[] { "serve" }).Concat(serverArguments ?? Array.Empty<string>());
-        CommandResolution.Apply(start, CommandResolution.Resolve(entry.Command), serveArgs);
+        var resolved = CommandResolution.Resolve(entry.Command)
+            ?? new ResolvedCommand(entry.Command, Array.Empty<string>(), entry.Command);
+        CommandResolution.Apply(start, resolved, serveArgs);
         if (Directory.Exists(entry.Directory)) start.WorkingDirectory = entry.Directory;
         start.Environment["NO_COLOR"] = "1";
         var process = new Process { StartInfo = start };
