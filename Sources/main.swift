@@ -102,6 +102,7 @@ final class Session: ObservableObject, Identifiable {
     var lastOutputAt: TimeInterval?
     var streamedText = false
     var claudeTextBlockPending = false
+    var claudeStreamSeparators: [NSRange] = []
     var process: Process?
     var muse: MuseConnection?
     @Published var requests: [MuseRequest] = []
@@ -284,7 +285,7 @@ final class Store: ObservableObject {
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         var args: [String] = []
         updateExplicitStatus(s)
@@ -795,7 +796,17 @@ final class Store: ObservableObject {
                 }
             } else if type == "result" {
                 if obj["is_error"] as? Bool == true { s.turnFailed = true }
-                if let result = obj["result"] as? String { text = result; replace = true }
+                if let result = obj["result"] as? String {
+                    let accumulated = s.messages.first { $0.id == responseID }?.text ?? ""
+                    let unseparated = NSMutableString(string: accumulated)
+                    for range in s.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length { unseparated.deleteCharacters(in: range) }
+                    // Some CLI final snapshots join text blocks directly.
+                    // Keep only our display separators when the content is
+                    // otherwise byte-for-byte the same; genuine corrections
+                    // and error results still replace the accumulated text.
+                    text = !s.turnFailed && !s.claudeStreamSeparators.isEmpty && (unseparated as String) == result ? accumulated : result
+                    replace = true
+                }
                 if let errors = obj["errors"] as? [String] { s.messages.append(Message(role: "notice", text: errors.joined(separator: "\n"))) }
             }
         } else {
@@ -812,6 +823,9 @@ final class Store: ObservableObject {
             if !visible.isEmpty {
                 let separator = old.isEmpty ? "" : startsTextBlock && !old.hasSuffix("\n") ? "\n\n" : delta ? "" : "\n"
                 let next = replace ? visible : old + separator + visible
+                if s.entry.engine == "claude", startsTextBlock, !replace, !separator.isEmpty {
+                    s.claudeStreamSeparators.append(NSRange(location: (old as NSString).length, length: (separator as NSString).length))
+                }
                 if next != old {
                     var offset = replace ? 0 : ((old + separator) as NSString).length
                     if replace && next.hasPrefix(old) { offset = (old as NSString).length }
@@ -1783,6 +1797,8 @@ func selfTest() {
     store.consume(#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":" continues"}}}"#, session: glued, responseID: gluedID)
     ScrollingConversation.Coordinator(glued).render(gluedView)
     check(glued.messages[0].text == "tracked.While\n\nNext block continues" && gluedView.string.contains("\n\n[20 sec] Next block continues"), "Claude text blocks get one separator in storage and delay markers stay at the start of resumed blocks")
+    store.consume(#"{"type":"result","result":"tracked.WhileNext block continues"}"#, session: glued, responseID: gluedID)
+    check(glued.messages[0].text == "tracked.While\n\nNext block continues" && glued.messages[0].delays?.count == 2, "Claude final snapshots cannot glue separated text blocks back together or discard their delay marks")
     check(MarkdownText.renderedOffset(in: "plain\nNext", utf16Offset: 6) == 6 && MarkdownText.renderedOffset(in: "plainNext", utf16Offset: 5) == 5 && MarkdownText.renderedOffset(in: "é😀Next", utf16Offset: 3) == 3, "Rendered delay offsets preserve existing newlines and UTF-16 character positions")
     check(TranscriptStyle.isTraffic(#"{"command":"tell","text":"hi"}"#) && TranscriptStyle.isTraffic("tell Muse hello") && TranscriptStyle.isTraffic("[Converse message from Muse · session test]\nhello") && !TranscriptStyle.isTraffic("Please explain JSON objects") && !TranscriptStyle.isTraffic("{invalid}"), "Orange traffic classification covers JSON, tells and incoming envelopes without recoloring ordinary prose")
     store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
