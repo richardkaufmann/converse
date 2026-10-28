@@ -20,7 +20,7 @@ cannot drift from `Sources/Device*.swift`.
 | `DeviceSync.swift` | `Converse.Core/Stores.cs` | Lease epochs persisted fail-closed, command store `accepted→running→completed`, `uncertain` recovery, viewer outbox, draft versions keyed by global ID. |
 | `DeviceTransport.swift` (Network.framework) | `Converse.Core` service over `TcpListener/TcpClient` (app milestone) | TCP port 48721, manual address for VPN. mDNS `_converse._tcp` via Windows `Dnssd` APIs later behind the same interface. |
 | `Store`/`Session` + providers | `Converse.Core` session engine (milestone 2) | Spawn `claude`, `codex`, `muse` from PATH; parse the same JSONL/MSP events; `%LocalAppData%\Converse` data folder (was `~/.converse`). |
-| `main.swift`/`Workspace.swift`/`DeviceUI.swift` | `Converse.App` (WinUI 3) | Dense sidebar, home sections with P/1/2/3, up to 3 panes, pairing sheet, Settings. Return sends. |
+| `main.swift`/`Workspace.swift`/`DeviceUI.swift` | `Converse.Windows` (WinUI 3, namespace `Converse.App`) | Dense sidebar, home sections with P/1/2/3, up to 3 panes, pairing sheet, Settings. Return sends. |
 
 ## Wire compatibility (must not drift)
 
