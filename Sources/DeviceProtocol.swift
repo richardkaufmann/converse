@@ -96,8 +96,10 @@ struct DeviceHello: Codable, Equatable {
     var deviceName: String
     var converseVersion: String
     var protocolVersion = 1
-    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1"]
+    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1", "converse-groups-v1"]
     var listenPort: Int? = nil
+    var group: ConverseGroup? = nil
+    var joinGroupID: String? = nil
 }
 
 struct DeviceSidebarRow: Codable, Equatable, Identifiable {
@@ -227,4 +229,19 @@ struct DeviceBlobPayload: Codable, Equatable {
     var size: Int? = nil
     var chunk: Data? = nil
     var done: Bool = false
+}
+
+struct GroupJoinRequest: Codable, Equatable, Identifiable {
+    var id: UUID
+    var groupID: String
+    var requesterID: String
+    var requesterName: String
+    var sponsorID: String
+    var expiresAt: Date
+    var approved = false
+}
+struct GroupJoinReview: Codable, Identifiable {
+    var id: UUID { request.id }
+    var request: GroupJoinRequest
+    var code: String
 }

@@ -11,6 +11,32 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testConverseGroupsAdmissionAgainstMacHome() async throws {
+        guard let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with the group-aware Mac fixture") }
+        let service = try service(); try service.enableGroupsForTesting()
+        service.isPlaced = { _ in true }
+        try service.startNetworkForTesting()
+        defer { service.suspendViewer() }
+        service.joinGroupByAddress(host: "127.0.0.1", port: port)
+        try await eventually("Joiner immediately receives its connection code") { service.pairingPrompt != nil }
+        let code = try XCTUnwrap(service.pairingPrompt?.code)
+        XCTAssertNil(service.currentGroup)
+        service.confirmPairing()
+        try await eventually("Mac review and both Pair confirmations admit iPad") { service.currentGroup?.name == "Simulator Group" && !service.homes.isEmpty }
+        XCTAssertTrue(service.remoteLeases.isEmpty, "Admission does not take a session")
+        try await eventually("Group directory reaches iPad") { service.homes.values.contains { !$0.rows.isEmpty } }
+        let row = try XCTUnwrap(service.homes.values.flatMap(\.rows).first)
+        service.acquireRemote(globalID: row.globalID)
+        try await eventually("Group member takes the home session") { service.remoteTranscripts[row.globalID] != nil }
+        let transcript = try XCTUnwrap(service.remoteTranscripts[row.globalID])
+        XCTAssertTrue(transcript.messages.contains { $0.text.contains("verified code " + code) }, "Mac Review saw the exact number the iPad displayed first")
+        XCTAssertEqual(transcript.draft, "home draft")
+        service.leaveGroup()
+        XCTAssertNil(service.currentGroup)
+        XCTAssertTrue(service.homes.isEmpty)
+        XCTAssertTrue(service.remoteLeases.isEmpty)
+        XCTAssertTrue(service.remoteTranscripts.isEmpty)
+    }
     func testBlockSpacingDoesNotInsertBlankTranscriptLines() {
         for tail in ["", "\n", "\n\n", "\r\n"] {
             let messages = [DeviceWireMessage(id: UUID(), role: "user", text: "Prompt" + tail), DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply" + tail)]

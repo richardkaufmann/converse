@@ -1452,6 +1452,7 @@ struct Conversation: View {
 struct RootView: View {
     @ObservedObject var store = Store.shared
     @ObservedObject var workspace = Workspace.shared
+    @ObservedObject var devices = DeviceSyncService.shared
     @ObservedObject var state: WindowState
     var body: some View {
         HSplitView {
@@ -1468,6 +1469,13 @@ struct RootView: View {
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
+                        if let group = devices.currentGroup {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Group").fontWeight(.bold)
+                                Text(group.name).font(.caption).foregroundStyle(.secondary)
+                                Text((devices.identity?.deviceName ?? "This Mac") + " · this device").fontWeight(.semibold)
+                            }.padding(.horizontal, 4)
+                        }
                         ForEach(store.assistantFamilies, id: \.self) { engine in
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
@@ -1484,16 +1492,12 @@ struct RootView: View {
                                 }
                             }
                         }
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack {
-                                Text("Agents").fontWeight(.bold); Spacer()
-                                Button { let agent = store.createAgent(); AppDelegate.shared.select(agent, state: state); AgentWindows.shared.setup(agent) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New agent")
-                            }.padding(.horizontal, 4)
-                            ForEach(store.sessions.filter { $0.agent != nil }) { session in SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold) }
-                        }
                         DeviceSidebarSection(workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                     }.padding(.top, 6)
                 }
+                Button { state.deviceConnect = true } label: {
+                    HStack { Text("Converse Groups"); Spacer(); if !devices.groupRequests.isEmpty { Text(String(devices.groupRequests.count)).bold().foregroundStyle(.orange) } }
+                }.buttonStyle(.plain).padding(.vertical, 6)
                 HStack {
                     Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }
                     Spacer()
@@ -1604,6 +1608,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
         AgentRuntime.shared.start()
+        if ProcessInfo.processInfo.environment["CONVERSE_QA_GROUPS"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
+            do {
+                let devices = DeviceSyncService.shared
+                try devices.configureForTesting(folder: Store.shared.folder); try devices.enableGroupsForTesting()
+                devices.createGroup(name: "Design review")
+                state.deviceConnect = true
+            } catch { fputs("Group preview unavailable\n", stderr) }
+        }
         if ProcessInfo.processInfo.environment["CONVERSE_QA_AGENT"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
             let agent = Store.shared.createAgent(title: "Isolated steward preview")
             agent.agent?.snapshot = AgentRepoSnapshot(repository: "fixture/project", stars: 12, openPRs: 2, openIssues: 4, openBugs: 1, conversationComments: 18, releaseDownloads: 23, visitors14d: 7)
@@ -1635,7 +1647,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
-        sub.addItem(withTitle: "Connect to Other Converses…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
@@ -2177,6 +2189,12 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--groups-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    converseGroupSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--conversation-layout-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }

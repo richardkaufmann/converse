@@ -1,10 +1,12 @@
 # Fabric membership, wire version 1
 
-Any member may admit or remove members. Pairing with one member grants membership
-of its entire connected fabric, including the ability to run prompts and tools on
-home computers under their existing session logins. Both devices must compare all
-eight SAS groups and approve the initial admission. Joining two existing fabrics
-unites their membership. There is no separate owner or central server.
+[Converse Groups](groups.md) now supplies the user-facing group identity,
+admission UI and group boundary. Any member may admit members or dissolve its
+group. Admission grants history/tool control under existing home logins, requires
+the joiner plus one reviewing member to compare all eight SAS groups and Pair,
+and moves only the joining device. Two existing groups never merge. The roster
+rules below apply **within the current named group**; bare-fabric pairing remains
+only in isolated legacy regression fixtures.
 
 Each member subsequently authenticates directly to every reachable member using
 the existing Noise XX channel and pinned X25519 identity. Bonjour is a hint, never

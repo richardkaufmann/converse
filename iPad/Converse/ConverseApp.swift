@@ -40,7 +40,7 @@ struct PadRoot: View {
                         Text("Converse").font(.headline)
                         Spacer()
                         Menu {
-                            Button("Setup…") { model.connectShown = true }
+                            Button("Converse Groups…") { model.connectShown = true }
                             Button("Converse Help…") { model.helpShown = true }
                             Divider()
                             Text("Converse " + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")")
@@ -56,8 +56,8 @@ struct PadRoot: View {
                         ContentUnavailableView {
                             Label("Your conversations, here", systemImage: "bubble.left.and.bubble.right")
                         } description: {
-                            Text("Connect to Converse on a home computer, then tap 1, 2 or 3 beside a session. Models and logins stay on that computer.")
-                        } actions: { Button("Connect to Other Converses") { model.connectShown = true }.buttonStyle(.borderedProminent) }
+                            Text("Join a Converse group, then tap 1, 2 or 3 beside a session. Models and logins stay on its home computer.")
+                        } actions: { Button("Converse Groups") { model.connectShown = true }.buttonStyle(.borderedProminent) }
                     } else if geometry.size.width - (model.state.sidebarHidden ? 0 : width) >= CGFloat(assigned.count) * 360 {
                         HStack(spacing: 0) {
                             ForEach(assigned, id: \.self) { pane in
@@ -77,6 +77,10 @@ struct PadRoot: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }.background(Color(uiColor: .systemBackground))
         }
+        .onChange(of: service.groupRequests) { old, requests in
+            let previous = Set(old.map(\.id))
+            if requests.contains(where: { !$0.approved && !previous.contains($0.id) }) { model.connectShown = true }
+        }
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
@@ -89,11 +93,12 @@ struct PadRoot: View {
     }
     var sidebar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Connect to Other Converses") }.padding(6)
+            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Converse Groups") }.padding(6)
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    ForEach(service.homes.values.sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
+                    if let group = service.currentGroup { Text("Group").bold().padding(.top, 6); Text(group.name).font(.caption).foregroundStyle(.secondary) }
+                    ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                         HStack { Circle().fill(home.online ? .green : .gray).frame(width: 8, height: 8); Text(home.deviceName).bold().lineLimit(1); Text(home.online ? "home" : "offline").font(.caption).foregroundStyle(.secondary) }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
                         ForEach(home.rows) { row in
@@ -115,9 +120,10 @@ struct PadRoot: View {
                                 .accessibilityElement(children: .contain)
                         }
                     }
-                    if service.homes.isEmpty { Text("No computers connected. Use the network button to pair with a home computer.").font(.callout).foregroundStyle(.secondary).padding(10) }
+                    if service.homes.isEmpty { Text("Join a Converse group to see its devices and sessions.").font(.callout).foregroundStyle(.secondary).padding(10) }
                 }.padding(.horizontal, 5)
             }
+            Button("Converse Groups") { model.connectShown = true }.padding(8)
             Text(service.serviceStatus).font(.caption2).foregroundStyle(.secondary).padding(8).frame(maxWidth: .infinity, alignment: .leading)
         }
     }

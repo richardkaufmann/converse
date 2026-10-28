@@ -13,8 +13,8 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
     check(composer.draft == "old send" && composer.blobHashes == ["old-image"], "Mac failed-send restore fills an empty composer")
     let outgoingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: true)
     let incomingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: false)
-    check(outgoingPrompt.actionLabel == "Pair" && incomingPrompt.actionLabel == "Approve", "Pairing assigns Pair to initiator and Approve to receiving Mac")
-    check(outgoingPrompt.instruction.contains("Approve there") && incomingPrompt.instruction.contains("Approve here"), "Pairing instructions tell each Mac which confirmation happens where")
+    check(outgoingPrompt.actionLabel == "Pair" && incomingPrompt.actionLabel == "Pair", "Group admission uses Pair on both the requesting and reviewing device")
+    check(outgoingPrompt.instruction.contains("Pair on both devices") && incomingPrompt.instruction.contains("Pair on both devices"), "Pairing instructions require matching codes and Pair on both devices")
     // Framing: length-prefixed envelopes round-trip and reject oversize input.
     let commandID = UUID()
     let envelope = DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: "home/session", commandID: commandID, epoch: 3, payload: Data("hello".utf8))
@@ -450,12 +450,25 @@ func runIPadHomeFixture() {
         Store.shared.importResponseImages(session)
         session.busy = true; session.status = "Working in isolated fixture"
         try service.startNetworkForTesting()
-        let deadline = Date().addingTimeInterval(120)
+        let groupService = DeviceSyncService()
+        try groupService.configureForTesting(folder: folder.appendingPathComponent("groups"))
+        try groupService.enableGroupsForTesting(); groupService.createGroup(name: "Simulator Group")
+        try groupService.startNetworkForTesting()
+        defer { groupService.suspendViewer() }
+        let deadline = Date().addingTimeInterval(180)
         var announced = false
         while Date() < deadline {
             _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
-            if !announced, let port = service.testingPort {
+            if !announced, let port = service.testingPort, let groupPort = groupService.testingPort {
+                try Data(String(groupPort).utf8).write(to: folder.appendingPathComponent("group-port"), options: .atomic)
                 try Data(String(port).utf8).write(to: folder.appendingPathComponent("port"), options: .atomic); announced = true
+            }
+            for request in groupService.groupRequests where !request.approved {
+                groupService.reviewGroupRequest(request)
+                if let review = groupService.groupReview {
+                    session.messages[0].text = "Mac group fixture · verified code " + review.code
+                    groupService.approveGroupReview()
+                }
             }
             if let prompt = service.pairingPrompt {
                 session.messages[0].text = "Mac home fixture · verified code " + prompt.code

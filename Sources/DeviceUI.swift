@@ -35,66 +35,7 @@ final class RemoteComposer: ObservableObject {
 }
 
 struct DeviceConnectView: View {
-    @ObservedObject var service = DeviceSyncService.shared
-    @Environment(\.dismiss) var dismiss
-    @StateObject private var form = DeviceConnectForm()
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Connect to Other Converses").font(.title2.bold())
-            Text(service.serviceStatus + " · " + service.localCodeNote).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-            Text("Pair once with any member to join its fabric. Members connect automatically; every member may admit another device.").font(.callout)
-            Text("1. Click Connect on ONE Mac.\n2. On both Macs, compare all eight code groups.\n3. Click Pair on the initiating Mac and Approve on the receiving Mac.").font(.callout)
-            Text("Joining grants every fabric member access to session history and control of tools on home computers under their logins. Every member can admit other devices. Compare all code groups before admitting a device.").font(.caption).foregroundStyle(.secondary)
-            if let prompt = service.pairingPrompt {
-                if service.pairingRequestCount > 1 { Text("\(service.pairingRequestCount) pairing requests waiting. Approve or reject each separately.").font(.caption) }
-                GroupBox(prompt.isInitiator ? "Pair with " + prompt.peerName : "Connection request from " + prompt.peerName) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(prompt.instruction).font(.callout)
-                        Text(prompt.code).font(.system(size: 20, weight: .semibold, design: .monospaced)).textSelection(.enabled)
-                        Text("All 8 groups must match exactly on both screens.").font(.caption)
-                        if prompt.keyChanged { Text("Stored key mismatch. Continue only if you expect a new device identity.").foregroundStyle(.red) }
-                        if prompt.nameCollision { Text("A different paired device has the same name. Check the fingerprint.").foregroundStyle(.orange) }
-                        Text("Fingerprint " + prompt.fingerprint).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                        HStack {
-                            Button("Reject") { service.rejectPairing() }
-                            Spacer()
-                            Button(prompt.actionLabel) { service.confirmPairing() }.buttonStyle(.borderedProminent)
-                        }
-                    }.padding(4)
-                }
-            }
-            GroupBox("Nearby devices") {
-                if service.discovered.isEmpty { Text("No nearby Converse found yet. Keep both apps open on the same network.").font(.caption).foregroundStyle(.secondary) }
-                ForEach(service.discovered) { device in
-                    HStack { Text(device.name); Spacer(); Button("Connect") { service.connect(discovered: device) } }
-                }
-            }
-            GroupBox("Connect by address") {
-                HStack {
-                    TextField("Host or IP", text: $form.host).textFieldStyle(.roundedBorder)
-                    TextField("Port", text: $form.port).frame(width: 80).textFieldStyle(.roundedBorder)
-                    Button("Connect") { service.connectManual(host: form.host.trimmingCharacters(in: .whitespaces), port: Int(form.port) ?? -1) }.disabled(form.host.isEmpty)
-                }
-                Text("Use this across VPNs where discovery does not reach. Pairing and encryption are identical.").font(.caption).foregroundStyle(.secondary)
-            }
-            GroupBox("Fabric members") {
-                if service.trusted.isEmpty { Text("None paired.").font(.caption).foregroundStyle(.secondary) }
-                ForEach(service.trusted) { device in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(device.name)
-                            Text((service.homes[device.deviceID]?.online == true ? "Online" : "Offline") + " · " + String(device.deviceID.prefix(16)).uppercased()).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Remove from Fabric", role: .destructive) { service.forgetDevice(device) }
-                    }
-                }
-            }
-            if !service.lastOutcome.isEmpty { Text(service.lastOutcome).font(.caption).textSelection(.enabled) }
-            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 560)
-
-    }
+    var body: some View { ConverseGroupsView().frame(width: 600, height: 650) }
 }
 
 struct DeviceSidebarSection: View {
@@ -104,7 +45,7 @@ struct DeviceSidebarSection: View {
     var showsModel = true
     var body: some View {
         let homes = service.homes.values.sorted { $0.deviceName < $1.deviceName }
-        if !homes.isEmpty {
+        if service.currentGroup != nil && !homes.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(homes, id: \.deviceID) { home in
                     HStack(spacing: 6) {

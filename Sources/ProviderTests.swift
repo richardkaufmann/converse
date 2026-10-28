@@ -11,6 +11,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     accountLoginSelfTests(check)
     sessionSetupSelfTests(check)
     deviceSyncSelfTests(check)
+    converseGroupSelfTests(check)
     fabricRevocationReconnectTests(check)
     fabricTrustSelfTests(check)
     deviceFabricSelfTests(check)

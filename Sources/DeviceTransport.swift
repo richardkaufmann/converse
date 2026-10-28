@@ -7,6 +7,7 @@ struct DiscoveredDevice: Identifiable, Equatable {
     var id: String { endpoint.debugDescription }
     var name: String
     var endpoint: NWEndpoint
+    var group: ConverseGroup? = nil
     static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.id == b.id }
 }
 
@@ -19,9 +20,9 @@ struct PairingPrompt: Identifiable {
     var keyChanged: Bool
     var nameCollision: Bool = false
     var isInitiator: Bool = true
-    var actionLabel: String { isInitiator ? "Pair" : "Approve" }
+    var actionLabel: String { "Pair" }
     var instruction: String {
-        isInitiator ? "Compare all eight code groups with the other device, then click Pair here and Approve there." : "The other device requested a connection. Compare all eight code groups, then click Approve here and Pair there."
+        isInitiator ? "Compare all eight code groups with a reviewing group member, then press Pair on both devices." : "Compare all eight code groups with the requesting device, then press Pair on both devices."
     }
 }
 
@@ -45,6 +46,10 @@ final class DevicePeer {
     var hello: DeviceHello?
     var buffer = Data()
     var plainDecoder = DeviceFrameDecoder()
+    var joiningGroupID: String?
+    var wantsJoin = false
+    var admissionGroup: ConverseGroup?
+    var controlOnly = false
     var trustedReady = false
     var humanConfirmed = false
     var localConfirmed = false
@@ -64,6 +69,22 @@ final class DeviceSyncService: ObservableObject {
     static let shared = DeviceSyncService()
     static let defaultPort: NWEndpoint.Port = 48721
     static let serviceType = "_converse._tcp"
+    @Published var currentGroup: ConverseGroup?
+    @Published var knownGroups: [ConverseGroup] = []
+    @Published var groupRequests: [GroupJoinRequest] = [] {
+        didSet {
+            #if os(macOS)
+            let previous = Set(oldValue.map(\.id))
+            if !isTestEnvironment && groupRequests.contains(where: { !$0.approved && !previous.contains($0.id) }) {
+                DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
+            }
+            #endif
+        }
+    }
+    @Published var groupReview: GroupJoinReview?
+    private var groupStore: ConverseGroupStore?
+    private var sponsoredRequests: [UUID: GroupJoinRequest] = [:]
+    var groupsEnabled: Bool { groupStore != nil }
     @Published var discovered: [DiscoveredDevice] = []
     @Published var trusted: [TrustedDevice] = []
     @Published var homes: [String: RemoteHomeState] = [:]
@@ -159,6 +180,7 @@ final class DeviceSyncService: ObservableObject {
             let folder = storageFolder
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)
+            try initializeGroups(folder: folder)
             commandStore = try DeviceCommandStore(folder: folder)
             stateStore = try DeviceSyncStateStore(folder: folder)
             draftStore = try DeviceDraftStore(folder: folder)
@@ -171,7 +193,7 @@ final class DeviceSyncService: ObservableObject {
             drafts.restore(versions: savedDrafts.versions, texts: savedDrafts.texts)
             draftAttachments = savedDrafts.attachments
             rebuildBlobPaths(folder: folder)
-            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
+            refreshGroupMembers()
             for device in trusted { homes[device.deviceID] = RemoteHomeState(deviceID: device.deviceID, deviceName: device.name) }
             if let cache = stateStore?.state.sidebarCache, let payloads = try? JSONDecoder().decode([DeviceSidebarPayload].self, from: cache) {
                 for payload in payloads where homes[payload.homeDeviceID] != nil {
@@ -200,7 +222,7 @@ final class DeviceSyncService: ObservableObject {
         _ = requested
         #endif
         let listener = try NWListener(using: parameters, on: portOverride ?? listenPort)
-        listener.service = NWListener.Service(name: deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType)
+        listener.service = groupAdvertisement()
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state { self?.serviceStatus = "Listen failed: " + error.localizedDescription }
@@ -228,7 +250,15 @@ final class DeviceSyncService: ObservableObject {
             guard let self else { return }
             self.discovered = results.compactMap { result in
                 if case .service(let name, _, _, _) = result.endpoint, !name.hasSuffix("[" + String((self.identity?.deviceID ?? "").prefix(8)) + "]") {
-                    return DiscoveredDevice(name: name, endpoint: result.endpoint)
+                    var group: ConverseGroup?
+                    if case .bonjour(let txt) = result.metadata,
+                       case .string(let id) = txt.getEntry(for: "group"),
+                       case .string(let label) = txt.getEntry(for: "name"),
+                       case .string(let creator) = txt.getEntry(for: "creator") {
+                        let candidate = ConverseGroup(id: id, name: label, creator: creator)
+                        if candidate.valid { group = candidate }
+                    }
+                    return DiscoveredDevice(name: name, endpoint: result.endpoint, group: group)
                 }
                 return nil
             }.sorted { $0.name < $1.name }
@@ -243,17 +273,18 @@ final class DeviceSyncService: ObservableObject {
         connect(to: .hostPort(host: NWEndpoint.Host(host), port: nwPort), displayName: host, manualHost: host, manualPort: port)
     }
     private func reconnectTrusted() {
-        guard trustStore?.records.first(where: { $0.deviceID == identity?.deviceID })?.removed != true else { return }
+        guard (!groupsEnabled || currentGroup != nil), trustStore?.records.first(where: { $0.deviceID == identity?.deviceID })?.removed != true else { return }
         for device in trusted where homes[device.deviceID]?.online != true {
             if let found = discovered.first(where: { $0.name.hasSuffix("[" + String(device.deviceID.prefix(8)) + "]") || $0.name == device.name }) { connect(discovered: found) }
             else if let host = device.lastHost, let port = device.lastPort { connectManual(host: host, port: port) }
         }
     }
-    private func connect(to endpoint: NWEndpoint, displayName: String, manualHost: String? = nil, manualPort: Int? = nil) {
+    private func connect(to endpoint: NWEndpoint, displayName: String, manualHost: String? = nil, manualPort: Int? = nil, joiningGroupID: String? = nil, wantsJoin: Bool = false) {
         guard let identity else { return }
         if peers.values.contains(where: { $0.connection.endpoint == endpoint && $0.alive }) { return }
         let connection = NWConnection(to: endpoint, using: .tcp)
         let peer = DevicePeer(connection: connection, isInitiator: true, displayName: displayName, manualHost: manualHost, manualPort: manualPort)
+        peer.joiningGroupID = joiningGroupID; peer.wantsJoin = wantsJoin
         peer.handshake = DeviceHandshake(isInitiator: true, staticKey: identity.privateKey)
         peers[peer.id] = peer; wire(peer); connection.start(queue: .main)
     }
@@ -273,15 +304,17 @@ final class DeviceSyncService: ObservableObject {
             }
         }
     }
-    private func helloPayload() -> Data {
-        let hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
+    private func helloPayload(_ peer: DevicePeer) -> Data {
+        var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
+        hello.group = currentGroup
+        hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
     private func sendHandshake(_ peer: DevicePeer) {
         do {
             guard var handshake = peer.handshake else { return }
-            let message = try handshake.writeMessage(payload: helloPayload())
+            let message = try handshake.writeMessage(payload: helloPayload(peer))
             peer.handshake = handshake; sendRaw(peer, message)
         } catch { disconnect(peer) }
     }
@@ -328,10 +361,11 @@ extension DeviceSyncService {
                 if let hello = try? JSONDecoder().decode(DeviceHello.self, from: payload), !hello.deviceID.isEmpty {
                     guard hello.protocolVersion == 1, Set(hello.capabilities).isSuperset(of: ["sidebar", "lease", "transcript", "commands", "blobs"]) else { disconnect(peer); return }
                     peer.hello = hello; peer.displayName = hello.deviceName
+                    if peer.wantsJoin, peer.joiningGroupID == nil { peer.joiningGroupID = hello.group?.id }
                 }
                 var probe = handshake
                 if (try? probe.finish()) == nil {
-                    let reply = try handshake.writeMessage(payload: helloPayload())
+                    let reply = try handshake.writeMessage(payload: helloPayload(peer))
                     peer.handshake = handshake; sendRaw(peer, reply)
                     if peer.isInitiator {
                         peer.keys = try peer.handshake!.finish(); peer.handshake = nil; beginTrust(peer)
@@ -362,29 +396,64 @@ extension DeviceSyncService {
             }
             disconnect(other, preserveDeviceState: true)
         }
+        if groupsEnabled {
+            guard hello.capabilities.contains("converse-groups-v1") else { lastOutcome = "Update the other device to use Converse Groups."; disconnect(peer); return }
+            if peer.wantsJoin {
+                guard let group = hello.group, group.valid, !group.dissolved,
+                      peer.joiningGroupID == nil || peer.joiningGroupID == group.id,
+                      groupStore?.state.groups.first(where: { $0.id == group.id })?.dissolved != true else { disconnect(peer); return }
+                peer.admissionGroup = group
+                offerPairing(peer)
+                return
+            }
+            if let group = currentGroup, hello.joinGroupID == group.id {
+                guard sponsoredRequests.count < 16 else { disconnect(peer); return }
+                let request = GroupJoinRequest(id: peer.id, groupID: group.id, requesterID: hello.deviceID,
+                                               requesterName: String(hello.deviceName.prefix(100)), sponsorID: identity?.deviceID ?? "", expiresAt: Date().addingTimeInterval(180))
+                sponsoredRequests[peer.id] = request; groupRequests.append(request)
+                publishGroupRequests(); return
+            }
+            // Group identity and pinned device identity must both match. Old
+            // trust can carry a dissolution notice, never session traffic.
+            let known = trustStore.records.first { $0.deviceID == hello.deviceID && $0.publicKey == keys.remoteStatic }
+            if let group = currentGroup, hello.group?.id == group.id, known?.groupID == group.id {
+                // Continue to the existing removed-member admission rules.
+            } else if let known, let id = known.groupID, (groupStore?.state.groups.first(where: { $0.id == id })?.dissolved == true && hello.group?.id == id) || (currentGroup?.id == id && hello.group == nil) {
+                peer.controlOnly = true
+            } else { disconnect(peer); return }
+            // Only the explicit join paths above may request human admission.
+            // Reconnect must never turn an unknown/revoked pin into a generic
+            // pairing prompt that bypasses group-wide Review.
+            guard !locallyRemoved, trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .trusted else { disconnect(peer); return }
+        }
         let removedLocally = trustStore.records.first { $0.deviceID == identity?.deviceID }?.removed == true
         switch removedLocally ? DeviceTrustCheck.unknown : trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) {
         case .trusted:
             peer.localConfirmed = true
             sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); finishTrustIfReady(peer)
         case .unknown, .keyChanged:
-            let prompt = PairingPrompt(connectionID: peer.id, peerName: hello.deviceName,
-                                          fingerprint: String(hello.deviceID.prefix(16)).uppercased(),
-                                          code: DeviceSAS.code(keys.handshakeHash),
-                                          keyChanged: trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .keyChanged,
-                                          nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID), isInitiator: peer.isInitiator)
-            if pairingPrompt == nil { pairingPrompt = prompt } else { waitingPairings.append(prompt) }
-            #if os(macOS)
-            if !peer.isInitiator, !isTestEnvironment {
-                DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
-            }
-            #endif
+            offerPairing(peer)
         }
+    }
+
+    private func offerPairing(_ peer: DevicePeer) {
+        guard let hello = peer.hello, let keys = peer.keys, let trustStore else { return }
+        let prompt = PairingPrompt(connectionID: peer.id, peerName: hello.deviceName,
+                              fingerprint: String(hello.deviceID.prefix(16)).uppercased(),
+                              code: DeviceSAS.code(keys.handshakeHash),
+                              keyChanged: trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .keyChanged,
+                              nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID), isInitiator: peer.isInitiator)
+        if pairingPrompt == nil { pairingPrompt = prompt } else { waitingPairings.append(prompt) }
+        #if os(macOS)
+        if !peer.isInitiator, !isTestEnvironment {
+            DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
+        }
+        #endif
     }
     func confirmPairing() {
         guard let prompt = pairingPrompt, let peer = peers[prompt.connectionID] else { return }
         peer.humanConfirmed = true; peer.localConfirmed = true
-        serviceStatus = peer.isInitiator ? "Waiting for Approve on " + prompt.peerName + "…" : "Approved. Waiting for Pair on " + prompt.peerName + "…"
+        serviceStatus = "Waiting for the other Pair confirmation…"
         sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); advancePairing(removing: peer.id); finishTrustIfReady(peer)
     }
     func rejectPairing() {
@@ -398,34 +467,43 @@ extension DeviceSyncService {
     private func finishTrustIfReady(_ peer: DevicePeer) {
         guard peer.localConfirmed, peer.remoteConfirmed, !peer.trustedReady, let hello = peer.hello, let keys = peer.keys else { return }
         do {
+            if groupsEnabled, peer.wantsJoin {
+                guard peer.humanConfirmed, let group = peer.admissionGroup else { disconnect(peer); return }
+                try activateGroup(group, keeping: peer.id)
+            }
             guard trustStore?.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .trusted || peer.humanConfirmed else { disconnect(peer); return }
             var host = peer.manualHost
             if host == nil, case .hostPort(let endpointHost, _) = peer.connection.endpoint { host = String(describing: endpointHost) }
-            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: host, port: hello.listenPort ?? peer.manualPort, issuer: identity?.deviceID, allowAdmission: peer.humanConfirmed)
-            if let identity, trustStore?.records.first(where: { $0.deviceID == identity.deviceID })?.removed != true {
-                try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID)
+            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: host, port: hello.listenPort ?? peer.manualPort, issuer: identity?.deviceID, allowAdmission: peer.humanConfirmed, groupID: groupsEnabled ? (peer.controlOnly ? trustStore?.records.first(where: { $0.deviceID == hello.deviceID })?.groupID : currentGroup?.id ?? hello.group?.id) : nil)
+            if !peer.controlOnly, let identity, trustStore?.records.first(where: { $0.deviceID == identity.deviceID })?.removed != true {
+                try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID, groupID: groupsEnabled ? currentGroup?.id : nil)
             }
-            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? trusted
+            refreshGroupMembers()
         } catch {
             lastOutcome = "Could not save paired device. Control not granted."
             disconnect(peer); return
         }
         peer.trustedReady = true
+        if groupsEnabled {
+            sendGroupState(peer)
+            if peer.controlOnly { return }
+            withdrawGroupRequest(peer.id)
+        }
         homes[hello.deviceID] = RemoteHomeState(deviceID: hello.deviceID, deviceName: hello.deviceName, online: true, rows: homes[hello.deviceID]?.rows ?? [], lastSeen: Date())
         if !locallyRemoved { sendSidebar(to: peer) }
         broadcastFabric()
         serviceStatus = locallyRemoved ? "Membership exchange only. Fresh sponsor approval is required to rejoin." : "Connected to " + hello.deviceName + ". Take a session again to control it."
     }
     private func broadcastFabric() {
-        guard let records = trustStore?.records, let data = try? JSONEncoder().encode(records) else { return }
-        for peer in Array(peers.values) where peer.trustedReady && peer.hello?.capabilities.contains("fabric-membership-v1") == true {
+        guard let records = trustStore?.records, let data = try? JSONEncoder().encode(records.filter { !groupsEnabled || $0.groupID == currentGroup?.id }) else { return }
+        for peer in Array(peers.values) where peer.trustedReady && !peer.controlOnly && (!groupsEnabled || currentGroup != nil) && peer.hello?.capabilities.contains("fabric-membership-v1") == true {
             sendEnvelope(peer, DeviceEnvelope(kind: "fabric.members", payload: data))
         }
     }
     func forgetDevice(_ device: TrustedDevice) {
         do {
             try trustStore?.forget(deviceID: device.deviceID, issuer: identity?.deviceID)
-            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
+            refreshGroupMembers()
             homes.removeValue(forKey: device.deviceID)
             for peer in Array(peers.values) where peer.hello?.deviceID == device.deviceID { disconnect(peer) }
             broadcastFabric()
@@ -444,10 +522,13 @@ extension DeviceSyncService {
         } catch { disconnect(peer) }
     }
     private func disconnect(_ peer: DevicePeer, preserveDeviceState: Bool = false) {
+        if sponsoredRequests[peer.id] != nil { withdrawGroupRequest(peer.id) }
         guard peer.alive else { return }
         peer.alive = false; peer.connection.cancel()
         advancePairing(removing: peer.id)
         if !preserveDeviceState, let hello = peer.hello, let device = peer.hello?.deviceID {
+            groupRequests.removeAll { $0.sponsorID == device }
+            if groupReview?.request.sponsorID == device { groupReview = nil }
             homes[hello.deviceID]?.online = false; homes[hello.deviceID]?.lastSeen = Date()
             // Viewer authority never survives disconnect.
             for row in homes[hello.deviceID]?.rows ?? [] {
@@ -465,7 +546,7 @@ extension DeviceSyncService {
         tickCount += 1
         let now = Date()
         for peer in Array(peers.values) {
-            if !peer.trustedReady && now.timeIntervalSince(peer.startedAt) > 60 { disconnect(peer); continue }
+            if !peer.trustedReady && now.timeIntervalSince(peer.startedAt) > 180 { disconnect(peer); continue }
             if peer.trustedReady {
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.ping.rawValue))
                 // Silent partition: no frame for 20s means offline, sends blocked.
@@ -589,6 +670,7 @@ extension DeviceSyncService {
         return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: deviceName, homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows)
     }
     private func sendSidebar(to peer: DevicePeer) {
+        guard !groupsEnabled || (!peer.controlOnly && currentGroup != nil && !locallyRemoved) else { return }
         guard let payload = try? JSONEncoder().encode(sidebarPayload()) else { return }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.sidebarSnapshot.rawValue, homeSeq: stateStore?.nextSeq(), payload: payload))
     }
@@ -730,15 +812,20 @@ extension DeviceSyncService {
         peer.lastSeen = Date()
         if envelope.kind == "pair.confirm" { peer.remoteConfirmed = true; finishTrustIfReady(peer); return }
         guard peer.trustedReady, let peerHome = peer.hello?.deviceID else { return }
+        if groupsEnabled {
+            if handleGroupEnvelope(peer, envelope) { return }
+            guard !peer.controlOnly, currentGroup != nil else { return }
+        }
         if locallyRemoved && !["fabric.members", "ping", "pong"].contains(envelope.kind) { return }
         switch envelope.kind {
         case "fabric.members":
             guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
-                  let members = try? JSONDecoder().decode([TrustedDevice].self, from: data) else { return }
+                  let members = try? JSONDecoder().decode([TrustedDevice].self, from: data),
+                  !groupsEnabled || members.allSatisfy({ $0.groupID == currentGroup?.id }) else { return }
             do {
                 let wasRemoved = locallyRemoved
                 if try trustStore?.merge(members) == true {
-                    trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
+                    refreshGroupMembers()
                     let active = Set(trusted.map(\.deviceID))
                     for connection in Array(peers.values) where connection.trustedReady && !active.contains(connection.hello?.deviceID ?? "") { disconnect(connection) }
                     for device in trusted where homes[device.deviceID] == nil { homes[device.deviceID] = RemoteHomeState(deviceID: device.deviceID, deviceName: device.name) }
@@ -747,6 +834,9 @@ extension DeviceSyncService {
                     // An offline device removed from the fabric cannot rejoin
                     // through an old pin: it must obtain fresh human admission.
                     if locallyRemoved && !wasRemoved {
+                        if groupsEnabled {
+                            try groupStore?.leave(); refreshGroupMembers(); parkGroupViews(); updateGroupAdvertisement()
+                        }
                         for connection in Array(peers.values) { disconnect(connection) }
                         serviceStatus = "This device was removed from the fabric. Pair again to rejoin."; return
                     }
@@ -990,7 +1080,7 @@ extension DeviceSyncService {
     // MARK: Viewer actions
     private func peerForHome(_ home: String) -> DevicePeer? {
         guard !locallyRemoved else { return nil }
-        return peers.values.first { $0.trustedReady && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
+        return peers.values.first { $0.trustedReady && !$0.controlOnly && (!groupsEnabled || currentGroup != nil) && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
     }
     func acquireRemote(globalID: String) {
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { lastOutcome = "Home is offline."; return }
@@ -1174,4 +1264,198 @@ extension DeviceSyncService {
     }
     func resumeViewer() { startIfNeeded() }
     func storedDraft(globalID: String) -> String? { drafts.text(session: globalID) }
+}
+
+extension DeviceSyncService {
+    private func initializeGroups(folder: URL) throws {
+        let existed = FileManager.default.fileExists(atPath: folder.appendingPathComponent("converse-groups.json").path)
+        let store = try ConverseGroupStore(folder: folder)
+        if !existed, !locallyRemoved, let migrated = ConverseGroupStore.migration(trustStore?.records ?? []) {
+            try trustStore?.migrateLegacyGroup(migrated.id); try store.adopt(migrated)
+        }
+        groupStore = store; refreshGroupMembers()
+    }
+    func enableGroupsForTesting() throws { try initializeGroups(folder: storageFolder) }
+    private func refreshGroupMembers() {
+        currentGroup = groupStore?.current
+        knownGroups = groupStore?.state.groups ?? []
+        trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID && (!groupsEnabled || (currentGroup != nil && $0.groupID == currentGroup?.id)) } ?? []
+    }
+    private func groupAdvertisement() -> NWListener.Service {
+        var hints: [String: String] = [:]
+        if let group = currentGroup { hints = ["group": group.id, "name": group.name, "creator": group.creator] }
+        return NWListener.Service(name: deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
+    }
+    private func updateGroupAdvertisement() { listener?.service = groupAdvertisement(); lastSidebarJSON = "" }
+    var availableGroups: [ConverseGroup] {
+        var groups = knownGroups.filter { !$0.dissolved }
+        for device in discovered {
+            if let group = device.group, !knownGroups.contains(where: { $0.id == group.id && $0.dissolved }), !groups.contains(where: { $0.id == group.id }) { groups.append(group) }
+        }
+        return groups.sorted { ($0.name.localizedLowercase, $0.id) < ($1.name.localizedLowercase, $1.id) }
+    }
+    func groupDevices(_ id: String) -> [String] {
+        var names = discovered.filter { $0.group?.id == id }.map(\.name)
+        names += trustStore?.devices.filter { $0.groupID == id && $0.deviceID != identity?.deviceID }.map(\.name) ?? []
+        if currentGroup?.id == id { names.append(deviceName + " (this device)") }
+        return Array(Set(names)).sorted()
+    }
+    func canJoinGroup(_ id: String) -> Bool { discovered.contains { $0.group?.id == id } && currentGroup?.id != id && pairingPrompt == nil }
+    func joinGroup(_ group: ConverseGroup) {
+        guard let device = discovered.first(where: { $0.group?.id == group.id }), canJoinGroup(group.id) else { lastOutcome = "No member of this group is currently reachable."; return }
+        connect(to: device.endpoint, displayName: device.name, joiningGroupID: group.id, wantsJoin: true)
+        serviceStatus = "Requesting to join " + group.name + "…"
+    }
+    func joinGroupByAddress(host: String, port: Int) {
+        guard (1...65535).contains(port), let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { lastOutcome = "Port must be between 1 and 65535."; return }
+        connect(to: .hostPort(host: NWEndpoint.Host(host), port: nwPort), displayName: host, manualHost: host, manualPort: port, wantsJoin: true)
+    }
+    func createGroup(name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.utf8.count <= 120, !availableGroups.contains(where: { $0.name.compare(name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }), let identity else {
+            lastOutcome = "Use a unique group name, up to 120 UTF-8 bytes."; return
+        }
+        do { try activateGroup(ConverseGroup(id: UUID().uuidString.lowercased(), name: name, creator: identity.deviceID)); lastOutcome = "Created " + name + ". Other devices can now request to join." }
+        catch { lastOutcome = "Could not create group: " + error.localizedDescription }
+    }
+    private func parkGroupViews() {
+        let remoteIDs = Set(Array(remoteLeases.keys) + remoteTranscripts.keys + homes.values.flatMap { $0.rows.map(\.globalID) } + outbox.map(\.sessionID))
+        for id in remoteIDs {
+            releaseRemote(globalID: id); parkViewer(id)
+            try? outboxStore?.markUncertain(sessionID: id)
+        }
+        outbox = outboxStore?.records ?? outbox
+        #if os(macOS)
+        // Also park restored placements whose home is currently unknown/offline.
+        let localIDs = Set(Store.shared.sessions.map(\.id))
+        for id in Array(Workspace.shared.placements.keys) where !localIDs.contains(id) { Workspace.shared.park(id) }
+        #endif
+        remoteLeases = [:]; remoteTranscripts = [:]; homes = [:]; remoteOffline = []
+        groupRequests = []; groupReview = nil
+    }
+    private func activateGroup(_ group: ConverseGroup, keeping peerID: UUID? = nil) throws {
+        guard let groupStore, let identity, group.valid else { throw CocoaError(.coderInvalidValue) }
+        if currentGroup?.id != group.id {
+            // Validate and durably save the destination before leaving. A
+            // failed/declined join never removes the prior membership.
+            let previous = currentGroup
+            try groupStore.adopt(group)
+            if previous != nil {
+                try trustStore?.forget(deviceID: identity.deviceID, issuer: identity.deviceID)
+                broadcastFabric()
+            }
+            parkGroupViews()
+            for peer in Array(peers.values) where peer.id != peerID { disconnect(peer) }
+        }
+        try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID, groupID: group.id)
+        refreshGroupMembers(); updateGroupAdvertisement(); lastOutcome = ""
+    }
+    func leaveGroup() {
+        guard currentGroup != nil else { return }
+        do {
+            try groupStore?.leave()
+            if let identity { try trustStore?.forget(deviceID: identity.deviceID, issuer: identity.deviceID) }
+            broadcastFabric(); refreshGroupMembers(); parkGroupViews(); updateGroupAdvertisement()
+            let old = Array(peers.values)
+            for peer in old { peer.controlOnly = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { for peer in old { self.disconnect(peer) } }
+            lastOutcome = ""
+            serviceStatus = "Not in a Converse group. Local sessions keep running."
+        } catch { lastOutcome = "Could not leave group: " + error.localizedDescription }
+    }
+    func dissolveGroup() {
+        guard let group = currentGroup else { return }
+        do {
+            try groupStore?.dissolve(group)
+            for peer in Array(peers.values) where peer.trustedReady { sendGroupState(peer); peer.controlOnly = true }
+            refreshGroupMembers(); parkGroupViews(); updateGroupAdvertisement()
+            let old = Array(peers.values)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { for peer in old { self.disconnect(peer) } }
+            lastOutcome = ""
+            serviceStatus = "Group dissolved. Local sessions keep running."
+        } catch { lastOutcome = "Could not dissolve group: " + error.localizedDescription }
+    }
+    private func sendGroupState(_ peer: DevicePeer) {
+        guard let groups = groupStore?.state.groups, let data = try? JSONEncoder().encode(groups) else { return }
+        sendEnvelope(peer, DeviceEnvelope(kind: "group.state", payload: data))
+    }
+    private func publishGroupRequests() {
+        guard let id = currentGroup?.id, let data = try? JSONEncoder().encode(Array(sponsoredRequests.values).filter { $0.groupID == id }) else { return }
+        for member in Array(peers.values) where member.trustedReady && !member.controlOnly { sendEnvelope(member, DeviceEnvelope(kind: "group.requests", payload: data)) }
+    }
+    private func withdrawGroupRequest(_ id: UUID) {
+        sponsoredRequests.removeValue(forKey: id); groupRequests.removeAll { $0.id == id }
+        if groupReview?.id == id { groupReview = nil }
+        publishGroupRequests()
+    }
+    func reviewGroupRequest(_ request: GroupJoinRequest) {
+        guard request.groupID == currentGroup?.id, !request.approved, request.expiresAt > Date() else { return }
+        if let peer = peers[request.id], sponsoredRequests[request.id] == request, let keys = peer.keys {
+            groupReview = GroupJoinReview(request: request, code: DeviceSAS.code(keys.handshakeHash))
+        } else if let member = peers.values.first(where: { $0.trustedReady && !$0.controlOnly && $0.hello?.deviceID == request.sponsorID }), let data = try? JSONEncoder().encode(request) {
+            sendEnvelope(member, DeviceEnvelope(kind: "group.review", payload: data))
+        }
+    }
+    func approveGroupReview() {
+        guard let review = groupReview, review.request.groupID == currentGroup?.id else { return }
+        if sponsoredRequests[review.id] != nil { approveSponsored(review) }
+        else if let member = peers.values.first(where: { $0.trustedReady && !$0.controlOnly && $0.hello?.deviceID == review.request.sponsorID }), let data = try? JSONEncoder().encode(review) {
+            sendEnvelope(member, DeviceEnvelope(kind: "group.approve", payload: data))
+        }
+        groupReview = nil
+    }
+    private func approveSponsored(_ review: GroupJoinReview) {
+        guard let request = sponsoredRequests[review.id], request == review.request, !request.approved, request.expiresAt > Date(), request.groupID == currentGroup?.id,
+              let peer = peers[request.id], let keys = peer.keys, review.code == DeviceSAS.code(keys.handshakeHash) else { return }
+        peer.humanConfirmed = true; peer.localConfirmed = true
+        var approved = request; approved.approved = true; sponsoredRequests[request.id] = approved
+        if let index = groupRequests.firstIndex(where: { $0.id == request.id }) { groupRequests[index] = approved }
+        publishGroupRequests()
+        sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); finishTrustIfReady(peer)
+    }
+    private func handleGroupEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope) -> Bool {
+        guard envelope.kind.hasPrefix("group.") else { return false }
+        guard let data = envelope.payload else { return true }
+        if envelope.kind == "group.state" {
+            guard let groups = try? JSONDecoder().decode([ConverseGroup].self, from: data), groups.count <= 2048,
+                  let issuer = trustStore?.records.first(where: { $0.deviceID == peer.hello?.deviceID && $0.publicKey == peer.keys?.remoteStatic && $0.removed != true }) else { return true }
+            for group in groups where group.valid && group.dissolved && group.id == issuer.groupID {
+                do {
+                    let affected = currentGroup?.id == group.id
+                    try groupStore?.dissolve(group)
+                    if affected {
+                        for connection in Array(peers.values) where connection.trustedReady && connection.id != peer.id { sendGroupState(connection) }
+                        refreshGroupMembers(); parkGroupViews(); updateGroupAdvertisement()
+                        let old = Array(peers.values)
+                        for connection in old { connection.controlOnly = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { for connection in old { self.disconnect(connection) } }
+                        serviceStatus = "Group dissolved by another member. Local sessions keep running."
+                    }
+                } catch { lastOutcome = "Could not persist group dissolution." }
+            }
+            return true
+        }
+        guard !peer.controlOnly, trustStore?.devices.contains(where: { $0.deviceID == peer.hello?.deviceID && $0.groupID == currentGroup?.id }) == true, currentGroup != nil, !locallyRemoved else { return true }
+        switch envelope.kind {
+        case "group.requests":
+            guard let requests = try? JSONDecoder().decode([GroupJoinRequest].self, from: data), requests.count <= 16,
+                  requests.allSatisfy({ $0.groupID == currentGroup?.id && $0.sponsorID == peer.hello?.deviceID && $0.requesterID.count == 64 && $0.requesterName.utf8.count <= 400 }) else { return true }
+            groupRequests.removeAll { $0.sponsorID == peer.hello?.deviceID }
+            groupRequests.append(contentsOf: requests.filter { $0.expiresAt > Date() })
+            if let review = groupReview, !groupRequests.contains(where: { $0.id == review.id && !$0.approved }) { groupReview = nil }
+        case "group.review":
+            guard let request = try? JSONDecoder().decode(GroupJoinRequest.self, from: data), sponsoredRequests[request.id] == request,
+                  let pending = peers[request.id], let keys = pending.keys, request.expiresAt > Date(), !request.approved,
+                  let payload = try? JSONEncoder().encode(GroupJoinReview(request: request, code: DeviceSAS.code(keys.handshakeHash))) else { return true }
+            sendEnvelope(peer, DeviceEnvelope(kind: "group.review.detail", payload: payload))
+        case "group.review.detail":
+            guard let review = try? JSONDecoder().decode(GroupJoinReview.self, from: data), review.request.sponsorID == peer.hello?.deviceID,
+                  groupRequests.contains(review.request), !review.request.approved, review.request.expiresAt > Date(), review.code.count == 39 else { return true }
+            groupReview = review
+        case "group.approve":
+            if let review = try? JSONDecoder().decode(GroupJoinReview.self, from: data) { approveSponsored(review) }
+        default: break
+        }
+        return true
+    }
 }

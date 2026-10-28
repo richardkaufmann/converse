@@ -2,68 +2,7 @@ import SwiftUI
 
 struct PadConnect: View {
     @ObservedObject var model: PadModel
-    @ObservedObject private var service = DeviceSyncService.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var host = ""
-    @State private var port = "48721"
-    @State private var deviceName = UserDefaults.standard.string(forKey: "deviceName") ?? "Converse iPad"
-    @State private var forget: TrustedDevice?
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Setup") {
-                    Text("Converse on iPad views and controls conversations on a home computer. Install and open Converse on that computer first. Its CLI logins and files stay there.")
-                    TextField("This device’s name", text: $deviceName).onSubmit {
-                        let name = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !name.isEmpty { UserDefaults.standard.set(name, forKey: "deviceName"); service.deviceNameOverride = name }
-                    }
-                }
-                Section("Pairing sequence") {
-                    Text("1. Tap Connect on ONE device.\n2. Compare ALL eight code groups on both screens.\n3. Tap Pair on the initiating device and Approve on the receiving device.")
-                    Text("Pair once with any member to join its fabric. All members connect automatically. Every member can admit others and control sessions on home computers under their logins.").font(.callout)
-                    Text(service.serviceStatus).font(.caption).textSelection(.enabled)
-                }
-                if service.localNetworkDenied {
-                    Section("Local Network access is off") {
-                        Text("Allow Converse in Settings → Privacy & Security → Local Network. This also affects connecting by address on your LAN.")
-                        Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }
-                        Button("Try again") { service.suspendViewer(); service.resumeViewer() }
-                    }
-                }
-                if let prompt = service.pairingPrompt {
-                    Section(prompt.isInitiator ? "Pair with " + prompt.peerName : "Approve connection from " + prompt.peerName) {
-                        Text(prompt.instruction)
-                        Text(prompt.code).font(.system(.title3, design: .monospaced).bold()).textSelection(.enabled)
-                        Text("Every group must match exactly.").bold()
-                        Text("Fingerprint: " + prompt.fingerprint).font(.caption).textSelection(.enabled)
-                        if prompt.keyChanged || prompt.nameCollision { Text("This identity differs from a stored device. Check that you expect a new identity before trusting it.").foregroundStyle(.red) }
-                        HStack { Button("Reject", role: .destructive) { service.rejectPairing() }; Spacer(); Button(prompt.actionLabel) { service.confirmPairing() }.buttonStyle(.borderedProminent) }
-                    }
-                }
-                Section("Nearby Converses") {
-                    if service.discovered.isEmpty { Text("Keep Converse open on both devices on the same network. You can also connect by address below.").foregroundStyle(.secondary) }
-                    ForEach(service.discovered) { device in HStack { Text(device.name); Spacer(); Button("Connect") { service.connect(discovered: device) } } }
-                }
-                Section("Connect by address") {
-                    TextField("Host or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Port", text: $port).keyboardType(.numberPad)
-                    Button("Connect") { service.connectManual(host: host.trimmingCharacters(in: .whitespacesAndNewlines), port: Int(port) ?? -1) }.disabled(host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Text("For VPNs without Bonjour discovery, use the home computer’s address and listening port. Pairing uses the same verification.").font(.caption)
-                }
-                Section("Fabric members") {
-                    if service.trusted.isEmpty { Text("None paired yet.") }
-                    ForEach(service.trusted) { device in
-                        HStack {
-                            VStack(alignment: .leading) { Text(device.name); Text(service.homes[device.deviceID]?.online == true ? "Online" : "Offline").font(.caption).foregroundStyle(.secondary) }
-                            Spacer(); Button("Remove", role: .destructive) { forget = device }
-                        }
-                    }
-                }
-                if !service.lastOutcome.isEmpty { Section { Text(service.lastOutcome).font(.caption).textSelection(.enabled) } }
-            }.navigationTitle("Converse · Setup").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-                .confirmationDialog("Remove this device from the fabric?", isPresented: Binding(get: { forget != nil }, set: { if !$0 { forget = nil } }), titleVisibility: .visible) { Button("Remove from Fabric", role: .destructive) { if let device = forget { service.forgetDevice(device) }; forget = nil } } message: { Text("This removal propagates to connected fabric members. The device must be admitted again to rejoin.") }
-        }
-    }
+    var body: some View { ConverseGroupsView() }
 }
 
 struct PadRequest: View {

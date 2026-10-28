@@ -6,6 +6,7 @@ if [[ -z "$simulator" ]]; then print -u2 'Create an iPad simulator in Xcode firs
 if ! xcrun simctl list devices booted | rg -q "$simulator"; then xcrun simctl boot "$simulator"; fi
 xcrun simctl bootstatus "$simulator" -b
 interop_port=0
+group_port=0
 fixture=""
 fixture_pid=""
 cleanup() {
@@ -21,14 +22,14 @@ if [[ "${1:-}" == --interop ]]; then
     CONVERSE_TEST_COMMAND=isolated-fixture CONVERSE_DATA_DIR="$fixture/data" "$app/Contents/MacOS/Converse" --ipad-home-fixture > "$fixture/home.log" 2>&1 &
     fixture_pid=$!
     for attempt in {1..200}; do
-        if [[ -s "$fixture/data/port" ]]; then interop_port=$(cat "$fixture/data/port"); break; fi
+        if [[ -s "$fixture/data/port" ]]; then interop_port=$(cat "$fixture/data/port"); group_port=$(cat "$fixture/data/group-port"); break; fi
         if ! kill -0 "$fixture_pid" 2>/dev/null; then cat "$fixture/home.log"; exit 1; fi
         sleep 0.05
     done
     if [[ "$interop_port" == 0 ]]; then print -u2 'Isolated Mac home did not open its test port.'; exit 1; fi
     print "Isolated Mac home evidence: $fixture"
 fi
-TEST_RUNNER_CONVERSE_INTEROP_PORT="$interop_port" TEST_RUNNER_CONVERSE_TEST_COMMAND=isolated-tests xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
+TEST_RUNNER_CONVERSE_GROUP_PORT="$group_port" TEST_RUNNER_CONVERSE_INTEROP_PORT="$interop_port" TEST_RUNNER_CONVERSE_TEST_COMMAND=isolated-tests xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
     -destination "platform=iOS Simulator,id=$simulator" \
     -derivedDataPath .build/iPad CODE_SIGN_IDENTITY=- \
     CONVERSE_INTEROP_PORT="$interop_port" test
