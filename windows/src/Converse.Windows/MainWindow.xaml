@@ -8,7 +8,7 @@
     mc:Ignorable="d"
     Title="Converse">
     <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <local:BoolToVisibilityConverter x:Key="BoolToVis"/>
         <!-- Classic {Binding} only: the x:Bind compiled-binding surface
              crashed XamlCompiler.exe with no diagnostic (CI run #9), while
              the identical layout with classic bindings builds clean. -->
