@@ -132,8 +132,9 @@ public sealed class DeviceHello
     [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
     [JsonPropertyName("deviceName")] public string DeviceName { get; set; } = "";
     [JsonPropertyName("converseVersion")] public string ConverseVersion { get; set; } = "";
+    [JsonPropertyName("listenPort")] public int? ListenPort { get; set; }
     [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; set; } = 1;
-    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "transcript", "commands", "blobs" };
+    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1" };
 }
 
 public sealed class DeviceSidebarRow

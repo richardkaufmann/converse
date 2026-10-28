@@ -232,6 +232,11 @@ public sealed partial class MainWindow : Window
         return text.Replace("**", "").Replace("`", "").Trim();
     }
 
+    private async void OnAboutClick(object sender, RoutedEventArgs e)
+    {
+        await new ContentDialog { Title = "Converse", Content = "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app", CloseButtonText = "Done", XamlRoot = Content.XamlRoot }.ShowAsync();
+    }
+
     private async Task<bool> ShowPairingPromptAsync(PairingPrompt prompt)
     {
         var accepted = false;
@@ -244,7 +249,7 @@ public sealed partial class MainWindow : Window
                 Content = "Compare EVERY group on both devices. Pair only if all 8 groups match exactly:\n\n"
                           + prompt.Code + "\n\nFingerprint " + prompt.Fingerprint
                           + (prompt.KeyChanged ? "\n\nWarning: stored key mismatch." : "")
-                          + "\n\nPairing allows remote prompts and tool execution on the home device.",
+                          + "\n\nJoining grants access to the entire fabric, including history and tool execution on home devices. Every member may admit or remove other devices.",
                 PrimaryButtonText = prompt.IsInitiator ? "Pair" : "Approve",
                 CloseButtonText = "Reject",
                 XamlRoot = Content.XamlRoot,

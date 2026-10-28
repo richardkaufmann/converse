@@ -14,6 +14,7 @@
         </Grid.RowDefinitions>
         <MenuBar Grid.Row="0">
             <MenuBarItem Title="Converse">
+                <MenuFlyoutItem Text="About Converse" Click="OnAboutClick"/>
                 <MenuFlyoutItem Text="Setup" Click="OnSetupClick"/>
                 <MenuFlyoutItem Text="Connect to Other Converses…" Click="OnConnectClick"/>
                 <MenuFlyoutSeparator/>

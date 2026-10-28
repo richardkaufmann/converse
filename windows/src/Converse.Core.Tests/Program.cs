@@ -310,6 +310,74 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "Sidebar layout persists collapsed state and width");
 }
 
+// Transitive admission: C joins through B; A and C connect without another approval.
+{
+    var root = Directory.CreateTempSubdirectory("converse-fabric-").FullName;
+    var services = new List<DeviceSyncService>(); var admissions = 0;
+    try
+    {
+        for (var i = 0; i < 4; i++)
+        {
+            var folder = Path.Combine(root, i.ToString());
+            var store = new SessionStore(folder, new FakeRunner());
+            var session = store.Create(store.Entries.First(e => e.Engine == "codex")); session.Title = "Fabric " + i;
+            var service = new DeviceSyncService(folder, store, "PC " + i);
+            service.PairingConfirmation = _ => { Interlocked.Increment(ref admissions); return Task.FromResult(true); };
+            await service.StartAsync(0); services.Add(service);
+        }
+        async Task<bool> WaitFor(Func<bool> predicate)
+        {
+            var end = DateTime.UtcNow.AddSeconds(15);
+            while (!predicate() && DateTime.UtcNow < end) await Task.Delay(20);
+            return predicate();
+        }
+        for (var i = 1; i < services.Count; i++)
+        {
+            await services[i].ConnectManualAsync("127.0.0.1", services[i - 1].ListeningPort);
+            Check(await WaitFor(() => services[i].Trust.Devices.Count >= i + 1), "Windows entrant learns existing fabric from one sponsor");
+        }
+        Check(await WaitFor(() => services.All(s => s.Homes.Count(h => h.Value.Online) == 3)) && admissions == 6,
+            "Four Windows cores form a mesh with only three mutual admissions");
+        Check(await WaitFor(() => services.All(s => s.Homes.Values.All(h => h.Rows.Count == 1))), "Fabric members see every other home session");
+        var stale = services[0].Trust.Records;
+        services[0].ForgetDevice(services[0].Trust.Devices.First(d => d.DeviceID == services[3].DeviceId));
+        Check(await WaitFor(() => services.Take(3).All(s => s.Trust.Check(services[3].DeviceId, X25519.PublicKeyFromPrivate(File.ReadAllBytes(Path.Combine(root, "3", "device-key.bin")))) == "unknown")), "Fabric removal propagates to other members");
+        var merged = services[1].Trust.Merge(stale);
+        Check(!services[1].Trust.Devices.Any(d => d.DeviceID == services[3].DeviceId), "Stale roster cannot resurrect a removed Windows member");
+        var wire = System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(services[0].Trust.Records));
+        Check(wire.Contains("\"deviceID\"") && wire.Contains("\"generation\"") && wire.Contains("\"removed\""), "Fabric record JSON uses the exact Swift wire keys");
+    }
+    finally { foreach (var service in services) service.Dispose(); }
+}
+
+if (int.TryParse(Environment.GetEnvironmentVariable("CONVERSE_MAC_INTEROP_PORT"), out var macPort) && macPort > 0)
+{
+    var root = Directory.CreateTempSubdirectory("converse-mac-fabric-").FullName;
+    var admissions = 0;
+    using var a = new DeviceSyncService(Path.Combine(root, "a"), new SessionStore(Path.Combine(root, "a"), new FakeRunner()), "Windows core A");
+    using var b = new DeviceSyncService(Path.Combine(root, "b"), new SessionStore(Path.Combine(root, "b"), new FakeRunner()), "Windows core B");
+    a.PairingConfirmation = _ => { Interlocked.Increment(ref admissions); return Task.FromResult(true); };
+    b.PairingConfirmation = _ => { Interlocked.Increment(ref admissions); return Task.FromResult(true); };
+    await a.StartAsync(0); await b.StartAsync(0);
+    async Task<bool> WaitMac(Func<bool> predicate)
+    {
+        var end = DateTime.UtcNow.AddSeconds(15);
+        while (!predicate() && DateTime.UtcNow < end) await Task.Delay(25);
+        return predicate();
+    }
+    await a.ConnectManualAsync("127.0.0.1", macPort);
+    Check(await WaitMac(() => a.Homes.Values.Any(h => h.DeviceName == "Isolated Mac home" && h.Rows.Count > 0)), "C# core pairs with real Swift home");
+    await b.ConnectManualAsync("127.0.0.1", a.ListeningPort);
+    Check(await WaitMac(() => b.Homes.Values.Any(h => h.DeviceName == "Isolated Mac home" && h.Rows.Count > 0)) && admissions == 3,
+        "C# entrant joins through C# member and automatically connects to Swift home");
+    var mac = b.Homes.Values.FirstOrDefault(h => h.DeviceName == "Isolated Mac home");
+    if (mac?.Rows.FirstOrDefault() is { } row)
+    {
+        await b.AcquireRemoteAsync(row.GlobalID);
+        Check(await WaitMac(() => b.RemoteTranscripts.GetValueOrDefault(row.GlobalID)?.Draft == "home draft"), "Transitively admitted C# viewer takes Swift session and receives its draft");
+    }
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
 
