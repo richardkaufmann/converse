@@ -19,6 +19,9 @@ public sealed class SidebarLayoutState
 
     public bool Collapsed { get; set; }
     public double ExpandedWidth { get; set; } = DefaultWidth;
+    // Line-number gutter, Mac parity (Store.lineNumbers, default on).
+    // Missing in older files; the initializer keeps the default true.
+    public bool ShowLineNumbers { get; set; } = true;
 
     /// <summary>Effective sidebar width for the current window width.</summary>
     public double EffectiveWidth(double windowWidth)

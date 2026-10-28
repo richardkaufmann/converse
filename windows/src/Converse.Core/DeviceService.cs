@@ -105,6 +105,7 @@ public sealed class DeviceSyncService : IDisposable
     private readonly Dictionary<Guid, Peer> _peers = new();
     private readonly Dictionary<string, string> _blobPaths = new();
     private readonly Dictionary<string, List<byte>> _staged = new();
+    private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
     private ulong _homeSeq;
     private ulong _boot = 1;
@@ -485,6 +486,8 @@ public sealed class DeviceSyncService : IDisposable
             Busy = session.Busy, Status = session.Status, Title = session.Title, Engine = session.Entry.Engine,
             AccountName = session.Entry.AccountName,
             Model = session.Choices.Model ?? "", Effort = session.Choices.Effort ?? "", Access = session.Choices.Access ?? "",
+            ModelOptions = ChoicesCatalog.ModelsFor(session.Entry.Engine)
+                .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
             EffortOptions = ChoicesCatalog.EffortsFor(session.Entry.Engine).ToArray(),
             AccessOptions = ChoicesCatalog.AccessFor(session.Entry.Engine)
                 .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
@@ -673,7 +676,8 @@ public sealed class DeviceSyncService : IDisposable
                 if (DeviceGlobalID.Parse(transcript.GlobalID)?.Home != peerHome) break;
                 if (transcript.Epoch is null || RemoteLeases.GetValueOrDefault(transcript.GlobalID) != transcript.Epoch) break;
                 if (RemoteTranscripts.TryGetValue(transcript.GlobalID, out var existing) && transcript.HomeSeq <= existing.HomeSeq) break;
-                RemoteTranscripts[transcript.GlobalID] = transcript;
+                RemoteTranscripts[transcript.GlobalID] = existing is not null && transcript.Prepend
+                    ? MergePrepend(existing, transcript) : transcript;
                 _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteOffline.Remove(transcript.GlobalID);
                 Changed?.Invoke();
@@ -752,6 +756,22 @@ public sealed class DeviceSyncService : IDisposable
                 }
                 break;
             case DeviceKind.BlobAck:
+                // BlobAck detail is "hash|message" (see SendBlobAckAsync);
+                // correlate upload waits by hash.
+                if (envelope.Payload is not null)
+                {
+                    var blobAck = DeviceJson.Decode<DeviceAckPayload>(envelope.Payload);
+                    var pipe = (blobAck.Detail ?? "").IndexOf('|');
+                    var hash = pipe < 0 ? blobAck.Detail ?? "" : blobAck.Detail![..pipe];
+                    lock (_blobAcks)
+                    {
+                        if (_blobAcks.TryGetValue(hash, out var waiter))
+                        {
+                            _blobAcks.Remove(hash);
+                            waiter.TrySetResult(blobAck.Outcome == "stored");
+                        }
+                    }
+                }
                 Changed?.Invoke();
                 break;
             case DeviceKind.BlobRequest:
@@ -783,6 +803,19 @@ public sealed class DeviceSyncService : IDisposable
             Kind = DeviceKind.BlobAck, SessionID = envelope.SessionID, Epoch = envelope.Epoch,
             Payload = DeviceJson.Encode(new DeviceAckPayload { Outcome = stored ? "stored" : "failed", Detail = hash + "|" + (stored ? "Stored on home." : "Not stored on home.") }),
         });
+
+    // Merges an earlier page ahead of the retained transcript. Message IDs
+    // dedupe (a repeated page changes nothing); fresh home fields (draft,
+    // status, options) come from the page, which carries the newest homeSeq.
+    internal static DeviceTranscriptPayload MergePrepend(DeviceTranscriptPayload existing, DeviceTranscriptPayload paged)
+    {
+        var seen = new HashSet<Guid>(paged.Messages.Select(m => m.Id));
+        var merged = new List<DeviceWireMessage>(paged.Messages);
+        merged.AddRange(existing.Messages.Where(m => !seen.Contains(m.Id)));
+        paged.Messages = merged;
+        paged.Total = Math.Max(paged.Total, existing.Total);
+        return paged;
+    }
 
     // ---- Viewer side ----
     private Peer? PeerForHome(string home) =>
@@ -836,5 +869,116 @@ public sealed class DeviceSyncService : IDisposable
 
     public List<DeviceOutboxRecord> Unresolved(string globalId) =>
         _outbox.Records.Where(r => r.SessionID == globalId).ToList();
+
+    // Mac parity: page earlier messages ahead of the retained transcript.
+    public async Task RequestEarlierAsync(string globalId)
+    {
+        var parsed = DeviceGlobalID.Parse(globalId);
+        if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
+        { LastOutcome = "Take the session again before loading earlier messages."; return; }
+        var offset = RemoteTranscripts.GetValueOrDefault(globalId)?.Offset ?? 0;
+        if (offset <= 0) return;
+        await SendEnvelopeAsync(peer, new DeviceEnvelope
+        {
+            Kind = DeviceKind.TranscriptRequest, SessionID = globalId, Epoch = epoch,
+            Payload = DeviceJson.Encode(new DeviceTranscriptRequest { BeforeOffset = offset }),
+        });
+    }
+
+    // Mac parity outbox recovery: ask home for the authoritative outcome of
+    // an uncertain command, drop a record the user discards, or resend the
+    // identical command under its original ID (home dedups replays).
+    public async Task QueryOutboxAsync(DeviceOutboxRecord record)
+    {
+        var parsed = DeviceGlobalID.Parse(record.SessionID);
+        if (parsed is null || PeerForHome(parsed.Value.Home) is not { } peer)
+        { LastOutcome = "Home is offline."; return; }
+        await SendEnvelopeAsync(peer, new DeviceEnvelope
+        { Kind = DeviceKind.CommandQuery, SessionID = record.SessionID, CommandID = record.CommandID, Epoch = record.Epoch });
+    }
+
+    public void DiscardOutbox(Guid commandId)
+    {
+        _outbox.Remove(commandId);
+        Changed?.Invoke();
+    }
+
+    public async Task<bool> RetryOutboxAsync(DeviceOutboxRecord record)
+    {
+        var parsed = DeviceGlobalID.Parse(record.SessionID);
+        if (parsed is null || !RemoteLeases.TryGetValue(record.SessionID, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
+        { LastOutcome = "Take the session again before resending."; return false; }
+        _outbox.Requeue(record.CommandID, epoch);
+        Changed?.Invoke();
+        await SendEnvelopeAsync(peer, new DeviceEnvelope
+        {
+            Kind = DeviceKind.Command, SessionID = record.SessionID, CommandID = record.CommandID,
+            Epoch = epoch, Payload = DeviceJson.Encode(record.Payload),
+        });
+        return true;
+    }
+
+    // Uploads attachment bytes to home, short-circuiting when home already
+    // stores the hash. Returns the content hash, or null on failure/timeout.
+    public async Task<string?> UploadBlobAsync(string globalId, byte[] data)
+    {
+        var parsed = DeviceGlobalID.Parse(globalId);
+        if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
+        { LastOutcome = "Take the session again before attaching."; return null; }
+        if (data.Length > DeviceBlob.MaxBlob) { LastOutcome = "Attachment exceeds the 25 MB limit."; return null; }
+        var hash = DeviceBlob.Sha256Hex(data);
+        TaskCompletionSource<bool> waiter;
+        lock (_blobAcks) { waiter = new TaskCompletionSource<bool>(); _blobAcks[hash] = waiter; }
+        await SendEnvelopeAsync(peer, new DeviceEnvelope
+        {
+            Kind = DeviceKind.BlobOffer, SessionID = globalId, Epoch = epoch,
+            Payload = DeviceJson.Encode(new DeviceBlobPayload { Sha256Hex = hash, Size = data.Length }),
+        });
+        // The offer ack reports whether home already stores the hash: stored
+        // short-circuits, "failed" means home needs the bytes (not refusal).
+        var offered = await WaitBlobAckAsync(hash, waiter, required: false);
+        if (offered is null) return null;
+        if (offered == true) return hash;
+        // Re-register: a second ack follows the chunk stream.
+        lock (_blobAcks) { waiter = new TaskCompletionSource<bool>(); _blobAcks[hash] = waiter; }
+        if (data.Length == 0)
+        {
+            await SendEnvelopeAsync(peer, new DeviceEnvelope
+            {
+                Kind = DeviceKind.BlobChunk, SessionID = globalId, Epoch = epoch,
+                Payload = DeviceJson.Encode(new DeviceBlobPayload { Sha256Hex = hash, Done = true }),
+            });
+        }
+        else
+        {
+            for (var offset = 0; offset < data.Length; offset += 32_768)
+            {
+                var chunk = data.AsSpan(offset, Math.Min(32_768, data.Length - offset)).ToArray();
+                await SendEnvelopeAsync(peer, new DeviceEnvelope
+                {
+                    Kind = DeviceKind.BlobChunk, SessionID = globalId, Epoch = epoch,
+                    Payload = DeviceJson.Encode(new DeviceBlobPayload
+                    { Sha256Hex = hash, Size = data.Length, Chunk = chunk, Done = offset + chunk.Length >= data.Length }),
+                });
+            }
+        }
+        return await WaitBlobAckAsync(hash, waiter, required: true) == true ? hash : null;
+    }
+
+    // Returns the stored flag, or null on timeout. Only the final ack treats
+    // "not stored" as a failure; the offer ack uses it to request bytes.
+    private async Task<bool?> WaitBlobAckAsync(string hash, TaskCompletionSource<bool> waiter, bool required)
+    {
+        var timeout = Task.Delay(TimeSpan.FromSeconds(60));
+        if (await Task.WhenAny(waiter.Task, timeout) != waiter.Task)
+        {
+            lock (_blobAcks) _blobAcks.Remove(hash);
+            LastOutcome = "Attachment upload timed out.";
+            return null;
+        }
+        var stored = await waiter.Task;
+        if (!stored && required) LastOutcome = "Home refused the attachment.";
+        return stored;
+    }
 }
 

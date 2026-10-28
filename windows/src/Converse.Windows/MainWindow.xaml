@@ -34,16 +34,13 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
                     <Button Content="P" Click="OnParkClick" Tag="{Binding}"
                             Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
-                            ToolTipService.ToolTip="Park (leave this conversation here)"/>
-                    <Button Content="1" Click="OnTakeClick" Tag="{Binding}"
+                            ToolTipService.ToolTip="Park (release this conversation to its home)"/>
+                    <Button Content="Take" Click="OnTakeClick" Tag="{Binding}"
                             Visibility="{Binding ShowTake, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Take here"/>
-                    <Button Content="2" Click="OnTakeClick" Tag="{Binding}"
-                            Visibility="{Binding ShowTake, Converter={StaticResource BoolToVis}}"
-                            ToolTipService.ToolTip="Take to second pane"/>
-                    <Button Content="3" Click="OnTakeClick" Tag="{Binding}"
-                            Visibility="{Binding ShowTake, Converter={StaticResource BoolToVis}}"
-                            ToolTipService.ToolTip="Take to third pane"/>
+                    <Button Content="X" Click="OnCloseClick" Tag="{Binding}"
+                            Visibility="{Binding ShowClose, Converter={StaticResource BoolToVis}}"
+                            ToolTipService.ToolTip="Close session (keeps a recovery archive)"/>
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -96,38 +93,88 @@
             <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="8,6" VerticalAlignment="Center">
-                    <!-- Restore pin stays reachable with the transcript when the sidebar is collapsed. -->
-                    <Button x:Name="RestorePin" Content="Pin" Click="OnPinClick" Visibility="Collapsed"
-                            ToolTipService.ToolTip="Restore sidebar at its previous width"/>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock x:Name="PaneTitle" FontWeight="SemiBold" Text="No conversation selected"/>
-                        <TextBlock x:Name="PaneSubtitle" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text=""/>
-                    </StackPanel>
-                </StackPanel>
-                <!-- One seamless document: protected history plus an editable blue draft tail. -->
-                <RichEditBox x:Name="Transcript" Grid.Row="1" Margin="8,0" FontSize="16"
-                             PlaceholderText="Select a conversation to begin."
-                             IsSpellCheckEnabled="True"
-                             PreviewKeyDown="OnTranscriptKeyDown"
-                             TextChanged="OnTranscriptTextChanged"/>
-                <Grid Grid.Row="2" Padding="8">
+                <Grid Grid.Row="0" Margin="8,6">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="11"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Type at the end in blue. Return sends · Ctrl+Return for newline"/>
-                    <Button Grid.Column="1" Content="Stop" Margin="6,0,0,0" Click="OnStopClick"/>
-                    <Button Grid.Column="2" Content="Send" Margin="6,0,0,0" Click="OnSendClick"/>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <!-- Restore pin stays reachable with the transcript when the sidebar is collapsed. -->
+                        <Button x:Name="RestorePin" Content="Pin" Click="OnPinClick" Visibility="Collapsed"
+                                ToolTipService.ToolTip="Restore sidebar at its previous width"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="PaneTitle" FontWeight="SemiBold" Text="No conversation selected"/>
+                            <TextBlock x:Name="PaneSubtitle" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text=""/>
+                        </StackPanel>
+                    </StackPanel>
+                    <!-- Take appears for a remote session this window is not viewing yet. -->
+                    <Button x:Name="TakeButton" Grid.Column="1" Content="Take here" Click="OnTakeHereClick"
+                            Visibility="Collapsed" VerticalAlignment="Center" Margin="8,0"/>
+                    <!-- The Windows beachball: indeterminate ring while the session works. -->
+                    <ProgressRing x:Name="BusyRing" Grid.Column="2" Width="20" Height="20"
+                                  IsActive="False" VerticalAlignment="Center"
+                                  ToolTipService.ToolTip="Session is working"/>
                 </Grid>
-                <StackPanel x:Name="SettingsRow" Grid.Row="3" Orientation="Horizontal" Spacing="6" Padding="8,0,8,8" VerticalAlignment="Center">
+                <!-- Approvals, questions, queued prompts and outbox recovery.
+                     Built in code behind; Mac shows the same stack above the editor. -->
+                <ScrollViewer Grid.Row="1" MaxHeight="220" VerticalScrollBarVisibility="Auto"
+                              x:Name="BannerScroller" Visibility="Collapsed">
+                    <StackPanel x:Name="BannerStack" Spacing="6" Margin="8,0"/>
+                </ScrollViewer>
+                <Button x:Name="EarlierButton" Grid.Row="2" Margin="8,4,8,0" Visibility="Collapsed"
+                        HorizontalAlignment="Left" Click="OnEarlierClick" Content="Load earlier messages"/>
+                <Grid Grid.Row="3" Margin="8,4,8,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <!-- Line-number gutter, Mac parity: one number per paragraph,
+                         prompt paragraphs tinted, scrolled in lockstep with the editor. -->
+                    <ScrollViewer x:Name="GutterScroller" Grid.Column="0"
+                                  VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Hidden"
+                                  HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled">
+                        <TextBlock x:Name="LineGutter" FontSize="16" MinWidth="28" Margin="0,8,0,0"
+                                   Padding="0,0,6,0" TextAlignment="Right"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
+                    </ScrollViewer>
+                    <!-- One seamless document: protected history plus an editable blue draft tail. -->
+                    <RichEditBox x:Name="Transcript" Grid.Column="1" FontSize="16"
+                                 PlaceholderText="Select a conversation to begin."
+                                 IsSpellCheckEnabled="True"
+                                 PreviewKeyDown="OnTranscriptKeyDown"
+                                 TextChanged="OnTranscriptTextChanged"/>
+                </Grid>
+                <Grid Grid.Row="4" Padding="8,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="HintText" Grid.Column="0" VerticalAlignment="Center" FontSize="11"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Type at the end in blue. Return sends or queues · Ctrl+Return for newline"/>
+                    <CheckBox x:Name="LineNumbersBox" Grid.Column="1" Content="line numbers" FontSize="11"
+                              VerticalAlignment="Center" Margin="8,0,0,0"
+                              Checked="OnLineNumbersToggled" Unchecked="OnLineNumbersToggled"
+                              ToolTipService.ToolTip="Show the transcript line-number gutter"/>
+                    <Button x:Name="AttachButton" Grid.Column="2" Content="Attach" Margin="8,0,0,0" Click="OnAttachClick"
+                            ToolTipService.ToolTip="Attach an image to the draft"/>
+                    <Button x:Name="ClearImagesButton" Grid.Column="3" Content="Clear images" Margin="8,0,0,0"
+                            Click="OnClearImagesClick" Visibility="Collapsed"/>
+                    <Button x:Name="StopButton" Grid.Column="4" Content="Stop" Margin="8,0,0,0" Click="OnStopClick"/>
+                    <Button x:Name="SendButton" Grid.Column="5" Content="Send" Margin="8,0,0,0" Click="OnSendClick"/>
+                </Grid>
+                <StackPanel x:Name="SettingsRow" Grid.Row="5" Orientation="Horizontal" Spacing="6" Padding="8,0,8,8" VerticalAlignment="Center">
                     <TextBlock Text="Model:" VerticalAlignment="Center" FontSize="12"/>
                     <ComboBox x:Name="ModelBox" Width="200" IsEditable="True" FontSize="12"
                               SelectionChanged="OnSettingChanged" LostFocus="OnModelCommitted" KeyDown="OnModelKeyDown"/>

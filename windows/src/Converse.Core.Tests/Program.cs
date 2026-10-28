@@ -406,6 +406,155 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(mode == "manual", "Mac legacy access id 'default' normalizes to CLI 'manual'");
 }
 
+// Editor boundary: RichEdit GetText normalization must not eat keystrokes.
+{
+    var history = "You: hi\r\r";
+    var exact = Converse.Core.EditorBoundary.Split("You: hi\r\rhello\r", history);
+    Check(exact.HistoryOk && exact.Draft == "hello", "Exact history match splits the draft tail");
+    var collapsed = Converse.Core.EditorBoundary.Split("You: hi\rhello\r", history);
+    Check(collapsed.HistoryOk && collapsed.Draft == "hello", "Collapsed trailing break still matches history");
+    var terminator = Converse.Core.EditorBoundary.Split("You: hi\r\r\r", history);
+    Check(terminator.HistoryOk && terminator.Draft == "", "Lone GetText terminator leaves an empty draft");
+    var hacked = Converse.Core.EditorBoundary.Split("You: HACKED\r\rhello\r", history);
+    Check(!hacked.HistoryOk, "Edited history fails the protected-region check");
+    var fresh = Converse.Core.EditorBoundary.Split("hello\r", "");
+    Check(fresh.HistoryOk && fresh.Draft == "hello", "Empty history accepts first keystrokes");
+    var leading = Converse.Core.EditorBoundary.Split("H\r\r\rhello\r", "H\r\r");
+    Check(leading.HistoryOk && leading.Draft == "\rhello", "Genuine leading draft blank lines survive the separator budget");
+}
+
+// Model options: verified claude aliases ride the home snapshot.
+{
+    var claude = Converse.Core.ChoicesCatalog.ModelsFor("claude");
+    Check(claude.Select(o => o.Id).SequenceEqual(new[] { "fable", "opus", "sonnet" }),
+        "Claude model aliases match verified CLI vocabulary");
+    Check(Converse.Core.ChoicesCatalog.ModelsFor("muse").Count == 0
+        && Converse.Core.ChoicesCatalog.ModelsFor("codex").Count == 0
+        && Converse.Core.ChoicesCatalog.ModelsFor("unknown").Count == 0,
+        "Other engines offer no static models (live or free text, Mac parity)");
+}
+
+// Prepend merge: earlier pages merge ahead with ID dedup.
+{
+    DeviceWireMessage Wire(string text) => new() { Id = Guid.NewGuid(), Role = "user", Text = text };
+    var old = new DeviceTranscriptPayload { HomeSeq = 7, Offset = 50, Total = 250,
+        Messages = new List<DeviceWireMessage> { Wire("new-1"), Wire("new-2") } };
+    var paged = new DeviceTranscriptPayload { HomeSeq = 9, Offset = 0, Total = 250, Prepend = true,
+        Messages = new List<DeviceWireMessage> { old.Messages[1], Wire("old-0") } };
+    var merged = Converse.Core.DeviceSyncService.MergePrepend(old, paged);
+    Check(merged.Offset == 0 && merged.Total == 250
+        && merged.Messages.Select(m => m.Text).SequenceEqual(new[] { "new-2", "old-0", "new-1" }),
+        "Earlier page merges ahead exactly once by message ID");
+}
+
+// Request views: local Muse requests project like remote DTOs; answers use Mac keys.
+{
+    var local = new Converse.Core.MuseRequest { Id = "a1", Kind = "approval",
+        Params = (System.Text.Json.Nodes.JsonNode.Parse(
+            "{\"toolName\":\"Bash\",\"rawArgs\":\"ls\",\"availableChoices\":[{\"choiceId\":\"allow-once\",\"label\":\"Allow once\",\"scope\":\"session\"}]}")!
+            .AsObject()) };
+    var approval = Converse.Core.RequestViews.FromLocal(local);
+    Check(approval.Kind == "approval" && approval.ToolName == "Bash" && approval.RawArgs == "ls"
+        && approval.Choices.Count == 1 && approval.Choices[0].Detail == "session",
+        "Local approval projects tool, args and choice detail");
+    var remote = new DeviceRequestDto { Id = "q1", Kind = "question",
+        QuestionsJson = Utf8("[{\"id\":\"q1\",\"question\":\"Pick one\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\",\"description\":\"desc\"}]},"
+            + "{\"id\":\"q2\",\"question\":\"Pick many\",\"selection\":{\"mode\":\"multiple\"},\"options\":[{\"label\":\"X\"},{\"label\":\"Y\"}]}]") };
+    var view = Converse.Core.RequestViews.FromRemote(remote);
+    Check(view.Questions.Count == 2 && !view.Questions[0].Multiple && view.Questions[1].Multiple
+        && view.Questions[0].Options[1].Description == "desc",
+        "Remote questions parse options and single/multi selection");
+    var answers = System.Text.Encoding.UTF8.GetString(Converse.Core.RequestViews.BuildAnswersJson(view,
+        new Dictionary<string, HashSet<string>> { ["q1"] = new() { "B", "bogus" }, ["q2"] = new() { "X", "Y" } },
+        new Dictionary<string, string> { ["q1"] = "  ", ["q2"] = " extra " }));
+    Check(answers == "[{\"questionId\":\"q1\",\"selectedLabel\":\"B\"},{\"questionId\":\"q2\",\"selectedLabels\":[\"X\",\"Y\"],\"freeText\":\"extra\"}]",
+        "Question answers use Mac keys and drop unknown labels and blank text");
+    Check(Converse.Core.RequestViews.ParseQuestions("not json").Count == 0
+        && Converse.Core.RequestViews.ParseQuestions(null).Count == 0,
+        "Malformed questions JSON parses to no questions");
+}
+
+// Line-number gutter preference persists with the window layout, default on.
+{
+    var layout = new Converse.Core.SidebarLayoutState();
+    Check(layout.ShowLineNumbers, "Line numbers default on (Mac parity)");
+    var dir = Directory.CreateTempSubdirectory("converse-gutter-").FullName;
+    File.WriteAllText(Path.Combine(dir, "window-layout.json"), "{\"Collapsed\":false,\"ExpandedWidth\":340}");
+    Check(Converse.Core.SidebarLayoutState.Load(dir).ShowLineNumbers,
+        "Layout files predating the gutter still default it on");
+    layout.ShowLineNumbers = false;
+    layout.Save(dir);
+    Check(!Converse.Core.SidebarLayoutState.Load(dir).ShowLineNumbers,
+        "Gutter preference round-trips through save and load");
+}
+
+// Loopback round two: model options, earlier paging, blob upload with an
+// attached submit, and outbox query/retry/discard over real TCP.
+{
+    var homeRoot = Directory.CreateTempSubdirectory("converse-home2-").FullName;
+    var viewerRoot = Directory.CreateTempSubdirectory("converse-viewer2-").FullName;
+    try
+    {
+        var homeStore = new SessionStore(homeRoot, new FakeRunner());
+        var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "claude"));
+        homeSession.Messages.Clear();
+        for (var i = 0; i < 250; i++)
+            homeSession.Messages.Add(new ChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Text = "m" + i });
+        using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
+        using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        home.PairingConfirmation = _ => Task.FromResult(true);
+        viewer.PairingConfirmation = _ => Task.FromResult(true);
+        await home.StartAsync(0);
+        await viewer.StartAsync(0);
+        await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort);
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
+        Check(await Until(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true),
+            "Round-two pairing publishes the claude home sidebar");
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } t
+            && t.ModelOptions.Select(o => o.Id).SequenceEqual(new[] { "fable", "opus", "sonnet" })
+            && t.Offset == 50 && t.Messages.Count == 200),
+            "Take streams model options with a 200-message tail at offset 50");
+        await viewer.RequestEarlierAsync(gid);
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } t
+            && t.Offset == 0 && t.Messages.Count == 250 && t.Messages.First().Text == "m0"),
+            "Earlier page merges ahead to the full 250 messages");
+        var png = Utf8("fake-png-bytes");
+        var hash = await viewer.UploadBlobAsync(gid, png);
+        Check(hash == DeviceBlob.Sha256Hex(png), "Blob upload returns the content hash");
+        var attached = await viewer.SendRemoteCommandAsync(gid,
+            new DeviceCommandPayload { Action = "submit", Text = "with image", BlobHashes = new[] { hash! } });
+        Check(attached is not null && await Until(() =>
+            homeSession.Messages.Any(m => m.Role == "user" && m.Text == "with image" && m.Images.Count == 1 && File.Exists(m.Images[0]))
+            && viewer.Unresolved(gid).Count == 0), "Submit with an uploaded hash stores home-side bytes once");
+        var failed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "submit", Text = "  " });
+        Check(failed is not null && await Until(() =>
+            viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == failed)?.Outcome == "failed"),
+            "Empty submit records a failed outbox entry with content retained");
+        var record = viewer.Unresolved(gid).First(r => r.CommandID == failed);
+        await viewer.QueryOutboxAsync(record);
+        Check(await Until(() =>
+            viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == failed)?.Detail == "Home record lookup."),
+            "Outbox query returns the authoritative home outcome");
+        Check(await viewer.RetryOutboxAsync(record)
+            && await Until(() => viewer.Unresolved(gid).Any(r => r.CommandID == failed && r.Outcome == "failed")),
+            "Retry resends under the original ID and home dedups the replay");
+        viewer.DiscardOutbox(failed.Value);
+        Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");
+    }
+    finally
+    {
+        Directory.Delete(homeRoot, recursive: true);
+        Directory.Delete(viewerRoot, recursive: true);
+    }
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
 

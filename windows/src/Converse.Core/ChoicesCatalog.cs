@@ -12,6 +12,22 @@ public sealed record ChoiceOption(string Id, string Label);
 
 public static class ChoicesCatalog
 {
+    // Model aliases verified against real `claude --help` ("an alias for the
+    // latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full
+    // name"). Muse models arrive live from MSP and Codex has no published
+    // static list, so those engines offer nothing static (Mac parity) and the
+    // editable combo covers typed IDs everywhere.
+    public static IReadOnlyList<ChoiceOption> ModelsFor(string engine) => engine switch
+    {
+        "claude" => new[]
+        {
+            new ChoiceOption("fable", "fable"),
+            new ChoiceOption("opus", "opus"),
+            new ChoiceOption("sonnet", "sonnet"),
+        },
+        _ => Array.Empty<ChoiceOption>(),
+    };
+
     public static IReadOnlyList<ChoiceOption> AccessFor(string engine) => engine switch
     {
         "claude" => new[]

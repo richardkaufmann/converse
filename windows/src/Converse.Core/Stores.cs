@@ -172,6 +172,14 @@ public sealed class DeviceOutboxStore
         Save();
     }
     public void Remove(Guid commandId) { Records.RemoveAll(r => r.CommandID == commandId); Save(); }
+    // Resend under the original ID keeps the payload; only the lease epoch
+    // and pending state move forward. Home dedups replays by ID.
+    public void Requeue(Guid commandId, ulong epoch)
+    {
+        var record = Records.FirstOrDefault(r => r.CommandID == commandId);
+        if (record is null) return;
+        record.Epoch = epoch; record.Outcome = "pending"; record.Detail = null; Save();
+    }
     private void Save() => AtomicJson.Write(_file, Records);
 }
 
