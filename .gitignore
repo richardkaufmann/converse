@@ -5,3 +5,8 @@ Converse.iconset/
 .build/
 
 __pycache__/
+
+# Generated offline Help artifact (scripts/build-help.py); build output only.
+windows/src/Converse.Windows/Assets/help.json
+bin/
+obj/

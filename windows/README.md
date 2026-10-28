@@ -52,7 +52,20 @@ cannot drift from `Sources/Device*.swift`.
    advertise/browse for `_converse._tcp` (`Mdns.cs`, hints only); WinUI 3
    sidebar + pane + composer bound to the real store/service,
    manual-address connect, discovered-device rows, Pair/Approve dialog.
-4. **Next:** three-pane workspace placements, blue-draft native editor
+4. **Sidebar pin + Setup/Help (done, core tested):** pin immediately left
+   of the Conversations header collapses the sidebar to zero width and
+   restores the last user width (drag the divider; clamped to half the
+   window; persisted in `window-layout.json`). Collapse is layout only —
+   it never parks a session or releases a lease — and a restore pin stays
+   with the transcript. Setup lives under the **Converse** menu (CLI
+   presence + data folder); **Help > Converse Help** is searchable offline
+   documentation rendered from the shared versioned artifact generated at
+   build time by `scripts/build-help.py` from the tracked `README.md`
+   (schema 1: `{schemaVersion, appVersion, sourceCommit, topics[{id,
+   title, markdown, plainText}]}`; generated `Assets/help.json` is not
+   checked in). `Converse.Core/Help.cs` loads/searches it identically for
+   any future host.
+5. **Next:** three-pane workspace placements, blue-draft native editor
    parity, DPAPI identity protection in the app layer, sleep/wake,
    signed MSIX packaging (`windows/packaging/Package.appxmanifest`).
 
@@ -62,6 +75,11 @@ cannot drift from `Sources/Device*.swift`.
 dotnet run --project windows/src/Converse.Core.Tests
 dotnet build windows/src/Converse.Windows -c Release
 ```
+
+The app build regenerates offline Help from `README.md` when Python is on
+PATH (`python scripts/build-help.py --out
+windows/src/Converse.Windows/Assets/help.json`); without Python the build
+still succeeds and Help states plainly that content is not included.
 
 The core test runner is a console app with `PASS:`/`FAIL:` lines mirroring
 `Sources/DeviceSyncTests.swift`, including the external cacophony Noise
@@ -78,5 +96,6 @@ skeleton in `src/Converse.Windows` is authored for first compile on the PC.
 - `%LocalAppData%\Converse\sessions.json`, `Attachments\`, `devices.json`,
   `device-commands.json`, `device-outbox.json`, `device-drafts.json`,
   `device-sync.json` — same filenames and semantics as macOS.
+  `window-layout.json` holds only sidebar pin/width intent.
 - Device private key: DPAPI-protected blob in the same folder (app layer);
   test/core file storage is plain and must never ship as the app default.

@@ -10,7 +10,11 @@ public sealed partial class MainWindow : Window
 {
     private readonly SessionStore _store;
     private readonly DeviceSyncService _devices;
+    private readonly string _dataFolder;
+    private readonly SidebarLayoutState _layout;
     private SidebarRowItem? _selected;
+    private bool _draggingSplitter;
+    private double _windowWidth = 1200;
 
     public MainWindow()
     {
@@ -18,13 +22,174 @@ public sealed partial class MainWindow : Window
         Title = "Converse";
         var folder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
+        _dataFolder = folder;
+        _layout = SidebarLayoutState.Load(folder);
         _store = new SessionStore(folder);
         _devices = new DeviceSyncService(folder, _store);
         _devices.PairingConfirmation = ShowPairingPromptAsync;
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
         _ = _devices.StartAsync();
+        ApplyLayout();
         Refresh();
+    }
+
+    // Sidebar pin (shared contract): collapse/restore is layout only. It never
+    // parks a session, releases a lease, or touches the device service.
+    private void ApplyLayout()
+    {
+        var width = _layout.EffectiveWidth(_windowWidth);
+        SidebarColumn.Width = new GridLength(width);
+        SplitterColumn.Width = new GridLength(_layout.Collapsed ? 0 : 4);
+        SidebarPanel.Visibility = _layout.Collapsed ? Visibility.Collapsed : Visibility.Visible;
+        Splitter.Visibility = _layout.Collapsed ? Visibility.Collapsed : Visibility.Visible;
+        RestorePin.Visibility = _layout.Collapsed ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnPinClick(object sender, RoutedEventArgs e)
+    {
+        _layout.Toggle();
+        _layout.Save(_dataFolder);
+        ApplyLayout();
+    }
+
+    private void OnRootSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        _windowWidth = e.NewSize.Width;
+        if (!_layout.Collapsed && !_draggingSplitter) ApplyLayout();
+    }
+
+    private void OnSplitterPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _draggingSplitter = true;
+        Splitter.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void OnSplitterMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_draggingSplitter || Content is not FrameworkElement root) return;
+        var x = e.GetCurrentPoint(root).Position.X;
+        SidebarColumn.Width = new GridLength(SidebarLayoutState.ClampWidth(x, _windowWidth));
+    }
+
+    private void OnSplitterReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_draggingSplitter) return;
+        _draggingSplitter = false;
+        Splitter.ReleasePointerCapture(e.Pointer);
+        _layout.RecordUserWidth(SidebarColumn.Width.Value, _windowWidth);
+        _layout.Save(_dataFolder);
+        ApplyLayout();
+    }
+
+    // Converse > Setup (moved out of Help on every platform): assistants,
+    // CLI presence, and the data folder. Help is searchable documentation only.
+    private async void OnSetupClick(object sender, RoutedEventArgs e)
+    {
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Converse runs the Muse, Claude Code, and Codex CLIs installed on this PC. "
+                 + "Install and sign in to each CLI separately; credentials stay in the CLI stores. "
+                 + "Creating a session sends no prompt.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        foreach (var entry in _store.Entries)
+        {
+            var found = FindOnPath(entry.Command);
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"{entry.Name} — command “{entry.Command}” · folder {entry.Directory} · "
+                     + (found is null ? "CLI not found on PATH" : "CLI available: " + found),
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Conversations, drafts, and device pairing state live in " + _dataFolder + ". "
+                 + "Use New session to start, and Help > Converse Help for searchable documentation.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        var dialog = new ContentDialog
+        {
+            Title = "Setup",
+            Content = new ScrollViewer { Content = panel },
+            CloseButtonText = "Done",
+            XamlRoot = Content.XamlRoot,
+        };
+        await dialog.ShowAsync();
+    }
+
+    private static string? FindOnPath(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        if (File.Exists(command)) return command;
+        var extensions = new[] { "", ".exe", ".cmd", ".bat" };
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+            foreach (var ext in extensions)
+            {
+                var candidate = Path.Combine(dir.Trim(), command + ext);
+                if (File.Exists(candidate)) return candidate;
+            }
+        return null;
+    }
+
+    // Help > Converse Help: offline, versioned artifact generated from the
+    // tracked README by scripts/build-help.py (Assets/help.json). Search is a
+    // case-insensitive substring over topic titles and plain text.
+    private async void OnHelpClick(object sender, RoutedEventArgs e)
+    {
+        var help = HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "Assets", "help.json"))
+                   ?? HelpDocument.TryLoadFile(Path.Combine(AppContext.BaseDirectory, "help.json"));
+        var search = new TextBox { PlaceholderText = "Search help…" };
+        var topics = new ListView { SelectionMode = ListViewSelectionMode.Single, Height = 140 };
+        var body = new TextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        var version = new TextBlock
+        {
+            Text = help is null
+                ? "Help content is generated at build time from README.md (scripts/build-help.py); this build does not include it yet."
+                : $"Converse Help · version {help.AppVersion} · source {help.Source} @{help.SourceCommit}",
+            TextWrapping = TextWrapping.Wrap,
+        };
+        void ShowTopic(HelpTopic? topic) => body.Text = topic is null ? "" : RenderMarkdownPlain(topic.Markdown);
+        void Refill()
+        {
+            var results = help?.Search(search.Text) ?? Array.Empty<HelpTopic>();
+            topics.ItemsSource = results.Select(t => t.Title).ToList();
+            ShowTopic(results.FirstOrDefault());
+        }
+        search.TextChanged += (_, _) => Refill();
+        topics.SelectionChanged += (_, _) =>
+        {
+            var results = help?.Search(search.Text) ?? Array.Empty<HelpTopic>();
+            if (topics.SelectedIndex >= 0 && topics.SelectedIndex < results.Count) ShowTopic(results[topics.SelectedIndex]);
+        };
+        Refill();
+        var panel = new StackPanel { Spacing = 8, Width = 640 };
+        panel.Children.Add(version);
+        panel.Children.Add(search);
+        panel.Children.Add(topics);
+        panel.Children.Add(new ScrollViewer { Content = body, Height = 320 });
+        var dialog = new ContentDialog
+        {
+            Title = "Converse Help",
+            Content = panel,
+            CloseButtonText = "Close",
+            XamlRoot = Content.XamlRoot,
+        };
+        await dialog.ShowAsync();
+    }
+
+    // Minimal native rendering adapter for the shared markdown subset:
+    // keep paragraph structure, drop emphasis/code markers, links become labels.
+    private static string RenderMarkdownPlain(string markdown)
+    {
+        var text = System.Text.RegularExpressions.Regex.Replace(markdown, @"\[([^\]]+)\]\([^)]*\)", "$1");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"!\[[^\]]*\]\([^)]*\)", "");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"^#{1,6}\s*", "",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        return text.Replace("**", "").Replace("`", "").Trim();
     }
 
     private async Task<bool> ShowPairingPromptAsync(PairingPrompt prompt)

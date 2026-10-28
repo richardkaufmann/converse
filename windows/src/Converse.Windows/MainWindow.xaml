@@ -7,67 +7,99 @@
     mc:Ignorable="d"
     Title="Converse">
     <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="340"/>
-            <ColumnDefinition Width="*"/>
-        </Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-            <ListView x:Name="Sidebar" Grid.Row="0" SelectionMode="Single" SelectionChanged="OnSidebarSelection">
-                <ListView.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Padding="4,3">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                                <Button Content="P" Click="OnParkClick" Tag="{Binding}"/>
-                                <Button Content="1" Click="OnTakeClick" Tag="{Binding}"/>
-                                <Button Content="2" Click="OnTakeClick" Tag="{Binding}"/>
-                                <Button Content="3" Click="OnTakeClick" Tag="{Binding}"/>
-                            </StackPanel>
-                        </Grid>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
-            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Padding="8">
-                <Button Content="New session" Click="OnNewSessionClick"/>
-                <Button Content="Connect…" Click="OnConnectClick"/>
-            </StackPanel>
-        </Grid>
-        <Grid Grid.Column="1">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-            <TextBlock x:Name="PaneTitle" Grid.Row="0" Margin="12,8" FontWeight="SemiBold" Text="No conversation selected"/>
-            <ListView x:Name="Messages" Grid.Row="1" SelectionMode="None">
-                <ListView.ItemTemplate>
-                    <DataTemplate>
-                        <TextBlock Text="{Binding}" TextWrapping="Wrap" IsTextSelectionEnabled="True" Margin="12,4"/>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
-            <Grid Grid.Row="2" Padding="8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBox x:Name="Composer" Grid.Column="0" AcceptsReturn="True" TextWrapping="Wrap"
-                         PreviewKeyDown="OnComposerKeyDown"
-                         PlaceholderText="Message… Return sends · Ctrl+Return for newline"/>
-                <Button Grid.Column="1" Content="Stop" Margin="6,0,0,0" Click="OnStopClick"/>
-                <Button Grid.Column="2" Content="Send" Margin="6,0,0,0" Click="OnSendClick"/>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <MenuBar Grid.Row="0">
+            <MenuBarItem Title="Converse">
+                <MenuFlyoutItem Text="Setup" Click="OnSetupClick"/>
+                <MenuFlyoutItem Text="Connect to Other Converses…" Click="OnConnectClick"/>
+                <MenuFlyoutSeparator/>
+                <MenuFlyoutItem Text="New session" Click="OnNewSessionClick"/>
+            </MenuBarItem>
+            <MenuBarItem Title="Help">
+                <MenuFlyoutItem Text="Converse Help" Click="OnHelpClick"/>
+            </MenuBarItem>
+        </MenuBar>
+        <Grid Grid.Row="1" SizeChanged="OnRootSizeChanged">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="SidebarColumn" Width="340"/>
+                <ColumnDefinition x:Name="SplitterColumn" Width="4"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid x:Name="SidebarPanel" Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6" Padding="8,8,8,4" VerticalAlignment="Center">
+                    <!-- Pin immediately left of the Conversation header: collapse/restore is layout only. -->
+                    <Button x:Name="CollapsePin" Content="Pin" Click="OnPinClick"
+                            ToolTipService.ToolTip="Collapse sidebar (sessions and leases are unaffected)"/>
+                    <TextBlock Text="Conversations" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+                <ListView x:Name="Sidebar" Grid.Row="1" SelectionMode="Single" SelectionChanged="OnSidebarSelection">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Padding="4,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                    <Button Content="P" Click="OnParkClick" Tag="{Binding}"/>
+                                    <Button Content="1" Click="OnTakeClick" Tag="{Binding}"/>
+                                    <Button Content="2" Click="OnTakeClick" Tag="{Binding}"/>
+                                    <Button Content="3" Click="OnTakeClick" Tag="{Binding}"/>
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Padding="8">
+                    <Button Content="New session" Click="OnNewSessionClick"/>
+                    <Button Content="Connect…" Click="OnConnectClick"/>
+                </StackPanel>
+            </Grid>
+            <Border x:Name="Splitter" Grid.Column="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    PointerPressed="OnSplitterPressed" PointerMoved="OnSplitterMoved" PointerReleased="OnSplitterReleased"/>
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="8,6" VerticalAlignment="Center">
+                    <!-- Restore pin stays reachable with the transcript when the sidebar is collapsed. -->
+                    <Button x:Name="RestorePin" Content="Pin" Click="OnPinClick" Visibility="Collapsed"
+                            ToolTipService.ToolTip="Restore sidebar at its previous width"/>
+                    <TextBlock x:Name="PaneTitle" FontWeight="SemiBold" Text="No conversation selected" VerticalAlignment="Center"/>
+                </StackPanel>
+                <ListView x:Name="Messages" Grid.Row="1" SelectionMode="None">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" TextWrapping="Wrap" IsTextSelectionEnabled="True" Margin="12,4"/>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <Grid Grid.Row="2" Padding="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="Composer" Grid.Column="0" AcceptsReturn="True" TextWrapping="Wrap"
+                             PreviewKeyDown="OnComposerKeyDown"
+                             PlaceholderText="Message… Return sends · Ctrl+Return for newline"/>
+                    <Button Grid.Column="1" Content="Stop" Margin="6,0,0,0" Click="OnStopClick"/>
+                    <Button Grid.Column="2" Content="Send" Margin="6,0,0,0" Click="OnSendClick"/>
+                </Grid>
             </Grid>
         </Grid>
     </Grid>

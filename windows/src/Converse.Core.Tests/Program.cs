@@ -259,6 +259,49 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(first == "_converse._tcp.local" && second == "Mac._converse._tcp.local", "mDNS names decode with compression pointers");
 }
 
+// Help artifact: generated schema loads, search matches titles + body, bad schema fails closed.
+{
+    var json = "{\"schemaVersion\":1,\"appVersion\":\"0.4.3\",\"sourceCommit\":\"abc1234\",\"source\":\"README.md\",\"topics\":["
+        + "{\"id\":\"overview\",\"title\":\"Converse\",\"markdown\":\"Intro\",\"plainText\":\"Manage conversations\"},"
+        + "{\"id\":\"connect-two-macs\",\"title\":\"Connect two Macs\",\"markdown\":\"Pairing steps\",\"plainText\":\"Compare all 8 groups\"}]}";
+    var help = HelpDocument.Load(json);
+    Check(help.Topics.Count == 2 && help.AppVersion == "0.4.3" && help.Topic("connect-two-macs")?.Title == "Connect two Macs",
+        "Help artifact loads with versioned topics");
+    Check(help.Search("8 GROUPS").Count == 1 && help.Search("macs").Count == 1 && help.Search("").Count == 2 && help.Search("nonexistent-term").Count == 0,
+        "Help search is case-insensitive over titles and plain text");
+    var rejected = false;
+    try { HelpDocument.Load("{\"schemaVersion\":99,\"topics\":[]}"); } catch (InvalidDataException) { rejected = true; }
+    Check(rejected, "Help loader rejects unsupported schema versions");
+    // Generated artifact, when present next to the test runner or in the app Assets, must load.
+    var candidates = new[]
+    {
+        Path.Combine(AppContext.BaseDirectory, "help.json"),
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Converse.Windows", "Assets", "help.json")),
+    };
+    var generated = candidates.Select(HelpDocument.TryLoadFile).FirstOrDefault(d => d is not null);
+    if (generated is not null)
+        Check(generated.Topics.Count >= 10 && generated.Topic("overview") is not null,
+            "Generated README Help artifact loads with overview topic");
+}
+
+// Sidebar pin layout: toggle collapses to zero, restore returns user width clamped to half window.
+{
+    var layout = new SidebarLayoutState();
+    layout.RecordUserWidth(420, 1200);
+    Check(layout.EffectiveWidth(1200) == 420, "Sidebar remembers user width");
+    Check(layout.Toggle() && layout.EffectiveWidth(1200) == 0, "Sidebar pin collapses to zero width");
+    Check(!layout.Toggle() && layout.EffectiveWidth(1200) == 420, "Sidebar pin restores previous user width");
+    Check(layout.EffectiveWidth(600) == 300, "Sidebar restore clamps to half a narrow window");
+    layout.RecordUserWidth(80, 1200);
+    Check(layout.ExpandedWidth == SidebarLayoutState.MinWidth, "Sidebar width has a usable minimum");
+    var dir = Directory.CreateTempSubdirectory("converse-layout-").FullName;
+    layout.Collapsed = true;
+    layout.Save(dir);
+    var reloaded = SidebarLayoutState.Load(dir);
+    Check(reloaded.Collapsed && reloaded.ExpandedWidth == SidebarLayoutState.MinWidth,
+        "Sidebar layout persists collapsed state and width");
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
 

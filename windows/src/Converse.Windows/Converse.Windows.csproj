@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- Unpackaged WinUI 3. Build on Windows 11 with the .NET 8 SDK:
-       dotnet build windows/src/Converse.App -c Release -->
+       dotnet build windows/src/Converse.Windows -c Release -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
@@ -25,4 +25,21 @@
   <ItemGroup>
     <ProjectReference Include="../Converse.Core/Converse.Core.csproj" />
   </ItemGroup>
+  <!-- Offline Help: generated at build time from the tracked README by the
+       shared scripts/build-help.py (never checked in). The Exec is
+       best-effort so a machine without Python still builds; Help then shows
+       an explicit not-included notice instead of stale content. -->
+  <Target Name="GenerateHelp" BeforeTargets="AssignTargetPaths">
+    <Exec Command="python &quot;$(MSBuildProjectDirectory)\..\..\..\scripts\build-help.py&quot; --out &quot;$(MSBuildProjectDirectory)\Assets\help.json&quot;"
+          IgnoreExitCode="true" ContinueOnError="true" />
+    <Exec Command="py &quot;$(MSBuildProjectDirectory)\..\..\..\scripts\build-help.py&quot; --out &quot;$(MSBuildProjectDirectory)\Assets\help.json&quot;"
+          Condition="!Exists('$(MSBuildProjectDirectory)\Assets\help.json')"
+          IgnoreExitCode="true" ContinueOnError="true" />
+    <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\Assets\help.json')">
+      <Content Include="$(MSBuildProjectDirectory)\Assets\help.json">
+        <Link>Assets\help.json</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
 </Project>
