@@ -24,6 +24,15 @@ struct MarkdownText {
         }
         return output
     }
+    // render() terminates a partial final line with a synthetic newline.
+    // That terminator is not part of the prefix inside the full document.
+    static func renderedOffset(in source: String, utf16Offset: Int) -> Int {
+        let offset = min(max(0, utf16Offset), (source as NSString).length)
+        guard offset > 0 else { return 0 }
+        let prefix = (source as NSString).substring(to: offset)
+        let rendered = render(prefix)
+        return max(0, rendered.length - (prefix.hasSuffix("\n") || !rendered.string.hasSuffix("\n") ? 0 : 1))
+    }
     static func cells(_ line: String) -> [String] {
         var text = line.trimmingCharacters(in: .whitespaces)
         if text.hasPrefix("|") { text.removeFirst() }; if text.hasSuffix("|") { text.removeLast() }

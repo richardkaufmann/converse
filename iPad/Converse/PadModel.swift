@@ -1,0 +1,182 @@
+import Combine
+import SwiftUI
+import UIKit
+
+struct PadDraft: Codable {
+    var text = ""
+    var hashes: [String] = []
+    var dirty = false
+    var baseVersion: UInt64 = 0
+    var sentID: UUID?
+    var sentText = ""
+    var sentHashes: [String] = []
+}
+struct PadState: Codable {
+    var placements: [String?] = [nil, nil, nil]
+    var sidebarWidth: Double = 300
+    var sidebarHidden = false
+    var drafts: [String: PadDraft] = [:]
+}
+
+final class PadModel: ObservableObject {
+    let service: DeviceSyncService
+    @Published var state = PadState()
+    @Published var conflicts: Set<String> = []
+    @Published var error = ""
+    @Published var connectShown = false
+    @Published var helpShown = false
+    @Published var lineNumbers = true
+    @Published var focusedPane = 0
+    private var edits: [String: DispatchWorkItem] = [:]
+    private var hydratedEpochs: [String: UInt64] = [:]
+    private var observer: AnyCancellable?
+    var file: URL { service.storageFolder.appendingPathComponent("ipad-scene.json") }
+    init(service: DeviceSyncService = .shared) {
+        self.service = service
+        if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(PadState.self, from: data), saved.placements.count == 3 { state = saved }
+        service.deviceNameOverride = UserDefaults.standard.string(forKey: "deviceName") ?? "Converse iPad"
+        service.isPlaced = { [weak self] id in self?.state.placements.contains(id) == true }
+        service.onRemotePark = { [weak self] id in self?.removePlacement(id) }
+        observer = service.objectWillChange.sink { [weak self] in
+            DispatchQueue.main.async { self?.reconcile(); self?.objectWillChange.send() }
+        }
+    }
+    func persist() {
+        do {
+            try FileManager.default.createDirectory(at: service.storageFolder, withIntermediateDirectories: true)
+            try JSONEncoder().encode(state).write(to: file, options: .atomic)
+        } catch { self.error = "Could not preserve your draft: " + error.localizedDescription }
+    }
+    func assign(_ id: String, pane: Int) {
+        guard (0..<3).contains(pane) else { return }
+        if let old = state.placements[pane], old != id { flush(old); service.releaseRemote(globalID: old) }
+        removePlacement(id)
+        state.placements[pane] = id; focusedPane = pane; persist()
+        service.acquireRemote(globalID: id)
+    }
+    func removePlacement(_ id: String) {
+        for index in state.placements.indices where state.placements[index] == id { state.placements[index] = nil }
+        persist()
+    }
+    func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id) }
+    func draft(_ id: String) -> PadDraft { state.drafts[id] ?? PadDraft() }
+    func edit(_ id: String, text: String) {
+        var draft = draft(id); draft.text = text; draft.dirty = true; state.drafts[id] = draft
+        persist() // Always durable locally, including unacknowledged/offline text.
+        edits[id]?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flush(id) }
+        edits[id] = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+    func flush(_ id: String) {
+        edits.removeValue(forKey: id)?.cancel()
+        guard let draft = state.drafts[id], draft.dirty, !conflicts.contains(id), service.remoteLeases[id] != nil,
+              draft.hashes.allSatisfy({ service.blobReady[$0] == true }) else { return }
+        service.saveDraftAttachments(globalID: id, hashes: draft.hashes)
+        service.sendRemoteDraft(globalID: id, text: draft.text)
+    }
+    func reconcile() {
+        var changed = false
+        for (id, snapshot) in service.remoteTranscripts where service.remoteLeases[id] != nil {
+            var draft = draft(id)
+            let epoch = service.remoteLeases[id]!
+            if hydratedEpochs[id] != epoch {
+                hydratedEpochs[id] = epoch
+                if draft.dirty && (draft.text != snapshot.draft || draft.hashes != (snapshot.draftImageHashes ?? [])) {
+                    conflicts.insert(id)
+                } else {
+                    draft.text = snapshot.draft; draft.hashes = snapshot.draftImageHashes ?? []; draft.dirty = false
+                }
+                draft.baseVersion = snapshot.draftVersion
+                for hash in draft.hashes { service.queryBlob(globalID: id, hash: hash) }
+                changed = true
+            } else if snapshot.draftVersion >= draft.baseVersion {
+                if !draft.dirty && draft.sentID == nil {
+                    if draft.text != snapshot.draft || draft.hashes != (snapshot.draftImageHashes ?? []) {
+                        draft.text = snapshot.draft; draft.hashes = snapshot.draftImageHashes ?? []; changed = true
+                    }
+                } else if draft.text == snapshot.draft && draft.hashes == (snapshot.draftImageHashes ?? []) { draft.dirty = false; changed = true }
+                draft.baseVersion = snapshot.draftVersion
+            }
+            if draft.sentID == nil, let record = pending(id) {
+                draft.sentID = record.commandID; draft.sentText = record.payload.text ?? ""; draft.sentHashes = record.payload.blobHashes; changed = true
+            }
+            if let sent = draft.sentID, service.completedCommands.contains(sent) {
+                if draft.text == draft.sentText { draft.text = "" }
+                if draft.hashes == draft.sentHashes { draft.hashes = [] }
+                draft.sentID = nil; draft.dirty = true
+                state.drafts[id] = draft; changed = true
+                flush(id)
+            }
+            state.drafts[id] = draft
+            for hash in snapshot.messages.flatMap(\.imageHashes) + draft.hashes where service.blobCache[hash] == nil { service.fetchBlob(globalID: id, hash: hash) }
+        }
+        if service.pairingPrompt != nil { connectShown = true }
+        if changed { persist() }
+    }
+    func resolveDraft(_ id: String, keepLocal: Bool) {
+        if !keepLocal, let snapshot = service.remoteTranscripts[id] {
+            var draft = draft(id); draft.text = snapshot.draft; draft.hashes = snapshot.draftImageHashes ?? []; draft.dirty = false; state.drafts[id] = draft
+        }
+        conflicts.remove(id); persist(); if keepLocal { flush(id) }
+    }
+    func pending(_ id: String) -> DeviceOutboxRecord? { service.unresolved(globalID: id).first { $0.payload.action == "submit" } }
+    func canControl(_ id: String) -> Bool { service.remoteLeases[id] != nil && !service.remoteOffline.contains(id) }
+    func canSend(_ id: String) -> Bool {
+        let draft = draft(id)
+        return canControl(id) && !conflicts.contains(id) && pending(id) == nil && (!draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.hashes.isEmpty) && draft.hashes.allSatisfy { service.blobReady[$0] == true }
+    }
+    func send(_ id: String) {
+        guard canSend(id) else { return }
+        flush(id)
+        var draft = draft(id)
+        if let command = service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "submit", text: draft.text, blobHashes: draft.hashes)) {
+            draft.sentID = command; draft.sentText = draft.text; draft.sentHashes = draft.hashes; state.drafts[id] = draft; persist()
+        }
+    }
+    func discard(_ record: DeviceOutboxRecord, restore: Bool) {
+        var draft = draft(record.sessionID)
+        if restore { draft.text = record.payload.text ?? ""; draft.hashes = record.payload.blobHashes; draft.dirty = true }
+        draft.sentID = nil; state.drafts[record.sessionID] = draft
+        service.discardOutbox(record); persist()
+    }
+    func attach(_ id: String, data: Data) {
+        guard canControl(id) else { return }
+        do {
+            let png = try PadImage.normalize(data)
+            guard let hash = service.sendRemoteBlob(globalID: id, data: png) else { throw CocoaError(.fileWriteUnknown) }
+            let folder = service.storageFolder.appendingPathComponent("RemoteCache")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let file = folder.appendingPathComponent(hash + ".png"); try png.write(to: file, options: .atomic)
+            service.blobCache[hash] = file
+            var draft = draft(id); draft.hashes.append(hash); draft.dirty = true; state.drafts[id] = draft; persist()
+            service.saveDraftAttachments(globalID: id, hashes: draft.hashes)
+        } catch { self.error = "Could not attach image: " + error.localizedDescription }
+    }
+    func clearImages(_ id: String) {
+        var draft = draft(id); draft.hashes = []; draft.dirty = true; state.drafts[id] = draft; persist(); flush(id)
+    }
+    func background() {
+        let task = UIApplication.shared.beginBackgroundTask(withName: "Preserve Converse drafts")
+        for id in state.drafts.keys { flush(id) }; persist(); service.suspendViewer(); hydratedEpochs = [:]
+        if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+    }
+    func foreground() { service.resumeViewer() } // No acquire: never steals on foreground.
+}
+
+enum PadImage {
+    static let byteLimit = 8_000_000
+    static func normalize(_ data: Data) throws -> Data {
+        guard data.count <= 50_000_000, let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        var dimension: CGFloat = min(2048, max(image.size.width, image.size.height))
+        while dimension > 0 {
+            let ratio = dimension / max(image.size.width, image.size.height)
+            let size = CGSize(width: max(1, floor(image.size.width * ratio)), height: max(1, floor(image.size.height * ratio)))
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = false
+            let result = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+            if let png = result.pngData(), png.count <= byteLimit { return png }
+            if dimension <= 128 { break }
+            dimension = max(128, dimension * 0.7)
+        }
+        throw CocoaError(.fileReadTooLarge)
+    }
+}

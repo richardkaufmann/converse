@@ -14,7 +14,7 @@ Default accounts reuse existing CLI logins. Add another account for a separate
 sign-in. Sign in opens Terminal; finish its browser/terminal flow and return here.
 Muse reuses its own CLI login. Choose an assistant and account to create a first
 session; creating it sends no prompt. Check CLI confirms installation, not sign-in.
-Help > Setup Guide reopens setup. Set up later skips it. Existing accounts,
+Converse > Setup reopens setup. Set up later skips it. Existing accounts,
 commands, sessions and drafts survive upgrades unchanged.
 
 USE

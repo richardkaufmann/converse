@@ -7,7 +7,13 @@ struct DeviceIdentity {
     var publicKey: Data { privateKey.publicKey.rawRepresentation }
     var deviceID: String { DeviceBlob.sha256Hex(publicKey) }
     var fingerprint: String { String(deviceID.prefix(16)).uppercased() }
-    var deviceName: String { Host.current().localizedName ?? "Mac" }
+    var deviceName: String {
+        #if os(macOS)
+        return Host.current().localizedName ?? "Mac"
+        #else
+        return "iPad"
+        #endif
+    }
 
     // Keychain in the app. Isolated test data uses a 0600 file to avoid prompts.
     // Fail closed: only errSecItemNotFound may create a key. Any other

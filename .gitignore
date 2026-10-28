@@ -11,3 +11,10 @@ __pycache__/
 *.p8
 *.cer
 *.certSigningRequest
+
+# Xcode user state and local iPad distribution artifacts.
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.mobileprovision
+*.xcarchive/

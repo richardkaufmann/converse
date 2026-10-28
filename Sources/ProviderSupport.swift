@@ -338,7 +338,7 @@ struct PendingMessagesView: View {
             }
             ForEach(session.pending) { prompt in
                 HStack {
-                    Text(prompt.text.isEmpty ? "Attached image" : prompt.text).lineLimit(1)
+                    Text(prompt.text.isEmpty ? "Attached image" : prompt.text).foregroundStyle(TranscriptStyle.isTraffic(prompt.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
                     Button("Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }

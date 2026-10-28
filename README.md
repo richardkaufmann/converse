@@ -23,13 +23,13 @@ Version **0.4.4** and later releases are **Developer ID signed and notarized by 
 
 ## First launch
 
-The setup guide opens automatically for a new installation:
+Setup opens automatically for a new installation:
 
 1. Choose one or more assistants, follow the official CLI installation links, and use **Check CLI** to verify installation. Choose an existing project folder (or keep `~` for your home folder).
 2. Reuse an existing CLI login or use **Sign in…** to open the selected CLI’s login flow in Terminal. Add another named Codex or Claude account for an independent sign-in. Muse reuses its CLI login. Credentials stay in the CLI’s stores.
 3. Choose an assistant and account, then **Create session**. Creating a session sends no prompt. Type at the bottom and press Return to begin.
 
-Use **+** for more sessions, **Settings → Models & sessions** for additional sign-ins, and **Help → Setup Guide** to revisit setup. **Set up later** skips the guide. Existing users keep their saved accounts, commands, sessions and drafts; upgrades do not rerun first-launch setup or replace local settings. CLI version checks confirm installation, not sign-in or subscription access.
+Use **+** for more sessions, **Settings → Models & sessions** for additional sign-ins, and **Converse → Setup** to revisit setup. **Set up later** skips the guide. Existing users keep their saved accounts, commands, sessions and drafts; upgrades do not rerun first-launch setup or replace local settings. CLI version checks confirm installation, not sign-in or subscription access.
 
 ## Use
 
@@ -45,7 +45,13 @@ The sidebar has one heading per assistant: **Claude**, **Codex**, and **Muse**. 
 - The **line numbers** checkbox controls a narrow logical-line gutter. It defaults on and remembers your choice. Prompts have a very light blue gutter; responses have a white gutter.
 - Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
 
-The sidebar gutter can be dragged down to 200 points wide. Below 360 points, the model column and its header disappear; narrowing further truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons visible. The full model and title remain in row hover details.
+The sidebar gutter can be dragged down to 160 points wide. Below 360 points, the model column and its header disappear; narrowing further truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons visible. The full model and title remain in row hover details.
+
+Click the **pin** to the left of **Conversation** to hide the sidebar. A small restore pin stays at the top-left of the conversation area. Click it again to restore your previous sidebar width, constrained by the space available. Each window has its own pin state. Hiding the sidebar leaves its displayed conversations and work running.
+
+**Converse → Setup…** reopens account and session setup. **Help → Converse Help…** opens searchable, selectable documentation built from this README and bundled with the app for offline use. Search matches topic titles and article text and highlights matches. Command-F focuses Help search when the Help window is active.
+
+Prompts and responses have a blank line between them. In light mode prompt line-number blocks have a light blue background; responses have white. In dark mode the gutter is black, with blue prompt numbers and white response numbers. JSON blobs and switchboard/tell traffic use orange.
 
 Each sidebar row shows a spinning rainbow beachball while the assistant is working (blank when idle or waiting for you), the conversation title, its model, and **P 1 2 3 X**. Hover over the row for account email, profile, model, effort, access, state, current window/pane, usage, quota, directory, queued input, draft/attachment counts and session IDs. Identity comes from the account's CLI: Codex account metadata, Claude initialization/auth status, or Muse's non-secret auth identity fields. The observation time is included; missing identity and probe failures are stated explicitly. Hover refreshes stale metadata without submitting a model prompt.
 
@@ -73,7 +79,7 @@ Choose **Converse → Connect to Other Converses…** on one Mac and click **Con
 
 Paired Macs share their session directories. Remote panes use the same selectable transcript editor as local panes: type a blue draft at the bottom, press Return to send or queue on home, or Command-Return for a newline. Queued messages offer explicit Inject controls. Use **1**, **2**, or **3** beside a remote session to move its display to this Mac; its tools, logins, and working folder stay on its home Mac. **P** parks the display. Pairing permits history access and prompts that can execute tools on the other Mac, so pair only devices you trust. **Forget Device** removes remembered trust. If a home disconnects, its work continues there and remote sends are disabled; take the session again after reconnecting. Uncertain sends require **Check home** rather than automatic replay.
 
-This is a two-Mac preview; real LAN pairing, sleep/wake, and takeover testing remain part of the preview. Windows and iPad clients are future work.
+Mac-to-Mac connection is available as a preview. The [iPad viewer/controller](iPad/README.md) builds from source and uses this same protocol; TestFlight provisioning and physical-device checks are still required. The Windows port is being developed separately.
 
 ## Export transcripts
 
@@ -176,7 +182,7 @@ Muse approval and question dialogs are supported. Approval buttons use the serve
 
 Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
 
-The current app is macOS-only. Mac-to-Mac session viewing is available as a preview; Windows and iPad clients are future work.
+The downloadable release is the Mac app. An [iPad viewer/controller](iPad/README.md) is available in source; its TestFlight distribution and physical-device verification are pending. The Windows port is being developed separately.
 
 See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); the vector-drawn sneaker icon is generated by [Sources/Icon.swift](Sources/Icon.swift).
 

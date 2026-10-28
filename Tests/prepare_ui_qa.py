@@ -33,6 +33,7 @@ for directory in [contents / "MacOS", contents / "Resources", work, data, accoun
 shutil.copy2(built / "Contents/MacOS/Converse", contents / "MacOS/ConverseNative")
 shutil.copy2(built / "Contents/Resources/Converse.icns", contents / "Resources/Converse.icns")
 shutil.copytree(built / "Contents/Resources/ProviderLogos", contents / "Resources/ProviderLogos", dirs_exist_ok=True)
+shutil.copytree(built / "Contents/Resources/Help", contents / "Resources/Help", dirs_exist_ok=True)
 shutil.copy2(repo / "Tests/provider_fixture.py", root / "provider_fixture.py")
 info = plistlib.loads((built / "Contents/Info.plist").read_bytes())
 info.update(CFBundleIdentifier="local.converse.IsolatedQA", CFBundleName="Converse Isolated QA", CFBundleDisplayName="Converse Isolated QA")

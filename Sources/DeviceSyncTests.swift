@@ -167,7 +167,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             func frame(_ data: Data) -> Data { var f = Data(count: 2); f.withUnsafeMutableBytes { $0.storeBytes(of: UInt16(data.count).bigEndian, as: UInt16.self) }; return f + data }
             func drain() {
                 while buffer.count >= 2 {
-                    let len = buffer.prefix(2).withUnsafeBytes { Int(UInt16(bigEndian: $0.load(as: UInt16.self))) }
+                    let len = buffer.prefix(2).reduce(0) { ($0 << 8) | Int($1) }
                     guard buffer.count >= 2 + len else { return }
                     messages.append(Data(buffer.dropFirst(2).prefix(len))); buffer.removeFirst(2 + len)
                 }
@@ -345,4 +345,37 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
     } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
     let global = DeviceGlobalID(home: "home-abc", session: sessionID)
     check(DeviceGlobalID(global.string) == global && DeviceGlobalID(home: "home-xyz", session: sessionID) != global, "Global session IDs stay unique per home and parse exactly")
+}
+
+
+// Short-lived, opt-in Mac home for simulator interoperability. No CLI process
+// runs: the fixture is deliberately busy so submitted text enters its queue.
+func runIPadHomeFixture() {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          let folderPath = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"], folderPath.contains("converse-ipad-interop.") else { exit(2) }
+    let folder = URL(fileURLWithPath: folderPath)
+    let service = DeviceSyncService.shared
+    do {
+        try service.configureForTesting(folder: folder)
+        service.deviceNameOverride = "Isolated Mac home"
+        let session = Store.shared.create(Entry(name: "Fixture", command: "/usr/bin/false", directory: folderPath, engine: "codex"))
+        session.title = "iPad interop fixture"; session.draft = "home draft"
+        session.messages = [Message(role: "assistant", text: "Mac home fixture")]
+        session.busy = true; session.status = "Working in isolated fixture"
+        try service.startNetworkForTesting()
+        let deadline = Date().addingTimeInterval(120)
+        var announced = false
+        while Date() < deadline {
+            _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            if !announced, let port = service.testingPort {
+                try Data(String(port).utf8).write(to: folder.appendingPathComponent("port"), options: .atomic); announced = true
+            }
+            if let prompt = service.pairingPrompt {
+                session.messages = [Message(role: "assistant", text: "Mac home fixture · verified code " + prompt.code)]
+                service.confirmPairing()
+            }
+            if FileManager.default.fileExists(atPath: folder.appendingPathComponent("stop").path) { break }
+        }
+        service.suspendViewer()
+    } catch { fputs("iPad interop fixture failed: " + error.localizedDescription + "\n", stderr); exit(1) }
 }

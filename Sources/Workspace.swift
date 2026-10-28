@@ -51,7 +51,7 @@ final class Workspace: ObservableObject {
         let count = placements.values.filter { $0.windowID == windowID }.count
         return Self.minimumWidth(paneCount: count)
     }
-    static func minimumWidth(paneCount: Int) -> CGFloat { max(760, PaneSizing.minimumSidebar + max(310, CGFloat(paneCount) * PaneSizing.minimumPane) + 12) }
+    static func minimumWidth(paneCount: Int, sidebarCollapsed: Bool = false) -> CGFloat { max(760, (sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.minimumSidebar) + max(310, CGFloat(paneCount) * PaneSizing.minimumPane) + 12) }
     func placementDescription(_ sessionID: UUID) -> String {
         guard let location = placements[sessionID] else { return "Parked · not displayed in any window" }
         return "\(names[location.windowID] ?? "Converse") · pane \(location.pane)"
@@ -63,6 +63,7 @@ final class WindowState: ObservableObject {
     @Published var settings = false
     @Published var deviceConnect = false
     @Published var setup = false
+    @Published var sidebarCollapsed = false
     @Published var sessionSetup: SessionSetupRequest? = nil
     @Published var closingSessionID: UUID? = nil
     init(workspace: Workspace = .shared) { self.workspace = workspace; workspace.register(id) }
@@ -204,7 +205,7 @@ struct WorkspacePanes: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var store = Store.shared
     @ObservedObject var devices = DeviceSyncService.shared
-    let state: WindowState
+    @ObservedObject var state: WindowState
     var occupied: [Int] { (1...3).filter { workspace.session(in: state.id, pane: $0) != nil } }
     var body: some View {
         Group {
@@ -218,9 +219,9 @@ struct WorkspacePanes: View {
                 HSplitView {
                     ForEach(occupied, id: \.self) { pane in
                         if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
-                            SessionPane(session: session, workspace: workspace, pane: pane)
+                            SessionPane(session: session, workspace: workspace, pane: pane, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         } else if let id = workspace.session(in: state.id, pane: pane), let globalID = devices.globalID(forPlacement: id) {
-                            RemotePane(globalID: globalID, pane: pane, workspace: workspace)
+                            RemotePane(globalID: globalID, pane: pane, workspace: workspace, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         }
                     }
                 }
@@ -244,6 +245,7 @@ struct SessionPane: View {
     @ObservedObject var session: Session
     @ObservedObject var workspace: Workspace
     let pane: Int
+    var leadingInset: CGFloat = 0
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -252,7 +254,7 @@ struct SessionPane: View {
                 Text(session.title).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")
-            }.padding(.horizontal, 8).padding(.vertical, 4)
+            }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             Conversation(session: session).id(session.id)
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)

@@ -4,6 +4,7 @@ enum PaneSizing {
     static let modelColumnThreshold: CGFloat = 360
     static let compactSidebar: CGFloat = modelColumnThreshold - 1
     static let minimumSidebar: CGFloat = 160
+    static let collapsedSidebar: CGFloat = 0
     static let minimumPane: CGFloat = 220
     static func split(in view: NSView?) -> NSSplitView? {
         guard let view else { return nil }
@@ -65,6 +66,7 @@ final class WindowPaneLayout {
     private(set) var paneCount = -1
     private(set) var preferredSidebar: CGFloat = 340
     private(set) var weights: [CGFloat] = []
+    private(set) var sidebarCollapsed = false
     private var referenceWidth: CGFloat
     private var sidebarLimit: CGFloat = 480
     private var lastWidth: CGFloat
@@ -72,6 +74,8 @@ final class WindowPaneLayout {
     private var applying = false
     private var pending = false
     private var revision = 0
+    private var lastExpandedSidebar: CGFloat = 340
+    private var restoreSidebarCap: CGFloat?
     private var observers: [NSObjectProtocol] = []
     init(window: NSWindow) {
         self.window = window
@@ -83,13 +87,29 @@ final class WindowPaneLayout {
         })
     }
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
-    func setPaneCount(_ count: Int) {
-        guard count != paneCount, let window else { return }
-        if count > paneCount && paneCount >= 0 { sidebarLimit = min(sidebarLimit, PaneSizing.compactSidebar) }
-        paneCount = count; weights = Array(repeating: 1, count: count)
-        window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: count), height: 540)
+    func setSidebarCollapsed(_ collapsed: Bool) {
+        guard collapsed != sidebarCollapsed else { return }
+        if collapsed, let window { lastExpandedSidebar = PaneSizing.sidebarWidth(in: window) ?? preferredSidebar }
+        sidebarCollapsed = collapsed
+        updateMinimumWidth()
+        if !collapsed, let window {
+            let width = window.contentRect(forFrameRect: window.frame).width
+            preferredSidebar = lastExpandedSidebar; referenceWidth = width; sidebarLimit = 480
+            restoreSidebarCap = width / 2
+        }
+        schedule()
+    }
+    private func updateMinimumWidth() {
+        guard let window else { return }
+        window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed), height: 540)
         let size = window.contentRect(forFrameRect: window.frame).size
         if size.width < window.contentMinSize.width { window.setContentSize(NSSize(width: window.contentMinSize.width, height: max(540, size.height))) }
+    }
+    func setPaneCount(_ count: Int) {
+        guard count != paneCount, window != nil else { return }
+        if count > paneCount && paneCount >= 0 && !sidebarCollapsed { sidebarLimit = min(sidebarLimit, PaneSizing.compactSidebar) }
+        paneCount = count; weights = Array(repeating: 1, count: count)
+        updateMinimumWidth()
         schedule()
     }
     private func windowResized() {
@@ -102,7 +122,7 @@ final class WindowPaneLayout {
         guard abs(width - lastWidth) < 0.5 else { schedule(); return }
         guard outer.arrangedSubviews.count == 2 else { return }
         let sidebar = outer.arrangedSubviews[0].frame.width
-        if abs(sidebar - lastSidebar) > 0.5 {
+        if !sidebarCollapsed && abs(sidebar - lastSidebar) > 0.5 {
             preferredSidebar = sidebar; referenceWidth = width; sidebarLimit = 480
             schedule(); return
         }
@@ -117,7 +137,7 @@ final class WindowPaneLayout {
     private func arrange(_ token: Int, attempts: Int) {
         guard token == revision, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
-        let sidebar = PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: sidebarLimit, paneCount: max(0, paneCount))
+        let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
         applying = true
         let success = PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights)
         applying = false
@@ -125,6 +145,7 @@ final class WindowPaneLayout {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.arrange(token, attempts: attempts - 1) }; return
         }
         lastWidth = width; lastSidebar = PaneSizing.sidebarWidth(in: window) ?? sidebar
+        restoreSidebarCap = nil
         pending = false
     }
 }
@@ -161,5 +182,14 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     let left = PaneSizing.sidebarWidth(in: window) ?? 0
     inner.addArrangedSubview(NSView()); layout.setPaneCount(3); settle()
     check((sizes().max()! - sizes().min()!) < 2 && (PaneSizing.sidebarWidth(in: window) ?? 999) <= PaneSizing.compactSidebar + 1 && left > PaneSizing.compactSidebar, "Adding a pane balances all panes and compacts a wide sidebar")
+    let expandedSidebar = PaneSizing.sidebarWidth(in: window) ?? 0
+    let savedPreference = layout.preferredSidebar, savedWeights = layout.weights
+    layout.setSidebarCollapsed(true); settle()
+    check(abs((PaneSizing.sidebarWidth(in: window) ?? 999) - PaneSizing.collapsedSidebar) < 2 && layout.preferredSidebar == savedPreference, "The pin minimizes the native sidebar without overwriting its preferred width")
+    window.setContentSize(NSSize(width: 900, height: 700)); settle()
+    window.setContentSize(NSSize(width: 1800, height: 700)); settle()
+    check(abs((PaneSizing.sidebarWidth(in: window) ?? 999) - PaneSizing.collapsedSidebar) < 2 && layout.weights == savedWeights, "A collapsed sidebar stays minimized during resizing and preserves session-pane proportions")
+    layout.setSidebarCollapsed(false); settle()
+    check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - expandedSidebar) < 2, "The pin restores the previous native sidebar width after resizing")
     window.close()
 }

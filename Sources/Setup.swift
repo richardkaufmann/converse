@@ -92,7 +92,7 @@ struct SetupView: View {
             Divider()
             HStack {
                 Button("Set up later") { store.setupCompleted = true; store.save(); state.setup = false }
-                    .help("You can reopen this guide from Help → Setup Guide")
+                    .help("You can reopen Setup from Converse → Setup")
                 Spacer()
                 if step > 0 { Button("Back") { step -= 1 } }
                 if step < 2 {
@@ -185,7 +185,7 @@ struct SetupView: View {
             }
             Text("Creating a session sends no model prompt. Type at the bottom and press Return when you are ready.").font(.callout)
             Text("Use + for more sessions. Use 1, 2 or 3 to display a session in a pane, or P to park it. The account, model, effort and access controls are at the bottom of each conversation. Changing a login affects only that session and preserves its conversation.").font(.callout)
-            Text("Your conversations and drafts are saved on this Mac. Settings manages additional accounts and assistants; Help → Setup Guide reopens these steps.").font(.callout)
+            Text("Your conversations and drafts are saved on this Mac. Settings manages additional accounts and assistants; Converse → Setup reopens these steps.").font(.callout)
         }
     }
     private func chooseSessionDefaults() {

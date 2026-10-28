@@ -35,8 +35,8 @@ enum DeviceFrame {
     static func encode(_ envelope: DeviceEnvelope) throws -> Data {
         let body = try JSONEncoder().encode(envelope)
         guard body.count <= maxPayload else { throw DeviceFrameError.oversize }
-        var frame = Data(count: 4)
-        frame.withUnsafeMutableBytes { $0.storeBytes(of: UInt32(body.count).bigEndian, as: UInt32.self) }
+        let count = UInt32(body.count)
+        let frame = Data([UInt8((count >> 24) & 255), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255)])
         return frame + body
     }
 }
@@ -47,7 +47,7 @@ struct DeviceFrameDecoder {
         buffer.append(chunk)
         var envelopes: [DeviceEnvelope] = []
         while buffer.count >= 4 {
-            let length = buffer.prefix(4).withUnsafeBytes { Int(UInt32(bigEndian: $0.load(as: UInt32.self))) }
+            let length = buffer.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
             guard length > 0, length <= DeviceFrame.maxPayload else { throw DeviceFrameError.oversize }
             guard buffer.count >= 4 + length else { break }
             let body = Data(buffer.dropFirst(4).prefix(length))

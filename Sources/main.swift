@@ -101,6 +101,7 @@ final class Session: ObservableObject, Identifiable {
     var statusDetails = ""
     var lastOutputAt: TimeInterval?
     var streamedText = false
+    var claudeTextBlockPending = false
     var process: Process?
     var muse: MuseConnection?
     @Published var requests: [MuseRequest] = []
@@ -283,7 +284,7 @@ final class Store: ObservableObject {
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         var args: [String] = []
         updateExplicitStatus(s)
@@ -755,7 +756,7 @@ final class Store: ObservableObject {
             activity(line, session: s); saveSoon(); return
         }
         updateReportedStatus(obj, session: s)
-        var text: String?; var replace = false; var delta = false
+        var text: String?; var replace = false; var delta = false; var startsTextBlock = false
         let type = obj["type"] as? String ?? ""
         if s.entry.engine == "muse" {
             let payload = obj["payload"] as? [String: Any] ?? [:]
@@ -774,8 +775,18 @@ final class Store: ObservableObject {
             }
         } else if s.entry.engine == "claude" {
             if let sid = obj["session_id"] as? String { s.remoteID = sid }
-            if type == "stream_event", let event = obj["event"] as? [String: Any], let chunk = event["delta"] as? [String: Any], chunk["type"] as? String == "text_delta" {
-                text = chunk["text"] as? String; delta = true; s.streamedText = true
+            if type == "stream_event", let event = obj["event"] as? [String: Any] {
+                if event["type"] as? String == "content_block_start", let block = event["content_block"] as? [String: Any], block["type"] as? String == "text" {
+                    s.claudeTextBlockPending = true
+                    if let initial = block["text"] as? String, !initial.isEmpty {
+                        text = initial; delta = true; startsTextBlock = true
+                        s.claudeTextBlockPending = false; s.streamedText = true
+                    }
+                }
+                if let chunk = event["delta"] as? [String: Any], chunk["type"] as? String == "text_delta", let value = chunk["text"] as? String, !value.isEmpty {
+                    text = value; delta = true; startsTextBlock = s.claudeTextBlockPending
+                    s.claudeTextBlockPending = false; s.streamedText = true
+                }
             }
             if type == "assistant", let message = obj["message"] as? [String: Any], let content = message["content"] as? [[String: Any]] {
                 for block in content {
@@ -799,7 +810,7 @@ final class Store: ObservableObject {
             let visible = Store.visibleText(raw)
             let old = s.messages[i].text
             if !visible.isEmpty {
-                let separator = old.isEmpty || delta ? "" : "\n"
+                let separator = old.isEmpty ? "" : startsTextBlock && !old.hasSuffix("\n") ? "\n\n" : delta ? "" : "\n"
                 let next = replace ? visible : old + separator + visible
                 if next != old {
                     var offset = replace ? 0 : ((old + separator) as NSString).length
@@ -859,6 +870,14 @@ struct Transcript: NSViewRepresentable {
         }
     }
 }
+enum TranscriptPalette {
+    static let promptBackground = NSColor(red: 212.0 / 255, green: 231.0 / 255, blue: 1, alpha: 1)
+    static let trafficBackground = NSColor(red: 1, green: 0.89, blue: 0.76, alpha: 1)
+    static let traffic = NSColor(name: "ConverseTraffic") { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(red: 1, green: 0.70, blue: 0.36, alpha: 1) : NSColor(red: 0.65, green: 0.27, blue: 0, alpha: 1)
+    }
+    static func draft(_ source: String) -> NSColor { TranscriptStyle.isTraffic(source) ? traffic : .systemBlue }
+}
 final class LineNumberRuler: NSRulerView {
     override var isFlipped: Bool { true }
     weak var text: ConversationTextView?
@@ -875,14 +894,15 @@ final class LineNumberRuler: NSRulerView {
     override func draw(_ dirtyRect: NSRect) { drawHashMarksAndLabels(in: dirtyRect) }
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let text, let layout = text.layoutManager, let container = text.textContainer else { return }
-        NSColor.white.setFill(); bounds.fill()
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        (dark ? NSColor.black : NSColor.white).setFill(); bounds.fill()
         layout.ensureLayout(for: container)
         let string = text.string as NSString
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
         // Shade the entire visual block, including wrapped lines and images,
         // rather than only the first numbered line of a submitted prompt.
-        NSColor(red: 224.0 / 255, green: 238.0 / 255, blue: 1, alpha: 1).setFill()
-        for block in text.userBlocks where block.length > 0 && block.location < string.length {
+        if !dark { TranscriptPalette.promptBackground.setFill() }
+        for block in (dark ? [] : text.userBlocks) where block.length > 0 && block.location < string.length {
             let end = min(NSMaxRange(block), string.length)
             let first = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
             let last = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: end - 1), effectiveRange: nil)
@@ -892,10 +912,21 @@ final class LineNumberRuler: NSRulerView {
         let start = min(text.inputStart, string.length)
         let first = start < string.length ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: start), effectiveRange: nil) : layout.extraLineFragmentRect
         let last = string.length > start && !text.string.hasSuffix("\n") ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: string.length - 1), effectiveRange: nil) : layout.extraLineFragmentRect
-        NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: max(18, last.maxY - first.minY)).intersection(bounds).fill()
+        if !dark {
+            let draftTraffic = TranscriptStyle.isTraffic(string.substring(from: start))
+            (draftTraffic ? TranscriptPalette.trafficBackground : TranscriptPalette.promptBackground).setFill()
+            NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: max(18, last.maxY - first.minY)).intersection(bounds).fill()
+            TranscriptPalette.trafficBackground.setFill()
+            for block in text.trafficBlocks where block.length > 0 && block.location < string.length {
+                let end = min(NSMaxRange(block), string.length)
+                let a = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
+                let b = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: end - 1), effectiveRange: nil)
+                NSRect(x: bounds.minX, y: origin + a.minY, width: bounds.width, height: b.maxY - a.minY).intersection(bounds).fill()
+            }
+        }
         NSColor.gray.withAlphaComponent(0.25).setStroke()
         let edge = NSBezierPath(); edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY)); edge.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY)); edge.lineWidth = 0.5; edge.stroke()
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor(white: 0.475, alpha: 1)]
+        let baseAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
         var offset = 0; var number = 1; var previousY: CGFloat?
         repeat {
             let lineRect: NSRect
@@ -903,7 +934,10 @@ final class LineNumberRuler: NSRulerView {
                 let glyph = layout.glyphIndexForCharacter(at: offset)
                 lineRect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             } else { lineRect = layout.extraLineFragmentRect }
-            let label = NSAttributedString(string: String(number), attributes: attrs)
+            let prompt = offset >= text.inputStart || text.userBlocks.contains { NSLocationInRange(offset, $0) }
+            let traffic = text.trafficBlocks.contains { NSLocationInRange(offset, $0) } || (offset >= text.inputStart && TranscriptStyle.isTraffic(string.substring(from: min(text.inputStart, string.length))))
+            let color: NSColor = traffic ? TranscriptPalette.traffic : dark ? (prompt ? NSColor.systemBlue : NSColor.white) : NSColor(white: 0.475, alpha: 1)
+            let label = NSAttributedString(string: String(number), attributes: baseAttrs.merging([.foregroundColor: color]) { _, new in new })
             let y = origin + lineRect.minY + max(0, (lineRect.height - label.size().height) / 2)
             let newRow = previousY == nil || abs(lineRect.minY - previousY!) > 0.5
             if newRow && y + lineRect.height >= bounds.minY && y <= bounds.maxY {
@@ -937,8 +971,9 @@ final class ConversationTextView: NSTextView {
     func focusInput() {
         window?.makeFirstResponder(self)
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
-        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.systemBlue]
-        insertionPointColor = .systemBlue
+        let color = TranscriptPalette.draft((string as NSString).substring(from: min(inputStart, (string as NSString).length)))
+        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: color]
+        insertionPointColor = color
         scrollRangeToVisible(selectedRange())
     }
     func isInputWhitespace(_ point: NSPoint) -> Bool {
@@ -999,6 +1034,7 @@ final class ConversationTextView: NSTextView {
         return menu
     }
     var userBlocks: [NSRange] = []
+    var trafficBlocks: [NSRange] = []
     func refreshDecorations() { needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -1133,15 +1169,15 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
-            text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.systemBlue]
+            text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft)]
         }
         func textDidChange(_ notification: Notification) {
             guard !rendering, let text = notification.object as? ConversationTextView else { return }
             session.draft = (text.string as NSString).substring(from: min(text.inputStart, (text.string as NSString).length))
             let length = (text.string as NSString).length
-            if length > text.inputStart { text.textStorage?.addAttribute(.foregroundColor, value: NSColor.systemBlue, range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
+            if length > text.inputStart { text.textStorage?.addAttribute(.foregroundColor, value: TranscriptPalette.draft(session.draft), range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
             text.refreshDecorations()
-            text.typingAttributes[.foregroundColor] = NSColor.systemBlue
+            text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
             text.scrollRangeToVisible(NSRange(location: length, length: 0))
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
@@ -1179,6 +1215,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 document.append(NSAttributedString(attachment: attachment)); append("\n")
             }
             text.userBlocks = []
+            text.trafficBlocks = []
             text.copyBlocks = []
             for message in session.messages where message.role != "activity" && (!message.text.isEmpty || !message.images.isEmpty) {
                 let visible = Store.visibleText(message.text)
@@ -1190,7 +1227,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 } else { body = NSMutableAttributedString(string: visible + "\n", attributes: base) }
                 for mark in (message.delays ?? []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
-                    let renderedOffset = message.role == "assistant" && sourceOffset > 0 ? MarkdownText.render((visible as NSString).substring(to: sourceOffset)).length : sourceOffset
+                    let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
                     let at = min(renderedOffset, body.length)
                     body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
                 }
@@ -1200,7 +1237,10 @@ struct ScrollingConversation: NSViewRepresentable {
                         if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
                     }
                 }
+                if document.length > 0 { append("\n") }
                 let start = document.length
+                let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
+                if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
                 if message.role == "user" {
                     body.addAttribute(.font, value: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 16), toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
                 }
@@ -1210,11 +1250,13 @@ struct ScrollingConversation: NSViewRepresentable {
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }
+                if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
+            if document.length > 0 { append("\n") }
             for path in session.attachments { image(path) }
             text.inputStart = document.length
-            let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.systemBlue]
+            let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: TranscriptPalette.draft(session.draft)]
             append(session.draft, draftStyle)
             text.textStorage?.setAttributedString(document)
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
@@ -1319,9 +1361,12 @@ struct RootView: View {
     var body: some View {
         HSplitView {
             GeometryReader { sidebar in
+            if state.sidebarCollapsed {
+                Color.clear
+            } else {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Color.clear.frame(width: 12, height: 1)
+                    sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     if sidebar.size.width >= PaneSizing.modelColumnThreshold { Text("Model").frame(width: 105, alignment: .leading) }
                     Text("Placement").frame(width: 98, alignment: .leading)
@@ -1354,9 +1399,22 @@ struct RootView: View {
                     Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
                 }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
-            }.frame(minWidth: PaneSizing.minimumSidebar, idealWidth: 340, maxWidth: 480)
-            WorkspacePanes(workspace: workspace, state: state)
+            }
+            }.frame(minWidth: state.sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.minimumSidebar, idealWidth: state.sidebarCollapsed ? PaneSizing.collapsedSidebar : 340, maxWidth: state.sidebarCollapsed ? PaneSizing.collapsedSidebar : 480)
+            WorkspacePanes(workspace: workspace, state: state).overlay(alignment: .topLeading) {
+                if state.sidebarCollapsed { sidebarPin.padding(.leading, 6).padding(.top, 3) }
+            }
         }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.deviceConnect) { DeviceConnectView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
+    }
+    private var sidebarPin: some View {
+        Button {
+            state.sidebarCollapsed.toggle()
+            AppDelegate.shared?.paneLayouts[state.id]?.setSidebarCollapsed(state.sidebarCollapsed)
+        } label: {
+            Image(systemName: state.sidebarCollapsed ? "pin" : "pin.fill").font(.system(size: 11)).frame(width: 16, height: 20)
+        }.buttonStyle(.plain).foregroundStyle(.secondary)
+            .accessibilityLabel(state.sidebarCollapsed ? "Show conversation sidebar" : "Hide conversation sidebar")
+            .help(state.sidebarCollapsed ? "Show conversations at the previous sidebar width" : "Minimize the conversation sidebar")
     }
 }
 struct SettingsView: View {
@@ -1429,6 +1487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var paneObserver: AnyCancellable?
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
     var transcriptExporter: TranscriptExportController?
+    lazy var helpController = ConverseHelpController()
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -1464,6 +1523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let menu = NSMenu(); let app = NSMenuItem(); menu.addItem(app); let sub = NSMenu(); app.submenu = sub
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
         sub.addItem(withTitle: "Connect to Other Converses…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
@@ -1475,8 +1535,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
-        h.addItem(withTitle: "Setup Guide…", action: #selector(showSetup), keyEquivalent: "")
+        h.addItem(withTitle: "Converse Help…", action: #selector(showConverseHelp), keyEquivalent: "?")
         NSApp.mainMenu = menu
+        NSApp.helpMenu = h
+        NSApp.registerUserInterfaceItemSearchHandler(helpController)
     }
     @objc func showDeviceConnect() {
         if windows.isEmpty { newWindow() }
@@ -1494,6 +1556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
+    @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "A calmer home for your command-line assistants.")]) }
     @objc func newWindow() {
         let state = WindowState()
@@ -1630,7 +1693,7 @@ func selfTest() {
     check(s.draft == "a long editable message", "Native text view accepts typing and saves draft")
     check(native.isInputWhitespace(NSPoint(x: 20, y: 450)), "Blank space below transcript is recognized as input")
     native.setSelectedRange(NSRange(location: 0, length: 0))
-    let blankClick = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 20, y: 450), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+    let blankClick = NSEvent.mouseEvent(with: .leftMouseDown, location: native.convert(NSPoint(x: 20, y: 450), to: nil), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
     native.mouseDown(with: blankClick)
     check(native.selectedRange().location == (native.string as NSString).length, "Clicking blank pane space places the caret at current input")
     native.insertText(" after click", replacementRange: native.selectedRange())
@@ -1705,7 +1768,23 @@ func selfTest() {
     check(exact.messages[0].delays?.first?.seconds == 10 && Store.delayLabel(10) == "[10 sec]", "Delay threshold includes exactly ten seconds")
     let timedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
     let timedCoordinator = ScrollingConversation.Coordinator(exact); timedCoordinator.render(timedView)
-    check(timedView.string == "[10 sec] Answer\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
+    check(timedView.string == "[10 sec] Answer\n\n" && timedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.gray, "Delay prefix is grey and tool output is hidden")
+    let glued = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
+    let gluedID = UUID(); glued.messages = [Message(id: gluedID, role: "assistant", text: "tracked.")]
+    glued.lastOutputAt = ProcessInfo.processInfo.systemUptime - 35
+    store.consume(#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"While"}}}"#, session: glued, responseID: gluedID)
+    let gluedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(glued).render(gluedView)
+    check(gluedView.string.contains("tracked.[35 sec] While") && !gluedView.string.contains("tracked.W["), "Stored mid-line delay renders before the resumed character, without a phantom prefix newline")
+    store.consume(#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read"}}}"#, session: glued, responseID: gluedID)
+    store.consume(#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text","text":""}}}"#, session: glued, responseID: gluedID)
+    glued.lastOutputAt = ProcessInfo.processInfo.systemUptime - 20
+    store.consume(#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Next block"}}}"#, session: glued, responseID: gluedID)
+    store.consume(#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":" continues"}}}"#, session: glued, responseID: gluedID)
+    ScrollingConversation.Coordinator(glued).render(gluedView)
+    check(glued.messages[0].text == "tracked.While\n\nNext block continues" && gluedView.string.contains("\n\n[20 sec] Next block continues"), "Claude text blocks get one separator in storage and delay markers stay at the start of resumed blocks")
+    check(MarkdownText.renderedOffset(in: "plain\nNext", utf16Offset: 6) == 6 && MarkdownText.renderedOffset(in: "plainNext", utf16Offset: 5) == 5 && MarkdownText.renderedOffset(in: "é😀Next", utf16Offset: 3) == 3, "Rendered delay offsets preserve existing newlines and UTF-16 character positions")
+    check(TranscriptStyle.isTraffic(#"{"command":"tell","text":"hi"}"#) && TranscriptStyle.isTraffic("tell Muse hello") && TranscriptStyle.isTraffic("[Converse message from Muse · session test]\nhello") && !TranscriptStyle.isTraffic("Please explain JSON objects") && !TranscriptStyle.isTraffic("{invalid}"), "Orange traffic classification covers JSON, tells and incoming envelopes without recoloring ordinary prose")
     store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
     check(exact.toolStatus.model == "test-model" && exact.toolStatus.effort == "high" && exact.toolStatus.access == "on-request" && exact.toolStatus.usage == "120 in / 30 out", "Status reflects reported model, effort, access and usage")
     let probeConfig: [String: Any] = ["model": "saved-model", "model_reasoning_efforts": ["retained-model": "max"]]
@@ -1926,6 +2005,7 @@ if CommandLine.arguments.contains("--provider-self-test") {
     providerSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }
     print("All provider checks passed"); exit(0)
 }
+if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 let application = NSApplication.shared
 let delegate = AppDelegate()

@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import Foundation
 import Network
@@ -20,7 +21,7 @@ struct PairingPrompt: Identifiable {
     var isInitiator: Bool = true
     var actionLabel: String { isInitiator ? "Pair" : "Approve" }
     var instruction: String {
-        isInitiator ? "Compare all eight code groups with the other Mac, then click Pair here and Approve there." : "The other Mac requested a connection. Compare all eight code groups, then click Approve here and Pair there."
+        isInitiator ? "Compare all eight code groups with the other device, then click Pair here and Approve there." : "The other device requested a connection. Compare all eight code groups, then click Approve here and Pair there."
     }
 }
 
@@ -76,6 +77,21 @@ final class DeviceSyncService: ObservableObject {
     @Published var serviceStatus = "Device sync off"
     @Published var localCodeNote = ""
 
+    // Platform adapters keep the reviewed transport identical on Mac and iPad.
+    var deviceNameOverride: String?
+    var isPlaced: ((String) -> Bool)?
+    var onRemotePark: ((String) -> Void)?
+    @Published var localNetworkDenied = false
+    private var testFolder: URL?
+    var storageFolder: URL {
+        if let testFolder { return testFolder }
+        #if os(macOS)
+        return Store.shared.folder
+        #else
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
+        #endif
+    }
+    private var deviceName: String { deviceNameOverride ?? identity?.deviceName ?? "Converse" }
     private(set) var identity: DeviceIdentity?
     private var trustStore: DeviceTrustStore?
     private var commandStore: DeviceCommandStore?
@@ -106,10 +122,11 @@ final class DeviceSyncService: ObservableObject {
     private var lastSeqByHome: [String: UInt64] = [:]
     private var tickCount = 0
     private var started = false
-    var isTestEnvironment: Bool { ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil }
+    var isTestEnvironment: Bool { ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
 
     // Isolated harness wiring without listener, browser, timers, or Keychain.
     func configureForTesting(folder: URL) throws {
+        testFolder = folder
         identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: false)
         trustStore = try DeviceTrustStore(folder: folder)
         commandStore = try DeviceCommandStore(folder: folder)
@@ -122,11 +139,19 @@ final class DeviceSyncService: ObservableObject {
         started = true
     }
     func adoptPeerForTesting(_ peer: DevicePeer) { peers[peer.id] = peer }
+    var testingPort: UInt16? { listener?.port?.rawValue }
+    func startNetworkForTesting() throws {
+        guard isTestEnvironment, testFolder != nil else { throw CocoaError(.executableNotLoadable) }
+        try startListener(portOverride: .any)
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
+        publishTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.publishSidebarIfChanged() }
+    }
+
     func startIfNeeded() {
         guard !started, !isTestEnvironment else { return }
         started = true
         do {
-            let folder = Store.shared.folder
+            let folder = storageFolder
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)
             commandStore = try DeviceCommandStore(folder: folder)
@@ -151,7 +176,7 @@ final class DeviceSyncService: ObservableObject {
             }
             try startListener()
             startBrowser()
-            serviceStatus = "Listening as " + (identity?.deviceName ?? "Mac")
+            serviceStatus = "Listening as " + (deviceName)
             localCodeNote = "Fingerprint " + (identity?.fingerprint ?? "")
             heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.tick() }
             publishTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.publishSidebarIfChanged() }
@@ -159,12 +184,18 @@ final class DeviceSyncService: ObservableObject {
         } catch { serviceStatus = "Device sync unavailable: " + error.localizedDescription }
     }
 
-    private func startListener() throws {
+    private func startListener(portOverride: NWEndpoint.Port? = nil) throws {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         let requested = ProcessInfo.processInfo.environment["CONVERSE_DEVICE_PORT"].flatMap { Int($0) }.flatMap { (1...65535).contains($0) ? NWEndpoint.Port(rawValue: UInt16($0)) : nil } ?? Self.defaultPort
-        let listener = try NWListener(using: parameters, on: requested)
-        listener.service = NWListener.Service(name: identity?.deviceName, type: Self.serviceType)
+        #if os(macOS)
+        let listenPort = requested
+        #else
+        let listenPort = NWEndpoint.Port.any
+        _ = requested
+        #endif
+        let listener = try NWListener(using: parameters, on: portOverride ?? listenPort)
+        listener.service = NWListener.Service(name: deviceName, type: Self.serviceType)
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state { self?.serviceStatus = "Listen failed: " + error.localizedDescription }
@@ -175,10 +206,23 @@ final class DeviceSyncService: ObservableObject {
     }
     private func startBrowser() {
         let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: NWParameters.tcp)
+        browser.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .waiting(let error), .failed(let error):
+                // TN3179: this specific Bonjour policy error means permission
+                // was denied. Other connectivity failures must not claim that.
+                if case .dns(let code) = error, code == -65570 {
+                    self?.localNetworkDenied = true
+                    self?.serviceStatus = "Local Network access is off. Enable it in Settings to connect."
+                }
+            case .ready: self?.localNetworkDenied = false
+            default: break
+            }
+        }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
             self.discovered = results.compactMap { result in
-                if case .service(let name, _, _, _) = result.endpoint, name != self.identity?.deviceName {
+                if case .service(let name, _, _, _) = result.endpoint, name != self.deviceName {
                     return DiscoveredDevice(name: name, endpoint: result.endpoint)
                 }
                 return nil
@@ -223,7 +267,7 @@ final class DeviceSyncService: ObservableObject {
         }
     }
     private func helloPayload() -> Data {
-        let hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: identity?.deviceName ?? "Mac",
+        let hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development")
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
@@ -237,8 +281,7 @@ final class DeviceSyncService: ObservableObject {
     private func sendRaw(_ peer: DevicePeer, _ message: Data) {
         guard message.count <= 65535 else { disconnect(peer); return }
         if let testSink = peer.testSink { testSink(message); return }
-        var framed = Data(count: 2)
-        framed.withUnsafeMutableBytes { $0.storeBytes(of: UInt16(message.count).bigEndian, as: UInt16.self) }
+        let framed = Data([UInt8((message.count >> 8) & 255), UInt8(message.count & 255)])
         peer.connection.send(content: framed + message, completion: .contentProcessed { [weak self, weak peer] error in
             if error != nil, let peer { self?.disconnect(peer) }
         })
@@ -257,7 +300,7 @@ final class DeviceSyncService: ObservableObject {
     }
     private func drain(_ peer: DevicePeer) {
         while peer.buffer.count >= 2 {
-            let length = peer.buffer.prefix(2).withUnsafeBytes { Int(UInt16(bigEndian: $0.load(as: UInt16.self))) }
+            let length = peer.buffer.prefix(2).reduce(0) { ($0 << 8) | Int($1) }
             guard peer.buffer.count >= 2 + length else { return }
             let message = Data(peer.buffer.dropFirst(2).prefix(length))
             peer.buffer.removeFirst(2 + length)
@@ -313,9 +356,11 @@ extension DeviceSyncService {
                                           code: DeviceSAS.code(keys.handshakeHash),
                                           keyChanged: trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .keyChanged,
                                           nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID), isInitiator: peer.isInitiator)
+            #if os(macOS)
             if !peer.isInitiator, !isTestEnvironment {
                 DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
             }
+            #endif
         }
     }
     func confirmPairing() {
@@ -405,13 +450,14 @@ extension DeviceSyncService {
         }
         // Leases for sessions no longer placed anywhere are released, so a
         // displaced or parked remote pane cannot heartbeat forever.
-        for globalID in Array(remoteLeases.keys) where Workspace.shared.placements[placementID(forGlobal: globalID)] == nil {
+        for globalID in Array(remoteLeases.keys) where !viewerHasPlacement(globalID) {
             releaseRemote(globalID: globalID)
         }
         for (globalID, epoch) in remoteLeases {
             guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { continue }
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseHeartbeat.rawValue, sessionID: globalID, epoch: epoch))
         }
+        #if os(macOS)
         // Async Muse setting changes complete after their accepted ack.
         var stillPending: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID, epoch: UInt64)] = []
         for pending in pendingAsyncAcks {
@@ -430,6 +476,7 @@ extension DeviceSyncService {
         for peer in peers.values where peer.trustedReady {
             for sessionID in Array(peer.leasedSessions) { sendTranscript(to: peer, sessionID: sessionID) }
         }
+        #endif
         if tickCount % 6 == 0 { reconnectTrusted() }
     }
 }
@@ -471,6 +518,7 @@ extension DeviceSyncService {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
         let hash = DeviceBlob.sha256Hex(data); imageHashCache[path] = hash; blobPaths[hash] = path; return hash
     }
+    #if os(macOS)
     private func wireMessage(_ message: Message) -> DeviceWireMessage {
         DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) })
     }
@@ -486,8 +534,10 @@ extension DeviceSyncService {
                                     questionsJSON: questions.flatMap { try? JSONSerialization.data(withJSONObject: $0) })
         }
     }
+    #endif
     private func sidebarPayload() -> DeviceSidebarPayload {
         let home = identity?.deviceID ?? ""
+        #if os(macOS)
         let rows = Store.shared.sessions.map { session in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: session.id).string, sessionID: session.id,
                              title: session.title, assistant: session.entry.name, engine: session.entry.engine,
@@ -496,7 +546,10 @@ extension DeviceSyncService {
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
                              accountName: session.entry.accountName)
         }
-        return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: identity?.deviceName ?? "Mac", homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows)
+        #else
+        let rows: [DeviceSidebarRow] = []
+        #endif
+        return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: deviceName, homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows)
     }
     private func sendSidebar(to peer: DevicePeer) {
         guard let payload = try? JSONEncoder().encode(sidebarPayload()) else { return }
@@ -509,6 +562,7 @@ extension DeviceSyncService {
         lastSidebarJSON = json
         for peer in peers.values where peer.trustedReady { sendSidebar(to: peer) }
     }
+    #if os(macOS)
     private func sendTranscript(to peer: DevicePeer, sessionID: UUID, beforeOffset: Int? = nil) {
         guard let session = Store.shared.sessions.first(where: { $0.id == sessionID }), let home = identity?.deviceID, let leases, let device = peer.hello?.deviceID else { return }
         // Never stream without a current lease for this exact peer and epoch.
@@ -627,6 +681,7 @@ extension DeviceSyncService {
                 detail: "Applied once on home.", epoch: envelope.epoch)
         sendTranscript(to: peer, sessionID: session.id); publishSidebarIfChanged()
     }
+    #endif
 }
 
 extension DeviceSyncService {
@@ -651,6 +706,7 @@ extension DeviceSyncService {
             homes[peerHome] = RemoteHomeState(deviceID: peerHome, deviceName: payload.homeDeviceName, online: true, rows: payload.rows, lastSeen: Date())
             for row in payload.rows { remoteOffline.remove(row.globalID) }
             if let encoded = try? JSONEncoder().encode(homes.values.map { DeviceSidebarPayload(homeDeviceID: $0.deviceID, homeDeviceName: $0.deviceName, homeSeq: 0, rows: $0.rows) }) { stateStore?.saveSidebarCache(encoded) }
+        #if os(macOS)
         case DeviceMessageKind.leaseAcquire.rawValue:
             guard let (session, _) = homeSession(envelope), let leases else { return }
             let result = leases.acquire(session: session.id, device: peerHome)
@@ -671,6 +727,7 @@ extension DeviceSyncService {
             if let (session, _) = homeSession(envelope), let epoch = envelope.epoch {
                 leases?.release(session: session.id, device: peerHome, epoch: epoch); peer.leasedSessions.remove(session.id); publishSidebarIfChanged()
             }
+        #endif
         case DeviceMessageKind.leaseGranted.rawValue:
             guard let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, let epoch = envelope.epoch else { return }
             if pendingTakes[idString] != nil {
@@ -689,7 +746,7 @@ extension DeviceSyncService {
                 pendingTakes.removeValue(forKey: idString)
                 remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString)
                 remoteTranscripts.removeValue(forKey: idString)
-                Workspace.shared.park(placementID(forGlobal: idString))
+                parkViewer(idString)
                 lastOutcome = "Display moved to another device."
             }
         case DeviceMessageKind.transcriptSnapshot.rawValue, DeviceMessageKind.transcriptTail.rawValue:
@@ -729,6 +786,7 @@ extension DeviceSyncService {
                 persistDrafts()
             }
             remoteOffline.remove(payload.globalID)
+        #if os(macOS)
         case DeviceMessageKind.transcriptRequest.rawValue:
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let request = try? JSONDecoder().decode(DeviceTranscriptRequest.self, from: data) else { return }
             guard requireLease(peer, envelope, session) else { return }
@@ -748,6 +806,7 @@ extension DeviceSyncService {
             }
             let ack = try? JSONEncoder().encode(DeviceDraftPayload(version: applied ? draft.version : drafts.version(session: session.id.uuidString), text: session.draft))
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftAck.rawValue, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: ack))
+        #endif
         case DeviceMessageKind.draftAck.rawValue:
             if let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, remoteLeases[idString] == envelope.epoch,
                let data = envelope.payload, let ack = try? JSONDecoder().decode(DeviceDraftPayload.self, from: data) {
@@ -755,6 +814,7 @@ extension DeviceSyncService {
                     draftConflicts[idString] = "Home kept a newer draft (version " + String(ack.version) + "). Your last edit was not applied."
                 } else { draftConflicts.removeValue(forKey: idString) }
             }
+        #if os(macOS)
         case DeviceMessageKind.command.rawValue:
             executeHomeCommand(peer, envelope)
         case DeviceMessageKind.commandQuery.rawValue:
@@ -762,6 +822,7 @@ extension DeviceSyncService {
                 if let record = commandStore.records[commandID], record.origin != peerHome || record.sessionID != envelope.sessionID { return }
                 sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.", epoch: envelope.epoch)
             }
+        #endif
         case DeviceMessageKind.commandAck.rawValue:
             // Bind to authenticated home + exact outbox session. A different
             // paired peer that somehow knows an ID cannot complete it.
@@ -775,6 +836,7 @@ extension DeviceSyncService {
                 if ack.outcome == "completed" { completedCommands.insert(commandID) }
                 if ack.outcome == "rejected" { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
             }
+        #if os(macOS)
         case DeviceMessageKind.blobChunk.rawValue, DeviceMessageKind.blobComplete.rawValue, DeviceMessageKind.blobOffer.rawValue:
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data) else { return }
             guard requireLease(peer, envelope, session) else { return }
@@ -800,6 +862,7 @@ extension DeviceSyncService {
                     sendBlobAck(peer, envelope: envelope, hash: blob.sha256Hex, stored: true, detail: "Stored on home.")
                 } catch { sendBlobAck(peer, envelope: envelope, hash: blob.sha256Hex, stored: false, detail: "Home could not store attachment: " + error.localizedDescription) }
             }
+        #endif
         case DeviceMessageKind.blobAck.rawValue:
             if let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, envelope.epoch == nil || remoteLeases[idString] == envelope.epoch,
                let data = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: data), let hash = ack.detail?.split(separator: "|").first.map(String.init),
@@ -813,6 +876,7 @@ extension DeviceSyncService {
                 }
                 lastOutcome = ack.outcome == "stored" ? "Attachment stored on home." : ("Attachment failed: " + (ack.detail ?? ""))
             }
+        #if os(macOS)
         case DeviceMessageKind.blobRequest.rawValue:
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data) else { return }
             guard requireLease(peer, envelope, session), let path = blobPaths[blob.sha256Hex], let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
@@ -822,6 +886,7 @@ extension DeviceSyncService {
                 let payload = try? JSONEncoder().encode(DeviceBlobPayload(sha256Hex: blob.sha256Hex, size: bytes.count, chunk: chunk, done: offset >= bytes.count))
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.blobData.rawValue, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: payload))
             }
+        #endif
         case DeviceMessageKind.blobData.rawValue:
             guard let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, remoteLeases[idString] == envelope.epoch,
                   let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data), pendingDownloads.contains(blob.sha256Hex) else { return }
@@ -830,7 +895,7 @@ extension DeviceSyncService {
                 if (downloadBuffers[blob.sha256Hex]?.count ?? 0) > DeviceBlob.maxBlob { downloadBuffers.removeValue(forKey: blob.sha256Hex); pendingDownloads.remove(blob.sha256Hex); return }
             }
             if blob.done, let bytes = downloadBuffers[blob.sha256Hex], DeviceBlob.verify(bytes, sha256Hex: blob.sha256Hex) {
-                let dir = Store.shared.folder.appendingPathComponent("RemoteCache")
+                let dir = storageFolder.appendingPathComponent("RemoteCache")
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let file = dir.appendingPathComponent(String(blob.sha256Hex.prefix(16)) + ".png")
                 if (try? bytes.write(to: file, options: .atomic)) != nil { blobCache[blob.sha256Hex] = file }
@@ -867,6 +932,7 @@ extension DeviceSyncService {
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: globalID, epoch: epoch))
         remoteLeases.removeValue(forKey: globalID); leaseBoots.removeValue(forKey: globalID)
     }
+    #if os(macOS)
     func releaseWindow(placements: [UUID: PaneLocation], windowID: UUID) {
         for (placement, location) in placements where location.windowID == windowID {
             if let globalID = globalID(forPlacement: placement) { releaseRemote(globalID: globalID) }
@@ -889,6 +955,7 @@ extension DeviceSyncService {
         }
         publishSidebarIfChanged()
     }
+    #endif
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else {
@@ -956,3 +1023,37 @@ extension DeviceSyncService {
 }
 
 
+
+
+extension DeviceSyncService {
+    private func viewerHasPlacement(_ globalID: String) -> Bool {
+        if let isPlaced { return isPlaced(globalID) }
+        #if os(macOS)
+        return Workspace.shared.placements[placementID(forGlobal: globalID)] != nil
+        #else
+        return false
+        #endif
+    }
+    private func parkViewer(_ globalID: String) {
+        #if os(macOS)
+        Workspace.shared.park(placementID(forGlobal: globalID))
+        #else
+        onRemotePark?(globalID)
+        #endif
+    }
+    // Called while the scene still has a short background assertion. Files
+    // persist synchronously; release is best effort and home TTL is the backstop.
+    func suspendViewer() {
+        persistDrafts()
+        for id in Set(remoteLeases.keys).union(pendingTakes.keys) { releaseRemote(globalID: id) }
+        heartbeatTimer?.invalidate(); publishTimer?.invalidate()
+        heartbeatTimer = nil; publishTimer = nil
+        browser?.cancel(); listener?.cancel(); browser = nil; listener = nil
+        for peer in Array(peers.values) { disconnect(peer) }
+        pairingPrompt = nil
+        started = false
+        serviceStatus = "Disconnected while in background. Take here after reconnecting."
+    }
+    func resumeViewer() { startIfNeeded() }
+    func storedDraft(globalID: String) -> String? { drafts.text(session: globalID) }
+}

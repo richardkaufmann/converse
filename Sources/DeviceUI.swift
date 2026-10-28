@@ -153,6 +153,7 @@ struct RemotePane: View {
     let pane: Int
     @ObservedObject var service = DeviceSyncService.shared
     @ObservedObject var workspace: Workspace
+    var leadingInset: CGFloat = 0
     @ObservedObject var store = Store.shared
     @StateObject private var composer = RemoteComposer()
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
@@ -169,7 +170,7 @@ struct RemotePane: View {
                 Text("on home Mac").font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
-            }.padding(.horizontal, 8).padding(.vertical, 4)
+            }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             HStack {
                 Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -204,7 +205,7 @@ struct RemotePane: View {
                         Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                     }
                     ForEach(pending) { item in
-                        HStack { Text(item.text).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
+                        HStack { Text(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
                     }
                 }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
             }
