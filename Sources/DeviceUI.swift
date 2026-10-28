@@ -108,7 +108,7 @@ struct DeviceSidebarSection: View {
                                          park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                          assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
                     }
-                    if home.rows.isEmpty { Text(home.online ? "No sessions shared yet." : "Offline. Last known sessions kept.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
+                    if home.rows.isEmpty { Text(home.online ? "No sessions available." : "Offline. Last known sessions kept.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
                 }
             }
         }
