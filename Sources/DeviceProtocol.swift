@@ -245,3 +245,8 @@ struct GroupJoinReview: Codable, Identifiable {
     var request: GroupJoinRequest
     var code: String
 }
+
+struct GroupDeviceLabel: Identifiable {
+    var id: String
+    var name: String
+}

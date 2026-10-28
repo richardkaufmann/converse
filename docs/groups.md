@@ -60,7 +60,7 @@ than allowed to bypass the new group boundary.
 DeviceHello adds capability `converse-groups-v1`, optional `group` (definition)
 and `joinGroupID` (the requested destination). The final authenticated handshake
 payload includes the destination even when address-based connection only learns
-it from the responder. Bonjour TXT entries `group`, `name`, and `creator` are
+it from the responder. Bonjour TXT entries `device`, `group`, `name`, and `creator` are
 untrusted discovery hints only; the handshake must match the selected UUID.
 
 All envelopes retain the existing encrypted/framed v1 format:

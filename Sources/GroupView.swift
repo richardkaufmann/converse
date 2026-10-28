@@ -53,7 +53,7 @@ struct ConverseGroupsView: View {
                                         Button("Dissolve", role: .destructive) { confirmDissolve = true }
                                     } else { Button("Join") { service.joinGroup(group) }.disabled(!service.canJoinGroup(group.id)) }
                                 }
-                                ForEach(service.groupDevices(group.id), id: \.self) { device in Text(device).font(.callout).padding(.leading, 16) }
+                                ForEach(service.groupDevices(group.id)) { device in Text(device.name).font(.callout).padding(.leading, 16) }
                                 if service.groupDevices(group.id).isEmpty { Text("No member currently discovered nearby.").font(.caption).foregroundStyle(.secondary) }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
                         }

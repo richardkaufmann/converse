@@ -55,9 +55,10 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         b.confirmPairing()
         pump { b.currentGroup == groupA && a.trusted.count == 1 && b.trusted.count == 1 }
         check(b.currentGroup == groupA && a.trusted.count == 1 && b.trusted.count == 1, "Both Pair confirmations admit one device into the selected group")
+        c.deviceNameOverride = "Groups B" // Two same-named devices must remain distinct.
         c.joinGroupByAddress(host: "127.0.0.1", port: Int(aPort))
-        pump { c.pairingPrompt != nil && b.groupRequests.contains { $0.requesterName == "Groups C" } }
-        guard let promptC = c.pairingPrompt, let requestC = b.groupRequests.first(where: { $0.requesterName == "Groups C" }) else { check(false, "Every existing member sees the new join request"); return }
+        pump { c.pairingPrompt != nil && b.groupRequests.contains { $0.requesterID == c.identity?.deviceID } }
+        guard let promptC = c.pairingPrompt, let requestC = b.groupRequests.first(where: { $0.requesterID == c.identity?.deviceID }) else { check(false, "Every existing member sees the new join request"); return }
         check(a.groupReview == nil && b.groupReview == nil, "Broadcast join requests carry no visible security number before Review")
         b.reviewGroupRequest(requestC)
         pump { b.groupReview != nil }
@@ -80,6 +81,9 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         check(c.remoteLeases[globalID] != nil && c.remoteTranscripts[globalID]?.draft == "Unsent home draft", "Admitted group members retain normal lease and transcript semantics")
         d.acquireRemote(globalID: globalID)
         check(d.remoteLeases[globalID] == nil && d.remoteTranscripts[globalID] == nil, "A device in another group cannot take or receive the session")
+        a.discovered = [DiscoveredDevice(name: "Groups B [" + String(b.identity!.deviceID.prefix(8)) + "]", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: b.testingPort!)!), group: groupA, deviceID: b.identity!.deviceID)]
+        let labels = a.groupDevices(groupA.id)
+        check(labels.count == 3 && Set(labels.map(\.id)).count == 3 && Set(labels.map(\.name)).count == 3, "Group device rows deduplicate discovery by identity and preserve same-named devices")
         // An unsuccessful switch keeps the old group and its trust separate.
         c.joinGroupByAddress(host: "127.0.0.1", port: Int(dPort))
         pump { c.pairingPrompt != nil && !d.groupRequests.isEmpty }

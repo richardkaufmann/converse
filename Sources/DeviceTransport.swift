@@ -8,6 +8,7 @@ struct DiscoveredDevice: Identifiable, Equatable {
     var name: String
     var endpoint: NWEndpoint
     var group: ConverseGroup? = nil
+    var deviceID: String? = nil
     static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.id == b.id }
 }
 
@@ -251,6 +252,8 @@ final class DeviceSyncService: ObservableObject {
             self.discovered = results.compactMap { result in
                 if case .service(let name, _, _, _) = result.endpoint, !name.hasSuffix("[" + String((self.identity?.deviceID ?? "").prefix(8)) + "]") {
                     var group: ConverseGroup?
+                    var deviceID: String?
+                    if case .bonjour(let txt) = result.metadata, case .string(let id) = txt.getEntry(for: "device"), id.count == 64, id.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) { deviceID = id }
                     if case .bonjour(let txt) = result.metadata,
                        case .string(let id) = txt.getEntry(for: "group"),
                        case .string(let label) = txt.getEntry(for: "name"),
@@ -258,7 +261,7 @@ final class DeviceSyncService: ObservableObject {
                         let candidate = ConverseGroup(id: id, name: label, creator: creator)
                         if candidate.valid { group = candidate }
                     }
-                    return DiscoveredDevice(name: name, endpoint: result.endpoint, group: group)
+                    return DiscoveredDevice(name: name, endpoint: result.endpoint, group: group, deviceID: deviceID)
                 }
                 return nil
             }.sorted { $0.name < $1.name }
@@ -1282,8 +1285,8 @@ extension DeviceSyncService {
         trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID && (!groupsEnabled || (currentGroup != nil && $0.groupID == currentGroup?.id)) } ?? []
     }
     private func groupAdvertisement() -> NWListener.Service {
-        var hints: [String: String] = [:]
-        if let group = currentGroup { hints = ["group": group.id, "name": group.name, "creator": group.creator] }
+        var hints: [String: String] = ["device": identity?.deviceID ?? ""]
+        if let group = currentGroup { hints.merge(["group": group.id, "name": group.name, "creator": group.creator]) { _, new in new } }
         return NWListener.Service(name: deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
     }
     private func updateGroupAdvertisement() { listener?.service = groupAdvertisement(); lastSidebarJSON = "" }
@@ -1294,11 +1297,16 @@ extension DeviceSyncService {
         }
         return groups.sorted { ($0.name.localizedLowercase, $0.id) < ($1.name.localizedLowercase, $1.id) }
     }
-    func groupDevices(_ id: String) -> [String] {
-        var names = discovered.filter { $0.group?.id == id }.map(\.name)
-        names += trustStore?.devices.filter { $0.groupID == id && $0.deviceID != identity?.deviceID }.map(\.name) ?? []
-        if currentGroup?.id == id { names.append(deviceName + " (this device)") }
-        return Array(Set(names)).sorted()
+    func groupDevices(_ id: String) -> [GroupDeviceLabel] {
+        let members = trustStore?.devices.filter { $0.groupID == id && $0.deviceID != identity?.deviceID } ?? []
+        var labels: [String: String] = [:]
+        for member in members { labels[member.deviceID] = member.name + " [" + String(member.deviceID.prefix(8)) + "]" }
+        for device in discovered where device.group?.id == id {
+            let key = device.deviceID ?? members.first(where: { device.name.hasSuffix("[" + String($0.deviceID.prefix(8)) + "]") })?.deviceID ?? device.id
+            if labels[key] == nil { labels[key] = device.name }
+        }
+        if currentGroup?.id == id, let identity { labels[identity.deviceID] = deviceName + " (this device)" }
+        return labels.map { GroupDeviceLabel(id: $0.key, name: $0.value) }.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
     }
     func canJoinGroup(_ id: String) -> Bool { discovered.contains { $0.group?.id == id } && currentGroup?.id != id && pairingPrompt == nil }
     func joinGroup(_ group: ConverseGroup) {
