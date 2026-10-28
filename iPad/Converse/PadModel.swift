@@ -81,8 +81,7 @@ final class PadModel: ObservableObject {
         edits.removeValue(forKey: id)?.cancel()
         guard let draft = state.drafts[id], draft.dirty, !conflicts.contains(id), service.remoteLeases[id] != nil,
               draft.hashes.allSatisfy({ service.blobReady[$0] == true }) else { return }
-        service.saveDraftAttachments(globalID: id, hashes: draft.hashes)
-        service.sendRemoteDraft(globalID: id, text: draft.text)
+        service.sendRemoteDraft(globalID: id, text: draft.text, imageHashes: draft.hashes)
     }
     func reconcile() {
         var changed = false

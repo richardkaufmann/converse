@@ -112,10 +112,9 @@ final class ConverseTests: XCTestCase {
             view.insertingNewline = true; view.insertText("\n"); view.insertingNewline = false
             XCTAssertEqual(view.text, "draft\n", "Command-Return inserts exactly one newline")
             XCTAssertEqual(sends, 1)
-            let hardwareReturn = view.keyCommands!.first { $0.input == "\r" && $0.modifierFlags.isEmpty }!
-            view.perform(hardwareReturn.action, with: hardwareReturn)
+            view.hardwareReturn(modifiers: [])
             XCTAssertEqual(sends, 2, "Hardware Return has a direct Send command")
-            view.isEditable = false; view.insertText(key); view.perform(hardwareReturn.action, with: hardwareReturn)
+            view.isEditable = false; view.insertText(key); view.hardwareReturn(modifiers: [])
             XCTAssertEqual(sends, 2, "An offline or read-only pane cannot send")
             XCTAssertEqual(view.text, "draft\n")
         }
@@ -151,6 +150,34 @@ final class ConverseTests: XCTestCase {
         parent.update(view, coordinator: coordinator)
         let after = view.layoutManager.characterIndexForGlyph(at: view.layoutManager.glyphIndex(for: CGPoint(x: 0, y: view.contentOffset.y - view.textContainerInset.top), in: view.textContainer))
         XCTAssertEqual((view.text as NSString).substring(with: NSRange(location: after, length: min(30, view.textStorage.length - after))), visibleText, "Loading earlier history keeps the same text at the top")
+    }
+    func testNativeReplacementAndCommandReturn() {
+        var sends = 0; var edited = ""
+        let parent = PadTranscript(messages: [], draft: "draft", images: [:], editable: true, lineNumbers: true, edit: { edited = $0 }, send: { sends += 1 }, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 300); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+        let commandReturn = view.keyCommands!.first { $0.input == "\r" && $0.modifierFlags == .command }!
+        view.perform(commandReturn.action, with: commandReturn)
+        XCTAssertEqual(view.text, "draft\n", "Dispatch the actual Command-Return selector")
+        XCTAssertEqual(edited, "draft\n", "Command-Return must update the synced draft, not only the native view")
+        XCTAssertEqual(sends, 0)
+        let caret = view.textRange(from: view.endOfDocument, to: view.endOfDocument)!
+        view.replace(caret, withText: "\n\n")
+        XCTAssertEqual(sends, 1, "UIKit replacement of a paragraph break sends once")
+        XCTAssertEqual(view.text, "draft\n", "UIKit replacement must not append blank lines")
+        view.hardwareReturn(modifiers: .shift)
+        XCTAssertEqual(edited, "draft\n\n", "Shift-Return uses the same explicit newline semantics")
+        XCTAssertEqual(sends, 1)
+    }
+    func testToolActivityNeverAppearsInTheConversationDocument() {
+        let parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "user", text: "Show a grasshopper"), DeviceWireMessage(id: UUID(), role: "activity", text: "Using Bash"), DeviceWireMessage(id: UUID(), role: "assistant", text: "Here is the photo"), DeviceWireMessage(id: UUID(), role: "activity", text: "/bin/zsh -lc private-command")], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 300)
+        parent.update(view, coordinator: coordinator)
+        XCTAssertFalse(view.text.contains("Using Bash")); XCTAssertFalse(view.text.contains("private-command"))
+        XCTAssertTrue(view.text.contains("Here is the photo"))
     }
     func testFreshLeasePreservesConflictingRecoveredDraftUntilChoice() throws {
         let service = try service(); let model = PadModel(service: service)

@@ -175,7 +175,7 @@ final class Store: ObservableObject {
             setupCompleted = FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path)
             entries = SetupCatalog.entries
         }
-        for session in sessions { attachIdentity(session) }
+        for session in sessions { attachIdentity(session); importResponseImages(session) }
         if !sessions.isEmpty { save() }
     }
     func attachIdentity(_ session: Session) {
@@ -267,6 +267,7 @@ final class Store: ObservableObject {
         s.draft = draft; s.attachments = attachments; save()
     }
     func finishQueue(_ s: Session, success: Bool) {
+        importResponseImages(s)
         if success && !s.interrupted { processSwitchboard(s) }
         s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
@@ -301,6 +302,9 @@ final class Store: ObservableObject {
         var prompt = text
         if includesLocalContext {
             prompt += "\n\n" + localContext(s, directory: directory)
+            let imageFolder = responseImageFolder(s)
+            try? FileManager.default.createDirectory(at: imageFolder, withIntermediateDirectories: true)
+            prompt += "\n[Converse image output: save images you create or download in " + imageFolder.path + "; include each as ![caption](file:///absolute/path.png) in your reply. Converse displays these in the conversation, including on remote devices. Do not open Preview or another desktop viewer.]"
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {

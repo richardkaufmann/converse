@@ -43,6 +43,7 @@ struct PadRoot: View {
                             Button("Setup…") { model.connectShown = true }
                             Button("Converse Help…") { model.helpShown = true }
                             Divider()
+                            Text("Converse " + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")")
                             Text("Richard Kaufmann")
                             Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!)
                             Link("www.kaoslabs.app", destination: URL(string: "https://www.kaoslabs.app")!)

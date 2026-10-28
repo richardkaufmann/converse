@@ -604,6 +604,7 @@ extension DeviceSyncService {
         guard let session = Store.shared.sessions.first(where: { $0.id == sessionID }), let home = identity?.deviceID, let leases, let device = peer.hello?.deviceID else { return }
         // Never stream without a current lease for this exact peer and epoch.
         guard let holder = leases.holder(session: sessionID), holder.device == device else { peer.leasedSessions.remove(sessionID); return }
+        if !session.busy, Store.shared.importResponseImages(session) { Store.shared.save() }
         let total = session.messages.count
         let end = min(max(beforeOffset ?? total, 0), total)
         let start = max(0, end - 200)
@@ -870,9 +871,17 @@ extension DeviceSyncService {
         case DeviceMessageKind.draftAck.rawValue:
             if let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, remoteLeases[idString] == envelope.epoch,
                let data = envelope.payload, let ack = try? JSONDecoder().decode(DeviceDraftPayload.self, from: data) {
-                if ack.version < drafts.version(session: idString) {
+                let localVersion = drafts.version(session: idString)
+                // Several edits may be in flight. Acknowledging an earlier
+                // one is normal, not rejection of the latest local edit.
+                guard ack.version >= localVersion else { return }
+                if ack.text != drafts.text(session: idString) {
                     draftConflicts[idString] = "Home kept a newer draft (version " + String(ack.version) + "). Your last edit was not applied."
                 } else { draftConflicts.removeValue(forKey: idString) }
+                if ack.version > localVersion {
+                    drafts.adopt(session: idString, version: ack.version, text: drafts.text(session: idString) ?? ack.text)
+                    persistDrafts()
+                }
             }
         #if os(macOS)
         case DeviceMessageKind.command.rawValue:
@@ -1045,13 +1054,15 @@ extension DeviceSyncService {
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }
     func unresolved(globalID: String) -> [DeviceOutboxRecord] { outbox.filter { $0.sessionID == globalID } }
-    func sendRemoteDraft(globalID: String, text: String) {
+    func sendRemoteDraft(globalID: String, text: String, imageHashes: [String]? = nil) {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return }
+        if let imageHashes { draftAttachments[globalID] = imageHashes }
         let version = drafts.bump(session: globalID, text: text); persistDrafts()
         let payload = try? JSONEncoder().encode(DeviceDraftPayload(version: version, text: text, imageHashes: draftAttachments[globalID] ?? []))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftPatch.rawValue, sessionID: globalID, epoch: epoch, payload: payload))
     }
     func saveDraftAttachments(globalID: String, hashes: [String]) {
+        guard (draftAttachments[globalID] ?? []) != hashes else { return }
         draftAttachments[globalID] = hashes; persistDrafts()
         if hashes.allSatisfy({ blobReady[$0] == true }), let text = drafts.text(session: globalID) ?? remoteTranscripts[globalID]?.draft {
             sendRemoteDraft(globalID: globalID, text: text)

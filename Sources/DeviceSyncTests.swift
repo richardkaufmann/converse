@@ -343,6 +343,24 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         var stale = snap; stale.homeSeq = 9; stale.title = "STALE"
         viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 9, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(stale)))
         check(viewer.remoteTranscripts[gid]?.title == "T2", "Viewer harness drops stale-sequence snapshots")
+        viewer.sendRemoteDraft(globalID: gid, text: "first edit")
+        let firstVersion: UInt64 = 6
+        viewer.sendRemoteDraft(globalID: gid, text: "second edit")
+        let secondVersion: UInt64 = 7
+        func draftAck(_ version: UInt64, _ text: String) throws {
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.draftAck.rawValue, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(DeviceDraftPayload(version: version, text: text))))
+        }
+        try draftAck(firstVersion, "first edit")
+        check(viewer.draftConflicts[gid] == nil, "An earlier successful draft acknowledgment is not a conflict with newer typing")
+        try draftAck(secondVersion, "second edit")
+        check(viewer.draftConflicts[gid] == nil, "Current matching draft acknowledgment clears conflict state")
+        try draftAck(secondVersion, "different home text")
+        check(viewer.draftConflicts[gid] != nil, "Same-version divergent draft acknowledgment reports a real conflict")
+        try draftAck(secondVersion + 1, "newer home text")
+        check(viewer.draftConflicts[gid] != nil && viewer.storedDraft(globalID: gid) == "second edit", "A newer conflicting home acknowledgment preserves the local draft")
+        let sentBeforeHints = viewerSent.count
+        viewer.saveDraftAttachments(globalID: gid, hashes: [])
+        check(viewerSent.count == sentBeforeHints, "Unchanged attachment lists never resend an old draft")
         let sentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "New"))
         check(sentID != nil && viewer.unresolved(globalID: gid).count == 1, "Viewer harness persists outgoing command in outbox")
         if let record = viewer.unresolved(globalID: gid).first { viewer.queryOutbox(record) }

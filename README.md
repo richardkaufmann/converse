@@ -42,6 +42,7 @@ The sidebar has one heading per assistant: **Claude**, **Codex**, and **Muse**. 
 - Gaps of ten seconds or more before answer text get grey markers such as `[10 sec]` or `[10.5 minutes]`. Timing starts at Send, then follows visible answer text; hidden tool events do not reset it.
 - Right-click in the transcript for **Copy this prompt** or **Copy this response**, using the exchange under the pointer. Rich-text targets receive formatted text (RTF/HTML), including tables and links; plain-text targets receive the original Markdown. Copies omit delay markers.
 - Paste screenshots with **⌘V**, or attach images with the paperclip. Attachments are saved as PNG files and supplied to the assistant.
+- Images returned by an assistant appear in the conversation and travel to remote panes. Converse asks the assistant to save output images in its session output folder and return Markdown image references. Local output images are copied into bounded PNG attachments; network URLs, code examples and paths outside the permitted output folders are not imported.
 - The **line numbers** checkbox controls a narrow logical-line gutter. It defaults on and remembers your choice. Prompts have a very light blue gutter; responses have a white gutter.
 - Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
 

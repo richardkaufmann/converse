@@ -47,19 +47,55 @@ final class TailTextView: UITextView {
         bringSubviewToFront(gutter); gutter.setNeedsDisplay()
     }
     override var keyCommands: [UIKeyCommand]? {
-        let commands = [UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(submit)),
-                        UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(newline))]
+        let commands = [UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(handleReturnCommand(_:))),
+                        UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(handleReturnCommand(_:)))]
         for command in commands { command.wantsPriorityOverSystemBehavior = true }
         return commands
     }
-    static func isReturn(_ text: String) -> Bool { ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"].contains(text) }
-    @objc private func submit() { if isEditable { send?() } }
-    @objc private func newline() { insertingNewline = true; insertText("\n"); insertingNewline = false }
+    static func isReturn(_ text: String) -> Bool { !text.isEmpty && text.unicodeScalars.allSatisfy { CharacterSet.newlines.contains($0) } }
+    @objc private func handleReturnCommand(_ command: UIKeyCommand) { hardwareReturn(modifiers: command.modifierFlags) }
+    func hardwareReturn(modifiers: UIKeyModifierFlags) {
+        guard isEditable else { return }
+        if markedTextRange != nil { unmarkText(); return }
+        if modifiers.contains(.command) || modifiers.contains(.shift) {
+            let location = max(historyLength, min(selectedRange.location, textStorage.length))
+            let length = min(selectedRange.length, textStorage.length - location)
+            let coordinator = delegate as? PadTranscript.Coordinator
+            coordinator?.updating = true
+            textStorage.replaceCharacters(in: NSRange(location: location, length: length), with: "\n")
+            selectedRange = NSRange(location: location + 1, length: 0)
+            coordinator?.updating = false; coordinator?.textViewDidChange(self)
+        } else { send?() }
+    }
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = presses.filter { press in
+            guard let key = press.key, Self.isReturn(key.charactersIgnoringModifiers) else { return true }
+            hardwareReturn(modifiers: key.modifierFlags); return false
+        }
+        if !remaining.isEmpty { super.pressesBegan(Set(remaining), with: event) }
+    }
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = presses.filter { !Self.isReturn($0.key?.charactersIgnoringModifiers ?? "") }
+        if !remaining.isEmpty { super.pressesEnded(Set(remaining), with: event) }
+    }
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = presses.filter { !Self.isReturn($0.key?.charactersIgnoringModifiers ?? "") }
+        if !remaining.isEmpty { super.pressesCancelled(Set(remaining), with: event) }
+    }
     override func insertText(_ text: String) {
         guard isEditable else { return }
-        if Self.isReturn(text), !insertingNewline, !pastingText { send?(); return }
+        if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
         if selectedRange.location < historyLength { selectedRange = NSRange(location: textStorage.length, length: 0) }
         super.insertText(text)
+    }
+    override func replace(_ range: UITextRange, withText text: String) {
+        guard isEditable else { return }
+        if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
+        if offset(from: beginningOfDocument, to: range.start) < historyLength {
+            selectedRange = NSRange(location: textStorage.length, length: 0)
+            if !text.isEmpty { insertText(text) }; return
+        }
+        super.replace(range, withText: text)
     }
     override func paste(_ sender: Any?) {
         if let image = UIPasteboard.general.image, let data = image.pngData(), let coordinator = delegate as? PadTranscript.Coordinator { coordinator.parent.attach(data); return }
@@ -111,7 +147,8 @@ struct PadTranscript: UIViewRepresentable {
         let leftInset: CGFloat = lineNumbers ? 48 : 10
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes)).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
-        let signature = messages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + String(lineNumbers)
+        let visibleMessages = messages.filter { $0.role != "activity" && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + String(lineNumbers)
         guard signature != c.signature || c.lastDraft != draft else { return }
         // Don't overwrite marked text while dictation/IME is composing.
         if view.markedTextRange != nil { return }
@@ -128,7 +165,7 @@ struct PadTranscript: UIViewRepresentable {
 
         let result = NSMutableAttributedString()
         view.promptBlocks = []; view.trafficBlocks = []
-        for message in messages {
+        for message in visibleMessages {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
             let body = Self.render(message.text)
