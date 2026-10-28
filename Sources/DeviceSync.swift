@@ -148,6 +148,12 @@ struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var detail: String? = nil
 }
 
+enum DeviceDraftRecovery {
+    static func canRestore(text: String, hashes: [String], record: DeviceOutboxRecord) -> Bool {
+        (text.isEmpty && hashes.isEmpty) || (text == (record.payload.text ?? "") && hashes == record.payload.blobHashes)
+    }
+}
+
 final class DeviceOutboxStore {
     private let file: URL
     private(set) var records: [DeviceOutboxRecord] = []

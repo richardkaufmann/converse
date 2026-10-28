@@ -124,6 +124,39 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(model.draft(id).text, "new typing")
         XCTAssertNil(model.draft(id).sentID)
     }
+    func testFailedSendRestoreKeepsNewerTextAndImages() throws {
+        for outcome in ["failed", "rejected"] {
+            let service = try service(); let model = PadModel(service: service)
+            let id = DeviceGlobalID(home: "test-home", session: UUID()).string
+            let record = DeviceOutboxRecord(commandID: UUID(), sessionID: id, payload: DeviceCommandPayload(action: "submit", text: "old send", blobHashes: ["old-image"]), payloadHash: "fixture", outcome: outcome)
+            model.state.drafts[id] = PadDraft(text: "new typing", hashes: ["new-image"], sentID: record.commandID, sentText: "old send", sentHashes: ["old-image"])
+            model.discard(record, restore: true)
+            XCTAssertEqual(model.draft(id).text, "new typing", outcome)
+            XCTAssertEqual(model.draft(id).hashes, ["new-image"], outcome)
+            XCTAssertNil(model.draft(id).sentID)
+            XCTAssertEqual(PadModel(service: service).draft(id).text, "new typing", "Preserved edits survive relaunch")
+        }
+    }
+    func testFailedSendRestoreFillsEmptyOrUnchangedComposerOnly() throws {
+        let service = try service(); let model = PadModel(service: service)
+        let id = DeviceGlobalID(home: "test-home", session: UUID()).string
+        let record = DeviceOutboxRecord(commandID: UUID(), sessionID: id, payload: DeviceCommandPayload(action: "submit", text: "old send", blobHashes: ["old-image"]), payloadHash: "fixture", outcome: "failed")
+        model.discard(record, restore: true)
+        XCTAssertEqual(model.draft(id).text, "old send")
+        XCTAssertEqual(model.draft(id).hashes, ["old-image"])
+        model.state.drafts[id]?.sentID = record.commandID
+        model.discard(record, restore: true)
+        XCTAssertEqual(model.draft(id).text, "old send")
+        XCTAssertEqual(model.draft(id).hashes, ["old-image"])
+        XCTAssertNil(model.draft(id).sentID, "Restoring unchanged submitted content clears its pending marker")
+        model.state.drafts[id] = PadDraft(text: "old send", hashes: ["new-image"], sentID: record.commandID, sentText: "old send", sentHashes: ["old-image"])
+        model.discard(record, restore: true)
+        XCTAssertEqual(model.draft(id).hashes, ["new-image"], "An attachment-only edit counts as newer typing")
+        model.state.drafts[id] = PadDraft(text: "", hashes: ["new-image"])
+        model.discard(record, restore: true)
+        XCTAssertEqual(model.draft(id).text, "", "An image-only draft must not be replaced")
+        XCTAssertEqual(model.draft(id).hashes, ["new-image"])
+    }
     func testHelpLoadsSharedSchemaAndSearch() throws {
         let book = try HelpBook.load()
         XCTAssertEqual(book.schemaVersion, 1)
@@ -135,6 +168,55 @@ final class ConverseTests: XCTestCase {
         while !predicate() && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(predicate(), description)
         if !predicate() { throw CocoaError(.coderValueNotFound) }
+    }
+    func testInterruptedImageUploadRecoversAfterBackgroundAndCacheReload() async throws {
+        guard let port = ProcessInfo.processInfo.environment["CONVERSE_INTEROP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with an isolated Mac home") }
+        let service = try service(); defer { service.suspendViewer() }
+        try service.startNetworkForTesting(); service.connectManual(host: "127.0.0.1", port: port)
+        try await eventually("Pair isolated home") { service.pairingPrompt != nil }
+        service.confirmPairing()
+        try await eventually("Load home directory") { service.homes.values.contains { !$0.rows.isEmpty } }
+        let row = try XCTUnwrap(service.homes.values.flatMap(\.rows).first)
+        var model: PadModel? = PadModel(service: service)
+        model!.state.placements[0] = row.globalID
+        service.acquireRemote(globalID: row.globalID)
+        try await eventually("Take initial lease") { service.remoteTranscripts[row.globalID] != nil }
+        model!.reconcile()
+        let firstEpoch = try XCTUnwrap(service.remoteLeases[row.globalID])
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 48, height: 48)).image { context in UIColor.orange.setFill(); context.fill(CGRect(x: 0, y: 0, width: 48, height: 48)) }
+        let png = try PadImage.normalize(try XCTUnwrap(image.pngData()))
+        let hash = DeviceBlob.sha256Hex(png)
+        let folder = service.storageFolder.appendingPathComponent("RemoteCache")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let cached = folder.appendingPathComponent(hash + ".png"); try png.write(to: cached, options: .atomic)
+        service.blobCache[hash] = cached
+        var draft = model!.draft(row.globalID); draft.hashes = [hash]; draft.dirty = true
+        model!.state.drafts[row.globalID] = draft; model!.persist()
+        service.saveDraftAttachments(globalID: row.globalID, hashes: [hash])
+        XCTAssertTrue(service.sendPartialBlobForTesting(globalID: row.globalID, data: png))
+        XCTAssertFalse(model!.canSend(row.globalID))
+        // Ensure the TCP stream delivered the prefix before canceling it.
+        // A subsequent rename ack is ordered after that blob chunk at home.
+        let barrier = try XCTUnwrap(service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "rename", text: row.title)))
+        try await eventually("Home has consumed the partial upload") { service.completedCommands.contains(barrier) }
+        model!.background(); model = nil
+        service.blobCache = [:] // Simulate losing the in-memory cache index on relaunch.
+        let restored = PadModel(service: service)
+        XCTAssertEqual(restored.draft(row.globalID).hashes, [hash])
+        try service.startNetworkForTesting(); service.connectManual(host: "127.0.0.1", port: port)
+        try await eventually("Trusted home reconnects") { service.homes[DeviceGlobalID(row.globalID)!.home]?.online == true }
+        XCTAssertNil(service.remoteLeases[row.globalID], "Reconnect alone never takes a lease")
+        service.acquireRemote(globalID: row.globalID)
+        try await eventually("Fresh epoch after reacquire") { (service.remoteLeases[row.globalID] ?? 0) > firstEpoch && service.remoteTranscripts[row.globalID] != nil }
+        restored.reconcile()
+        try await eventually("Cached PNG is resent and verified on home") { service.blobReady[hash] == true }
+        XCTAssertEqual(service.blobCache[hash], cached, "Recovery rediscovers the verified file without an in-memory cache index")
+        if restored.conflicts.contains(row.globalID) { restored.resolveDraft(row.globalID, keepLocal: true) }
+        try await eventually("Recovered draft can be sent") { restored.canSend(row.globalID) }
+        XCTAssertEqual(restored.draft(row.globalID).hashes, [hash], "Recovery never appends a duplicate attachment")
+        restored.clearImages(row.globalID)
+        restored.edit(row.globalID, text: "home draft"); restored.flush(row.globalID)
+        try await eventually("Fixture restored for other interop checks") { service.remoteTranscripts[row.globalID]?.draft == "home draft" && service.remoteTranscripts[row.globalID]?.draftImageHashes == [] }
     }
     func testMacHomeInteroperability() async throws {
         guard let port = ProcessInfo.processInfo.environment["CONVERSE_INTEROP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with an isolated Mac home") }

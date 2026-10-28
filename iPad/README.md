@@ -26,7 +26,7 @@ The pin left of Conversation hides the sidebar without parking sessions or inter
 
 The native text document has protected selectable history and a blue editable tail. Return sends or queues; Command-Return inserts a newline. Queue rows offer Inject now, with Inject all at the top. Switchboard and JSON traffic is orange. Permission requests are yellow. Model, effort and access controls send changes to home. Photo/file attachments are re-encoded as real PNG bytes, at most 2048 pixels on the long side and 8 MB, with metadata removed before hashing.
 
-Backgrounding saves drafts and outgoing command IDs and releases display leases best-effort. Home TTL is the backstop. Foregrounding reconnects but never takes a session automatically. Use Take here. Uncertain sends require Check home; they are never silently replayed. A recovered draft that differs from home requires choosing which draft to edit.
+Backgrounding saves drafts and outgoing command IDs and releases display leases best-effort. Home TTL is the backstop. Foregrounding reconnects but never takes a session automatically. Use Take here. Uncertain sends require Check home; they are never silently replayed. A recovered draft that differs from home requires choosing which draft to edit. If an image upload was interrupted, the verified cached PNG is resent once per new lease when home reports it missing. Restoring a failed send preserves any newer text or image edits in the composer.
 
 ## Build and check
 

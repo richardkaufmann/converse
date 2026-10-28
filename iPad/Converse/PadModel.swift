@@ -145,9 +145,15 @@ final class PadModel: ObservableObject {
     }
     func discard(_ record: DeviceOutboxRecord, restore: Bool) {
         var draft = draft(record.sessionID)
-        if restore { draft.text = record.payload.text ?? ""; draft.hashes = record.payload.blobHashes; draft.dirty = true }
-        draft.sentID = nil; state.drafts[record.sessionID] = draft
+        if restore && DeviceDraftRecovery.canRestore(text: draft.text, hashes: draft.hashes, record: record) {
+            draft.text = record.payload.text ?? ""; draft.hashes = record.payload.blobHashes; draft.dirty = true
+        }
+        if draft.sentID == record.commandID {
+            draft.sentID = nil; draft.sentText = ""; draft.sentHashes = []
+        }
+        state.drafts[record.sessionID] = draft
         service.discardOutbox(record); persist()
+        if restore { flush(record.sessionID) }
     }
     func attach(_ id: String, data: Data) {
         guard canControl(id) else { return }
@@ -158,7 +164,7 @@ final class PadModel: ObservableObject {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let file = folder.appendingPathComponent(hash + ".png"); try png.write(to: file, options: .atomic)
             service.blobCache[hash] = file
-            var draft = draft(id); draft.hashes.append(hash); draft.dirty = true; state.drafts[id] = draft; persist()
+            var draft = draft(id); if !draft.hashes.contains(hash) { draft.hashes.append(hash) }; draft.dirty = true; state.drafts[id] = draft; persist()
             service.saveDraftAttachments(globalID: id, hashes: draft.hashes)
         } catch { self.error = "Could not attach image: " + error.localizedDescription }
     }

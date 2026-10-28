@@ -16,6 +16,14 @@ final class RemoteComposer: ObservableObject {
     var hydratedKey = ""
     @Published var answers: [String: String] = [:]
     @Published var selections: [String: Set<String>] = [:]
+    func restoreFailedSend(_ record: DeviceOutboxRecord) {
+        if DeviceDraftRecovery.canRestore(text: draft, hashes: blobHashes, record: record) {
+            draft = record.payload.text ?? ""; blobHashes = record.payload.blobHashes
+        }
+        if sentCommandID == record.commandID {
+            sentCommandID = nil; sentText = ""; sentHashes = []
+        }
+    }
     func updateEditor(transcript: DeviceTranscriptPayload?, cache: [String: URL]) {
         editor.messages = (transcript?.messages ?? []).map { message in
             Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: nil)
@@ -217,7 +225,7 @@ struct RemotePane: View {
                         Button("Check home") { service.queryOutbox(record) }
                         Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
                     } else if record.outcome == "failed" || record.outcome == "rejected" {
-                        Button("Restore to composer") { composer.sentCommandID = nil; composer.draft = record.payload.text ?? ""; composer.blobHashes = record.payload.blobHashes; service.discardOutbox(record) }
+                        Button("Restore to composer") { composer.restoreFailedSend(record); service.discardOutbox(record) }
                         Button("Discard") { service.discardOutbox(record); composer.sentCommandID = nil }
                     } else if record.outcome == "accepted" {
                         Button("Dismiss") { service.discardOutbox(record); composer.sentCommandID = nil }

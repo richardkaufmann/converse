@@ -114,6 +114,7 @@ final class DeviceSyncService: ObservableObject {
     private var pendingTakes: [String: Date] = [:]
     private var leaseBoots: [String: UInt64] = [:]
     private var pendingUploads: Set<String> = []
+    private var recoveredUploads: [String: [String: UInt64]] = [:]
     private var pendingDownloads: Set<String> = []
     private var pendingAsyncAcks: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID, epoch: UInt64)] = []
     @Published var draftConflicts: [String: String] = [:]
@@ -842,6 +843,9 @@ extension DeviceSyncService {
             guard requireLease(peer, envelope, session) else { return }
             if envelope.kind == DeviceMessageKind.blobOffer.rawValue {
                 let stored = blobPaths[blob.sha256Hex].map { FileManager.default.fileExists(atPath: $0) } ?? false
+                // A fresh offer negotiates a complete upload. Abandon any
+                // prefix left by an interrupted attempt before resending.
+                if !stored { stagedBlobs.removeValue(forKey: blob.sha256Hex) }
                 sendBlobAck(peer, envelope: envelope, hash: blob.sha256Hex, stored: stored, detail: stored ? "Already stored on home." : "Not stored on home."); return
             }
             if let chunk = blob.chunk {
@@ -874,7 +878,10 @@ extension DeviceSyncService {
                         sendRemoteDraft(globalID: idString, text: text)
                     }
                 }
-                lastOutcome = ack.outcome == "stored" ? "Attachment stored on home." : ("Attachment failed: " + (ack.detail ?? ""))
+                if ack.outcome == "stored" { lastOutcome = "Attachment stored on home." }
+                else if !recoverCachedUpload(globalID: idString, hash: hash, ackEpoch: envelope.epoch) {
+                    lastOutcome = "Attachment failed: " + (ack.detail ?? "") + " Take the session again to retry, or attach the image again."
+                }
             }
         #if os(macOS)
         case DeviceMessageKind.blobRequest.rawValue:
@@ -992,7 +999,7 @@ extension DeviceSyncService {
     }
     func queryBlob(globalID: String, hash: String) {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return }
-        pendingUploads.insert(hash)
+        blobReady[hash] = false; pendingUploads.insert(hash)
         let payload = try? JSONEncoder().encode(DeviceBlobPayload(sha256Hex: hash))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.blobOffer.rawValue, sessionID: globalID, epoch: epoch, payload: payload))
     }
@@ -1007,6 +1014,38 @@ extension DeviceSyncService {
         pendingDownloads.insert(hash)
         let payload = try? JSONEncoder().encode(DeviceBlobPayload(sha256Hex: hash))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.blobRequest.rawValue, sessionID: globalID, epoch: epoch, payload: payload))
+    }
+    private func recoverCachedUpload(globalID: String, hash: String, ackEpoch: UInt64?) -> Bool {
+        guard let epoch = remoteLeases[globalID], ackEpoch == epoch,
+              recoveredUploads[globalID]?[hash] != epoch,
+              let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home),
+              hash.count == 64, hash.allSatisfy({ "0123456789abcdef".contains($0) }) else { return false }
+        let cache = storageFolder.appendingPathComponent("RemoteCache")
+        let candidates = [blobCache[hash], cache.appendingPathComponent(hash + ".png"), cache.appendingPathComponent(String(hash.prefix(16)) + ".png")].compactMap { $0 }
+        guard let cached = candidates.lazy.compactMap({ url -> (URL, Data)? in
+            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0, size <= DeviceBlob.maxBlob,
+                  let bytes = try? Data(contentsOf: url), bytes.count <= DeviceBlob.maxBlob, DeviceBlob.verify(bytes, sha256Hex: hash) else { return nil }
+            return (url, bytes)
+        }).first else { return false }
+        // Record before sending: the offer's own not-stored ack must not
+        // recurse into another retry. A new lease permits one new attempt.
+        recoveredUploads[globalID, default: [:]][hash] = epoch
+        blobCache[hash] = cached.0
+        let offer = try? JSONEncoder().encode(DeviceBlobPayload(sha256Hex: hash))
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.blobOffer.rawValue, sessionID: globalID, epoch: epoch, payload: offer))
+        guard sendRemoteBlob(globalID: globalID, data: cached.1) == hash else { return false }
+        lastOutcome = "Retrying cached image upload…"
+        return true
+    }
+    // Isolated interoperability fixture: drop halfway through an upload,
+    // then exercise the normal reconnect/offer/recovery path.
+    func sendPartialBlobForTesting(globalID: String, data: Data) -> Bool {
+        guard isTestEnvironment, testFolder != nil, data.count > 1, data.count <= DeviceBlob.maxBlob,
+              let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return false }
+        let hash = DeviceBlob.sha256Hex(data); blobReady[hash] = false; pendingUploads.insert(hash)
+        let payload = try? JSONEncoder().encode(DeviceBlobPayload(sha256Hex: hash, size: data.count, chunk: Data(data.prefix(data.count / 2)), done: false))
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.blobChunk.rawValue, sessionID: globalID, epoch: epoch, payload: payload))
+        return true
     }
     func sendRemoteBlob(globalID: String, data: Data) -> String? {
         guard data.count <= DeviceBlob.maxBlob, let global = DeviceGlobalID(globalID),

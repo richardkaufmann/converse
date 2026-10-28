@@ -4,6 +4,12 @@ import Network
 import Security
 
 func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
+    let restoreRecord = DeviceOutboxRecord(commandID: UUID(), sessionID: "fixture", payload: DeviceCommandPayload(action: "submit", text: "old send", blobHashes: ["old-image"]), payloadHash: "fixture", outcome: "failed")
+    let composer = RemoteComposer(); composer.draft = "new typing"; composer.blobHashes = ["new-image"]; composer.sentCommandID = restoreRecord.commandID
+    composer.restoreFailedSend(restoreRecord)
+    check(composer.draft == "new typing" && composer.blobHashes == ["new-image"] && composer.sentCommandID == nil, "Mac failed-send restore preserves newer text and images")
+    composer.draft = ""; composer.blobHashes = []; composer.restoreFailedSend(restoreRecord)
+    check(composer.draft == "old send" && composer.blobHashes == ["old-image"], "Mac failed-send restore fills an empty composer")
     let outgoingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: true)
     let incomingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: false)
     check(outgoingPrompt.actionLabel == "Pair" && incomingPrompt.actionLabel == "Approve", "Pairing assigns Pair to initiator and Approve to receiving Mac")
@@ -291,6 +297,18 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: settingID, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceCommandPayload(action: "effort", effort: "high"))))
         let settingAck = try capturedEnvelopes().first { $0.commandID == settingID }.flatMap { $0.payload }.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
         check(session.choices.effort == "high" && settingAck?.outcome == "completed", "Busy home accepts next-turn settings and acknowledges saved selection")
+        captured = []
+        let retryBytes = Data("partial upload recovery fixture".utf8)
+        let retryHash = DeviceBlob.sha256Hex(retryBytes)
+        func homeBlob(_ kind: DeviceMessageKind, _ bytes: Data?, done: Bool = false) throws {
+            let payload = try JSONEncoder().encode(DeviceBlobPayload(sha256Hex: retryHash, size: retryBytes.count, chunk: bytes, done: done))
+            home.handleEnvelope(peer, DeviceEnvelope(kind: kind.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: payload))
+        }
+        try homeBlob(.blobChunk, Data(retryBytes.prefix(5)))
+        try homeBlob(.blobOffer, nil)
+        try homeBlob(.blobChunk, retryBytes, done: true)
+        let recoveredBlobAcks = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.blobAck.rawValue }.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) } }
+        check(recoveredBlobAcks.last?.outcome == "stored", "Home abandons interrupted image prefixes before a negotiated full resend")
         session.busy = false
         Store.shared.deleteSession(session)
     } catch { check(false, "Service harness failed: " + error.localizedDescription) }
@@ -341,7 +359,39 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(viewer.unresolved(globalID: gid).count == 1 && !viewer.completedCommands.contains(sentID!), "Viewer harness ignores ack from wrong authenticated home")
         viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: sentID, epoch: 4, payload: ackPayload))
         check(viewer.unresolved(globalID: gid).isEmpty && viewer.completedCommands.contains(sentID!), "Viewer harness completes only on bound home ack")
-        _ = homeKeys2
+        viewerSent = []
+        let retryBytes = Data("verified cached image fixture".utf8)
+        let retryHash = DeviceBlob.sha256Hex(retryBytes)
+        let cache = viewer.storageFolder.appendingPathComponent("RemoteCache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let cacheFile = cache.appendingPathComponent(retryHash + ".png")
+        try Data("corrupted cache".utf8).write(to: cacheFile)
+        viewer.queryBlob(globalID: gid, hash: retryHash)
+        func notStored(_ epoch: UInt64) throws {
+            let payload = try JSONEncoder().encode(DeviceAckPayload(outcome: "failed", detail: retryHash + "|Not stored on home."))
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.blobAck.rawValue, sessionID: gid, epoch: epoch, payload: payload))
+        }
+        func newViewerFrames() throws -> [DeviceEnvelope] {
+            var frames: [DeviceEnvelope] = []; var decoder = DeviceFrameDecoder()
+            for frame in viewerSent { frames += try decoder.append(homeKeys2.receiver.decrypt(frame)) }
+            viewerSent = []; return frames
+        }
+        try notStored(4)
+        let corruptFrames = try newViewerFrames()
+        check(!corruptFrames.contains { $0.kind == DeviceMessageKind.blobChunk.rawValue }, "Image recovery refuses cached bytes with the wrong checksum")
+        try retryBytes.write(to: cacheFile)
+        try notStored(4); try notStored(4)
+        let retryFrames = try newViewerFrames()
+        check(retryFrames.filter { $0.kind == DeviceMessageKind.blobChunk.rawValue }.count == 1 && viewer.blobCache[retryHash] == cacheFile, "Image recovery rediscovers its cache and resends at most once per lease")
+        viewer.releaseRemote(globalID: gid); viewer.acquireRemote(globalID: gid)
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.leaseGranted.rawValue, boot: 7, sessionID: gid, epoch: 5))
+        viewer.queryBlob(globalID: gid, hash: retryHash)
+        try notStored(4)
+        let staleFrames = try newViewerFrames()
+        check(!staleFrames.contains { $0.kind == DeviceMessageKind.blobChunk.rawValue }, "Stale-epoch image acknowledgments cannot trigger a resend")
+        try notStored(5)
+        let freshFrames = try newViewerFrames()
+        check(freshFrames.filter { $0.kind == DeviceMessageKind.blobChunk.rawValue }.count == 1, "A fresh display lease permits a new cached-image recovery attempt")
     } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
     let global = DeviceGlobalID(home: "home-abc", session: sessionID)
     check(DeviceGlobalID(global.string) == global && DeviceGlobalID(home: "home-xyz", session: sessionID) != global, "Global session IDs stay unique per home and parse exactly")
