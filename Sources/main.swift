@@ -107,6 +107,7 @@ final class Session: ObservableObject, Identifiable {
     var claudeStreamSeparators: [NSRange] = []
     var process: Process?
     var muse: MuseConnection?
+    var museClosing = false
     @Published var requests: [MuseRequest] = []
     var requestAnswers = MuseRequestAnswers()
     @Published var requestError = ""
@@ -412,7 +413,21 @@ final class Store: ObservableObject {
             s.process = connection.process
             connection.load(entry: s.entry, choices: s.choices) { result in
                 guard s.muse === connection else { return }
-                if case .failure(let error) = result { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription); return }
+                if case .failure(let error) = result {
+                    if MuseConnection.sessionIsInUse(error) {
+                        // No turn/start was sent, so holding this exact input is
+                        // safe. Never resubmit an ambiguously acknowledged turn.
+                        if let index = s.messages.firstIndex(where: { $0.id == responseID }), index > 0,
+                           s.messages[index - 1].role == "user", s.messages[index - 1].text == display,
+                           s.messages[index - 1].images == images {
+                            s.messages.removeSubrange((index - 1)...index)
+                        }
+                        s.pending.insert(PendingPrompt(switchboardHop: s.switchboardHop, text: display, images: images), at: 0)
+                        s.interrupted = false; s.resumeAfterInterrupt = false; s.queuePaused = true
+                        self.finishMuse(s, status: "Session in use · input held", notice: "Muse has this session open in another host. This prompt was not submitted and is held in the paused queue. Close the other host, then choose Resume queue or Inject now. Your conversation identity and draft are unchanged.")
+                    } else { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription) }
+                    return
+                }
                 if let warning = connection.settingWarning { s.messages.append(Message(role: "notice", text: warning)); s.settingNotice = warning }
                 s.started = true; s.remoteID = connection.sessionID; self.save(); s.status = "Working…"
                 connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
@@ -424,13 +439,22 @@ final class Store: ObservableObject {
         }
     }
     func finishMuse(_ s: Session, status: String, notice: String? = nil) {
-        let connection = s.muse; s.muse = nil; connection?.event = nil; connection?.disconnected = nil; connection?.close()
-        s.busy = false; s.process = nil; s.requests = []; s.answeringRequest = false; s.status = status
-        s.messages.removeAll { $0.role == "assistant" && $0.text.isEmpty && $0.images.isEmpty }
-        if let notice, !notice.isEmpty { s.messages.append(Message(role: "notice", text: notice)) }
-        save(); objectWillChange.send()
-        if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { refreshStatus(s) }
-        finishQueue(s, success: status == "Ready")
+        guard !s.museClosing else { return }
+        s.museClosing = true
+        let connection = s.muse; connection?.event = nil; connection?.disconnected = nil
+        s.status = "Releasing Muse session…"
+        let finish = {
+            s.muse = nil; s.museClosing = false
+            s.busy = false; s.process = nil; s.requests = []; s.answeringRequest = false; s.status = status
+            s.messages.removeAll { $0.role == "assistant" && $0.text.isEmpty && $0.images.isEmpty }
+            if let notice, !notice.isEmpty { s.messages.append(Message(role: "notice", text: notice)) }
+            self.save(); self.objectWillChange.send()
+            if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }
+            self.finishQueue(s, success: status == "Ready")
+        }
+        // turn/completed is not process exit. Keep this seat busy until its
+        // owned host has exited and released the CLI session lock.
+        if let connection { connection.close(completion: finish) } else { finish() }
     }
     func consumeMuse(_ method: String, _ params: [String: Any], session s: Session, responseID: UUID) {
         switch method {
@@ -609,7 +633,7 @@ final class Store: ObservableObject {
             remember(); s.settingNotice = s.busy ? "Change saved · applies next turn" : "Change saved · applies when the next turn starts"; return
         }
         if s.busy {
-            guard let connection = s.muse, connection.turnID != nil else {
+            guard !s.museClosing, let connection = s.muse, connection.turnID != nil else {
                 remember(); s.settingNotice = "Change saved · applies next turn"; return
             }
             s.changingSetting = true; s.settingNotice = "Applying change…"

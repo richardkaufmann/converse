@@ -16,6 +16,9 @@ final class MuseConnection {
     private(set) var settingWarning: String?
     private var ready = false
     private var closing = false
+    private var shutdownStarted = false
+    private var shutdownFinished = false
+    private var closeWaiters: [() -> Void] = []
     private var interruptWatchdogStarted = false
     private var errorTail = ""
     init(sessionID: String) { self.sessionID = sessionID.lowercased() }
@@ -152,21 +155,38 @@ final class MuseConnection {
         interruptWatchdogStarted = true
         DispatchQueue.main.asyncAfter(deadline: .now() + interruptionGrace) { [weak self] in
             guard let self, !self.closing else { return }
-            self.close()
-            let process = self.process
-            DispatchQueue.main.asyncAfter(deadline: .now() + self.terminationGrace) {
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            }
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                DispatchQueue.main.async { onForcedStop() }
-            }
+            self.close(completion: onForcedStop)
         }
     }
-    func close() {
+    func close(completion: @escaping () -> Void = {}) {
+        if shutdownFinished { completion(); return }
+        closeWaiters.append(completion)
+        guard !shutdownStarted else { return }
+        shutdownStarted = true
         closing = true; callbacks.removeAll()
         try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
+        guard process.isRunning else { completeClose(); return }
+        process.terminate()
+        let process = process
+        DispatchQueue.main.asyncAfter(deadline: .now() + terminationGrace) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            process.waitUntilExit()
+            DispatchQueue.main.async { self.completeClose() }
+        }
+    }
+    private func completeClose() {
+        shutdownFinished = true
+        let waiters = closeWaiters; closeWaiters = []
+        waiters.forEach { $0() }
+    }
+    static func sessionIsInUse(_ error: Error) -> Bool {
+        let error = error as NSError
+        guard error.domain == "Muse" else { return false }
+        let kind = error.userInfo["kind"] as? String ?? ""
+        return ["sessionInUse", "sessionAlreadyInUse"].contains(kind) ||
+            (error.localizedDescription.localizedCaseInsensitiveContains("session") && error.localizedDescription.localizedCaseInsensitiveContains("already in use"))
     }
     private func closed() {
         let pending = callbacks; callbacks = [:]

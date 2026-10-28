@@ -171,6 +171,29 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     check(muse.remoteID == museRemote && muse.messages.last?.text == "answer: after interrupt", "Muse resumes its retained session after interruption")
     let previousMuseTransport = store.usesInteractiveMuse
     store.usesInteractiveMuse = true
+    let lifecycleFolder = store.folder.appendingPathComponent("msp-lifecycle")
+    let lifecycleScript = FileManager.default.currentDirectoryPath + "/Tests/msp_lifecycle_fixture.py"
+    let lifecycleEntry = Entry(name: "Muse lifecycle", command: "python3 " + ProviderCommand.quote(lifecycleScript) + " " + ProviderCommand.quote(lifecycleFolder.path), directory: NSTemporaryDirectory(), engine: "muse")
+    let lifecycle = store.create(lifecycleEntry)
+    lifecycle.draft = "first"; store.submit(lifecycle)
+    lifecycle.draft = "second"; store.submit(lifecycle)
+    lifecycle.draft = "newer draft"
+    pump { !lifecycle.busy && lifecycle.pending.isEmpty }
+    let submittedFile = lifecycleFolder.appendingPathComponent("submitted.jsonl")
+    let submissions = (try? String(contentsOf: submittedFile, encoding: .utf8)) ?? ""
+    check(lifecycle.status == "Ready" && lifecycle.messages.filter { $0.role == "assistant" }.map(\.text) == ["answer: first", "answer: second"] && submissions.split(separator: "\n").count == 2 && lifecycle.draft == "newer draft", "Muse queue waits for delayed host exit and releases its real session lock before the next turn")
+    let lock = lifecycleFolder.appendingPathComponent("session.lock")
+    try! FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
+    let retainedID = lifecycle.remoteID
+    lifecycle.draft = "blocked input"; store.submit(lifecycle)
+    lifecycle.draft = "keep typing"; lifecycle.attachments = ["new-attachment.png"]
+    pump { !lifecycle.busy }
+    check(lifecycle.queuePaused && lifecycle.pending.map(\.text) == ["blocked input"] && lifecycle.status == "Session in use · input held" && lifecycle.remoteID == retainedID && lifecycle.draft == "keep typing" && lifecycle.attachments == ["new-attachment.png"], "Muse lock conflict holds unsubmitted input in a paused queue without replacing identity or newer typing")
+    check(!lifecycle.messages.contains { $0.role == "user" && $0.text == "blocked input" } && ((try? String(contentsOf: submittedFile, encoding: .utf8)) ?? "") == submissions, "Rejected Muse session-open never submits a turn or leaves a duplicate user message")
+    try! FileManager.default.removeItem(at: lock)
+    store.injectPending(lifecycle, id: lifecycle.pending.first?.id)
+    pump { !lifecycle.busy && lifecycle.pending.isEmpty }
+    check(lifecycle.messages.filter { $0.role == "user" && $0.text == "blocked input" }.count == 1 && lifecycle.messages.filter { $0.text == "answer: blocked input" }.count == 1 && lifecycle.draft == "keep typing" && lifecycle.attachments == ["new-attachment.png"], "Inject after a Muse lock clears delivers held input exactly once and preserves the draft")
     for mode in ["muse-stuck", "muse-no-ack", "muse-rejected-interrupt"] {
         var entry = museEntry
         entry.command = "python3 " + ProviderCommand.quote(fixture) + " " + mode
