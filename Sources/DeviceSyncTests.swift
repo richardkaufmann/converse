@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Network
@@ -309,6 +310,12 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         try homeBlob(.blobChunk, retryBytes, done: true)
         let recoveredBlobAcks = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.blobAck.rawValue }.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) } }
         check(recoveredBlobAcks.last?.outcome == "stored", "Home abandons interrupted image prefixes before a negotiated full resend")
+        session.queuePaused = true
+        let teachingID = UUID(), previousQueueCount = session.pending.count
+        let teachingPayload = try JSONEncoder().encode(DeviceCommandPayload(action: "teachSwitchboard"))
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: teachingID, epoch: 0, payload: teachingPayload))
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: teachingID, epoch: 0, payload: teachingPayload))
+        check(session.switchboardEnabled && session.pending.count == previousQueueCount + 1 && session.queuePaused, "Remote teaching queues instructions exactly once without taking a display lease or resuming a paused queue")
         session.busy = false
         Store.shared.deleteSession(session)
     } catch { check(false, "Service harness failed: " + error.localizedDescription) }
@@ -361,6 +368,14 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let sentBeforeHints = viewerSent.count
         viewer.saveDraftAttachments(globalID: gid, hashes: [])
         check(viewerSent.count == sentBeforeHints, "Unchanged attachment lists never resend an old draft")
+        viewer.remoteLeases.removeValue(forKey: gid)
+        let teachingID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "teachSwitchboard"))
+        check(teachingID != nil && viewer.remoteLeases[gid] == nil && viewer.outbox.first(where: { $0.commandID == teachingID })?.epoch == 0, "Viewer can teach a parked session without acquiring its display lease")
+        if let teachingID {
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: teachingID, epoch: 0, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "completed"))))
+            check(viewer.completedCommands.contains(teachingID) && viewer.unresolved(globalID: gid).isEmpty, "Lease-free teaching acknowledges through its bound durable outbox record")
+        }
+        viewer.remoteLeases[gid] = 4
         let sentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "New"))
         check(sentID != nil && viewer.unresolved(globalID: gid).count == 1, "Viewer harness persists outgoing command in outbox")
         if let record = viewer.unresolved(globalID: gid).first { viewer.queryOutbox(record) }
@@ -428,7 +443,11 @@ func runIPadHomeFixture() {
         service.deviceNameOverride = "Isolated Mac home"
         let session = Store.shared.create(Entry(name: "Fixture", command: "/usr/bin/false", directory: folderPath, engine: "codex"))
         session.title = "iPad interop fixture"; session.draft = "home draft"
-        session.messages = [Message(role: "assistant", text: "Mac home fixture")]
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let imageFile = folder.appendingPathComponent("reply.jpg")
+        try bitmap.representation(using: .jpeg, properties: [:])!.write(to: imageFile)
+        session.messages = [Message(role: "assistant", text: "Mac home fixture\n![Reply image](" + imageFile.absoluteString + ")")]
+        Store.shared.importResponseImages(session)
         session.busy = true; session.status = "Working in isolated fixture"
         try service.startNetworkForTesting()
         let deadline = Date().addingTimeInterval(120)
@@ -439,7 +458,7 @@ func runIPadHomeFixture() {
                 try Data(String(port).utf8).write(to: folder.appendingPathComponent("port"), options: .atomic); announced = true
             }
             if let prompt = service.pairingPrompt {
-                session.messages = [Message(role: "assistant", text: "Mac home fixture · verified code " + prompt.code)]
+                session.messages[0].text = "Mac home fixture · verified code " + prompt.code
                 service.confirmPairing()
             }
             if FileManager.default.fileExists(atPath: folder.appendingPathComponent("stop").path) { break }

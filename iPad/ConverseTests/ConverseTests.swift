@@ -11,6 +11,13 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testUnloadedImageCaptionRemainsClickable() {
+        let url = URL(string: "https://upload.wikimedia.org/example.jpg")!
+        let rendered = PadTranscript.render("![Grasshopper](" + url.absoluteString + ")")
+        XCTAssertEqual(rendered.string, "Grasshopper")
+        XCTAssertEqual(rendered.attribute(.link, at: 0, effectiveRange: nil) as? URL, url)
+        XCTAssertEqual(TranscriptStyle.imageLinks("`![example](https://example.com/a.png)`"), "`![example](https://example.com/a.png)`")
+    }
     func testUnalignedCoalescedFrames() throws {
         var first = DeviceEnvelope(kind: "odd")
         while try DeviceFrame.encode(first).count % 4 == 0 { first.kind += "x" }
@@ -315,6 +322,13 @@ final class ConverseTests: XCTestCase {
         try await eventually("iPad receives fresh draft and transcript") { service.remoteTranscripts[row.globalID] != nil }
         XCTAssertEqual(service.remoteTranscripts[row.globalID]?.draft, "home draft")
         XCTAssertTrue(service.remoteTranscripts[row.globalID]?.messages.first?.text.contains(code) == true, "Both platform handshakes show the same verification code")
+        let replyHash = try XCTUnwrap(service.remoteTranscripts[row.globalID]?.messages.first?.imageHashes.first)
+        service.fetchBlob(globalID: row.globalID, hash: replyHash)
+        try await eventually("Returned Mac image downloads to iPad") { service.blobCache[replyHash] != nil }
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 400)
+        let parent = PadTranscript(messages: try XCTUnwrap(service.remoteTranscripts[row.globalID]?.messages), draft: "", images: service.blobCache, editable: false, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        parent.update(view, coordinator: PadTranscript.Coordinator(parent))
+        XCTAssertTrue(view.textStorage.string.contains("\u{fffc}"), "Mac reply image is a native inline attachment on iPad")
         let model = PadModel(service: service); model.state.placements[0] = row.globalID; model.reconcile()
         model.edit(row.globalID, text: "from iPad")
         let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { context in UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 40)) }
@@ -339,6 +353,12 @@ final class ConverseTests: XCTestCase {
         XCTAssertNil(service.remoteLeases[row.globalID])
         service.acquireRemote(globalID: row.globalID)
         try await eventually("Parked iPad can reacquire without replaying") { service.remoteTranscripts[row.globalID]?.pending.count == 1 && service.remoteLeases[row.globalID] != nil }
+        service.releaseRemote(globalID: row.globalID)
+        let teaching = try XCTUnwrap(service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")))
+        try await eventually("Parked session teaching reaches Mac") { service.completedCommands.contains(teaching) }
+        XCTAssertNil(service.remoteLeases[row.globalID], "Teaching must not take the session away from another device")
+        service.acquireRemote(globalID: row.globalID)
+        try await eventually("Teaching instructions are visible on home") { service.remoteTranscripts[row.globalID]?.pending.contains { $0.text.hasPrefix("[Converse switchboard instructions]") } == true }
     }
 
 }

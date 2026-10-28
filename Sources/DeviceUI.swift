@@ -155,6 +155,11 @@ struct RemoteSidebarRow: View {
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .help(helpText)
+            .contextMenu {
+                Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
+                    .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
+                Button("Park conversation") { park() }
+            }
     }
 }
 
@@ -251,6 +256,7 @@ struct RemotePane: View {
                 Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
             ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
+                onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
                                   onDraftChanged: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) },
                                   onImagePaste: attach)

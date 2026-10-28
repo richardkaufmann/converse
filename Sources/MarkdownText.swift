@@ -6,7 +6,7 @@ struct MarkdownText {
     static let font = NSFont.systemFont(ofSize: 16)
     static func inline(_ source: String, bold: Bool = false) -> NSMutableAttributedString {
         let output = NSMutableAttributedString(string: "")
-        guard let parsed = try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+        guard let parsed = try? AttributedString(markdown: TranscriptStyle.imageLinks(source), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSMutableAttributedString(string: source, attributes: [.font: font, .foregroundColor: NSColor.textColor])
         }
         for run in parsed.runs {

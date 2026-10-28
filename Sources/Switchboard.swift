@@ -59,15 +59,25 @@ extension Store {
         return "[Converse switchboard directory · live lookup]\n" + String(decoding: data, as: UTF8.self)
     }
     func processSwitchboard(_ s: Session) {
-        guard s.switchboardEnabled, sessions.contains(where: { $0.id == s.id }),
+        guard sessions.contains(where: { $0.id == s.id }),
               let start = s.switchboardTurnStart else { return }
         let replies = Array(s.messages.dropFirst(start).filter { $0.role == "assistant" })
         for reply in replies {
             let commandText = s.entry.engine == "codex" ? reply.finalReply : reply.text
-            guard !s.switchboardHandled.contains(reply.id), let commandText,
-                  let request = SwitchboardCommand.parse(commandText) else { continue }
+            guard !s.switchboardHandled.contains(reply.id), let commandText else { continue }
+            let fenced = SwitchboardCommand.parse(commandText)
+            let bare = try? JSONDecoder().decode(SwitchboardCommand.self, from: Data(commandText.trimmingCharacters(in: .whitespacesAndNewlines).utf8))
+            guard let request = fenced ?? bare, fenced != nil || ["list-sessions", "tell", "tell-urgently"].contains(request.command) else { continue }
             s.switchboardHandled.append(reply.id)
             func note(_ text: String) { s.messages.append(Message(role: "notice", text: "Switchboard: " + text)) }
+            guard s.switchboardEnabled else {
+                note("command ignored: session messaging is disabled. Right-click this conversation and choose Teach Session To Talk To Other Sessions, then ask it to try again. Nothing was sent.")
+                save(); continue
+            }
+            guard fenced != nil else {
+                note("command ignored: the entire final reply must be one converse fenced JSON block. Nothing was sent.")
+                save(); continue
+            }
             guard s.switchboardHop < 8 else { note("chain stopped at 8 hops. A human can continue it with a new message."); save(); continue }
             switch request.command {
             case "list-sessions":

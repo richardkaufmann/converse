@@ -653,10 +653,11 @@ extension DeviceSyncService {
     private func executeHomeCommand(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
         guard let (session, _) = homeSession(envelope), let commandID = envelope.commandID,
               let data = envelope.payload, let command = try? JSONDecoder().decode(DeviceCommandPayload.self, from: data) else { return }
-        guard requireLease(peer, envelope, session) else { return }
+        let teaching = command.action == "teachSwitchboard" && envelope.epoch == 0 && peer.hello?.capabilities.contains("switchboard-teach-v1") == true
+        guard teaching || requireLease(peer, envelope, session) else { return }
         guard let origin = peer.hello?.deviceID, let commandStore else { return }
         let payloadHash = DeviceBlob.sha256Hex(data)
-        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer"]
+        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard"]
         do {
             guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) else {
                 if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) {
@@ -677,6 +678,7 @@ extension DeviceSyncService {
         let store = Store.shared
         var asyncSetting = false
         switch command.action {
+        case "teachSwitchboard": store.teachSwitchboard(session)
         case "submit":
             let savedDraft = session.draft, savedAttachments = session.attachments
             let consumesHomeDraft = (command.text ?? "") == savedDraft
@@ -1032,9 +1034,14 @@ extension DeviceSyncService {
         publishSidebarIfChanged()
     }
     #endif
+    func canTeachRemote(_ globalID: String) -> Bool {
+        guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { return false }
+        return peer.hello?.capabilities.contains("switchboard-teach-v1") == true
+    }
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
-        guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else {
+        let epoch = command.action == "teachSwitchboard" && canTeachRemote(globalID) ? 0 : remoteLeases[globalID]
+        guard let global = DeviceGlobalID(globalID), let epoch, let peer = peerForHome(global.home) else {
             lastOutcome = "Take the session again before sending."; return nil
         }
         guard let payloadData = try? JSONEncoder().encode(command) else { return nil }
@@ -1044,7 +1051,8 @@ extension DeviceSyncService {
         return record.commandID
     }
     func retryOutbox(_ record: DeviceOutboxRecord) {
-        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch = remoteLeases[record.sessionID], let peer = peerForHome(global.home),
+        let epoch = record.payload.action == "teachSwitchboard" && canTeachRemote(record.sessionID) ? 0 : remoteLeases[record.sessionID]
+        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch, let peer = peerForHome(global.home),
               let payloadData = try? JSONEncoder().encode(record.payload) else { lastOutcome = "Take the session again before retrying."; return }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: record.sessionID, commandID: record.commandID, epoch: epoch, payload: payloadData))
     }

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     let store = Store.shared
@@ -19,9 +20,20 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     }
     reply(block("tell", to: target.id.uuidString, text: "disabled"))
     check(target.pending.isEmpty, "Untaught sessions cannot emit switchboard messages")
+    check(source.messages.last?.role == "notice" && source.messages.last?.text.contains("messaging is disabled") == true, "Untaught switchboard commands explain that nothing was sent")
+    let noticeCount = source.messages.count
+    store.processSwitchboard(source)
+    check(source.messages.count == noticeCount, "Ignored untaught commands report once and cannot replay after teaching")
+    reply("{\"command\":\"list-sessions\"}")
+    check(source.messages.last?.text.contains("messaging is disabled") == true && source.pending.isEmpty, "Bare JSON commands from untaught sessions receive a notice without executing")
     store.teachSwitchboard(source)
     check(source.switchboardEnabled && source.pending.last?.text.contains("list-sessions") == true && source.pending.last?.text.contains("tell <name>") == true && source.draft == "source draft", "Teach enables messaging and queues dynamic lookup instructions without overwriting draft")
     source.pending = []
+    reply("{\"command\":\"list-sessions\"}")
+    check(source.pending.isEmpty && source.messages.last?.text.contains("fenced JSON block") == true, "Taught sessions get a formatting notice for bare command JSON")
+    let textView = ConversationTextView(frame: .zero); textView.teachSession = { store.teachSwitchboard(source) }
+    let menu = NSMenu(); textView.addTeachingItem(to: menu)
+    check(menu.items.contains { $0.title == "Teach Session To Talk To Other Sessions" }, "Transcript right-click offers teaching even with no text or pane placement")
     reply("Example:\n" + block("tell", to: target.id.uuidString, text: "quoted"))
     check(target.pending.isEmpty, "JSON embedded in explanatory prose never sends")
     reply(block("list-sessions"))

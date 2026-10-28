@@ -218,7 +218,7 @@ struct PadTranscript: UIViewRepresentable {
     static func separator() -> NSAttributedString { NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.label]) }
     static func render(_ text: String) -> NSMutableAttributedString {
         let output = NSMutableAttributedString()
-        guard let parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+        guard let parsed = try? AttributedString(markdown: TranscriptStyle.imageLinks(text), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSMutableAttributedString(string: text, attributes: [.font: UIFont.systemFont(ofSize: 16)])
         }
         for run in parsed.runs {

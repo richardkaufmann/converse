@@ -141,6 +141,7 @@ final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     let folder: URL
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
+    let responseImageLoader = ResponseImageLoader()
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
@@ -1057,8 +1058,16 @@ final class ConversationTextView: NSTextView {
         return (copyBlocks[index].role == "user" ? "Copy this prompt" : "Copy this response", index)
     }
     @objc private func copyConversationBlock(_ sender: NSMenuItem) { copyBlock(sender.tag, to: .general) }
+    var teachSession: (() -> Void)?
+    @objc func teachConversation(_ sender: Any?) { teachSession?() }
+    func addTeachingItem(to menu: NSMenu) {
+        guard teachSession != nil else { return }
+        let item = NSMenuItem(title: "Teach Session To Talk To Other Sessions", action: #selector(teachConversation(_:)), keyEquivalent: "")
+        item.target = self; menu.addItem(.separator()); menu.addItem(item)
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
+        addTeachingItem(to: menu)
         guard let layout = layoutManager, let container = textContainer, !copyBlocks.isEmpty else { return menu }
         var point = convert(event.locationInWindow, from: nil)
         point.x -= textContainerOrigin.x; point.y -= textContainerOrigin.y
@@ -1142,6 +1151,7 @@ struct ScrollingConversation: NSViewRepresentable {
     @ObservedObject var session: Session
     var lineNumbers: Bool = true
     var inputEnabled: Bool = true
+    var onTeachSwitchboard: (() -> Void)? = nil
     var onSubmit: (() -> Void)? = nil
     var onDraftChanged: ((String) -> Void)? = nil
     var onImagePaste: ((NSImage) -> Void)? = nil
@@ -1168,6 +1178,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.isEditable = inputEnabled
+        text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
         scroll.verticalRulerView = LineNumberRuler(scroll: scroll, text: text)
@@ -1187,6 +1198,7 @@ struct ScrollingConversation: NSViewRepresentable {
         context.coordinator.draftChanged = onDraftChanged
         if let text = scroll.documentView as? ConversationTextView {
             text.isEditable = inputEnabled
+            text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? (onSubmit ?? { Store.shared.submit(session) }) : nil
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
             context.coordinator.render(text); text.refreshDecorations()
@@ -2039,6 +2051,12 @@ if CommandLine.arguments.contains("--probe-muse-quota") {
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {
     do { print(try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"), sessionID: CommandLine.arguments[at + 1]).detail); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if let at = CommandLine.arguments.firstIndex(of: "--probe-response-image"), CommandLine.arguments.count > at + 1 {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          let path = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"],
+          let url = URL(string: CommandLine.arguments[at + 1]) else { exit(2) }
+    exit(probeResponseImage(url, folder: URL(fileURLWithPath: path)) ? 0 : 1)
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), CommandLine.arguments.count > at + 2 {
     let engine = CommandLine.arguments[at + 1], directory = CommandLine.arguments[at + 2]

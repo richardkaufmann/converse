@@ -96,7 +96,7 @@ struct DeviceHello: Codable, Equatable {
     var deviceName: String
     var converseVersion: String
     var protocolVersion = 1
-    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1"]
+    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1"]
     var listenPort: Int? = nil
 }
 

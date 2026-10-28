@@ -109,6 +109,7 @@ struct PadRoot: View {
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
                                 .contextMenu {
                                     Text(row.title); Text("Home: " + home.deviceName); Text("Account: " + (row.accountName ?? "Not reported")); Text("Model: " + row.model); Text(row.status)
+                                    Button("Teach Session To Talk To Other Sessions") { service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }.disabled(!service.canTeachRemote(row.globalID))
                                     Button("Park") { model.park(row.globalID) }
                                 }
                                 .accessibilityElement(children: .contain)
