@@ -240,6 +240,9 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         }
         let session = Store.shared.create(entry)
         session.title = "Harness session"; session.draft = "home draft"
+        let draftImage = root.appendingPathComponent("draft-image.png")
+        let draftBytes = Data("isolated image transfer fixture".utf8)
+        try draftBytes.write(to: draftImage); session.attachments = [draftImage.path]
         var viewerHS = DeviceHandshake(isInitiator: true, staticKey: fixedKey(0x77), ephemeralKey: fixedKey(0x33))
         var homeHS = DeviceHandshake(isInitiator: false, staticKey: homeIdentity.privateKey, ephemeralKey: fixedKey(0x44))
         _ = try homeHS.readMessage(try viewerHS.writeMessage(payload: Data("v".utf8)))
@@ -263,6 +266,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let granted = grantFrames.first { $0.kind == DeviceMessageKind.leaseGranted.rawValue }
         let snapshot = grantFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
         check(granted != nil && snapshot?.draft == "home draft" && snapshot?.epoch == granted?.epoch, "Service harness grants lease and streams matching home snapshot")
+        check(snapshot?.draftImageHashes == [DeviceBlob.sha256Hex(draftBytes)], "Home snapshot carries staged draft attachment hashes for takeover")
         captured = []
         let renameID = UUID()
         let renamePayload = try JSONEncoder().encode(DeviceCommandPayload(action: "rename", text: "Renamed remotely"))
@@ -274,6 +278,16 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: renameID, epoch: granted?.epoch, payload: renamePayload))
         let ackCount = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.commandAck.rawValue }.count
         check(session.title == "Renamed remotely" && ackCount >= 2, "Service harness applies valid command once and acks duplicate without reapplying")
+        captured = []
+        let patch = DeviceDraftPayload(version: (snapshot?.draftVersion ?? 0) + 1, text: "transferred draft", imageHashes: [DeviceBlob.sha256Hex(draftBytes)])
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftPatch.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(patch)))
+        check(session.draft == "transferred draft" && session.attachments == [draftImage.path], "Home persists remote draft text and verified attachments together")
+        _ = try capturedEnvelopes(); captured = []
+        let settingID = UUID(); session.busy = true
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: settingID, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceCommandPayload(action: "effort", effort: "high"))))
+        let settingAck = try capturedEnvelopes().first { $0.commandID == settingID }.flatMap { $0.payload }.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
+        check(session.choices.effort == "high" && settingAck?.outcome == "completed", "Busy home accepts next-turn settings and acknowledges saved selection")
+        session.busy = false
         Store.shared.deleteSession(session)
     } catch { check(false, "Service harness failed: " + error.localizedDescription) }
     // Viewer-service harness: grant, snapshot adoption, stale seq, ack binding.
@@ -309,6 +323,10 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(viewer.remoteTranscripts[gid]?.title == "T2", "Viewer harness drops stale-sequence snapshots")
         let sentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "New"))
         check(sentID != nil && viewer.unresolved(globalID: gid).count == 1, "Viewer harness persists outgoing command in outbox")
+        if let record = viewer.unresolved(globalID: gid).first { viewer.queryOutbox(record) }
+        var queryFrames: [DeviceEnvelope] = []; var queryDecoder = DeviceFrameDecoder()
+        for frame in viewerSent { queryFrames += try queryDecoder.append(homeKeys2.receiver.decrypt(frame)) }
+        check(queryFrames.contains(where: { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.epoch == 4 && $0.commandID == sentID }), "Viewer reconciliation query retains persisted command epoch")
         // Wrong-home ack must not complete it.
         let rogue = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Rogue")
         rogue.hello = DeviceHello(deviceID: DeviceBlob.sha256Hex(fixedKey(0x99).publicKey.rawRepresentation), deviceName: "Rogue", converseVersion: "test")

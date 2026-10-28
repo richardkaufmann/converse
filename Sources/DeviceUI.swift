@@ -234,6 +234,7 @@ struct RemotePane: View {
                 if let id = composer.sentCommandID, completed.contains(id) {
                     if composer.draft == composer.sentText { composer.draft = "" }
                     if composer.blobHashes == composer.sentHashes { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []) }
+                    service.sendRemoteDraft(globalID: globalID, text: composer.draft)
                     composer.sentText = ""; composer.sentHashes = []; composer.sentCommandID = nil
                 }
             }

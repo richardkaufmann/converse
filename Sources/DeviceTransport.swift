@@ -94,7 +94,7 @@ final class DeviceSyncService: ObservableObject {
     private var leaseBoots: [String: UInt64] = [:]
     private var pendingUploads: Set<String> = []
     private var pendingDownloads: Set<String> = []
-    private var pendingAsyncAcks: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID)] = []
+    private var pendingAsyncAcks: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID, epoch: UInt64)] = []
     @Published var draftConflicts: [String: String] = [:]
     @Published var completedCommands: Set<UUID> = []
     @Published var draftAttachments: [String: [String]] = [:]
@@ -404,11 +404,18 @@ extension DeviceSyncService {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseHeartbeat.rawValue, sessionID: globalID, epoch: epoch))
         }
         // Async Muse setting changes complete after their accepted ack.
-        var stillPending: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID)] = []
+        var stillPending: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID, epoch: UInt64)] = []
         for pending in pendingAsyncAcks {
             if let session = Store.shared.sessions.first(where: { $0.id == pending.homeSession }), session.changingSetting { stillPending.append(pending); continue }
-            try? commandStore?.markCompleted(id: pending.commandID)
-            if let peer = peers[pending.peerID] { sendAck(peer, commandID: pending.commandID, sessionID: pending.sessionID, outcome: "completed", detail: "Setting applied on home.") }
+            let notice = Store.shared.sessions.first(where: { $0.id == pending.homeSession })?.settingNotice ?? "Session closed before the change finished"
+            let failed = notice.hasPrefix("Change not confirmed:") || !Store.shared.sessions.contains(where: { $0.id == pending.homeSession })
+            do {
+                if failed { try commandStore?.markFailed(id: pending.commandID) }
+                else { try commandStore?.markCompleted(id: pending.commandID) }
+                if let peer = peers[pending.peerID] { sendAck(peer, commandID: pending.commandID, sessionID: pending.sessionID, outcome: failed ? "failed" : "completed", detail: notice, epoch: pending.epoch) }
+            } catch {
+                if let peer = peers[pending.peerID] { sendAck(peer, commandID: pending.commandID, sessionID: pending.sessionID, outcome: "uncertain", detail: "Setting finished but its outcome could not be saved. Check home.", epoch: pending.epoch) }
+            }
         }
         pendingAsyncAcks = stillPending
         for peer in peers.values where peer.trustedReady {
@@ -502,13 +509,19 @@ extension DeviceSyncService {
         let start = max(0, end - 200)
         let slice = Array(session.messages[start..<end].map { wireMessage($0) })
         let draftKey = sessionID.uuidString
+        let imageHashes = session.attachments.compactMap { imageHash(path: $0) }
+        if draftAttachments[draftKey] != imageHashes {
+            draftAttachments[draftKey] = imageHashes
+            _ = drafts.bump(session: draftKey, text: session.draft)
+            persistDrafts()
+        }
         // Local home edits bump the version so transfer never reuses one.
         if drafts.text(session: draftKey) == nil { drafts.adopt(session: draftKey, version: max(1, drafts.version(session: draftKey)), text: session.draft); persistDrafts() }
         else if drafts.text(session: draftKey) != session.draft { _ = drafts.bump(session: draftKey, text: session.draft); persistDrafts() }
         let payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: sessionID).string,
                                               homeSeq: stateStore?.nextSeq() ?? 0, epoch: holder.epoch, boot: boot,
                                               messages: slice, offset: start, total: total, prepend: beforeOffset != nil,
-                                              draft: session.draft, draftVersion: drafts.version(session: sessionID.uuidString),
+                                              draft: session.draft, draftVersion: drafts.version(session: sessionID.uuidString), draftImageHashes: imageHashes,
                                               pending: session.pending.map { DevicePendingDTO(id: $0.id, text: $0.text) },
                                               busy: session.busy, status: session.status, title: session.title, engine: session.entry.engine,
                                               accountName: session.entry.accountName, model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
@@ -595,16 +608,9 @@ extension DeviceSyncService {
         default: break
         }
         if asyncSetting {
-            pendingAsyncAcks.append((commandID: commandID, peerID: peer.id, sessionID: envelope.sessionID ?? "", homeSession: session.id))
+            pendingAsyncAcks.append((commandID: commandID, peerID: peer.id, sessionID: envelope.sessionID ?? "", homeSession: session.id, epoch: envelope.epoch ?? 0))
             sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "accepted", detail: "Setting change in progress on home; completion will follow.", epoch: envelope.epoch)
             sendTranscript(to: peer, sessionID: session.id); publishSidebarIfChanged(); return
-        }
-        // Busy sessions on this base cannot change settings synchronously;
-        // changeSetting no-ops while busy, so report honestly, not completed.
-        if ["model", "effort", "access"].contains(command.action), session.busy, session.muse == nil {
-            try? commandStore.markFailed(id: commandID)
-            sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "failed", detail: "Home session is busy; setting not applied. Retry when idle.", epoch: envelope.epoch)
-            return
         }
         do { try commandStore.markCompleted(id: commandID) }
         catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Applied on home but completion was not recorded. Check home; do not resend.", epoch: envelope.epoch); return }
@@ -702,14 +708,17 @@ extension DeviceSyncService {
                 existing.pending = payload.pending; existing.requests = payload.requests; existing.queuePaused = payload.queuePaused
                 existing.model = payload.model; existing.effort = payload.effort; existing.access = payload.access
                 existing.modelOptions = payload.modelOptions; existing.effortOptions = payload.effortOptions; existing.accessOptions = payload.accessOptions
-                existing.draft = payload.draft; existing.draftVersion = payload.draftVersion
+                existing.draft = payload.draft; existing.draftVersion = payload.draftVersion; existing.draftImageHashes = payload.draftImageHashes
                 existing.title = payload.title; existing.engine = payload.engine; existing.accountName = payload.accountName
                 existing.epoch = payload.epoch; existing.boot = payload.boot
                 remoteTranscripts[payload.globalID] = existing
             } else {
                 remoteTranscripts[payload.globalID] = payload
             }
-            if drafts.adoptIfNewer(session: payload.globalID, version: payload.draftVersion, text: payload.draft) { persistDrafts() }
+            if drafts.adoptIfNewer(session: payload.globalID, version: payload.draftVersion, text: payload.draft) {
+                draftAttachments[payload.globalID] = payload.draftImageHashes ?? []
+                persistDrafts()
+            }
             remoteOffline.remove(payload.globalID)
         case DeviceMessageKind.transcriptRequest.rawValue:
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let request = try? JSONDecoder().decode(DeviceTranscriptRequest.self, from: data) else { return }
@@ -718,8 +727,16 @@ extension DeviceSyncService {
         case DeviceMessageKind.draftPatch.rawValue:
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let draft = try? JSONDecoder().decode(DeviceDraftPayload.self, from: data) else { return }
             guard requireLease(peer, envelope, session) else { return }
+            let hashes = draft.imageHashes ?? []
+            guard hashes.allSatisfy({ blobPaths[$0].map { FileManager.default.fileExists(atPath: $0) } == true }) else {
+                sendTranscript(to: peer, sessionID: session.id); return
+            }
             let applied = drafts.apply(session: session.id.uuidString, version: draft.version, text: draft.text)
-            if applied { session.draft = draft.text; Store.shared.saveSoon(); persistDrafts() }
+            if applied {
+                session.draft = draft.text; session.attachments = hashes.compactMap { blobPaths[$0] }
+                draftAttachments[session.id.uuidString] = hashes
+                Store.shared.save(); persistDrafts()
+            }
             let ack = try? JSONEncoder().encode(DeviceDraftPayload(version: applied ? draft.version : drafts.version(session: session.id.uuidString), text: session.draft))
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftAck.rawValue, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: ack))
         case DeviceMessageKind.draftAck.rawValue:
@@ -733,7 +750,8 @@ extension DeviceSyncService {
             executeHomeCommand(peer, envelope)
         case DeviceMessageKind.commandQuery.rawValue:
             if let commandID = envelope.commandID, let commandStore {
-                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.")
+                if let record = commandStore.records[commandID], record.origin != peerHome || record.sessionID != envelope.sessionID { return }
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.", epoch: envelope.epoch)
             }
         case DeviceMessageKind.commandAck.rawValue:
             // Bind to authenticated home + exact outbox session. A different
@@ -778,7 +796,12 @@ extension DeviceSyncService {
                let data = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: data), let hash = ack.detail?.split(separator: "|").first.map(String.init),
                pendingUploads.contains(hash) {
                 blobReady[hash] = ack.outcome == "stored"
-                if ack.outcome == "stored" { pendingUploads.remove(hash) }
+                if ack.outcome == "stored" {
+                    pendingUploads.remove(hash)
+                    if let hashes = draftAttachments[idString], hashes.contains(hash), hashes.allSatisfy({ blobReady[$0] == true }), let text = drafts.text(session: idString) ?? remoteTranscripts[idString]?.draft {
+                        sendRemoteDraft(globalID: idString, text: text)
+                    }
+                }
                 lastOutcome = ack.outcome == "stored" ? "Attachment stored on home." : ("Attachment failed: " + (ack.detail ?? ""))
             }
         case DeviceMessageKind.blobRequest.rawValue:
@@ -875,17 +898,22 @@ extension DeviceSyncService {
     }
     func queryOutbox(_ record: DeviceOutboxRecord) {
         guard let global = DeviceGlobalID(record.sessionID), let peer = peerForHome(global.home) else { return }
-        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandQuery.rawValue, sessionID: record.sessionID, commandID: record.commandID))
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandQuery.rawValue, sessionID: record.sessionID, commandID: record.commandID, epoch: record.epoch))
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }
     func unresolved(globalID: String) -> [DeviceOutboxRecord] { outbox.filter { $0.sessionID == globalID } }
     func sendRemoteDraft(globalID: String, text: String) {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return }
         let version = drafts.bump(session: globalID, text: text); persistDrafts()
-        let payload = try? JSONEncoder().encode(DeviceDraftPayload(version: version, text: text))
+        let payload = try? JSONEncoder().encode(DeviceDraftPayload(version: version, text: text, imageHashes: draftAttachments[globalID] ?? []))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftPatch.rawValue, sessionID: globalID, epoch: epoch, payload: payload))
     }
-    func saveDraftAttachments(globalID: String, hashes: [String]) { draftAttachments[globalID] = hashes; persistDrafts() }
+    func saveDraftAttachments(globalID: String, hashes: [String]) {
+        draftAttachments[globalID] = hashes; persistDrafts()
+        if hashes.allSatisfy({ blobReady[$0] == true }), let text = drafts.text(session: globalID) ?? remoteTranscripts[globalID]?.draft {
+            sendRemoteDraft(globalID: globalID, text: text)
+        }
+    }
     func queryBlob(globalID: String, hash: String) {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return }
         pendingUploads.insert(hash)

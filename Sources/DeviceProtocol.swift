@@ -163,6 +163,7 @@ struct DeviceTranscriptPayload: Codable {
     var prepend: Bool = false
     var draft: String
     var draftVersion: UInt64
+    var draftImageHashes: [String]? = nil
     var pending: [DevicePendingDTO] = []
     var busy: Bool
     var status: String
@@ -206,6 +207,7 @@ struct DeviceAckPayload: Codable, Equatable {
 struct DeviceDraftPayload: Codable, Equatable {
     var version: UInt64
     var text: String
+    var imageHashes: [String]? = nil
 }
 
 struct DeviceBlobPayload: Codable, Equatable {
