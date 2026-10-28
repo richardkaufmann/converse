@@ -53,6 +53,9 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(restored.state.sidebarWidth, 287)
         XCTAssertTrue(restored.state.sidebarHidden)
         XCTAssertEqual(restored.state.placements[1], id)
+        XCTAssertEqual(PadLayout.sidebarWidth(preferred: 287, available: 320), 160)
+        XCTAssertEqual(PadLayout.sidebarWidth(preferred: 287, available: 1024), 287)
+        XCTAssertEqual(restored.state.sidebarWidth, 287, "Rotation clamp never overwrites the chosen width")
     }
     func testPNGNormalizationBoundsDimensionsAndStripsOriginalBytes() throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 4000, height: 3000)).image { context in

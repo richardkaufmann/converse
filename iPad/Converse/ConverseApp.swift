@@ -23,14 +23,14 @@ struct PadRoot: View {
     @State private var dragWidth: Double?
     var body: some View {
         GeometryReader { geometry in
-            let width = min(model.state.sidebarWidth, geometry.size.width * 0.5)
+            let width = PadLayout.sidebarWidth(preferred: model.state.sidebarWidth, available: geometry.size.width)
             HStack(spacing: 0) {
                 if !model.state.sidebarHidden {
-                    sidebar.frame(width: max(180, width))
+                    sidebar.frame(width: width)
                     Rectangle().fill(.separator).frame(width: 5).contentShape(Rectangle())
                         .gesture(DragGesture().onChanged { value in
                             if dragWidth == nil { dragWidth = width }
-                            model.state.sidebarWidth = min(geometry.size.width * 0.5, max(180, (dragWidth ?? width) + value.translation.width))
+                            model.state.sidebarWidth = min(geometry.size.width * 0.5, max(120, (dragWidth ?? width) + value.translation.width))
                         }.onEnded { _ in dragWidth = nil; model.persist() })
                         .accessibilityLabel("Resize conversation sidebar")
                 }
@@ -226,5 +226,12 @@ struct PadPane: View {
             Menu(snapshot.effort.isEmpty ? "Effort" : snapshot.effort) { ForEach(snapshot.effortOptions, id: \.self) { value in Button(value) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "effort", effort: value)) } } }
             Menu(snapshot.access.isEmpty ? "Access" : snapshot.access) { ForEach(snapshot.accessOptions) { value in Button(value.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access", access: value.id)) } } }
         }.font(.caption).disabled(!model.canControl(id))
+    }
+}
+
+
+enum PadLayout {
+    static func sidebarWidth(preferred: Double, available: CGFloat) -> CGFloat {
+        min(max(0, available) * 0.5, max(120, preferred))
     }
 }
