@@ -30,6 +30,7 @@ final class PadModel: ObservableObject {
     private var edits: [String: DispatchWorkItem] = [:]
     private var hydratedEpochs: [String: UInt64] = [:]
     private var observer: AnyCancellable?
+    private var uploadObserver: AnyCancellable?
     var file: URL { service.storageFolder.appendingPathComponent("ipad-scene.json") }
     init(service: DeviceSyncService = .shared) {
         self.service = service
@@ -40,6 +41,15 @@ final class PadModel: ObservableObject {
         observer = service.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.reconcile(); self?.objectWillChange.send() }
         }
+        uploadObserver = service.$blobReady.dropFirst().sink { [weak self] ready in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // A debounce may have fired before upload finished. Send the
+                // latest local text once all images have durable home storage.
+                for (id, draft) in self.state.drafts where draft.dirty && !draft.hashes.isEmpty && draft.hashes.allSatisfy({ ready[$0] == true }) { self.flush(id) }
+            }
+        }
+
     }
     func persist() {
         do {

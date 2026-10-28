@@ -149,16 +149,24 @@ final class ConverseTests: XCTestCase {
         try await eventually("iPad receives fresh draft and transcript") { service.remoteTranscripts[row.globalID] != nil }
         XCTAssertEqual(service.remoteTranscripts[row.globalID]?.draft, "home draft")
         XCTAssertTrue(service.remoteTranscripts[row.globalID]?.messages.first?.text.contains(code) == true, "Both platform handshakes show the same verification code")
-        service.sendRemoteDraft(globalID: row.globalID, text: "from iPad")
-        try await eventually("iPad draft persists on Mac home") { service.remoteTranscripts[row.globalID]?.draft == "from iPad" }
+        let model = PadModel(service: service); model.state.placements[0] = row.globalID; model.reconcile()
+        model.edit(row.globalID, text: "from iPad")
         let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { context in UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 40)) }
-        let png = try PadImage.normalize(try XCTUnwrap(image.pngData()))
-        let hash = try XCTUnwrap(service.sendRemoteBlob(globalID: row.globalID, data: png))
+        model.attach(row.globalID, data: try XCTUnwrap(image.pngData()))
+        let hash = try XCTUnwrap(model.draft(row.globalID).hashes.first)
+        // Edit again while the image is in flight; blob completion must flush
+        // the current text even if the normal debounce already ran.
+        model.edit(row.globalID, text: "from iPad with image")
+        model.flush(row.globalID)
         try await eventually("Converted PNG is verified and stored on Mac") { service.blobReady[hash] == true }
-        let command = try XCTUnwrap(service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "submit", text: "from iPad", blobHashes: [hash])))
+        try await eventually("Latest draft and attachment sync after upload") {
+            service.remoteTranscripts[row.globalID]?.draft == "from iPad with image" && service.remoteTranscripts[row.globalID]?.draftImageHashes == [hash]
+        }
+        model.send(row.globalID)
+        let command = try XCTUnwrap(model.draft(row.globalID).sentID)
         try await eventually("Mac acknowledges the queued send") { service.completedCommands.contains(command) }
         try await eventually("Mac publishes exactly one queued message") { service.remoteTranscripts[row.globalID]?.pending.count == 1 }
-        XCTAssertEqual(service.remoteTranscripts[row.globalID]?.pending.first?.text, "from iPad")
+        XCTAssertEqual(service.remoteTranscripts[row.globalID]?.pending.first?.text, "from iPad with image")
         service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "rename", text: "Renamed from iPad"))
         try await eventually("Rename reaches home and sidebar") { service.remoteTranscripts[row.globalID]?.title == "Renamed from iPad" }
         service.releaseRemote(globalID: row.globalID)
