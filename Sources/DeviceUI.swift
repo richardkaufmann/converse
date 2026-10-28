@@ -42,9 +42,11 @@ struct DeviceConnectView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Connect to Other Converses").font(.title2.bold())
             Text(service.serviceStatus + " · " + service.localCodeNote).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+            Text("Pair once with any member to join its fabric. Members connect automatically; every member may admit another device.").font(.callout)
             Text("1. Click Connect on ONE Mac.\n2. On both Macs, compare all eight code groups.\n3. Click Pair on the initiating Mac and Approve on the receiving Mac.").font(.callout)
-            Text("Pairing lets both Macs view history and send prompts that run tools on the home Mac under its logins. Pair only devices you trust.").font(.caption).foregroundStyle(.secondary)
+            Text("Joining grants every fabric member access to session history and control of tools on home computers under their logins. Every member can admit other devices. Compare all code groups before admitting a device.").font(.caption).foregroundStyle(.secondary)
             if let prompt = service.pairingPrompt {
+                if service.pairingRequestCount > 1 { Text("\(service.pairingRequestCount) pairing requests waiting. Approve or reject each separately.").font(.caption) }
                 GroupBox(prompt.isInitiator ? "Pair with " + prompt.peerName : "Connection request from " + prompt.peerName) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(prompt.instruction).font(.callout)
@@ -75,7 +77,7 @@ struct DeviceConnectView: View {
                 }
                 Text("Use this across VPNs where discovery does not reach. Pairing and encryption are identical.").font(.caption).foregroundStyle(.secondary)
             }
-            GroupBox("Paired devices") {
+            GroupBox("Fabric members") {
                 if service.trusted.isEmpty { Text("None paired.").font(.caption).foregroundStyle(.secondary) }
                 ForEach(service.trusted) { device in
                     HStack {
@@ -84,7 +86,7 @@ struct DeviceConnectView: View {
                             Text((service.homes[device.deviceID]?.online == true ? "Online" : "Offline") + " · " + String(device.deviceID.prefix(16)).uppercased()).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Forget Device", role: .destructive) { service.forgetDevice(device) }
+                        Button("Remove from Fabric", role: .destructive) { service.forgetDevice(device) }
                     }
                 }
             }
@@ -142,7 +144,7 @@ struct RemoteSidebarRow: View {
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
             Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
-            if row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
+            if (row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title)
                 ForEach(1...3, id: \.self) { pane in
@@ -151,7 +153,7 @@ struct RemoteSidebarRow: View {
                 }
             }.fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.horizontal, 4).padding(.vertical, 3)
-            .background(row.status == "Waiting for approval" && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
+            .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .help(helpText)
     }
 }
@@ -195,6 +197,16 @@ struct RemotePane: View {
                 }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
+            if let widget = transcript?.agentWidget {
+                DisclosureGroup("Agent scoreboard") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let hash = widget.artHash, let file = service.blobCache[hash], let image = NSImage(contentsOf: file) { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 160) }
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        Text(widget.summary).font(.caption).textSelection(.enabled)
+                    }
+                }.padding(8)
+                if !widget.attention.isEmpty { ApprovalHeading(detail: widget.attention, title: "ATTENTION REQUIRED") }
+            }
             if offline {
                 Text("Home offline. Last transcript shown. Sending disabled; nothing replays silently.").font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.12))
             } else if !hasLease {
@@ -302,7 +314,7 @@ struct RemotePane: View {
     }
     func syncEditor() {
         composer.updateEditor(transcript: transcript, cache: service.blobCache)
-        let hashes = (transcript?.messages ?? []).flatMap(\.imageHashes) + composer.blobHashes
+        let hashes = (transcript?.messages ?? []).flatMap(\.imageHashes) + composer.blobHashes + [transcript?.agentWidget?.artHash].compactMap { $0 }
         for hash in Set(hashes) where service.blobCache[hash] == nil { service.fetchBlob(globalID: globalID, hash: hash) }
     }
     func attach(_ image: NSImage) {

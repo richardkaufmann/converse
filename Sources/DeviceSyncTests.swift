@@ -429,3 +429,100 @@ func runIPadHomeFixture() {
         service.suspendViewer()
     } catch { fputs("iPad interop fixture failed: " + error.localizedDescription + "\n", stderr); exit(1) }
 }
+
+// Real sockets, independent keys and concurrent approval requests. Platform
+// labels exercise identities, not a claim of Windows/iPad binary coverage.
+func deviceFabricSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-fabric-" + UUID().uuidString)
+    var services: [DeviceSyncService] = []
+    defer { services.forEach { $0.suspendViewer() }; try? FileManager.default.removeItem(at: root) }
+    func pump(_ done: () -> Bool) -> Bool {
+        let until = Date().addingTimeInterval(12)
+        while !done() && Date() < until {
+            for service in services where service.pairingPrompt != nil { service.confirmPairing() }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return done()
+    }
+    do {
+        for index in 0..<12 {
+            let service = DeviceSyncService()
+            try service.configureForTesting(folder: root.appendingPathComponent(String(index)))
+            service.deviceNameOverride = index < 3 ? "Home \(index)" : "Viewer \(index)"
+            service.isPlaced = { _ in true }
+            try service.startNetworkForTesting(); services.append(service)
+        }
+        guard pump({ services.allSatisfy { $0.testingPort != nil } }) else { check(false, "Fabric listeners become ready"); return }
+        let homes = Array(services.prefix(3)), viewers = Array(services.dropFirst(3))
+        // Admit each new device through a different existing member. Only
+        // the admission link is approved; all other links must auto-trust.
+        var humanAdmissions = 0
+        for index in 1..<services.count {
+            let sponsor = services[(index - 1) / 2]
+            services[index].connectManual(host: "127.0.0.1", port: Int(sponsor.testingPort!))
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline && services[index].trusted.count < index {
+                for service in services {
+                    if let prompt = service.pairingPrompt {
+                        humanAdmissions += 1
+                        service.confirmPairing()
+                        _ = prompt
+                    }
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+        }
+        // Do not approve anything else: remaining mesh connections must
+        // authenticate with the membership learned from the sponsor.
+        let until = Date().addingTimeInterval(12)
+        while services.contains(where: { $0.homes.values.filter(\.online).count != 11 }) && Date() < until {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        check(services.allSatisfy { $0.homes.values.filter(\.online).count == 11 && $0.pairingPrompt == nil } && humanAdmissions == 22, "Twelve devices form one fabric with only eleven mutual admissions")
+        let session = Store.shared.create(Entry(name: "Fabric fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
+        defer { Store.shared.sessions.removeAll { $0.id == session.id }; Store.shared.save() }
+        session.title = "Fabric live session"
+        check(pump { viewers.allSatisfy { viewer in viewer.homes.values.filter { $0.rows.contains { $0.sessionID == session.id } }.count == 11 } }, "Every fabric member sees sessions from every other home")
+        let gid = DeviceGlobalID(home: homes[0].identity!.deviceID, session: session.id).string
+        for viewer in viewers {
+            viewer.acquireRemote(globalID: gid)
+            if !pump({ viewer.remoteLeases[gid] != nil && viewer.remoteTranscripts[gid] != nil }) { check(false, "Fabric takeover acquires authoritative snapshot"); return }
+        }
+        check(pump { viewers.filter { $0.remoteLeases[gid] != nil }.count == 1 } && viewers.last?.remoteLeases[gid] != nil, "Nine-way takeover retains exactly one display lease")
+        viewers[0].suspendViewer()
+        check(pump { viewers.dropFirst().allSatisfy { $0.homes.values.filter(\.online).count == 10 } }, "Disconnecting one viewer leaves all other fabric connections online")
+    } catch { check(false, "Fabric integration: " + error.localizedDescription) }
+}
+
+func fabricTrustSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-membership-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+        let a = try DeviceTrustStore(folder: root.appendingPathComponent("a"))
+        let b = try DeviceTrustStore(folder: root.appendingPathComponent("b"))
+        let key = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let id = DeviceBlob.sha256Hex(key)
+        try a.pin(deviceID: id, name: "New entrant", publicKey: key, issuer: "admin-a")
+        check(try b.merge(a.records) && b.check(deviceID: id, publicKey: key) == .trusted, "Fabric member introductions become durable trust")
+        let stale = a.records
+        try b.forget(deviceID: id, issuer: "admin-b")
+        _ = try a.merge(b.records); _ = try b.merge(stale)
+        check(a.devices.isEmpty && b.devices.isEmpty, "Stale fabric rosters cannot resurrect a removed member")
+        try a.pin(deviceID: id, name: "Readmitted", publicKey: key, issuer: "admin-a")
+        _ = try b.merge(a.records)
+        check(b.devices.first?.name == "Readmitted" && (b.devices.first?.generation ?? 0) > (stale.first?.generation ?? 0), "Explicit fresh admission supersedes a removal")
+        check(try DeviceTrustStore(folder: root.appendingPathComponent("b")).records == b.records, "Fabric admission and removal versions survive restart")
+        var invalid = a.records[0]; invalid.deviceID = String(repeating: "0", count: 64)
+        let before = b.records
+        do { _ = try b.merge([invalid]); check(false, "Fabric rejects identity/key mismatch") }
+        catch { check(b.records == before, "Fabric rejects identity/key mismatch without mutating trust") }
+        invalid = a.records[0]; invalid.generation = UInt64.max
+        do { _ = try b.merge([invalid]); check(false, "Fabric rejects exhausted generation") }
+        catch { check(b.records == before, "Fabric rejects exhausted generation without poisoning future admissions") }
+        let untrusted = DeviceSyncService(); try untrusted.configureForTesting(folder: root.appendingPathComponent("untrusted"))
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp), isInitiator: false, displayName: "Untrusted")
+        peer.hello = DeviceHello(deviceID: "unknown", deviceName: "Unknown", converseVersion: "test")
+        untrusted.handleEnvelope(peer, DeviceEnvelope(kind: "fabric.members", payload: try JSONEncoder().encode(a.records)))
+        check(untrusted.trusted.isEmpty, "Unauthenticated peers cannot introduce fabric members")
+    } catch { check(false, "Fabric trust regression: " + error.localizedDescription) }
+}

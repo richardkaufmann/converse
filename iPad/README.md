@@ -20,7 +20,7 @@ For an earlier direct-device test, connect the iPad once by cable, trust the Mac
 
 ## Use
 
-Open **Setup** from the top-right Converse menu. Connect on one device, compare all eight code groups on both screens, then Pair on the initiator and Approve on the receiver. Only after both confirm does the sidebar show the home's sessions. Tap 1, 2 or 3 to take a session into that pane; P parks its display. Tool execution continues on home when parked.
+Open **Setup** from the top-right Converse menu. Connect on one device, compare all eight code groups on both screens, then Pair on the initiator and Approve on the receiver. This admits the device to the entire fabric: other members connect automatically, and any member can admit the next device. The sidebar shows all reachable homes' sessions. Remove from Fabric propagates a membership removal to connected devices. Tap 1, 2 or 3 to take a session into that pane; P parks its display. Tool execution continues on home when parked.
 
 The pin left of Conversation hides the sidebar without parking sessions or interrupting heartbeats. The restore pin remains in the top bar. Its previous width returns, bounded to half the current window. At narrow widths the pane picker shows one assigned pane at a time without releasing other assignments.
 

@@ -96,7 +96,8 @@ struct DeviceHello: Codable, Equatable {
     var deviceName: String
     var converseVersion: String
     var protocolVersion = 1
-    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs"]
+    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1"]
+    var listenPort: Int? = nil
 }
 
 struct DeviceSidebarRow: Codable, Equatable, Identifiable {
@@ -116,6 +117,8 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var leaseHolder: String? = nil
     var leaseEpoch: UInt64? = nil
     var accountName: String? = nil
+    var participantKind: String? = nil
+    var attention: String? = nil
 }
 
 struct DeviceSidebarPayload: Codable, Equatable {
@@ -152,6 +155,14 @@ struct DeviceRequestDTO: Codable, Equatable, Identifiable {
     var choices: [DeviceChoiceDTO] = []
     var questionsJSON: Data? = nil
 }
+struct DeviceWidgetMetric: Codable { var label: String; var value: String }
+struct DeviceAgentWidget: Codable {
+    var summary: String
+    var metrics: [DeviceWidgetMetric]
+    var observedAt: Date?
+    var attention: String
+    var artHash: String?
+}
 struct DeviceTranscriptPayload: Codable {
     var globalID: String
     var homeSeq: UInt64
@@ -178,6 +189,7 @@ struct DeviceTranscriptPayload: Codable {
     var accessOptions: [DeviceChoiceDTO] = []
     var requests: [DeviceRequestDTO] = []
     var queuePaused: Bool = false
+    var agentWidget: DeviceAgentWidget? = nil
 }
 struct DeviceTranscriptRequest: Codable, Equatable {
     var beforeOffset: Int

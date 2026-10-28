@@ -20,7 +20,7 @@ struct PadConnect: View {
                 }
                 Section("Pairing sequence") {
                     Text("1. Tap Connect on ONE device.\n2. Compare ALL eight code groups on both screens.\n3. Tap Pair on the initiating device and Approve on the receiving device.")
-                    Text("Pairing grants access to history and prompts that can run tools on the home computer under its logins. Only pair devices you trust.").font(.callout)
+                    Text("Pair once with any member to join its fabric. All members connect automatically. Every member can admit others and control sessions on home computers under their logins.").font(.callout)
                     Text(service.serviceStatus).font(.caption).textSelection(.enabled)
                 }
                 if service.localNetworkDenied {
@@ -50,18 +50,18 @@ struct PadConnect: View {
                     Button("Connect") { service.connectManual(host: host.trimmingCharacters(in: .whitespacesAndNewlines), port: Int(port) ?? -1) }.disabled(host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Text("For VPNs without Bonjour discovery, use the home computer’s address and listening port. Pairing uses the same verification.").font(.caption)
                 }
-                Section("Paired devices") {
+                Section("Fabric members") {
                     if service.trusted.isEmpty { Text("None paired yet.") }
                     ForEach(service.trusted) { device in
                         HStack {
                             VStack(alignment: .leading) { Text(device.name); Text(service.homes[device.deviceID]?.online == true ? "Online" : "Offline").font(.caption).foregroundStyle(.secondary) }
-                            Spacer(); Button("Forget", role: .destructive) { forget = device }
+                            Spacer(); Button("Remove", role: .destructive) { forget = device }
                         }
                     }
                 }
                 if !service.lastOutcome.isEmpty { Section { Text(service.lastOutcome).font(.caption).textSelection(.enabled) } }
             }.navigationTitle("Converse · Setup").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-                .confirmationDialog("Forget this paired device?", isPresented: Binding(get: { forget != nil }, set: { if !$0 { forget = nil } }), titleVisibility: .visible) { Button("Forget Device", role: .destructive) { if let device = forget { service.forgetDevice(device) }; forget = nil } } message: { Text("Its active connections will close. Pair again to reconnect.") }
+                .confirmationDialog("Remove this device from the fabric?", isPresented: Binding(get: { forget != nil }, set: { if !$0 { forget = nil } }), titleVisibility: .visible) { Button("Remove from Fabric", role: .destructive) { if let device = forget { service.forgetDevice(device) }; forget = nil } } message: { Text("This removal propagates to connected fabric members. The device must be admitted again to rejoin.") }
         }
     }
 }

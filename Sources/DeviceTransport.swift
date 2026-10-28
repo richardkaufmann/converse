@@ -4,10 +4,10 @@ import Foundation
 import Network
 
 struct DiscoveredDevice: Identifiable, Equatable {
-    var id: String { name }
+    var id: String { endpoint.debugDescription }
     var name: String
     var endpoint: NWEndpoint
-    static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.name == b.name }
+    static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.id == b.id }
 }
 
 struct PairingPrompt: Identifiable {
@@ -46,6 +46,7 @@ final class DevicePeer {
     var buffer = Data()
     var plainDecoder = DeviceFrameDecoder()
     var trustedReady = false
+    var humanConfirmed = false
     var localConfirmed = false
     var remoteConfirmed = false
     var alive = true
@@ -67,6 +68,8 @@ final class DeviceSyncService: ObservableObject {
     @Published var trusted: [TrustedDevice] = []
     @Published var homes: [String: RemoteHomeState] = [:]
     @Published var pairingPrompt: PairingPrompt?
+    private var waitingPairings: [PairingPrompt] = []
+    var pairingRequestCount: Int { waitingPairings.count + (pairingPrompt == nil ? 0 : 1) }
     @Published var remoteLeases: [String: UInt64] = [:]
     @Published var remoteTranscripts: [String: DeviceTranscriptPayload] = [:]
     @Published var remoteOffline: Set<String> = []
@@ -167,7 +170,7 @@ final class DeviceSyncService: ObservableObject {
             drafts.restore(versions: savedDrafts.versions, texts: savedDrafts.texts)
             draftAttachments = savedDrafts.attachments
             rebuildBlobPaths(folder: folder)
-            trusted = trustStore?.devices ?? []
+            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
             for device in trusted { homes[device.deviceID] = RemoteHomeState(deviceID: device.deviceID, deviceName: device.name) }
             if let cache = stateStore?.state.sidebarCache, let payloads = try? JSONDecoder().decode([DeviceSidebarPayload].self, from: cache) {
                 for payload in payloads where homes[payload.homeDeviceID] != nil {
@@ -196,7 +199,7 @@ final class DeviceSyncService: ObservableObject {
         _ = requested
         #endif
         let listener = try NWListener(using: parameters, on: portOverride ?? listenPort)
-        listener.service = NWListener.Service(name: deviceName, type: Self.serviceType)
+        listener.service = NWListener.Service(name: deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType)
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state { self?.serviceStatus = "Listen failed: " + error.localizedDescription }
@@ -223,11 +226,12 @@ final class DeviceSyncService: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
             self.discovered = results.compactMap { result in
-                if case .service(let name, _, _, _) = result.endpoint, name != self.deviceName {
+                if case .service(let name, _, _, _) = result.endpoint, !name.hasSuffix("[" + String((self.identity?.deviceID ?? "").prefix(8)) + "]") {
                     return DiscoveredDevice(name: name, endpoint: result.endpoint)
                 }
                 return nil
             }.sorted { $0.name < $1.name }
+            self.reconnectTrusted()
         }
         self.browser = browser
         browser.start(queue: .main)
@@ -238,14 +242,15 @@ final class DeviceSyncService: ObservableObject {
         connect(to: .hostPort(host: NWEndpoint.Host(host), port: nwPort), displayName: host, manualHost: host, manualPort: port)
     }
     private func reconnectTrusted() {
+        guard trustStore?.records.first(where: { $0.deviceID == identity?.deviceID })?.removed != true else { return }
         for device in trusted where homes[device.deviceID]?.online != true {
-            if let found = discovered.first(where: { $0.name == device.name }) { connect(discovered: found) }
+            if let found = discovered.first(where: { $0.name == device.name || $0.name.hasPrefix(device.name + " [") }) { connect(discovered: found) }
             else if let host = device.lastHost, let port = device.lastPort { connectManual(host: host, port: port) }
         }
     }
     private func connect(to endpoint: NWEndpoint, displayName: String, manualHost: String? = nil, manualPort: Int? = nil) {
         guard let identity else { return }
-        if peers.values.contains(where: { $0.displayName == displayName && $0.alive }) { return }
+        if peers.values.contains(where: { $0.connection.endpoint == endpoint && $0.alive }) { return }
         let connection = NWConnection(to: endpoint, using: .tcp)
         let peer = DevicePeer(connection: connection, isInitiator: true, displayName: displayName, manualHost: manualHost, manualPort: manualPort)
         peer.handshake = DeviceHandshake(isInitiator: true, staticKey: identity.privateKey)
@@ -269,7 +274,7 @@ final class DeviceSyncService: ObservableObject {
     }
     private func helloPayload() -> Data {
         let hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
-                                converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development")
+                                converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.map { Int($0.rawValue) })
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
     private func sendHandshake(_ peer: DevicePeer) {
@@ -346,17 +351,28 @@ extension DeviceSyncService {
     }
     private func beginTrust(_ peer: DevicePeer) {
         guard let keys = peer.keys, let hello = peer.hello, let trustStore else { disconnect(peer); return }
-        guard hello.deviceID == DeviceBlob.sha256Hex(keys.remoteStatic) else { disconnect(peer); return }
-        switch trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) {
+        guard hello.deviceID == DeviceBlob.sha256Hex(keys.remoteStatic), hello.deviceID != identity?.deviceID else { disconnect(peer); return }
+        // Simultaneous connects choose the same socket at both ends. An
+        // established socket wins; otherwise the lower identity initiates.
+        let preferInitiator = (identity?.deviceID ?? "") < hello.deviceID
+        for other in Array(peers.values) where other.id != peer.id && other.alive && other.keys != nil && other.hello?.deviceID == hello.deviceID {
+            if other.trustedReady || (other.isInitiator == preferInitiator && peer.isInitiator != preferInitiator) {
+                disconnect(peer, preserveDeviceState: true); return
+            }
+            disconnect(other, preserveDeviceState: true)
+        }
+        let removedLocally = trustStore.records.first { $0.deviceID == identity?.deviceID }?.removed == true
+        switch removedLocally ? DeviceTrustCheck.unknown : trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) {
         case .trusted:
             peer.localConfirmed = true
             sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); finishTrustIfReady(peer)
         case .unknown, .keyChanged:
-            pairingPrompt = PairingPrompt(connectionID: peer.id, peerName: hello.deviceName,
+            let prompt = PairingPrompt(connectionID: peer.id, peerName: hello.deviceName,
                                           fingerprint: String(hello.deviceID.prefix(16)).uppercased(),
                                           code: DeviceSAS.code(keys.handshakeHash),
                                           keyChanged: trustStore.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .keyChanged,
                                           nameCollision: trustStore.hasNameCollision(name: hello.deviceName, deviceID: hello.deviceID), isInitiator: peer.isInitiator)
+            if pairingPrompt == nil { pairingPrompt = prompt } else { waitingPairings.append(prompt) }
             #if os(macOS)
             if !peer.isInitiator, !isTestEnvironment {
                 DispatchQueue.main.async { AppDelegate.shared?.showDeviceConnect() }
@@ -366,19 +382,27 @@ extension DeviceSyncService {
     }
     func confirmPairing() {
         guard let prompt = pairingPrompt, let peer = peers[prompt.connectionID] else { return }
-        peer.localConfirmed = true
+        peer.humanConfirmed = true; peer.localConfirmed = true
         serviceStatus = peer.isInitiator ? "Waiting for Approve on " + prompt.peerName + "…" : "Approved. Waiting for Pair on " + prompt.peerName + "…"
-        sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); pairingPrompt = nil; finishTrustIfReady(peer)
+        sendEnvelope(peer, DeviceEnvelope(kind: "pair.confirm")); advancePairing(removing: peer.id); finishTrustIfReady(peer)
     }
     func rejectPairing() {
         guard let prompt = pairingPrompt, let peer = peers[prompt.connectionID] else { pairingPrompt = nil; return }
-        disconnect(peer); pairingPrompt = nil
+        disconnect(peer)
+    }
+    private func advancePairing(removing id: UUID) {
+        waitingPairings.removeAll { $0.connectionID == id }
+        if pairingPrompt?.connectionID == id { pairingPrompt = waitingPairings.isEmpty ? nil : waitingPairings.removeFirst() }
     }
     private func finishTrustIfReady(_ peer: DevicePeer) {
         guard peer.localConfirmed, peer.remoteConfirmed, !peer.trustedReady, let hello = peer.hello, let keys = peer.keys else { return }
         do {
-            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: peer.manualHost, port: peer.manualPort)
-            trusted = trustStore?.devices ?? trusted
+            guard trustStore?.check(deviceID: hello.deviceID, publicKey: keys.remoteStatic) == .trusted || peer.humanConfirmed else { disconnect(peer); return }
+            var host = peer.manualHost
+            if host == nil, case .hostPort(let endpointHost, _) = peer.connection.endpoint { host = String(describing: endpointHost) }
+            try trustStore?.pin(deviceID: hello.deviceID, name: hello.deviceName, publicKey: keys.remoteStatic, host: host, port: hello.listenPort ?? peer.manualPort, issuer: identity?.deviceID)
+            if let identity { try trustStore?.pin(deviceID: identity.deviceID, name: deviceName, publicKey: identity.publicKey, issuer: identity.deviceID) }
+            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? trusted
         } catch {
             lastOutcome = "Could not save paired device. Control not granted."
             disconnect(peer); return
@@ -386,14 +410,22 @@ extension DeviceSyncService {
         peer.trustedReady = true
         homes[hello.deviceID] = RemoteHomeState(deviceID: hello.deviceID, deviceName: hello.deviceName, online: true, rows: homes[hello.deviceID]?.rows ?? [], lastSeen: Date())
         sendSidebar(to: peer)
+        broadcastFabric()
         serviceStatus = "Connected to " + hello.deviceName + ". Take a session again to control it."
+    }
+    private func broadcastFabric() {
+        guard let records = trustStore?.records, let data = try? JSONEncoder().encode(records) else { return }
+        for peer in Array(peers.values) where peer.trustedReady && peer.hello?.capabilities.contains("fabric-membership-v1") == true {
+            sendEnvelope(peer, DeviceEnvelope(kind: "fabric.members", payload: data))
+        }
     }
     func forgetDevice(_ device: TrustedDevice) {
         do {
-            try trustStore?.forget(deviceID: device.deviceID)
-            trusted = trustStore?.devices ?? []
+            try trustStore?.forget(deviceID: device.deviceID, issuer: identity?.deviceID)
+            trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
             homes.removeValue(forKey: device.deviceID)
-            for peer in peers.values where peer.hello?.deviceID == device.deviceID { disconnect(peer) }
+            for peer in Array(peers.values) where peer.hello?.deviceID == device.deviceID { disconnect(peer) }
+            broadcastFabric()
         } catch { lastOutcome = "Could not forget device: " + error.localizedDescription }
     }
     private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
@@ -408,10 +440,11 @@ extension DeviceSyncService {
             peer.keys = keys
         } catch { disconnect(peer) }
     }
-    private func disconnect(_ peer: DevicePeer) {
+    private func disconnect(_ peer: DevicePeer, preserveDeviceState: Bool = false) {
         guard peer.alive else { return }
         peer.alive = false; peer.connection.cancel()
-        if let hello = peer.hello, let device = peer.hello?.deviceID {
+        advancePairing(removing: peer.id)
+        if !preserveDeviceState, let hello = peer.hello, let device = peer.hello?.deviceID {
             homes[hello.deviceID]?.online = false; homes[hello.deviceID]?.lastSeen = Date()
             // Viewer authority never survives disconnect.
             for row in homes[hello.deviceID]?.rows ?? [] {
@@ -545,7 +578,7 @@ extension DeviceSyncService {
                              model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
                              status: session.status, busy: session.busy, queued: session.pending.count, queuePaused: session.queuePaused,
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
-                             accountName: session.entry.accountName)
+                             accountName: session.entry.accountName, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention)
         }
         #else
         let rows: [DeviceSidebarRow] = []
@@ -592,7 +625,7 @@ extension DeviceSyncService {
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
-                                              requests: requestDTOs(session), queuePaused: session.queuePaused)
+                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: (config.snapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.snapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }) })
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
         }
@@ -692,6 +725,26 @@ extension DeviceSyncService {
         if envelope.kind == "pair.confirm" { peer.remoteConfirmed = true; finishTrustIfReady(peer); return }
         guard peer.trustedReady, let peerHome = peer.hello?.deviceID else { return }
         switch envelope.kind {
+        case "fabric.members":
+            guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
+                  let members = try? JSONDecoder().decode([TrustedDevice].self, from: data) else { return }
+            do {
+                if try trustStore?.merge(members) == true {
+                    trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID } ?? []
+                    let active = Set(trusted.map(\.deviceID))
+                    for connection in Array(peers.values) where connection.trustedReady && !active.contains(connection.hello?.deviceID ?? "") { disconnect(connection) }
+                    for device in trusted where homes[device.deviceID] == nil { homes[device.deviceID] = RemoteHomeState(deviceID: device.deviceID, deviceName: device.name) }
+                    let removed = Set(members.filter { $0.removed == true }.map(\.deviceID)).subtracting(active)
+                    for id in removed { homes.removeValue(forKey: id) }
+                    // An offline device removed from the fabric cannot rejoin
+                    // through an old pin: it must obtain fresh human admission.
+                    if let own = trustStore?.records.first(where: { $0.deviceID == identity?.deviceID }), own.removed == true {
+                        for connection in Array(peers.values) { disconnect(connection) }
+                        serviceStatus = "This device was removed from the fabric. Pair again to rejoin."; return
+                    }
+                    broadcastFabric(); reconnectTrusted()
+                }
+            } catch { lastOutcome = "Could not save fabric membership. No new trust granted." }
         case DeviceMessageKind.ping.rawValue:
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.pong.rawValue))
             if homes[peerHome]?.online == false { homes[peerHome]?.online = true; for row in homes[peerHome]?.rows ?? [] { remoteOffline.remove(row.globalID) } }
@@ -771,7 +824,7 @@ extension DeviceSyncService {
                     combined = existing.messages + payload.messages.filter { !known.contains($0.id) }
                 }
                 existing.messages = combined; existing.offset = min(existing.offset, payload.offset); existing.total = payload.total
-                existing.homeSeq = payload.homeSeq; existing.busy = payload.busy; existing.status = payload.status
+                existing.homeSeq = payload.homeSeq; existing.busy = payload.busy; existing.status = payload.status; existing.agentWidget = payload.agentWidget
                 existing.pending = payload.pending; existing.requests = payload.requests; existing.queuePaused = payload.queuePaused
                 existing.model = payload.model; existing.effort = payload.effort; existing.access = payload.access
                 existing.modelOptions = payload.modelOptions; existing.effortOptions = payload.effortOptions; existing.accessOptions = payload.accessOptions

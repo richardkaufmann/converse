@@ -118,7 +118,7 @@ final class PadModel: ObservableObject {
                 flush(id)
             }
             state.drafts[id] = draft
-            for hash in snapshot.messages.flatMap(\.imageHashes) + draft.hashes where service.blobCache[hash] == nil { service.fetchBlob(globalID: id, hash: hash) }
+            for hash in snapshot.messages.flatMap(\.imageHashes) + draft.hashes + [snapshot.agentWidget?.artHash].compactMap({ $0 }) where service.blobCache[hash] == nil { service.fetchBlob(globalID: id, hash: hash) }
         }
         if service.pairingPrompt != nil { connectShown = true }
         if changed { persist() }

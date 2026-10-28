@@ -164,11 +164,12 @@ final class MuseRequestAnswers: ObservableObject {
 }
 struct ApprovalHeading: View {
     let detail: String
+    var title = "PERMISSION REQUIRED"
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").font(.title2)
             VStack(alignment: .leading, spacing: 3) {
-                Text("PERMISSION REQUIRED").font(.system(size: 14, weight: .heavy))
+                Text(title).font(.system(size: 14, weight: .heavy))
                 Text(detail).font(.callout)
             }
             Spacer(minLength: 0)

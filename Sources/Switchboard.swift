@@ -49,7 +49,8 @@ extension Store {
         enqueueSwitchboard(s, text: prompt)
     }
     func switchboardDirectory(for s: Session) -> String {
-        let rows: [[String: Any]] = sessions.map {
+        let visible = sessions.filter { s.agent == nil || $0.id == s.id || s.agent?.watchedSessions.contains($0.id) == true }
+        let rows: [[String: Any]] = visible.map {
             ["id": $0.id.uuidString, "name": $0.title, "assistant": $0.entry.name,
              "model": $0.toolStatus.model, "messagingEnabled": $0.switchboardEnabled]
         }
@@ -76,6 +77,9 @@ extension Store {
                 guard let rawID = request.to, let id = UUID(uuidString: rawID),
                       let target = sessions.first(where: { $0.id == id }), target.id != s.id else {
                     note("delivery failed: target missing, closed, invalid or this same session. Request list-sessions for current IDs."); save(); continue
+                }
+                if let agent = s.agent, (!agent.watchedSessions.contains(target.id) || request.command == "tell-urgently") {
+                    note("delivery refused: this agent may queue messages only to its selected sessions. Change its scope in Agent Setup."); save(); continue
                 }
                 guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 32_768 else {
                     note("delivery failed: message must contain 1–32768 bytes of text."); save(); continue

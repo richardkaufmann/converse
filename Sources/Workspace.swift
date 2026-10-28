@@ -172,7 +172,12 @@ struct SidebarSession: View {
             .onHover { inside in hover.setHovered(inside); if inside { Store.shared.refreshSidebarStatus(session) } }
             .contextMenu {
                 Button("Rename…") { AppDelegate.shared.renameSession(session) }
-                Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
+                if session.agent != nil {
+                    Button("Agent Setup…") { AgentWindows.shared.setup(session) }
+                    Button("Show scoreboard") { AgentWindows.shared.widget(session) }
+                    Button("Run once") { Store.shared.enqueueSwitchboard(session, text: "[Manual agent run] Check progress and refresh the scoreboard.") }
+                    Button("Clear attention") { session.agent?.attention = ""; session.status = "Ready"; Store.shared.save() }
+                } else { Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy) }
                 ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }

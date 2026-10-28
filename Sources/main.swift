@@ -54,10 +54,12 @@ struct SavedSession: Codable {
     var switchboardHandled: [UUID]? = nil
     var createdAt: Date? = nil
     var titleUpdatedAt: Date? = nil
+    var agent: AgentConfig? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
     @Published var entry: Entry
+    @Published var agent: AgentConfig? = nil
     @Published var title: String { didSet { if title != oldValue { titleUpdatedAt = Date(); identityChanged?() } } }
     var createdAt: Date
     var titleUpdatedAt: Date
@@ -95,7 +97,7 @@ final class Session: ObservableObject, Identifiable {
     var probingStatus = false
     var statusCallbacks: [() -> Void] = []
     var needsApproval: Bool {
-        requests.contains { $0.kind == "approval" } ||
+        agent?.attention.isEmpty == false || requests.contains { $0.kind == "approval" } ||
         (status.hasPrefix("Waiting") && (status.localizedCaseInsensitiveContains("approval") || status.localizedCaseInsensitiveContains("permission")))
     }
     var statusDetails = ""
@@ -113,9 +115,10 @@ final class Session: ObservableObject, Identifiable {
     var web: WKWebView?
     var textScrollOrigin: NSPoint?
     var textSelection: NSRange?
+    weak var inputTextView: ConversationTextView?
     init(_ saved: SavedSession) {
         createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
-        id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages
+        id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages; agent = saved.agent
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         choices = saved.choices ?? SessionChoices()
@@ -126,7 +129,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil }
 final class Store: ObservableObject {
@@ -187,8 +190,12 @@ final class Store: ObservableObject {
         let task = DispatchWorkItem { self.save() }; pendingSave = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
+    func saveChecked() throws {
+        let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted))
+        try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
+    }
     func save() {
-        do { let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted)); try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic) }
+        do { try saveChecked() }
         catch { NSLog("Save failed: %@", error.localizedDescription) }
     }
     func create(_ entry: Entry) -> Session {
@@ -205,6 +212,7 @@ final class Store: ObservableObject {
     func interruptProcess(_ s: Session) {
         guard s.busy else { return }
         s.interrupted = true
+        if s.agent != nil { MainActor.assumeIsolated { AgentRuntime.shared.cancel(s) }; s.status = "Stopping…"; return }
         if let muse = s.muse { s.status = "Stopping…"; muse.interrupt(); return }
         guard let p = s.process, p.isRunning else { return }
         s.status = "Stopping…"; p.interrupt()
@@ -287,6 +295,7 @@ final class Store: ObservableObject {
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
+        if s.agent != nil { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID) }; save(); return }
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
@@ -503,6 +512,7 @@ final class Store: ObservableObject {
         }
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
+        if let agent = s.agent { s.toolStatus.model = agent.model; s.toolStatus.access = "Monitor selected sessions"; completion?(); return }
         guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
         if s.entry.engine != "muse" { refreshProviderStatus(s, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
@@ -632,7 +642,8 @@ final class Store: ObservableObject {
         guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login"].contains(command) else { return false }
         if command == "/login" {
             s.draft = ""
-            if let app = AppDelegate.shared { app.chooseLogin(s) } else { signInSession(s) }
+            if s.agent != nil { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
+            else if let app = AppDelegate.shared { app.chooseLogin(s) } else { signInSession(s) }
             saveSoon(); return true
         }
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
@@ -1127,6 +1138,7 @@ struct ScrollingConversation: NSViewRepresentable {
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.borderType = .noBorder; scroll.backgroundColor = NSColor.textBackgroundColor
         let text = ConversationTextView(frame: scroll.contentView.bounds)
+        session.inputTextView = text
         text.minSize = NSSize(width: 0, height: 600)
         text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         text.isVerticallyResizable = true; text.isHorizontallyResizable = false
@@ -1311,12 +1323,13 @@ struct Conversation: View {
                 }.padding(8).background(Color.orange.opacity(0.1))
             }
             if session.needsApproval && !session.requests.contains(where: { $0.kind == "approval" }) {
-                ApprovalHeading(detail: session.status)
+                ApprovalHeading(detail: session.agent?.attention ?? session.status, title: session.agent == nil ? "PERMISSION REQUIRED" : "ATTENTION REQUIRED")
             }
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
             Divider()
+            if session.agent != nil { AgentControls(session: session) } else {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     Text(session.status)
@@ -1363,6 +1376,7 @@ struct Conversation: View {
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
+            }
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
@@ -1402,6 +1416,13 @@ struct RootView: View {
                                     SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                                 }
                             }
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack {
+                                Text("Agents").fontWeight(.bold); Spacer()
+                                Button { let agent = store.createAgent(); AppDelegate.shared.select(agent, state: state); AgentWindows.shared.setup(agent) } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New agent")
+                            }.padding(.horizontal, 4)
+                            ForEach(store.sessions.filter { $0.agent != nil }) { session in SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold) }
                         }
                         DeviceSidebarSection(workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                     }.padding(.top, 6)
@@ -1515,6 +1536,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
+        AgentRuntime.shared.start()
+        if ProcessInfo.processInfo.environment["CONVERSE_QA_AGENT"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
+            let agent = Store.shared.createAgent(title: "Isolated steward preview")
+            agent.agent?.snapshot = AgentRepoSnapshot(repository: "fixture/project", stars: 12, openPRs: 2, openIssues: 4, openBugs: 1, conversationComments: 18, releaseDownloads: 23, visitors14d: 7)
+            agent.agent?.attention = "Define the release acceptance criteria."
+            agent.agent?.widgetSummary = "Preview data only. Ready to compare evidence across the development sessions."
+            agent.messages.append(Message(role: "assistant", text: "What are we building, and what must be true for the demo to count as a success?"))
+            select(agent, state: state); AgentWindows.shared.widget(agent)
+        }
         if ProcessInfo.processInfo.environment["CONVERSE_QA_REMOTE"] == "1",
            ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
            ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil,
@@ -1571,7 +1601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
     @objc func showConverseHelp() { helpController.show() }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "A calmer home for your command-line assistants.")]) }
+    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app")]) }
     @objc func newWindow() {
         let state = WindowState()
         state.setup = windows.isEmpty && !Store.shared.setupCompleted

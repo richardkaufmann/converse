@@ -69,30 +69,61 @@ struct TrustedDevice: Codable, Equatable, Identifiable {
     var pairedAt: Date
     var lastHost: String? = nil
     var lastPort: Int? = nil
+    var generation: UInt64? = nil
+    var changedBy: String? = nil
+    var removed: Bool? = nil
 }
 
 final class DeviceTrustStore {
     private let file: URL
-    private(set) var devices: [TrustedDevice] = []
+    private(set) var records: [TrustedDevice] = []
+    var devices: [TrustedDevice] { records.filter { $0.removed != true } }
     init(folder: URL) throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         file = folder.appendingPathComponent("devices.json")
-        if let data = try? Data(contentsOf: file) { devices = (try? JSONDecoder().decode([TrustedDevice].self, from: data)) ?? [] }
+        if FileManager.default.fileExists(atPath: file.path) {
+            records = try JSONDecoder().decode([TrustedDevice].self, from: Data(contentsOf: file))
+        }
     }
     func check(deviceID: String, publicKey: Data) -> DeviceTrustCheck {
         guard let device = devices.first(where: { $0.deviceID == deviceID }) else { return .unknown }
         return device.publicKey == publicKey ? .trusted : .keyChanged
     }
-    // Transactional: persist the candidate list first; memory changes only
-    // after durable save succeeds, so a failed pin never grants trust.
-    func pin(deviceID: String, name: String, publicKey: Data, host: String? = nil, port: Int? = nil) throws {
-        var next = devices.filter { $0.deviceID != deviceID }
-        next.append(TrustedDevice(deviceID: deviceID, name: name, publicKey: publicKey, pairedAt: Date(), lastHost: host, lastPort: port))
-        try save(next); devices = next
+    private func nextGeneration() throws -> UInt64 {
+        let highest = records.map { $0.generation ?? 0 }.max() ?? 0
+        guard highest < UInt64.max - 1 else { throw CocoaError(.coderInvalidValue) }
+        return highest + 1
     }
-    func forget(deviceID: String) throws {
-        let next = devices.filter { $0.deviceID != deviceID }
-        try save(next); devices = next
+    func pin(deviceID: String, name: String, publicKey: Data, host: String? = nil, port: Int? = nil, issuer: String? = nil) throws {
+        let old = devices.first { $0.deviceID == deviceID }
+        if let old, old.publicKey == publicKey, old.name == name, (host == nil || old.lastHost == host), (port == nil || old.lastPort == port) { return }
+        var next = records.filter { $0.deviceID != deviceID }
+        next.append(TrustedDevice(deviceID: deviceID, name: String(name.prefix(200)), publicKey: publicKey, pairedAt: old?.pairedAt ?? Date(), lastHost: host ?? old?.lastHost, lastPort: port ?? old?.lastPort, generation: try nextGeneration(), changedBy: issuer ?? deviceID, removed: false))
+        try save(next); records = next
+    }
+    func forget(deviceID: String, issuer: String? = nil) throws {
+        guard var record = records.first(where: { $0.deviceID == deviceID }) else { return }
+        record.removed = true; record.generation = try nextGeneration(); record.changedBy = issuer ?? deviceID
+        let next = records.filter { $0.deviceID != deviceID } + [record]
+        try save(next); records = next
+    }
+    // Called ONLY after transport authentication of an existing member. All
+    // members may admit/remove members; this is intentionally transitive trust.
+    // Versioned removals prevent a stale offline roster from resurrecting one.
+    func merge(_ incoming: [TrustedDevice]) throws -> Bool {
+        guard incoming.count <= 512, incoming.allSatisfy({ $0.publicKey.count == 32 && DeviceBlob.sha256Hex($0.publicKey) == $0.deviceID && $0.name.count <= 200 && ($0.changedBy?.count ?? 0) <= 64 && ($0.lastHost?.count ?? 0) <= 253 && ($0.lastPort == nil || (1...65535).contains($0.lastPort!)) && ($0.generation ?? 0) < UInt64.max - 1 }) else { throw CocoaError(.coderInvalidValue) }
+        var next = records
+        for record in incoming {
+            if let index = next.firstIndex(where: { $0.deviceID == record.deviceID }) {
+                let old = next[index]
+                let newRank = (record.generation ?? 0, record.removed == true ? 1 : 0, record.changedBy ?? "")
+                let oldRank = (old.generation ?? 0, old.removed == true ? 1 : 0, old.changedBy ?? "")
+                if newRank > oldRank { next[index] = record }
+            } else { next.append(record) }
+        }
+        guard next.count <= 512 else { throw CocoaError(.coderInvalidValue) }
+        guard next != records else { return false }
+        try save(next); records = next; return true
     }
     func hasNameCollision(name: String, deviceID: String) -> Bool {
         devices.contains { $0.name == name && $0.deviceID != deviceID }

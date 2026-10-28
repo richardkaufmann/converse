@@ -42,6 +42,10 @@ struct PadRoot: View {
                         Menu {
                             Button("Setup…") { model.connectShown = true }
                             Button("Converse Help…") { model.helpShown = true }
+                            Divider()
+                            Text("Richard Kaufmann")
+                            Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!)
+                            Link("www.kaoslabs.app", destination: URL(string: "https://www.kaoslabs.app")!)
                             Toggle("Line numbers", isOn: $model.lineNumbers)
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Converse menu")
                     }.padding(10)
@@ -148,6 +152,16 @@ struct PadPane: View {
                     Text("Recovered draft differs from the home draft. Both are preserved; choose which to edit.").font(.caption)
                     HStack { Button("Keep my recovered draft") { model.resolveDraft(id, keepLocal: true) }; Button("Use home draft") { model.resolveDraft(id, keepLocal: false) } }
                 }.padding(8).background(Color.yellow.opacity(0.3))
+            }
+            if let widget = snapshot?.agentWidget {
+                DisclosureGroup("Agent scoreboard") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let hash = widget.artHash, let file = service.blobCache[hash], let image = UIImage(contentsOfFile: file.path) { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        Text(widget.summary).font(.caption).textSelection(.enabled)
+                    }
+                }.padding(8)
+                if !widget.attention.isEmpty { Label(widget.attention, systemImage: "exclamationmark.triangle.fill").padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.yellow).foregroundStyle(.black) }
             }
             if let request = snapshot?.requests.first { PadRequest(id: id, request: request).disabled(!model.canControl(id)) }
             if let snapshot, !snapshot.pending.isEmpty {

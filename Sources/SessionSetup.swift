@@ -8,12 +8,12 @@ struct SessionSetupRequest: Identifiable {
 }
 enum AssistantFamily {
     static func name(_ engine: String) -> String {
-        ["claude": "Claude", "codex": "Codex", "muse": "Muse"][engine] ?? engine.capitalized
+        ["claude": "Claude", "codex": "Codex", "muse": "Muse", "agent": "Agent"][engine] ?? engine.capitalized
     }
 }
 extension Store {
     var assistantFamilies: [String] {
-        Array(Set(entries.map(\.engine) + sessions.map { $0.entry.engine })).sorted()
+        Array(Set(entries.map(\.engine) + sessions.map { $0.entry.engine })).filter { $0 != "agent" }.sorted()
     }
     func defaultEntry(engine: String) -> Entry {
         entries.first { $0.engine == engine } ?? SetupCatalog.entries.first { $0.engine == engine }!
