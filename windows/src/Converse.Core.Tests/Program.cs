@@ -310,6 +310,70 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "Sidebar layout persists collapsed state and width");
 }
 
+// Entry naming: claude engine is "Claude" (Mac parity), with migration for old stores.
+{
+    var entries = Converse.Core.SessionStore.DefaultEntries();
+    Check(entries.Count == 3 && entries[0].Name == "Claude" && entries[1].Name == "Codex" && entries[2].Name == "Muse",
+        "Default entries are named Claude, Codex, Muse");
+    var dir = Directory.CreateTempSubdirectory("converse-entries-").FullName;
+    File.WriteAllText(Path.Combine(dir, "sessions.json"),
+        "{\"Entries\":[{\"Name\":\"Muse\",\"Command\":\"claude\",\"Directory\":\"C:\\\\u\",\"Engine\":\"claude\"}],\"Sessions\":[]}");
+    var store = new Converse.Core.SessionStore(dir, new FakeRunner());
+    Check(store.Entries.Count == 1 && store.Entries[0].Name == "Claude" && store.Entries[0].Command == "claude",
+        "Stored claude entry misnamed Muse migrates to Claude");
+}
+
+// Command resolution: .exe preferred, npm .cmd shims wrapped in cmd.exe with safe quoting.
+{
+    var bin = Directory.CreateTempSubdirectory("converse-bin-").FullName;
+    File.WriteAllText(Path.Combine(bin, "tool.cmd"), "@echo off\n");
+    var shimOnly = Converse.Core.CommandResolution.Resolve("tool", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
+    Check(shimOnly.UsesCmd && shimOnly.DisplayPath.EndsWith("tool.cmd") && shimOnly.CmdPrefix == "\"" + shimOnly.DisplayPath + "\"",
+        "npm-style .cmd shim resolves to a cmd.exe wrapper");
+    File.WriteAllText(Path.Combine(bin, "tool.exe"), "MZ");
+    var preferred = Converse.Core.CommandResolution.Resolve("tool", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
+    Check(!preferred.UsesCmd && preferred.FileName.EndsWith("tool.exe"),
+        "Native .exe wins over .cmd shim when both exist");
+    var quoted = Converse.Core.CommandResolution.QuoteCmdArg("say \"hi\" & 100% | done ^<>");
+    Check(quoted == "\"say \"\"hi\"\" & 100%% | done ^<>\"",
+        "cmd quoting doubles quotes and percents, leaving metachars literal inside quotes");
+    var psi = new System.Diagnostics.ProcessStartInfo();
+    Converse.Core.CommandResolution.Apply(psi, shimOnly, new[] { "--print", "a&b" });
+    Check(psi.FileName.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase)
+        && psi.Arguments.StartsWith("/d /s /c \"") && psi.Arguments.Contains("\"a&b\""),
+        "cmd wrapper builds a /d /s /c line with quoted prompt text");
+    var missing = Converse.Core.CommandResolution.Resolve("no-such-tool-xyz", bin, ".COM;.EXE;.BAT;.CMD", windows: true);
+    Check(!missing.UsesCmd && missing.FileName == "no-such-tool-xyz",
+        "Unknown command passes through for a clear spawn error");
+}
+
+// Choices catalog: per-engine access/effort options for the settings row.
+{
+    var claude = Converse.Core.ChoicesCatalog.AccessFor("claude");
+    Check(claude.Count == 6 && claude.Any(o => o.Id == "manual") && claude.Any(o => o.Id == "bypassPermissions"),
+        "Claude access matches CLI permission-mode vocabulary");
+    var codex = Converse.Core.ChoicesCatalog.AccessFor("codex");
+    Check(codex.Count == 3 && codex[0].Id == "read-only",
+        "Codex access offers sandbox modes");
+    var museEfforts = Converse.Core.ChoicesCatalog.EffortsFor("muse");
+    Check(museEfforts.Contains("ultra") && museEfforts.Contains("none"),
+        "Muse efforts match CLI reasoning-effort vocabulary");
+    var clean = Converse.Core.ChoicesCatalog.EffortsFor("claude")
+        .Concat(Converse.Core.ChoicesCatalog.EffortsFor("codex"))
+        .Concat(museEfforts)
+        .All(e => e.Length > 0 && !e.Any(char.IsWhiteSpace));
+    Check(clean && Converse.Core.ChoicesCatalog.AccessFor("unknown").Count == 0,
+        "Effort ids are CLI-safe tokens; unknown engines offer nothing");
+    var session = new Converse.Core.ChatSession
+    {
+        Entry = new Converse.Core.AgentEntry { Engine = "claude" },
+        Choices = new Converse.Core.SessionChoices { Access = "default" },
+    };
+    var turnArgs = Converse.Core.TurnArguments.For(session, Array.Empty<string>());
+    var mode = turnArgs.SkipWhile(a => a != "--permission-mode").Skip(1).FirstOrDefault();
+    Check(mode == "manual", "Mac legacy access id 'default' normalizes to CLI 'manual'");
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 return failures == 0 ? 0 : 1;
 

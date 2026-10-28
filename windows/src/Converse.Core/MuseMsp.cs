@@ -42,15 +42,14 @@ public sealed class MuseMspClient : IDisposable
     {
         var start = new ProcessStartInfo
         {
-            FileName = entry.Command,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        start.ArgumentList.Add("serve");
-        foreach (var arg in serverArguments ?? Array.Empty<string>()) start.ArgumentList.Add(arg);
+        var serveArgs = (new[] { "serve" }).Concat(serverArguments ?? Array.Empty<string>());
+        CommandResolution.Apply(start, CommandResolution.Resolve(entry.Command), serveArgs);
         if (Directory.Exists(entry.Directory)) start.WorkingDirectory = entry.Directory;
         start.Environment["NO_COLOR"] = "1";
         var process = new Process { StartInfo = start };

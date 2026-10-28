@@ -49,6 +49,7 @@ public sealed partial class MainWindow : Window
     private string? _lastSentText;
     private bool _rebuilding;
     private string _sidebarSignature = "";
+    private bool _suppressSettings;
     private ScrollViewer? _transcriptScroller;
     private int _draftSeq;
     private DateTime _lastDraftFlush = DateTime.MinValue;
@@ -158,19 +159,8 @@ public sealed partial class MainWindow : Window
         await dialog.ShowAsync();
     }
 
-    private static string? FindOnPath(string command)
-    {
-        if (string.IsNullOrWhiteSpace(command)) return null;
-        if (File.Exists(command)) return command;
-        var extensions = new[] { "", ".exe", ".cmd", ".bat" };
-        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
-            foreach (var ext in extensions)
-            {
-                var candidate = Path.Combine(dir.Trim(), command + ext);
-                if (File.Exists(candidate)) return candidate;
-            }
-        return null;
-    }
+    // Setup detection shares the spawn resolver, so "CLI available" always means launchable.
+    private static string? FindOnPath(string command) => CommandResolution.FindOnPath(command);
 
     // Help > Converse Help: offline, versioned artifact generated from the
     // tracked README by scripts/build-help.py (Assets/help.json). Search is a
@@ -369,6 +359,133 @@ public sealed partial class MainWindow : Window
             _historyText = history;
             RebuildDocument(caretToEnd: false, oldHistoryLength: oldHistoryLength);
         }
+        RefreshSettings();
+    }
+
+    private sealed record SettingItem(string Id, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
+    private const string CliDefault = "CLI default";
+
+    // Bottom settings row: model (editable combo — new model IDs never need an
+    // app update), effort, access. Remote sessions use the home's live option
+    // lists when the snapshot carries them, else the static per-engine catalog.
+    private void RefreshSettings()
+    {
+        if (_selected is null) { SettingsRow.IsEnabled = false; return; }
+        SettingsRow.IsEnabled = true;
+        string engine;
+        string? model, effort, access;
+        List<SettingItem> modelItems = new() { new SettingItem("", CliDefault) };
+        List<SettingItem> effortItems = new() { new SettingItem("", CliDefault) };
+        List<SettingItem> accessItems = new() { new SettingItem("", CliDefault) };
+        if (_selected.LocalSessionID is { } localId)
+        {
+            var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);
+            if (session is null) return;
+            engine = session.Entry.Engine;
+            model = session.Choices.Model; effort = session.Choices.Effort; access = session.Choices.Access;
+        }
+        else if (_selected.GlobalID is { } globalId)
+        {
+            var transcript = _devices.RemoteTranscripts.GetValueOrDefault(globalId);
+            if (transcript is null) return;
+            engine = transcript.Engine;
+            model = transcript.Model.Length > 0 ? transcript.Model : null;
+            effort = transcript.Effort.Length > 0 ? transcript.Effort : null;
+            access = transcript.Access.Length > 0 ? transcript.Access : null;
+            foreach (var option in transcript.ModelOptions)
+                modelItems.Add(new SettingItem(option.Id, option.Label.Length > 0 ? option.Label : option.Id));
+            var liveEfforts = transcript.EffortOptions;
+            var liveAccess = transcript.AccessOptions;
+            if (liveEfforts.Length > 0)
+                foreach (var id in liveEfforts) effortItems.Add(new SettingItem(id, id));
+            else
+                foreach (var id in ChoicesCatalog.EffortsFor(engine)) effortItems.Add(new SettingItem(id, id));
+            if (liveAccess.Count > 0)
+                foreach (var option in liveAccess) accessItems.Add(new SettingItem(option.Id, option.Label.Length > 0 ? option.Label : option.Id));
+            else
+                foreach (var option in ChoicesCatalog.AccessFor(engine)) accessItems.Add(new SettingItem(option.Id, option.Label));
+        }
+        else return;
+        if (_selected.LocalSessionID is not null)
+        {
+            foreach (var id in ChoicesCatalog.EffortsFor(engine)) effortItems.Add(new SettingItem(id, id));
+            foreach (var option in ChoicesCatalog.AccessFor(engine)) accessItems.Add(new SettingItem(option.Id, option.Label));
+        }
+        if (model is not null && modelItems.All(i => i.Id != model)) modelItems.Add(new SettingItem(model, model));
+        if (effort is not null && effortItems.All(i => i.Id != effort)) effortItems.Add(new SettingItem(effort, effort));
+        if (access is not null && accessItems.All(i => i.Id != access)) accessItems.Add(new SettingItem(access, access));
+        _suppressSettings = true;
+        try
+        {
+            SyncCombo(ModelBox, modelItems, model ?? "");
+            if (!ModelBox.IsDropDownOpen) ModelBox.Text = model ?? CliDefault;
+            SyncCombo(EffortBox, effortItems, effort ?? "");
+            SyncCombo(AccessBox, accessItems, access ?? "");
+        }
+        finally { _suppressSettings = false; }
+    }
+
+    private static void SyncCombo(ComboBox box, List<SettingItem> items, string currentId)
+    {
+        if (box.IsDropDownOpen) return;
+        var existing = box.ItemsSource as List<SettingItem>;
+        if (existing is null || !existing.Select(i => i.Id).SequenceEqual(items.Select(i => i.Id)))
+            box.ItemsSource = items;
+        var match = items.FirstOrDefault(i => i.Id == currentId) ?? items[0];
+        if (!Equals(box.SelectedItem, match)) box.SelectedItem = match;
+    }
+
+    private void OnSettingChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSettings || _selected is null || sender is not ComboBox box) return;
+        if (box == ModelBox)
+        {
+            if (box.SelectedItem is SettingItem picked) ApplySetting("model", picked.Id == "" ? null : picked.Id);
+            return;
+        }
+        if (box.SelectedItem is SettingItem item)
+            ApplySetting(box == EffortBox ? "effort" : "access", item.Id == "" ? null : item.Id);
+    }
+
+    private void OnModelCommitted(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSettings || _selected is null) return;
+        var text = ModelBox.Text.Trim();
+        if (text == CliDefault) text = "";
+        ApplySetting("model", text == "" ? null : text);
+    }
+
+    private void OnModelKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; OnModelCommitted(sender, e); }
+    }
+
+    private void ApplySetting(string kind, string? value)
+    {
+        if (_selected?.LocalSessionID is { } localId)
+        {
+            var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);
+            if (session is null) return;
+            if (kind == "model") session.Choices.Model = value;
+            else if (kind == "effort") session.Choices.Effort = value;
+            else session.Choices.Access = value;
+            _store.Save();
+        }
+        else if (_selected?.GlobalID is { } globalId)
+        {
+            _ = _devices.SendRemoteCommandAsync(globalId, new DeviceCommandPayload
+            {
+                Action = kind,
+                Model = kind == "model" ? value : null,
+                Effort = kind == "effort" ? value : null,
+                Access = kind == "access" ? value : null,
+            });
+        }
+        Refresh();
     }
 
     private void RebuildDocument(bool caretToEnd, int? oldHistoryLength = null)

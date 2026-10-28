@@ -478,6 +478,9 @@ public sealed class DeviceSyncService : IDisposable
             Busy = session.Busy, Status = session.Status, Title = session.Title, Engine = session.Entry.Engine,
             AccountName = session.Entry.AccountName,
             Model = session.Choices.Model ?? "", Effort = session.Choices.Effort ?? "", Access = session.Choices.Access ?? "",
+            EffortOptions = ChoicesCatalog.EffortsFor(session.Entry.Engine).ToArray(),
+            AccessOptions = ChoicesCatalog.AccessFor(session.Entry.Engine)
+                .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
             QueuePaused = session.QueuePaused,
         };
         await SendEnvelopeAsync(peer, new DeviceEnvelope

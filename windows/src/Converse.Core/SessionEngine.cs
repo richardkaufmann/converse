@@ -89,16 +89,14 @@ public sealed class ProcessAgentRunner : IAgentRunner
     {
         var start = new ProcessStartInfo
         {
-            FileName = session.Entry.Command,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             RedirectStandardInput = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        foreach (var arg in arguments) start.ArgumentList.Add(arg);
-        start.ArgumentList.Add("--");
-        start.ArgumentList.Add(prompt);
+        var allArgs = arguments.Append("--").Append(prompt);
+        CommandResolution.Apply(start, CommandResolution.Resolve(session.Entry.Command), allArgs);
         if (System.IO.Directory.Exists(session.Entry.Directory)) start.WorkingDirectory = session.Entry.Directory;
         start.Environment["NO_COLOR"] = "1";
         start.Environment["TERM"] = "dumb";
@@ -156,7 +154,8 @@ public static class TurnArguments
             else { args.Add("--session-id"); args.Add(session.Id.ToString("D")); }
             if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
             if (choices.Effort is not null) { args.Add("--effort"); args.Add(choices.Effort); }
-            if (choices.Access is not null) { args.Add("--permission-mode"); args.Add(choices.Access); }
+            // "manual" is the CLI's vocabulary (claude --help); accept the Mac's legacy "default" id too.
+            if (choices.Access is not null) { args.Add("--permission-mode"); args.Add(choices.Access == "default" ? "manual" : choices.Access); }
             foreach (var dir in images.Select(Path.GetDirectoryName).Where(d => d is not null).Distinct().OrderBy(d => d))
             { args.Add("--add-dir"); args.Add(dir!); }
         }
@@ -209,11 +208,16 @@ public sealed class SessionStore
             if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; }
         }
         if (Entries.Count == 0) Entries = DefaultEntries();
+        // One-time repair: early builds named the claude entry "Muse".
+        var renamed = false;
+        foreach (var entry in Entries)
+            if (entry.Engine == "claude" && entry.Name == "Muse") { entry.Name = "Claude"; renamed = true; }
+        if (renamed) Save();
     }
 
     public static List<AgentEntry> DefaultEntries() => new()
     {
-        new AgentEntry { Name = "Muse", Command = "claude", Engine = "claude", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
+        new AgentEntry { Name = "Claude", Command = "claude", Engine = "claude", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
         new AgentEntry { Name = "Codex", Command = "codex", Engine = "codex", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
         new AgentEntry { Name = "Muse", Command = "muse", Engine = "muse", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
     };
