@@ -14,7 +14,7 @@ namespace Converse.App;
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
 public sealed record SidebarHeader(string Key, string Title, string Status) : SidebarItem(Key);
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -139,6 +139,7 @@ public sealed partial class MainWindow : Window
         }
         _placeholder = new ConversationPane();
         _placeholder.Attach(this, 0);
+        AppWindow.Changed += (_, e) => { if (e.DidSizeChange) ClampWindowWidth(); };
         ApplyLayout();
         Refresh();
     }
@@ -353,36 +354,122 @@ public sealed partial class MainWindow : Window
     // placeholder. Panes keep their shown session across refreshes — only
     // a changed assignment re-shows, so streaming never rebuilds blocks.
     // Focus falls to the lowest occupied pane when its pane goes away.
+    // The column tree is rebuilt only when occupancy changes: re-parenting
+    // every refresh unloads the panes and drops keyboard focus mid-word,
+    // which reads as "can't type into any pane".
+    private string _paneLayoutSig = "";
+
     private void RefreshPanes()
     {
         var rows = Sidebar.Items.OfType<SidebarSession>().ToDictionary(i => i.Key, i => i);
         var occupied = new[] { 1, 2, 3 }.Where(pane => _placements.KeyIn(pane) is not null).ToList();
         if (_focusedPane < 1 || _placements.KeyIn(_focusedPane) is null)
             _focusedPane = occupied.Count > 0 ? occupied[0] : 0;
-        PaneHost.Children.Clear();
-        PaneHost.ColumnDefinitions.Clear();
+        // Occupancy and assignments only: focus changes tint badges in
+        // place and must never rebuild the tree (see above).
+        var sig = string.Join(",", occupied) + "|keys="
+            + string.Join(",", occupied.Select(pane => _placements.KeyIn(pane)));
+        if (sig != _paneLayoutSig)
+        {
+            _paneLayoutSig = sig;
+            RebuildPaneColumns(occupied);
+        }
         if (occupied.Count == 0)
         {
-            PaneHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             _placeholder.ShowSession(null, caretToEnd: false);
             _placeholder.SyncLineNumbersBox();
             _placeholder.SetFocused(false);
-            PaneHost.Children.Add(_placeholder);
             return;
         }
         foreach (var pane in occupied)
         {
-            PaneHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var view = _panes[pane - 1];
-            Grid.SetColumn(view, PaneHost.ColumnDefinitions.Count - 1);
             var key = _placements.KeyIn(pane);
             var row = key is not null && rows.TryGetValue(key, out var found) ? found : null;
             if (view.Current?.Key != row?.Key) view.ShowSession(row, caretToEnd: false);
             else view.RenderPane();
             view.SyncLineNumbersBox();
             view.SetFocused(pane == _focusedPane);
-            PaneHost.Children.Add(view);
         }
+        UpdateWindowMinWidth(occupied.Count);
+    }
+
+    // Occupancy changed: equal star-width columns with a draggable
+    // GridSplitter between panes (Mac auto-sizes; the splitter is the
+    // Windows adjustment affordance). Columns carry a minimum so a drag
+    // can never squeeze a pane shut; user widths survive refreshes until
+    // the next occupancy change resets to equal shares.
+    private void RebuildPaneColumns(List<int> occupied)
+    {
+        PaneHost.Children.Clear();
+        PaneHost.ColumnDefinitions.Clear();
+        if (occupied.Count == 0)
+        {
+            PaneHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            PaneHost.Children.Add(_placeholder);
+            UpdateWindowMinWidth(0);
+            return;
+        }
+        var column = 0;
+        foreach (var pane in occupied)
+        {
+            PaneHost.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star),
+                MinWidth = 280,
+            });
+            var view = _panes[pane - 1];
+            Grid.SetColumn(view, column);
+            PaneHost.Children.Add(view);
+            column++;
+            if (pane != occupied[^1])
+            {
+                PaneHost.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(4),
+                    MinWidth = 4,
+                });
+                var splitter = new GridSplitter
+                {
+                    ResizeDirection = GridSplitterResizeDirection.Columns,
+                    ResizeBehavior = GridSplitterResizeBehavior.PreviousAndNext,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                };
+                Grid.SetColumn(splitter, column);
+                PaneHost.Children.Add(splitter);
+                column++;
+            }
+        }
+        UpdateWindowMinWidth(occupied.Count);
+    }
+
+    // Mac minimumWidth parity: the window grows to fit new panes instead
+    // of squeezing them into a sliver (it never auto-shrinks — like the
+    // Mac minimum, it only floors manual resizing). WinUI 3 windows have
+    // no MinWidth property, so the AppWindow size is clamped in physical
+    // pixels against the rasterization scale.
+    private int _minWindowWidthPx;
+
+    private void UpdateWindowMinWidth(int paneCount)
+    {
+        var sidebar = SidebarColumn.Width.Value;
+        if (sidebar <= 0) sidebar = _layout.EffectiveWidth(_windowWidth);
+        var scale = (Content as FrameworkElement)?.XamlRoot.RasterizationScale ?? 1.0;
+        _minWindowWidthPx = Math.Max(700, (int)Math.Ceiling((sidebar + 4 + paneCount * 340 + 24) * scale));
+        ClampWindowWidth();
+    }
+
+    private void ClampWindowWidth()
+    {
+        try
+        {
+            var size = AppWindow.Size;
+            if (size.X < _minWindowWidthPx)
+                AppWindow.Resize(new Windows.Graphics.SizeInt32(_minWindowWidthPx, size.Y));
+        }
+        catch { /* window not ready yet; the Changed hook retries */ }
     }
 
 
@@ -397,7 +484,11 @@ public sealed partial class MainWindow : Window
         items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
         foreach (var session in _store.Sessions)
             items.Add(new SidebarSession("local:" + session.Id, (session.Busy ? "● " : "") + session.Title,
-                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true));
+                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true,
+                PActive: _placements.PaneOf("local:" + session.Id) is null,
+                In1: _placements.KeyIn(1) == "local:" + session.Id,
+                In2: _placements.KeyIn(2) == "local:" + session.Id,
+                In3: _placements.KeyIn(3) == "local:" + session.Id));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
@@ -407,12 +498,17 @@ public sealed partial class MainWindow : Window
                     home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true, ShowGreyClose: true));
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true, ShowGreyClose: true,
+                    PActive: _placements.PaneOf("remote:" + row.GlobalID) is null,
+                    In1: _placements.KeyIn(1) == "remote:" + row.GlobalID,
+                    In2: _placements.KeyIn(2) == "remote:" + row.GlobalID,
+                    In3: _placements.KeyIn(3) == "remote:" + row.GlobalID));
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
             SidebarHeader h => h.Title + "|" + h.Status,
-            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace,
+            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace
+                + "|" + s.PActive + "|" + s.In1 + "|" + s.In2 + "|" + s.In3,
             _ => "",
         })));
         if (signature == _sidebarSignature) return;

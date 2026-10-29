@@ -13,6 +13,8 @@
          no diagnostic. Classic {Binding} only throughout. -->
     <Grid.Resources>
         <local:BoolToVisibilityConverter x:Key="BoolToVis"/>
+        <local:ActiveToBackgroundConverter x:Key="ActiveBg"/>
+        <local:ActiveToForegroundConverter x:Key="ActiveFg"/>
         <DataTemplate x:Key="SidebarHeaderTemplate">
             <StackPanel Padding="8,7,8,2">
                 <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="12"
@@ -33,21 +35,32 @@
                     <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
+                <!-- P 1 2 3 X (Mac order). The active button prints white on
+                     the Mac green; X is always the destructive dark red. -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                    <Button Content="P" Click="OnParkClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
+                            Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
+                            Background="{Binding PActive, Converter={StaticResource ActiveBg}}"
+                            Foreground="{Binding PActive, Converter={StaticResource ActiveFg}}"
+                            ToolTipService.ToolTip="Park (release this conversation to its home)"/>
                     <Button Content="1" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            Background="{Binding In1, Converter={StaticResource ActiveBg}}"
+                            Foreground="{Binding In1, Converter={StaticResource ActiveFg}}"
                             ToolTipService.ToolTip="Show in pane 1 (takes remote sessions here)"/>
                     <Button Content="2" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            Background="{Binding In2, Converter={StaticResource ActiveBg}}"
+                            Foreground="{Binding In2, Converter={StaticResource ActiveFg}}"
                             ToolTipService.ToolTip="Show in pane 2 (takes remote sessions here)"/>
                     <Button Content="3" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            Background="{Binding In3, Converter={StaticResource ActiveBg}}"
+                            Foreground="{Binding In3, Converter={StaticResource ActiveFg}}"
                             ToolTipService.ToolTip="Show in pane 3 (takes remote sessions here)"/>
-                    <Button Content="P" Click="OnParkClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
-                            Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
-                            ToolTipService.ToolTip="Park (release this conversation to its home)"/>
                     <Button Content="X" Click="OnCloseClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowClose, Converter={StaticResource BoolToVis}}"
+                            Background="#8C0F14" Foreground="White"
                             ToolTipService.ToolTip="Close session (keeps a recovery archive)"/>
                     <Button Content="X" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowGreyClose, Converter={StaticResource BoolToVis}}"
@@ -105,19 +118,13 @@
             <Border x:Name="Splitter" Grid.Column="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}"
                     PointerPressed="OnSplitterPressed" PointerMoved="OnSplitterMoved" PointerReleased="OnSplitterReleased"/>
             <!-- Visible conversations (Mac WorkspacePanes parity): occupied
-                 slots render side by side, each an independent
-                 ConversationPane built in code behind; an empty layout
-                 shows one disabled placeholder. Panes scroll vertically on
-                 their own; the strip scrolls horizontally when the window
-                 is narrower than its panes. The restore pin floats above
-                 so it stays reachable while the sidebar is collapsed. -->
+                 slots share the finite width equally and scroll vertically
+                 on their own; the window's minimum width grows with the
+                 pane count so a new pane never arrives as a sliver. The
+                 restore pin floats above so it stays reachable while the
+                 sidebar is collapsed. -->
             <Grid Grid.Column="2">
-                <ScrollViewer HorizontalScrollBarVisibility="Auto"
-                              VerticalScrollBarVisibility="Disabled"
-                              HorizontalScrollMode="Enabled"
-                              VerticalScrollMode="Disabled">
-                    <Grid x:Name="PaneHost"/>
-                </ScrollViewer>
+                <Grid x:Name="PaneHost"/>
                 <Button x:Name="RestorePin" Content="Pin" Click="OnPinClick" Visibility="Collapsed"
                         HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,6"
                         ToolTipService.ToolTip="Restore sidebar at its previous width"/>
