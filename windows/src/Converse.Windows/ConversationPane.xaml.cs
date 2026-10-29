@@ -201,7 +201,10 @@ public sealed partial class ConversationPane : UserControl
             SetDraftBox();
         }
         // A remote draft clears only after its exact sent text is acknowledged.
-        if (_selected.GlobalID is not null && _lastSentText is not null && homeDraft == "" && _draftText == Breaks(_lastSentText))
+        // A draft clears once its exact sent text is acknowledged (remote)
+        // or consumed (local submit clears synchronously). Either way the
+        // sent text never re-adopts into the tail.
+        if (_lastSentText is not null && homeDraft == "" && _draftText == Breaks(_lastSentText))
         {
             _draftText = "";
             _lastSentText = null;
@@ -891,6 +894,72 @@ public sealed partial class ConversationPane : UserControl
 
 
 
+    // Click-anywhere-to-type (Mac parity): a plain left-click on history
+    // or the header jumps to the end and focuses the draft. A press that
+    // moves becomes a selection drag and never yanks; right-button presses
+    // (context menu) and DraftBox presses (editing) are excluded. Known
+    // tradeoff, same as the Mac: double-click word-select in history jumps
+    // instead — drag to select, right-click to copy.
+    private bool _pressArmed;
+    private Windows.Foundation.Point _pressPoint;
+
+    // Draft presses edit; scrollbar presses scroll. Everything else in
+    // the transcript is history, and a plain click there jumps to entry.
+    private bool IsEntryOrChrome(DependencyObject? source)
+    {
+        var current = source;
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, DraftBox)) return true;
+            if (current is Microsoft.UI.Xaml.Controls.Primitives.ScrollBar) return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return false;
+    }
+
+    private void JumpToEntry()
+    {
+        _userScrollUtc = DateTime.UtcNow;
+        _unreadUpdates = 0;
+        UpdateJumpButton(following: true);
+        ScrollTranscriptToEnd();
+        DraftBox.Focus(FocusState.Programmatic);
+    }
+
+    private void OnTranscriptPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _pressArmed = false;
+        var at = e.GetCurrentPoint(TranscriptScroller);
+        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonPressed) return;
+        if (IsEntryOrChrome(e.OriginalSource as DependencyObject)) return;
+        _pressArmed = true;
+        _pressPoint = at.Position;
+    }
+
+    private void OnTranscriptMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_pressArmed) return;
+        var at = e.GetCurrentPoint(TranscriptScroller).Position;
+        if (Math.Abs(at.X - _pressPoint.X) + Math.Abs(at.Y - _pressPoint.Y) > 6) _pressArmed = false;
+    }
+
+    private void OnTranscriptReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_pressArmed) return;
+        _pressArmed = false;
+        var at = e.GetCurrentPoint(TranscriptScroller);
+        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonReleased) return;
+        if (IsEntryOrChrome(e.OriginalSource as DependencyObject)) return;
+        JumpToEntry();
+    }
+
+    private void OnPaneHeaderPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        var at = e.GetCurrentPoint(PaneHeader);
+        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonPressed) return;
+        JumpToEntry();
+    }
+
     private void OnTranscriptScrolled(object sender, ScrollViewerViewChangedEventArgs e)
     {
         var scroller = TranscriptScroller;
@@ -1508,6 +1577,13 @@ public sealed partial class ConversationPane : UserControl
         if (string.IsNullOrWhiteSpace(text) || _selected is null || !InputAllowed()) return;
         _notice = null;
         _noticeUtc = null;
+        // The just-sent text must never come back. A debounced draft flush
+        // scheduled while typing would otherwise resurrect it into the
+        // store after submit cleared it (the send-then-leftover bug), so a
+        // pending flush dies here; and the adopt rule below must not refill
+        // the tail with it either, local or remote.
+        _lastSentText = text;
+        _draftSeq++;
         if (_selected.LocalSessionID is { } localId)
         {
             var session = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId);
@@ -1523,7 +1599,6 @@ public sealed partial class ConversationPane : UserControl
         else if (_selected.GlobalID is { } globalId)
         {
             // Draft stays until home ack completes (outbox in core service).
-            _lastSentText = text;
             var hashes = _host.RemoteHashes.GetValueOrDefault(globalId)?.ToArray() ?? Array.Empty<string>();
             await _host.Devices.SendRemoteCommandAsync(globalId,
                 new DeviceCommandPayload { Action = "submit", Text = text, BlobHashes = hashes });
