@@ -1635,6 +1635,19 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "Valid surrogate pairs pass through untouched");
 }
 
+// Round-16 crash fix: streaming appends absorb incrementally; anything else
+// takes the full rebuild. Parked-at-X plus appends is a UI behavior the Core
+// side cannot model (no RichEdit here); the decision table below is the
+// pinned contract the UI wires to its viewport preservation.
+{
+    Check(TranscriptHistory.NeedsFull(null, "abc"), "First render takes the full rebuild");
+    Check(TranscriptHistory.NeedsFull("abc", "xyzabc"), "Prepended earlier messages take the full rebuild");
+    Check(TranscriptHistory.NeedsFull("abc", "ab"), "Shrunk history takes the full rebuild");
+    Check(!TranscriptHistory.NeedsFull("abc", "abc"), "Identical history needs no history work");
+    Check(!TranscriptHistory.NeedsFull("abc", "abcdef") && TranscriptHistory.IsAppend("abc", "abcdef"),
+        "Streaming growth absorbs as an append");
+}
+
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
 // batches fall back to a quoted cmd.exe wrapper, misses resolve null.
 {
