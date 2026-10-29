@@ -200,15 +200,15 @@ public sealed partial class ConversationPane : UserControl
             _draftText = Breaks(homeDraft);
             SetDraftBox();
         }
-        // A remote draft clears only after its exact sent text is acknowledged.
         // A draft clears once its exact sent text is acknowledged (remote)
         // or consumed (local submit clears synchronously). Either way the
-        // sent text never re-adopts into the tail.
+        // sent text never re-adopts into the tail. Only remotes carry
+        // image hashes — Remove(null) throws, so the guard is load-bearing.
         if (_lastSentText is not null && homeDraft == "" && _draftText == Breaks(_lastSentText))
         {
             _draftText = "";
             _lastSentText = null;
-            _host.RemoteHashes.Remove(_selected.GlobalID);
+            if (_selected.GlobalID is { } clearGid) _host.RemoteHashes.Remove(clearGid);
             SetDraftBox();
         }
         var (lines, hidden) = VisibleLines();
