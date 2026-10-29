@@ -14,8 +14,8 @@ struct Entry: Codable, Identifiable, Equatable {
     var accountDirectory: String? = nil
     var useDefaultAccountStore: Bool? = nil
 }
-struct DelayMark: Codable { var offset: Int; var seconds: Double }
-struct Message: Codable, Identifiable {
+struct DelayMark: Codable, Equatable { var offset: Int; var seconds: Double }
+struct Message: Codable, Identifiable, Equatable {
     var id = UUID()
     var role: String
     var text: String
@@ -66,7 +66,8 @@ final class Session: ObservableObject, Identifiable {
     var identityChanged: (() -> Void)?
     var identityPath: String?
     var identityError = ""
-    @Published var messages: [Message]
+    var messagesRevision: UInt64 = 0
+    @Published var messages: [Message] { didSet { messagesRevision &+= 1 } }
     @Published var draft: String
     @Published var attachments: [String]
     @Published var pending: [PendingPrompt] = []
@@ -1424,9 +1425,15 @@ struct ScrollingConversation: NSViewRepresentable {
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         let session: Session
-        var signature = ""
-        var historySignature = ""
+        var renderedMessages: [Message]?
+        var seenMessagesRevision: UInt64?
+        var renderedAttachments: [String] = []
+        var messageStarts: [UUID: Int] = [:]
+        var historyEnd = 0
+        private(set) var historyBuildCount = 0
+        private(set) var lastReplacementStart = 0
         var markdownCache: [UUID: (String, NSAttributedString)] = [:]
+        let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         var rendering = false
         var draftChanged: ((String) -> Void)?
         init(_ session: Session) { self.session = session }
@@ -1470,13 +1477,40 @@ struct ScrollingConversation: NSViewRepresentable {
             return true
         }
         func render(_ text: ConversationTextView) {
-            let data = (try? JSONEncoder().encode(session.messages.filter { $0.role != "activity" })) ?? Data()
-            let historyKey = String(decoding: data, as: UTF8.self)
-            let key = historyKey + session.attachments.joined()
-            let current = text.string as NSString
-            if key == signature && current.length >= text.inputStart && current.substring(from: text.inputStart) == session.draft { return }
-            let firstRender = signature.isEmpty
-            signature = key
+            let previous = renderedMessages
+            let firstRender = previous == nil
+            var historyChanged = firstRender
+            if seenMessagesRevision != session.messagesRevision {
+                let messages = session.messages.filter { $0.role != "activity" }
+                historyChanged = previous != messages
+                renderedMessages = messages; seenMessagesRevision = session.messagesRevision
+            }
+            let attachmentsChanged = renderedAttachments != session.attachments
+            let current = text.textStorage?.mutableString ?? NSMutableString(string: text.string)
+            if !historyChanged && !attachmentsChanged {
+                guard current.length >= text.inputStart, current.substring(from: text.inputStart) != session.draft else { return }
+                // External draft hydration/clear changes only the editable
+                // tail. Native typing already changed it and returns above.
+                let selection = text.selectedRange(), offset = max(0, selection.location - text.inputStart)
+                rendering = true
+                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
+                text.textStorage?.replaceCharacters(in: NSRange(location: text.inputStart, length: current.length - text.inputStart), with: NSAttributedString(string: session.draft, attributes: attrs))
+                text.typingAttributes = attrs; text.undoManager?.removeAllActions()
+                if selection.location >= text.inputStart {
+                    let length = (session.draft as NSString).length, at = min(offset, length)
+                    text.setSelectedRange(NSRange(location: text.inputStart + at, length: min(selection.length, length - at)))
+                }
+                text.fitDocumentHeight(); text.refreshDecorations(); rendering = false
+                return
+            }
+            let messages = renderedMessages ?? []
+            var common = 0
+            if let previous {
+                while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
+            }
+            let unchangedPrefix = firstRender ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
+            renderedAttachments = session.attachments
+            historyBuildCount += 1
             let selection = text.selectedRange()
             let editing = selection.location >= text.inputStart
             let offset = max(0, selection.location - text.inputStart)
@@ -1484,8 +1518,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let origin = scroll?.contentView.bounds.origin ?? .zero
             let nativeScroll = scroll as? ConversationScrollView
             let follow = nativeScroll?.prepareForRender(first: firstRender) ?? (firstRender || (scroll.map { $0.contentView.bounds.maxY >= text.bounds.height - 200 } ?? true))
-            if !firstRender && historyKey != historySignature { nativeScroll?.outputArrived() }
-            historySignature = historyKey
+            if !firstRender && historyChanged { nativeScroll?.outputArrived() }
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
@@ -1504,7 +1537,9 @@ struct ScrollingConversation: NSViewRepresentable {
             text.userBlocks = []
             text.trafficBlocks = []
             text.copyBlocks = []
-            for message in session.messages where message.role != "activity" && (!message.text.isEmpty || !message.images.isEmpty) {
+            messageStarts = [:]
+            for message in messages {
+                messageStarts[message.id] = document.length
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
@@ -1518,7 +1553,7 @@ struct ScrollingConversation: NSViewRepresentable {
                     let at = min(renderedOffset, body.length)
                     body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
                 }
-                if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+                if let detector = linkDetector {
                     let value = body.string as NSString
                     for match in detector.matches(in: body.string, range: NSRange(location: 0, length: value.length)) {
                         if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
@@ -1535,7 +1570,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 }
                 document.append(body)
                 if message.role == "user" || message.role == "assistant" {
-                    let formatted = message.role == "assistant" ? MarkdownText.render(visible) : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+                    let formatted = message.role == "assistant" ? markdownCache[message.id]!.1 : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }
@@ -1549,6 +1584,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
+            historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
                 if image(path) { text.draftImages.append((document.length - 1, path)); append("\n") }
@@ -1556,7 +1592,14 @@ struct ScrollingConversation: NSViewRepresentable {
             text.inputStart = document.length
             let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: TranscriptPalette.draft(session.draft)]
             append(session.draft, draftStyle)
-            text.textStorage?.setAttributedString(document)
+            // Layout preceding unchanged messages remains valid while an
+            // assistant streams. Replacing the entire storage invalidates
+            // every paragraph, even when only the final block changed.
+            let prefix = min(unchangedPrefix, document.length, current.length)
+            lastReplacementStart = prefix
+            if prefix > 0 {
+                text.textStorage?.replaceCharacters(in: NSRange(location: prefix, length: current.length - prefix), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
+            } else { text.textStorage?.setAttributedString(document) }
             text.configureDraftImageButtons()
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.insertionPointColor = .systemBlue
@@ -2019,6 +2062,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    let performanceSession = Session(entry: Entry(name: "Typing QA", command: "false", directory: "/tmp", engine: "claude"))
+    performanceSession.messages = (0..<600).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Message \($0): " + String(repeating: "Retained history with **formatting**. ", count: 8)) }
+    let performanceText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    let performanceCoordinator = ScrollingConversation.Coordinator(performanceSession)
+    performanceText.delegate = performanceCoordinator; performanceCoordinator.render(performanceText)
+    let historyInputStart = performanceText.inputStart
+    let startTyping = ProcessInfo.processInfo.systemUptime
+    for _ in 0..<100 {
+        performanceText.insertText("x", replacementRange: NSRange(location: performanceText.textStorage!.length, length: 0))
+        performanceCoordinator.render(performanceText)
+    }
+    let typingMilliseconds = (ProcessInfo.processInfo.systemUptime - startTyping) * 1000
+    check(performanceSession.draft == String(repeating: "x", count: 100) && performanceCoordinator.historyBuildCount == 1 && performanceText.inputStart == historyInputStart, "Long-history typing does not serialize, rebuild or replace submitted history (100 edits: " + String(format: "%.1f", typingMilliseconds) + " ms)")
+    performanceSession.draft = "External draft hydration"
+    performanceCoordinator.render(performanceText)
+    check(performanceCoordinator.historyBuildCount == 1 && (performanceText.string as NSString).substring(from: performanceText.inputStart) == performanceSession.draft, "Programmatic draft hydration replaces only the editable tail")
+    let previousPrefix = performanceCoordinator.messageStarts[performanceSession.messages.last!.id]!
+    performanceSession.messages[performanceSession.messages.count - 1].text += " Streamed suffix."
+    performanceCoordinator.render(performanceText)
+    check(performanceCoordinator.historyBuildCount == 2 && performanceCoordinator.lastReplacementStart == previousPrefix && performanceText.string.contains("Streamed suffix."), "Streaming replaces the changed message suffix while retaining preceding native layout")
+    performanceSession.messages.append(Message(role: "activity", text: "hidden tool status"))
+    performanceCoordinator.render(performanceText)
+    check(performanceCoordinator.historyBuildCount == 2, "Hidden tool activity does not invalidate the rendered transcript")
     var following = TranscriptFollowState()
     following.scroll(nearBottom: false, now: 10); following.outputArrived()
     check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output for at least five idle seconds")
