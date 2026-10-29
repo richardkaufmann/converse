@@ -79,6 +79,7 @@ final class Session: ObservableObject, Identifiable {
     var resumeAfterInterrupt = false
     @Published var injectionNotice = ""
     var injectionTargetID: UUID?
+    var injectionAll = false
     var turnFailed = false
     @Published var accountStatus = ""
     @Published var probeError = ""
@@ -270,6 +271,9 @@ final class Store: ObservableObject {
         if s.changingSetting { return refused("Inject not applied: a session setting is still changing. Wait for its result, then try again.") }
         if s.pending.isEmpty { return refused("Inject not applied: the queue is already empty. Nothing was sent.") }
         if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID != nil {
+            guard (id == nil && s.injectionAll) || id == s.injectionTargetID else {
+                return refused("Inject not applied: another queued prompt is already being injected. Wait for it to start before choosing a different item.")
+            }
             s.injectionNotice = "Interrupting — your queued prompt is next"; return nil
         }
         if let id {
@@ -284,6 +288,7 @@ final class Store: ObservableObject {
         }
         s.queuePaused = false
         s.injectionTargetID = s.pending.first?.id
+        s.injectionAll = id == nil
         s.injectionNotice = s.busy ? "Interrupting — your queued prompt is next" : "Starting your queued prompt…"
         if s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
         else { runNext(s) }

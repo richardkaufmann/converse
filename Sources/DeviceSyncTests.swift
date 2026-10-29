@@ -331,6 +331,10 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(missingInject?.outcome == "failed" && session.pending.count == 2, "Malformed single-item injection cannot silently inject the whole queue")
         let validInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
         check(validInject?.outcome == "completed" && session.pending.first?.id == queuedB.id && session.resumeAfterInterrupt && session.draft == independentDraft, "Accepted injection moves the intended item first and preserves the independent draft")
+        let otherInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedA.id))
+        check(otherInject?.outcome == "failed" && otherInject?.detail?.contains("already being injected") == true && session.pending.first?.id == queuedB.id, "A different injection during interruption cannot be falsely acknowledged or displace the first intent")
+        let repeatedInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
+        check(repeatedInject?.outcome == "completed" && session.pending.map(\.id) == [queuedB.id, queuedA.id], "Repeated injection of the same queued item is idempotent while stopping")
         session.pending = []; session.interrupted = false; session.resumeAfterInterrupt = false
         let emptyInject = try injectAck(DeviceCommandPayload(action: "injectAll"))
         check(emptyInject?.outcome == "failed" && emptyInject?.detail?.contains("already empty") == true, "Empty queue injection returns an honest failure with nothing submitted")
