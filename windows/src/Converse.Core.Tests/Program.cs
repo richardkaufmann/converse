@@ -253,6 +253,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             while (!done() && DateTime.UtcNow < deadline) await Task.Delay(10);
             return done();
         }
+        string? holderSeenByUI = "not refreshed";
+        home.Changed += () => holderSeenByUI = home.DisplayHolder(session.Id)?.Device;
         var gid = new DeviceGlobalID(home.DeviceId, session.Id).ToString();
         Check(await JoinPair(home, a, () => a.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true)
             && await JoinPair(home, b, () => b.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true),
@@ -262,6 +264,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && home.DisplayHolder(session.Id) is { } firstHolder && firstHolder.Device == a.DeviceId
             && firstHolder.Epoch == a.RemoteLeases.GetValueOrDefault(gid),
             "Display holder reports the actual viewer and granted epoch");
+        Check(await UntilTakeover(() => holderSeenByUI == a.DeviceId),
+            "Lease grant refreshes the home UI so it can park the local pane immediately");
         var firstEpoch = a.RemoteLeases.GetValueOrDefault(gid);
         await a.AcquireRemoteAsync(gid);
         Check(a.RemoteLeases.GetValueOrDefault(gid) == firstEpoch && a.RemoteTranscripts.ContainsKey(gid),
@@ -273,9 +277,11 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(home.DisplayHolder(session.Id) is { } secondHolder && secondHolder.Device == b.DeviceId
             && secondHolder.Epoch > firstEpoch && secondHolder.Epoch == b.RemoteLeases.GetValueOrDefault(gid),
             "Takeover holder advances to the new viewer at its granted epoch");
+        Check(await UntilTakeover(() => holderSeenByUI == b.DeviceId),
+            "Takeover refreshes the home UI with the new display holder");
         await b.ReleaseRemoteAsync(gid);
-        Check(await UntilTakeover(() => home.DisplayHolder(session.Id) is null),
-            "Display holder clears on release so the home pane can be shown again");
+        Check(await UntilTakeover(() => home.DisplayHolder(session.Id) is null && holderSeenByUI is null),
+            "Display holder clears and refreshes the home UI on release");
     }
     finally { Cleanup(roots); }
 }

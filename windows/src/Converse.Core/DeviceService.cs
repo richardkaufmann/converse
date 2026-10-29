@@ -1607,6 +1607,8 @@ public sealed class DeviceSyncService : IDisposable
                             });
                         }
                     peer.LeasedSessions.Add(leased.Id);
+                    PublishSidebars();
+                    Changed?.Invoke();
                     await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseGranted, Boot = _boot, SessionID = envelope.SessionID, Epoch = result.Epoch });
                     await SendTranscriptAsync(peer, leased);
                 }
@@ -1620,6 +1622,8 @@ public sealed class DeviceSyncService : IDisposable
                 {
                     _leases.Release(released.Id, peerHome, relEpoch);
                     peer.LeasedSessions.Remove(released.Id);
+                    PublishSidebars();
+                    Changed?.Invoke();
                 }
                 break;
             case DeviceKind.LeaseGranted:
