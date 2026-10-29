@@ -333,14 +333,14 @@ struct PendingMessagesView: View {
                     Store.shared.save()
                     if !session.queuePaused { Store.shared.runNext(session) }
                 }
-                Button("Inject all") { Store.shared.injectPending(session) }.disabled(session.changingSetting).help("Interrupt and send all queued messages together, in order")
+                Button("Inject all") { Store.shared.injectPending(session) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send all queued messages together, in order")
                 Button("Clear queue") { session.pending = []; Store.shared.save() }
             }
             ForEach(session.pending) { prompt in
                 HStack {
                     Text(prompt.text.isEmpty ? "Attached image" : prompt.text).foregroundStyle(TranscriptStyle.isTraffic(prompt.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
-                    Button("Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting).help("Interrupt and send this message next")
+                    Button(session.interrupted && session.injectionTargetID == prompt.id ? "Interrupting…" : "Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }
                     Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
                 }

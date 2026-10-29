@@ -1,5 +1,26 @@
 import Foundation
 
+// Clock-injected policy: incoming output never extends a user's reading
+// timeout. Only scroll/keyboard/selection interaction does.
+struct TranscriptFollowState {
+    private(set) var following = true
+    private(set) var unreadUpdates = 0
+    private(set) var lastInteractionAt: TimeInterval = 0
+    static let idleDelay: TimeInterval = 5
+    mutating func pause(now: TimeInterval) { following = false; lastInteractionAt = now }
+    mutating func interaction(now: TimeInterval) { lastInteractionAt = now }
+    mutating func scroll(nearBottom: Bool, now: TimeInterval) {
+        lastInteractionAt = now
+        if nearBottom { resume() } else { following = false }
+    }
+    mutating func outputArrived() { if !following { unreadUpdates += 1 } }
+    mutating func resume() { following = true; unreadUpdates = 0 }
+    mutating func resumeIfIdle(now: TimeInterval, selecting: Bool, scrolling: Bool) -> Bool {
+        guard !following, !selecting, !scrolling, now - lastInteractionAt >= Self.idleDelay else { return false }
+        resume(); return true
+    }
+}
+
 // Display classification only; never executes JSON or changes stored text.
 enum TranscriptStyle {
     static let blockSpacing: CGFloat = 8

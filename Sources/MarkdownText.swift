@@ -31,7 +31,7 @@ struct MarkdownText {
         guard offset > 0 else { return 0 }
         let prefix = (source as NSString).substring(to: offset)
         let rendered = render(prefix)
-        return max(0, rendered.length - (prefix.hasSuffix("\n") || !rendered.string.hasSuffix("\n") ? 0 : 1))
+        return max(0, rendered.length - (prefix.last?.isNewline == true || !rendered.string.hasSuffix("\n") ? 0 : 1))
     }
     static func cells(_ line: String) -> [String] {
         var text = line.trimmingCharacters(in: .whitespaces)
@@ -52,7 +52,10 @@ struct MarkdownText {
     }
     static func render(_ source: String) -> NSMutableAttributedString {
         let output = NSMutableAttributedString(string: "")
-        let lines = source.components(separatedBy: "\n")
+        // Homes on Windows can send CRLF, and older sources may use CR.
+        // Normalize only for display so table dividers and fences see the
+        // same line boundaries; stored/copyable source remains untouched.
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
         let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
         let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
         func append(_ body: NSAttributedString, style: NSParagraphStyle = paragraph) {

@@ -11,6 +11,19 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
     check(composer.draft == "new typing" && composer.blobHashes == ["new-image"] && composer.sentCommandID == nil, "Mac failed-send restore preserves newer text and images")
     composer.draft = ""; composer.blobHashes = []; composer.restoreFailedSend(restoreRecord)
     check(composer.draft == "old send" && composer.blobHashes == ["old-image"], "Mac failed-send restore fills an empty composer")
+    let hydrating = RemoteComposer()
+    check(hydrating.hydrate(text: "home draft", hashes: ["home-image"], key: "home@1", origin: "QA home (version 1)") && hydrating.draftOrigin.contains("QA home"), "Initial remote draft hydration names its home and version")
+    hydrating.draft = "new local typing"
+    let adoptedDirty = hydrating.hydrate(text: "stale home draft", hashes: [], key: "home@2", origin: "QA home (version 2)")
+    check(!adoptedDirty && hydrating.hydrationConflict && hydrating.draft == "new local typing" && hydrating.blobHashes == ["home-image"], "Lease refresh cannot clobber a dirty remote composer or its images")
+    hydrating.keepLocalDraft()
+    check(!hydrating.hydrationConflict && hydrating.draft == "new local typing", "Keep my draft resolves hydration conflict without changing local input")
+    hydrating.blobHashes = ["new local image"]
+    check(!hydrating.hydrate(text: "new local typing", hashes: [], key: "home@3", origin: "QA home") && hydrating.blobHashes == ["new local image"], "Attachment-only edits are dirty during remote hydration")
+    hydrating.useHomeDraft()
+    check(!hydrating.hydrationConflict && hydrating.draft == "new local typing" && hydrating.blobHashes.isEmpty, "Use home draft explicitly adopts the offered text and attachment set")
+    let cleanHydration = hydrating.hydrate(text: "new authoritative draft", hashes: [], key: "home@4", origin: "QA home")
+    check(cleanHydration && hydrating.draft == "new authoritative draft", "Unedited remote composers adopt a fresh home draft normally")
     let outgoingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: true)
     let incomingPrompt = PairingPrompt(connectionID: UUID(), peerName: "Other Mac", fingerprint: "fingerprint", code: "code", keyChanged: false, isInitiator: false)
     check(outgoingPrompt.actionLabel == "Pair" && incomingPrompt.actionLabel == "Pair", "Group admission uses Pair on both the requesting and reviewing device")
@@ -298,6 +311,29 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: settingID, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceCommandPayload(action: "effort", effort: "high"))))
         let settingAck = try capturedEnvelopes().first { $0.commandID == settingID }.flatMap { $0.payload }.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
         check(session.choices.effort == "high" && settingAck?.outcome == "completed", "Busy home accepts next-turn settings and acknowledges saved selection")
+        let queuedA = PendingPrompt(text: "first queued", images: [])
+        let queuedB = PendingPrompt(text: "second queued", images: [])
+        session.pending = [queuedA, queuedB]
+        let independentDraft = session.draft
+        func injectAck(_ command: DeviceCommandPayload) throws -> DeviceAckPayload? {
+            captured = []
+            let id = UUID()
+            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: id, epoch: granted?.epoch, payload: try JSONEncoder().encode(command)))
+            return try capturedEnvelopes().first { $0.commandID == id && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
+        }
+        let staleInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: UUID()))
+        check(staleInject?.outcome == "failed" && staleInject?.detail?.contains("no longer available") == true && session.pending.map(\.id) == [queuedA.id, queuedB.id], "Stale Inject now reports failure and leaves other queued items untouched")
+        session.changingSetting = true
+        let settingInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
+        session.changingSetting = false
+        check(settingInject?.outcome == "failed" && settingInject?.detail?.contains("setting") == true && session.pending.first?.id == queuedA.id, "Inject while settings change receives an explicit failure instead of false completion")
+        let missingInject = try injectAck(DeviceCommandPayload(action: "inject"))
+        check(missingInject?.outcome == "failed" && session.pending.count == 2, "Malformed single-item injection cannot silently inject the whole queue")
+        let validInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
+        check(validInject?.outcome == "completed" && session.pending.first?.id == queuedB.id && session.resumeAfterInterrupt && session.draft == independentDraft, "Accepted injection moves the intended item first and preserves the independent draft")
+        session.pending = []; session.interrupted = false; session.resumeAfterInterrupt = false
+        let emptyInject = try injectAck(DeviceCommandPayload(action: "injectAll"))
+        check(emptyInject?.outcome == "failed" && emptyInject?.detail?.contains("already empty") == true, "Empty queue injection returns an honest failure with nothing submitted")
         captured = []
         let retryBytes = Data("partial upload recovery fixture".utf8)
         let retryHash = DeviceBlob.sha256Hex(retryBytes)
@@ -392,6 +428,26 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(viewer.unresolved(globalID: gid).count == 1 && !viewer.completedCommands.contains(sentID!), "Viewer harness ignores ack from wrong authenticated home")
         viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: sentID, epoch: 4, payload: ackPayload))
         check(viewer.unresolved(globalID: gid).isEmpty && viewer.completedCommands.contains(sentID!), "Viewer harness completes only on bound home ack")
+        viewerSent = []
+        let queuedID = UUID()
+        let injectID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "inject", pendingID: queuedID))
+        let sentFrames = viewerSent.count
+        let doubleClick = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "inject", pendingID: queuedID))
+        let differentQueueCommand = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "injectAll"))
+        check(injectID != nil && doubleClick == injectID && differentQueueCommand == nil && viewerSent.count == sentFrames && viewer.queueCommand(globalID: gid)?.outcome == "pending", "Repeated queue clicks share one durable intent and cannot send another interrupt while awaiting home")
+        if let injectID {
+            let failed = try JSONEncoder().encode(DeviceAckPayload(outcome: "failed", detail: "Queued item no longer available.", epoch: 4))
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: injectID, epoch: 4, payload: failed))
+            check(viewer.queueCommand(globalID: gid)?.detail == "Queued item no longer available." && viewer.remoteLeases[gid] == 4, "Queue failure remains visible in the outbox without revoking the valid display lease")
+            let retryID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "inject", pendingID: queuedID))
+            check(retryID != nil && retryID != injectID, "A definitively failed injection permits a new explicit attempt")
+            if let retryID {
+                viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: retryID, epoch: 4, payload: ackPayload))
+            }
+            if let failedRecord = viewer.outbox.first(where: { $0.commandID == injectID }) { viewer.discardOutbox(failedRecord) }
+        }
+        var queueDecoder = DeviceFrameDecoder()
+        for frame in viewerSent { _ = try queueDecoder.append(homeKeys2.receiver.decrypt(frame)) }
         viewerSent = []
         let retryBytes = Data("verified cached image fixture".utf8)
         let retryHash = DeviceBlob.sha256Hex(retryBytes)

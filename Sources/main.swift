@@ -77,6 +77,8 @@ final class Session: ObservableObject, Identifiable {
     var switchboardHop = 0
     var interrupted = false
     var resumeAfterInterrupt = false
+    @Published var injectionNotice = ""
+    var injectionTargetID: UUID?
     var turnFailed = false
     @Published var accountStatus = ""
     @Published var probeError = ""
@@ -210,10 +212,11 @@ final class Store: ObservableObject {
     }
     func stop(_ s: Session) {
         s.queuePaused = true; s.resumeAfterInterrupt = false
+        if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
         interruptProcess(s)
     }
     func interruptProcess(_ s: Session) {
-        guard s.busy else { return }
+        guard s.busy, !s.interrupted else { return }
         s.interrupted = true
         if s.agent != nil { MainActor.assumeIsolated { AgentRuntime.shared.cancel(s) }; s.status = "Stopping…"; return }
         if let muse = s.muse {
@@ -256,10 +259,23 @@ final class Store: ObservableObject {
         }
         send(s)
     }
-    func injectPending(_ s: Session, id: UUID? = nil) {
-        guard !s.pending.isEmpty, !s.changingSetting else { return }
+    @discardableResult
+    func injectPending(_ s: Session, id: UUID? = nil) -> String? {
+        func refused(_ detail: String) -> String {
+            if s.messages.last?.role != "notice" || s.messages.last?.text != detail {
+                s.messages.append(Message(role: "notice", text: detail))
+            }
+            saveSoon(); return detail
+        }
+        if s.changingSetting { return refused("Inject not applied: a session setting is still changing. Wait for its result, then try again.") }
+        if s.pending.isEmpty { return refused("Inject not applied: the queue is already empty. Nothing was sent.") }
+        if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID != nil {
+            s.injectionNotice = "Interrupting — your queued prompt is next"; return nil
+        }
         if let id {
-            guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = s.pending.firstIndex(where: { $0.id == id }) else {
+                return refused("Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.")
+            }
             let prompt = s.pending.remove(at: index)
             s.pending.insert(prompt, at: 0)
         } else {
@@ -267,18 +283,34 @@ final class Store: ObservableObject {
             s.pending = [PendingPrompt(switchboardHop: prompts.compactMap(\.switchboardHop).max(), text: prompts.map(\.text).joined(separator: "\n\n"), images: prompts.flatMap(\.images))]
         }
         s.queuePaused = false
+        s.injectionTargetID = s.pending.first?.id
+        s.injectionNotice = s.busy ? "Interrupting — your queued prompt is next" : "Starting your queued prompt…"
         if s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
         else { runNext(s) }
         save()
+        return nil
     }
     func runNext(_ s: Session) {
+        if !s.busy && s.pending.isEmpty && s.injectionTargetID != nil {
+            s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
+            s.injectionTargetID = nil
+        }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
         send(s, switchboardHop: next.switchboardHop ?? 0)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
+        if s.injectionTargetID == next.id {
+            if !s.busy { s.injectionNotice = "Injected prompt is held in the queue. Check the session notice before retrying." }
+            else if s.entry.engine == "muse" && usesInteractiveMuse && s.agent == nil { s.injectionNotice = "Opening your injected prompt…" }
+            else { confirmInjectionStarted(s) }
+        }
         s.draft = draft; s.attachments = attachments; save()
+    }
+    func confirmInjectionStarted(_ s: Session) {
+        guard !s.interrupted, let target = s.injectionTargetID, !s.pending.contains(where: { $0.id == target }) else { return }
+        s.injectionNotice = "Injected prompt started."; s.injectionTargetID = nil
     }
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
@@ -291,6 +323,7 @@ final class Store: ObservableObject {
         }
         s.interrupted = false; s.resumeAfterInterrupt = false
         if !shouldRun { s.queuePaused = !s.pending.isEmpty }
+        if !shouldRun && s.injectionTargetID != nil { s.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying." }
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
@@ -437,7 +470,10 @@ final class Store: ObservableObject {
                 connection.submit(prompt: prompt, display: display, images: images, effort: s.choices.effort) { result in
                     guard s.muse === connection else { return }
                     if case .failure(let error) = result { self.finishMuse(s, status: "Turn not acknowledged", notice: error.localizedDescription) }
-                    else if s.interrupted { connection.interrupt() }
+                    else {
+                        self.confirmInjectionStarted(s)
+                        if s.interrupted { connection.interrupt() }
+                    }
                 }
             }
         }
@@ -462,7 +498,7 @@ final class Store: ObservableObject {
     }
     func consumeMuse(_ method: String, _ params: [String: Any], session s: Session, responseID: UUID) {
         switch method {
-        case "turn/started": s.busy = true; s.muse?.turnID = params["turnId"] as? String; s.status = "Working…"
+        case "turn/started": s.busy = true; s.muse?.turnID = params["turnId"] as? String; s.status = "Working…"; confirmInjectionStarted(s)
         case "turn/foregroundCompleted":
             let agents = params["blockingAgents"] as? [String] ?? []
             s.status = "Answer finished · checking " + agents.joined(separator: ", ")
@@ -1042,11 +1078,80 @@ final class InputClipView: NSClipView {
 }
 final class ConversationScrollView: NSScrollView {
     private var tiling = false
+    private(set) var followState = TranscriptFollowState()
+    private var idleResume: DispatchWorkItem?
+    private var interactionMonitor: Any?
+    private var liveScrolling = false
+    private let latest = NSButton(title: "Jump to latest", target: nil, action: nil)
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect); configureFollowing() }
+    required init?(coder: NSCoder) { super.init(coder: coder); configureFollowing() }
+    deinit {
+        idleResume?.cancel(); NotificationCenter.default.removeObserver(self)
+        if let interactionMonitor { NSEvent.removeMonitor(interactionMonitor) }
+    }
+    private func configureFollowing() {
+        latest.target = self; latest.action = #selector(jumpToLatest)
+        latest.bezelStyle = .rounded; latest.font = .systemFont(ofSize: 12, weight: .medium); latest.isHidden = true
+        latest.setAccessibilityLabel("Jump to latest output")
+        addSubview(latest)
+        interactionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            if let self, let window = self.window, event.window === window { self.interaction() }
+            return event
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(startedScrolling), name: NSScrollView.willStartLiveScrollNotification, object: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSScrollView.didLiveScrollNotification, object: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(endedScrolling), name: NSScrollView.didEndLiveScrollNotification, object: self)
+    }
+    var nearBottom: Bool { contentView.bounds.maxY >= (documentView?.bounds.height ?? 0) - 200 }
+    var selecting: Bool { ((documentView as? NSTextView)?.selectedRange().length ?? 0) > 0 || NSEvent.pressedMouseButtons != 0 }
+    func prepareForRender(first: Bool) -> Bool {
+        if first { followState.resume() }
+        else if followState.following && (!nearBottom || selecting) {
+            followState.pause(now: ProcessInfo.processInfo.systemUptime); scheduleResume()
+        }
+        refreshLatest(); return followState.following
+    }
+    func outputArrived() { followState.outputArrived(); refreshLatest() }
+    func interaction() {
+        followState.interaction(now: ProcessInfo.processInfo.systemUptime)
+        if selecting && followState.following { followState.pause(now: ProcessInfo.processInfo.systemUptime) }
+        scheduleResume()
+    }
+    private func scheduleResume() {
+        idleResume?.cancel()
+        guard !followState.following else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.followState.resumeIfIdle(now: ProcessInfo.processInfo.systemUptime, selecting: self.selecting, scrolling: self.liveScrolling) { self.jumpToLatest() }
+        }
+        idleResume = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowState.idleDelay, execute: work)
+    }
+    @objc private func startedScrolling() { liveScrolling = true; recordScroll() }
+    @objc private func scrolled() { recordScroll() }
+    @objc private func endedScrolling() { liveScrolling = false; recordScroll() }
+    private func recordScroll() {
+        followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
+        scheduleResume(); refreshLatest()
+    }
+    override func scrollWheel(with event: NSEvent) { super.scrollWheel(with: event); recordScroll() }
+    @objc func jumpToLatest() {
+        idleResume?.cancel(); followState.resume()
+        if let text = documentView as? NSTextView { text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0)) }
+        refreshLatest()
+    }
+    private func refreshLatest() {
+        latest.isHidden = followState.following
+        latest.title = followState.unreadUpdates == 0 ? "Jump to latest" : "Jump to latest (" + String(followState.unreadUpdates) + " new updates)"
+        latest.sizeToFit()
+        latest.frame.origin = NSPoint(x: max(contentView.frame.minX + 8, contentView.frame.maxX - latest.frame.width - 12), y: isFlipped ? bounds.maxY - latest.frame.height - 10 : bounds.minY + 10)
+    }
     override func tile() {
         guard !tiling else { return }
         tiling = true; defer { tiling = false }
         super.tile()
         (documentView as? ConversationTextView)?.fitDocumentHeight()
+        refreshLatest()
     }
 }
 final class DraftImageRemoveButton: NSButton {
@@ -1124,6 +1229,7 @@ final class ConversationTextView: NSTextView {
         return point.y >= bottom + textContainerOrigin.y
     }
     override func mouseDown(with event: NSEvent) {
+        (enclosingScrollView as? ConversationScrollView)?.interaction()
         if isInputWhitespace(convert(event.locationInWindow, from: nil)) { focusInput(); return }
         super.mouseDown(with: event)
     }
@@ -1206,6 +1312,7 @@ final class ConversationTextView: NSTextView {
     var submit: (() -> Void)?
     var imagePaste: ((NSImage) -> Void)?
     override func keyDown(with event: NSEvent) {
+        (enclosingScrollView as? ConversationScrollView)?.interaction()
         if event.keyCode == 53 { super.keyDown(with: event); return }
         if event.keyCode == 36 || event.keyCode == 76 {
             guard isEditable else { return }
@@ -1217,7 +1324,7 @@ final class ConversationTextView: NSTextView {
         // Typing while reading history always goes to the current input.
         if selectedRange().location < inputStart && !event.modifierFlags.contains(.command),
            let characters = event.characters, !characters.isEmpty,
-           characters.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+           characters.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && !(0xF700...0xF8FF).contains($0.value) }) {
             setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         }
         super.keyDown(with: event)
@@ -1313,6 +1420,7 @@ struct ScrollingConversation: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         let session: Session
         var signature = ""
+        var historySignature = ""
         var markdownCache: [UUID: (String, NSAttributedString)] = [:]
         var rendering = false
         var draftChanged: ((String) -> Void)?
@@ -1331,6 +1439,10 @@ struct ScrollingConversation: NSViewRepresentable {
             return rendering || affectedCharRange.location >= text.inputStart
         }
         func textViewDidChangeSelection(_ notification: Notification) {
+            if !rendering, let text = notification.object as? ConversationTextView,
+               let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown].contains(event.type) {
+                (text.enclosingScrollView as? ConversationScrollView)?.interaction()
+            }
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
         }
@@ -1343,6 +1455,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
             text.fitDocumentHeight()
             text.scrollRangeToVisible(NSRange(location: length, length: 0))
+            (text.enclosingScrollView as? ConversationScrollView)?.jumpToLatest()
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
         }
@@ -1352,8 +1465,9 @@ struct ScrollingConversation: NSViewRepresentable {
             return true
         }
         func render(_ text: ConversationTextView) {
-            let data = (try? JSONEncoder().encode(session.messages)) ?? Data()
-            let key = String(decoding: data, as: UTF8.self) + session.attachments.joined() + String(session.busy)
+            let data = (try? JSONEncoder().encode(session.messages.filter { $0.role != "activity" })) ?? Data()
+            let historyKey = String(decoding: data, as: UTF8.self)
+            let key = historyKey + session.attachments.joined()
             let current = text.string as NSString
             if key == signature && current.length >= text.inputStart && current.substring(from: text.inputStart) == session.draft { return }
             let firstRender = signature.isEmpty
@@ -1363,7 +1477,10 @@ struct ScrollingConversation: NSViewRepresentable {
             let offset = max(0, selection.location - text.inputStart)
             let scroll = text.enclosingScrollView
             let origin = scroll?.contentView.bounds.origin ?? .zero
-            let follow = firstRender || (scroll.map { $0.contentView.bounds.maxY >= text.bounds.height - 70 } ?? true)
+            let nativeScroll = scroll as? ConversationScrollView
+            let follow = nativeScroll?.prepareForRender(first: firstRender) ?? (firstRender || (scroll.map { $0.contentView.bounds.maxY >= text.bounds.height - 200 } ?? true))
+            if !firstRender && historyKey != historySignature { nativeScroll?.outputArrived() }
+            historySignature = historyKey
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
@@ -1441,7 +1558,10 @@ struct ScrollingConversation: NSViewRepresentable {
             text.undoManager?.removeAllActions()
             if session.draft.isEmpty && selection.length == 0 { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
-            else { text.setSelectedRange(NSRange(location: min(selection.location, document.length), length: 0)) }
+            else {
+                let start = min(selection.location, document.length)
+                text.setSelectedRange(NSRange(location: start, length: min(selection.length, document.length - start)))
+            }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.layoutManager?.ensureLayout(for: text.textContainer!)
             text.fitDocumentHeight()
@@ -1482,6 +1602,12 @@ struct Conversation: View {
                 ApprovalHeading(detail: session.agent?.attention ?? session.status, title: session.agent == nil ? "PERMISSION REQUIRED" : "ATTENTION REQUIRED")
             }
             if let request = session.requests.first { MuseRequestView(session: session, request: request).id(request.id) }
+            if !session.injectionNotice.isEmpty {
+                HStack {
+                    Text(session.injectionNotice).fontWeight(.semibold); Spacer()
+                    if !session.interrupted { Button("Dismiss") { session.injectionNotice = "" } }
+                }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.22))
+            }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
             Divider()
@@ -1888,6 +2014,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    var following = TranscriptFollowState()
+    following.scroll(nearBottom: false, now: 10); following.outputArrived()
+    check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output for at least five idle seconds")
+    following.interaction(now: 14)
+    check(!following.resumeIfIdle(now: 18.9, selecting: false, scrolling: false), "New user input resets the idle-resume deadline")
+    check(!following.resumeIfIdle(now: 19, selecting: true, scrolling: false) && !following.resumeIfIdle(now: 19, selecting: false, scrolling: true), "Idle following never resumes while selecting text or actively scrolling")
+    check(following.resumeIfIdle(now: 19, selecting: false, scrolling: false) && following.following && following.unreadUpdates == 0, "Idle resume follows latest and clears the unread-update count")
+    following.scroll(nearBottom: false, now: 20); following.outputArrived(); following.scroll(nearBottom: true, now: 21)
+    check(following.following && following.unreadUpdates == 0, "Scrolling back near the bottom resumes following immediately")
     let entry = Entry(name: "Layout fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")
     let submitted = Session(entry: entry)
     submitted.draft = "Send this once"
@@ -1941,6 +2076,15 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     session.messages.append(Message(role: "assistant", text: "A later streamed answer"))
     coordinator.render(view)
     check(abs(scroll.contentView.bounds.minY - 100) < 1, "New output preserves the viewport while reading older messages")
+    view.setSelectedRange(NSRange(location: 5, length: 12))
+    session.messages.append(Message(role: "assistant", text: "Output while selecting history"))
+    coordinator.render(view)
+    check(view.selectedRange() == NSRange(location: 5, length: 12) && !scroll.followState.following && scroll.followState.unreadUpdates > 0, "Incoming output preserves a history selection and exposes unread updates")
+    let rightArrow = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}", charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: 124)!
+    view.keyDown(with: rightArrow)
+    check(view.selectedRange().location < view.inputStart && !scroll.followState.following, "History navigation keys move within history without being mistaken for typing and jumping to the draft")
+    scroll.jumpToLatest()
+    check(scroll.followState.following && scroll.followState.unreadUpdates == 0, "Native Jump to latest explicitly resumes following and clears unread output")
     session.messages = [Message(role: "assistant", text: "Short reply")]; session.draft = "Typing here"
     coordinator.render(view); scroll.tile()
     check(view.frame.height <= scroll.contentView.bounds.height + 1 && scroll.contentView.bounds.minY < 1, "Shortened transcripts shrink and clamp the scroll position before showing the draft")
@@ -2134,6 +2278,16 @@ func selfTest() {
     let tableRange = (markdown.string as NSString).range(of: "Recommendation")
     let tableStyle = markdown.attribute(.paragraphStyle, at: tableRange.location, effectiveRange: nil) as? NSParagraphStyle
     check(tableStyle?.textBlocks.first is NSTextTableBlock, "Markdown pipe tables become native Mac table cells")
+    for ending in ["\r\n", "\r"] {
+        let raw = ["## Remote heading", "**Bold reply**", "| A | B |", "| --- | --- |", "| one | two |"].joined(separator: ending)
+        let remote = RemoteComposer()
+        remote.updateEditor(transcript: DeviceTranscriptPayload(globalID: "fixture", homeSeq: 1, messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: raw)], draft: "", draftVersion: 1, busy: false, status: "Ready"), cache: [:])
+        let rendered = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        ScrollingConversation.Coordinator(remote.editor).render(rendered)
+        let cell = (rendered.string as NSString).range(of: "one")
+        let cellStyle = cell.location == NSNotFound ? nil : rendered.textStorage?.attribute(.paragraphStyle, at: cell.location, effectiveRange: nil) as? NSParagraphStyle
+        check(!rendered.string.contains("##") && !rendered.string.contains("**") && !rendered.string.contains("| ---") && cellStyle?.textBlocks.first is NSTextTableBlock && remote.editor.messages[0].text == raw, "Remote assistant Markdown with " + ending.debugDescription + " line endings renders headings/emphasis/tables without editing its source")
+    }
     let linkRange = (markdown.string as NSString).range(of: "a link")
     check(markdown.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL == URL(string: "https://example.com"), "Markdown link labels keep clickable URL attributes")
     check(markdown.string.contains("**not bold**") && !markdown.string.contains("```"), "Fenced code is literal and loses fence markers")

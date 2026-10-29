@@ -49,8 +49,13 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         session.pending = [PendingPrompt(text: "first", images: []), PendingPrompt(text: "second", images: [])]
         session.draft = "untouched"
         store.injectPending(session, id: session.pending[1].id)
+        let promotedID = session.pending.first?.id
+        check(session.injectionNotice == "Interrupting — your queued prompt is next" && session.interrupted, engine + " injection gives immediate feedback before the old process exits")
+        store.injectPending(session, id: promotedID)
+        check(session.pending.first?.id == promotedID && session.pending.count == 2 && session.resumeAfterInterrupt, engine + " repeated injection while stopping keeps the original intent and queue order")
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: second", "answer: first"] && session.draft == "untouched", engine + " Inject now promotes selected row, interrupts, and preserves draft")
+        check(session.injectionNotice == "Injected prompt started." && session.injectionTargetID == nil, engine + " injection confirms the promoted prompt actually started")
         session.pending = [PendingPrompt(text: "one", images: []), PendingPrompt(text: "two", images: [])]
         session.queuePaused = true
         store.injectPending(session)

@@ -779,6 +779,7 @@ extension DeviceSyncService {
         } catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Home could not durably record the command. Check home before retrying.", epoch: envelope.epoch); return }
         let store = Store.shared
         var asyncSetting = false
+        var failure: String?
         switch command.action {
         case "teachSwitchboard": store.teachSwitchboard(session)
         case "submit":
@@ -792,8 +793,10 @@ extension DeviceSyncService {
             let key = session.id.uuidString
             if consumesHomeDraft { _ = drafts.bump(session: key, text: "") } else { drafts.adopt(session: key, version: drafts.version(session: key), text: savedDraft) }
             persistDrafts(); store.saveSoon()
-        case "inject": store.injectPending(session, id: command.pendingID)
-        case "injectAll": store.injectPending(session)
+        case "inject":
+            if let id = command.pendingID { failure = store.injectPending(session, id: id) }
+            else { failure = "Inject not applied: no queued item was specified. Nothing was sent." }
+        case "injectAll": failure = store.injectPending(session)
         case "stop": store.stop(session)
         case "resumeQueue": session.queuePaused = false; store.save(); store.runNext(session)
         case "pauseQueue": session.queuePaused = true; store.save()
@@ -811,6 +814,12 @@ extension DeviceSyncService {
                 } else { store.answerMuse(session, request: request, choice: command.choiceID) }
             }
         default: break
+        }
+        if let failure {
+            do { try commandStore.markFailed(id: commandID) }
+            catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Nothing was injected, but home could not record the failure. Check home before retrying.", epoch: envelope.epoch); return }
+            sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "failed", detail: failure, epoch: envelope.epoch)
+            sendTranscript(to: peer, sessionID: session.id); return
         }
         if asyncSetting {
             pendingAsyncAcks.append((commandID: commandID, peerID: peer.id, sessionID: envelope.sessionID ?? "", homeSession: session.id, epoch: envelope.epoch ?? 0))
@@ -1150,6 +1159,13 @@ extension DeviceSyncService {
     }
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
+        // A double click is the same outstanding queue intent, not a second
+        // interrupt. Uncertain requests require a home query before retrying.
+        if Self.queueActions.contains(command.action), let active = queueCommand(globalID: globalID),
+           ["pending", "accepted", "uncertain"].contains(active.outcome) {
+            lastOutcome = "Queue request already pending. Check home for its result."
+            return active.payload.action == command.action && active.payload.pendingID == command.pendingID ? active.commandID : nil
+        }
         let epoch = command.action == "teachSwitchboard" && canTeachRemote(globalID) ? 0 : remoteLeases[globalID]
         guard let global = DeviceGlobalID(globalID), let epoch, let peer = peerForHome(global.home) else {
             lastOutcome = "Take the session again before sending."; return nil
@@ -1172,6 +1188,11 @@ extension DeviceSyncService {
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }
     func unresolved(globalID: String) -> [DeviceOutboxRecord] { outbox.filter { $0.sessionID == globalID } }
+    static let queueActions: Set<String> = ["inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue"]
+    func queueCommand(globalID: String) -> DeviceOutboxRecord? {
+        let records = unresolved(globalID: globalID).filter { Self.queueActions.contains($0.payload.action) }
+        return records.first { ["pending", "accepted", "uncertain"].contains($0.outcome) } ?? records.last
+    }
     func sendRemoteDraft(globalID: String, text: String, imageHashes: [String]? = nil) {
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return }
         if let imageHashes { draftAttachments[globalID] = imageHashes }

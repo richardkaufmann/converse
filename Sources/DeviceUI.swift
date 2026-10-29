@@ -14,8 +14,34 @@ final class RemoteComposer: ObservableObject {
     @Published var sentText = ""
     @Published var sentHashes: [String] = []
     var hydratedKey = ""
+    private var lastHomeText = ""
+    private var lastHomeHashes: [String] = []
+    private var offeredHomeText = ""
+    private var offeredHomeHashes: [String] = []
+    @Published var hydrationConflict = false
+    @Published var draftOrigin = ""
     @Published var answers: [String: String] = [:]
     @Published var selections: [String: Set<String>] = [:]
+    @discardableResult func hydrate(text: String, hashes: [String], key: String, origin: String) -> Bool {
+        hydratedKey = key
+        offeredHomeText = text; offeredHomeHashes = hashes
+        let unchanged = draft == lastHomeText && blobHashes == lastHomeHashes
+        let empty = draft.isEmpty && blobHashes.isEmpty
+        let sent = sentCommandID != nil && draft == sentText && blobHashes == sentHashes
+        guard unchanged || empty || sent || (draft == text && blobHashes == hashes) else {
+            hydrationConflict = true; draftOrigin = "Home supplied a different draft from " + origin + ". Your unsent edits are preserved."
+            return false
+        }
+        useHomeDraft(); draftOrigin = text.isEmpty && hashes.isEmpty ? "" : "Restored unsent draft from " + origin
+        return true
+    }
+    func useHomeDraft() {
+        draft = offeredHomeText; blobHashes = offeredHomeHashes
+        lastHomeText = draft; lastHomeHashes = blobHashes; hydrationConflict = false
+    }
+    func keepLocalDraft() {
+        lastHomeText = draft; lastHomeHashes = blobHashes; hydrationConflict = false; draftOrigin = ""
+    }
     @discardableResult func removeImage(path: String, cache: [String: URL]) -> Bool {
         guard let index = blobHashes.firstIndex(where: { cache[$0]?.path == path }) else { return false }
         blobHashes.remove(at: index); return true
@@ -120,6 +146,8 @@ struct RemotePane: View {
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
     var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first { $0.payload.action == "submit" } }
+    var queueRecord: DeviceOutboxRecord? { service.queueCommand(globalID: globalID) }
+    var queueBusy: Bool { queueRecord.map { ["pending", "accepted", "uncertain"].contains($0.outcome) } ?? false }
     var placement: UUID { service.placementID(forGlobal: globalID) }
     var body: some View {
         VStack(spacing: 0) {
@@ -140,7 +168,7 @@ struct RemotePane: View {
                     let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true
                     if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { attach(image) } } }
                 } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot").disabled(offline || !hasLease)
-                if !composer.blobHashes.isEmpty { Button("Clear images") { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []); syncEditor() } }
+                if !composer.blobHashes.isEmpty { Button("Clear images") { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []); syncEditor() }.disabled(composer.hydrationConflict) }
                 if transcript?.busy == true {
                     if transcript?.requests.isEmpty != false { ProgressView().controlSize(.small) }
                     Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(offline || !hasLease)
@@ -171,13 +199,17 @@ struct RemotePane: View {
                     HStack {
                         Text(String(pending.count) + " queued on home" + (transcript?.queuePaused == true ? " · paused" : "")); Spacer()
                         Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
-                        Button("Inject all") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "injectAll")) }
+                        Button(queueBusy && queueRecord?.payload.action == "injectAll" ? "Injecting…" : "Inject all") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "injectAll")) }
                         Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                     }
                     ForEach(pending) { item in
-                        HStack { Text(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
+                        HStack { Text(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button(queueBusy && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
                     }
-                }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
+                }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06)).disabled(offline || !hasLease || queueBusy)
+            }
+            if let record = queueRecord {
+                RemoteQueueFeedback(record: record, available: !offline && hasLease,
+                                    check: { service.queryOutbox(record) }, dismiss: { service.discardOutbox(record) })
             }
             if let record = pendingRecord {
                 HStack {
@@ -197,18 +229,35 @@ struct RemotePane: View {
             if let conflict = service.draftConflicts[globalID] {
                 Text(conflict).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.10))
             }
+            if !composer.draftOrigin.isEmpty {
+                HStack {
+                    Text(composer.draftOrigin).textSelection(.enabled); Spacer()
+                    if composer.hydrationConflict {
+                        Button("Keep my draft") {
+                            composer.keepLocalDraft()
+                            service.sendRemoteDraft(globalID: globalID, text: composer.draft, imageHashes: composer.blobHashes)
+                        }
+                        Button("Use home draft") { composer.useHomeDraft(); composer.draftOrigin = ""; syncEditor() }
+                    }
+                }.font(.caption).padding(8).background(Color.orange.opacity(0.10))
+            }
             if let transcript, transcript.offset > 0 {
                 Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
             ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
                 onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
-                                  onDraftChanged: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) },
+                                  onDraftChanged: {
+                                      composer.draft = $0
+                                      if !composer.hydrationConflict { composer.draftOrigin = ""; service.sendRemoteDraft(globalID: globalID, text: $0) }
+                                  },
                                   onImagePaste: attach,
                                   onImageRemove: { path in
                                       guard hasLease, !offline, composer.removeImage(path: path, cache: service.blobCache) else { return }
-                                      service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
-                                      service.sendRemoteDraft(globalID: globalID, text: composer.draft, imageHashes: composer.blobHashes)
+                                      if !composer.hydrationConflict {
+                                          service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+                                          service.sendRemoteDraft(globalID: globalID, text: composer.draft, imageHashes: composer.blobHashes)
+                                      }
                                       syncEditor()
                                   })
             Divider()
@@ -257,15 +306,14 @@ struct RemotePane: View {
         }
     }
     var canSend: Bool {
-        hasLease && !offline && pendingRecord == nil && (!composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.blobHashes.isEmpty) && composer.blobHashes.allSatisfy { service.blobReady[$0] == true }
+        hasLease && !offline && !composer.hydrationConflict && pendingRecord == nil && (!composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.blobHashes.isEmpty) && composer.blobHashes.allSatisfy { service.blobReady[$0] == true }
     }
     func hydrate(force: Bool = false) {
-        guard let transcript else { return }
-        let key = globalID + "@" + String(service.remoteLeases[globalID] ?? 0)
+        guard let transcript, let epoch = service.remoteLeases[globalID], transcript.epoch == epoch else { return }
+        let key = globalID + "@" + String(epoch)
         guard force || composer.hydratedKey != key else { return }
-        composer.hydratedKey = key
-        composer.draft = transcript.draft
-        composer.blobHashes = service.draftAttachments[globalID] ?? []
+        let home = DeviceGlobalID(globalID).flatMap { service.homes[$0.home]?.deviceName } ?? "home device"
+        composer.hydrate(text: transcript.draft, hashes: transcript.draftImageHashes ?? [], key: key, origin: home + " (version " + String(transcript.draftVersion) + ")")
         for hash in composer.blobHashes where service.blobReady[hash] != true { service.queryBlob(globalID: globalID, hash: hash) }
         if let record = pendingRecord { composer.sentCommandID = record.commandID; composer.sentText = record.payload.text ?? ""; composer.sentHashes = record.payload.blobHashes }
     }
@@ -283,13 +331,30 @@ struct RemotePane: View {
             let path = folder.appendingPathComponent(hash + ".png"); try data.write(to: path, options: .atomic)
             service.blobCache[hash] = path
         } catch { service.lastOutcome = "Attachment failed: " + error.localizedDescription }
-        composer.blobHashes.append(hash); service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+        composer.blobHashes.append(hash)
+        if !composer.hydrationConflict { service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes) }
         syncEditor()
     }
     func send() {
         guard canSend else { return }
         composer.sentText = composer.draft; composer.sentHashes = composer.blobHashes
         composer.sentCommandID = service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "submit", text: composer.draft, blobHashes: composer.blobHashes))
+    }
+}
+
+struct RemoteQueueFeedback: View {
+    let record: DeviceOutboxRecord
+    let available: Bool
+    let check: () -> Void
+    let dismiss: () -> Void
+    var waiting: Bool { ["pending", "accepted", "uncertain"].contains(record.outcome) }
+    var body: some View {
+        HStack {
+            Text(record.detail ?? (waiting ? "Queue request sent. Waiting for home acknowledgment…" : "Queue request was not applied.")).textSelection(.enabled)
+            Spacer()
+            if waiting { Button("Check home", action: check).disabled(!available) }
+            else { Button("Dismiss", action: dismiss) }
+        }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.12))
     }
 }
 
