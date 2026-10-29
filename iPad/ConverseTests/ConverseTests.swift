@@ -48,6 +48,36 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(messages[0].text, "Prompt" + tail)
         }
     }
+    func testDraftImageRemoveButtonPreservesHistoryAndText() throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: "test-home", session: UUID()).string
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 160, height: 100)).image { context in UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 160, height: 100)) }
+        let file = service.storageFolder.appendingPathComponent("draft-preview.png")
+        try XCTUnwrap(image.pngData()).write(to: file)
+        service.remoteLeases[id] = 1
+        model.state.drafts[id] = PadDraft(text: "Keep this text", hashes: ["one", "two"], dirty: true)
+        let historical = DeviceWireMessage(id: UUID(), role: "assistant", text: "Historical image", imageHashes: ["one"])
+        var parent = PadTranscript(messages: [historical], draft: model.draft(id).text, images: ["one": file, "two": file], draftImageHashes: model.draft(id).hashes, editable: true, lineNumbers: true, edit: { model.edit(id, text: $0) }, send: {}, attach: { _ in }, removeImage: { model.removeImage(id, hash: $0) })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 500)
+        let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.draftImageButtons.count, 2, "The historical image has no X")
+        XCTAssertEqual(view.textStorage.string.filter { $0 == "\u{fffc}" }.count, 3)
+        view.selectedRange = NSRange(location: view.historyLength + 3, length: 0)
+        let button = try XCTUnwrap(view.draftImageButtons.first)
+        XCTAssertFalse(button.isHidden); XCTAssertGreaterThan(button.frame.minX, 100)
+        button.sendActions(for: .touchUpInside)
+        XCTAssertEqual(model.draft(id).hashes, ["two"]); XCTAssertEqual(model.draft(id).text, "Keep this text")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertEqual(PadModel(service: service).draft(id).hashes, ["two"], "Deletion is persisted before network sync")
+        parent.draftImageHashes = model.draft(id).hashes
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.draftImageButtons.count, 1)
+        XCTAssertEqual(view.selectedRange.location, view.historyLength + 3)
+        XCTAssertEqual(view.textStorage.string.filter { $0 == "\u{fffc}" }.count, 2)
+        parent.editable = false; parent.update(view, coordinator: coordinator)
+        XCTAssertTrue(view.draftImageButtons.allSatisfy(\.isHidden))
+    }
     func testUnloadedImageCaptionRemainsClickable() {
         let url = URL(string: "https://upload.wikimedia.org/example.jpg")!
         let rendered = PadTranscript.render("![Grasshopper](" + url.absoluteString + ")")
@@ -378,6 +408,15 @@ final class ConverseTests: XCTestCase {
         try await eventually("Converted PNG is verified and stored on Mac") { service.blobReady[hash] == true }
         try await eventually("Latest draft and attachment sync after upload") {
             service.remoteTranscripts[row.globalID]?.draft == "from iPad with image" && service.remoteTranscripts[row.globalID]?.draftImageHashes == [hash]
+        }
+        model.removeImage(row.globalID, hash: hash)
+        try await eventually("Removing one image synchronizes to the Mac draft without changing text") {
+            service.remoteTranscripts[row.globalID]?.draft == "from iPad with image" && service.remoteTranscripts[row.globalID]?.draftImageHashes == []
+        }
+        XCTAssertNotNil(service.blobCache[hash], "Removing a draft reference does not delete an image used in history")
+        model.attach(row.globalID, data: try XCTUnwrap(image.pngData()))
+        try await eventually("The same image can be attached again without a stale removal") {
+            service.remoteTranscripts[row.globalID]?.draftImageHashes == [hash]
         }
         model.send(row.globalID)
         let command = try XCTUnwrap(model.draft(row.globalID).sentID)

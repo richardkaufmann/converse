@@ -170,6 +170,14 @@ final class PadModel: ObservableObject {
     func clearImages(_ id: String) {
         var draft = draft(id); draft.hashes = []; draft.dirty = true; state.drafts[id] = draft; persist(); flush(id)
     }
+    func removeImage(_ id: String, hash: String) {
+        guard canControl(id) else { return }
+        var draft = draft(id)
+        guard let index = draft.hashes.firstIndex(of: hash) else { return }
+        draft.hashes.remove(at: index); draft.dirty = true
+        state.drafts[id] = draft; persist()
+        service.saveDraftAttachments(globalID: id, hashes: draft.hashes); flush(id)
+    }
     func background() {
         let task = UIApplication.shared.beginBackgroundTask(withName: "Preserve Converse drafts")
         for id in state.drafts.keys { flush(id) }; persist(); service.suspendViewer(); hydratedEpochs = [:]

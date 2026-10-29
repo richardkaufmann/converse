@@ -9,6 +9,33 @@ final class TailTextView: UITextView {
     var promptBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
     let gutter = PadGutter()
+    var draftImages: [(location: Int, hash: String)] = []
+    private(set) var draftImageButtons: [UIButton] = []
+    var removeDraftImage: ((String) -> Void)?
+    func configureDraftImageButtons() {
+        draftImageButtons.forEach { $0.removeFromSuperview() }; draftImageButtons = []
+        for image in draftImages {
+            let button = UIButton(type: .system)
+            button.setImage(UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .bold)), for: .normal)
+            button.tintColor = .white; button.backgroundColor = UIColor.black.withAlphaComponent(0.8)
+            button.layer.cornerRadius = 16; button.accessibilityLabel = "Remove image from draft"
+            button.addAction(UIAction { [weak self] _ in self?.removeDraftImage?(image.hash) }, for: .touchUpInside)
+            addSubview(button); draftImageButtons.append(button)
+        }
+        setNeedsLayout()
+    }
+    private func layoutDraftImageButtons() {
+        guard !draftImageButtons.isEmpty else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        for (image, button) in zip(draftImages, draftImageButtons) {
+            button.isHidden = !isEditable || removeDraftImage == nil || image.location >= textStorage.length
+            guard !button.isHidden else { continue }
+            let glyph = layoutManager.glyphRange(forCharacterRange: NSRange(location: image.location, length: 1), actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyph, in: textContainer).offsetBy(dx: textContainerInset.left, dy: textContainerInset.top)
+            button.frame = CGRect(x: max(rect.minX, rect.maxX - 34), y: rect.minY + 2, width: 32, height: 32)
+            bringSubviewToFront(button)
+        }
+    }
     enum Viewport { case bottom, offset(CGFloat), anchor(Int, CGFloat) }
     var pendingViewport: Viewport?
     private var previousBounds = CGSize.zero
@@ -45,6 +72,7 @@ final class TailTextView: UITextView {
         if gutter.superview == nil { gutter.text = self; gutter.isUserInteractionEnabled = false; addSubview(gutter) }
         gutter.frame = CGRect(x: contentOffset.x, y: contentOffset.y, width: 42, height: bounds.height)
         bringSubviewToFront(gutter); gutter.setNeedsDisplay()
+        layoutDraftImageButtons()
     }
     override var keyCommands: [UIKeyCommand]? {
         let commands = [UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(handleReturnCommand(_:))),
@@ -120,11 +148,13 @@ struct PadTranscript: UIViewRepresentable {
     var messages: [DeviceWireMessage]
     var draft: String
     var images: [String: URL]
+    var draftImageHashes: [String] = []
     var editable: Bool
     var lineNumbers: Bool
     var edit: (String) -> Void
     var send: () -> Void
     var attach: (Data) -> Void
+    var removeImage: (String) -> Void = { _ in }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
@@ -140,15 +170,16 @@ struct PadTranscript: UIViewRepresentable {
     }
     func updateUIView(_ view: TailTextView, context: Context) { update(view, coordinator: context.coordinator) }
     func update(_ view: TailTextView, coordinator c: Coordinator) {
-        c.parent = self; view.send = send
+        c.parent = self; view.send = send; view.removeDraftImage = editable ? removeImage : nil
         if view.isEditable != editable { view.isEditable = editable }
         guard !c.updating else { return }
         view.gutter.isHidden = !lineNumbers
         let leftInset: CGFloat = lineNumbers ? 48 : 10
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
-        let imageSignature = Set(messages.flatMap(\.imageHashes)).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
+        let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
         let visibleMessages = messages.filter { $0.role != "activity" && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
-        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + String(lineNumbers)
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
+        view.draftImageButtons.forEach { $0.isHidden = !editable }
         guard signature != c.signature || c.lastDraft != draft else { return }
         // Don't overwrite marked text while dictation/IME is composing.
         if view.markedTextRange != nil { return }
@@ -198,10 +229,20 @@ struct PadTranscript: UIViewRepresentable {
             if prompt { view.promptBlocks.append(range) }
             if TranscriptStyle.isTraffic(message.text) { view.trafficBlocks.append(range) }
         }
+        view.draftImages = []
+        for hash in draftImageHashes {
+            guard let url = images[hash], let image = UIImage(contentsOfFile: url.path) else { continue }
+            let attachment = NSTextAttachment(); attachment.image = image
+            let ratio = min(1, max(100, view.bounds.width - view.textContainerInset.left - view.textContainerInset.right - 10) / image.size.width, 260 / image.size.height)
+            attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * ratio, height: image.size.height * ratio)
+            view.draftImages.append((result.length, hash))
+            result.append(NSAttributedString(attachment: attachment)); result.append(Self.separator())
+        }
         c.historyLength = result.length
         view.historyLength = result.length
         result.append(NSAttributedString(string: draft, attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft)]))
         view.textStorage.setAttributedString(result)
+        view.configureDraftImageButtons()
         view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft), .paragraphStyle: NSParagraphStyle.default]
         if let relative {
             let position = min(result.length, c.historyLength + relative)

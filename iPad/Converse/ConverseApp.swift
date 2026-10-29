@@ -196,8 +196,8 @@ struct PadPane: View {
                 }.padding(8).background(Color.orange.opacity(0.12))
             }
             if let snapshot, snapshot.offset > 0 { Button("Load \(snapshot.offset) earlier messages") { service.requestEarlier(globalID: id) }.font(.caption).padding(4) }
-            PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, editable: model.canControl(id), lineNumbers: model.lineNumbers,
-                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) })
+            PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers,
+                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) })
             Divider()
             if let snapshot {
                 ViewThatFits(in: .horizontal) {

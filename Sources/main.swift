@@ -238,6 +238,10 @@ final class Store: ObservableObject {
             try png.write(to: url, options: .atomic); s.attachments.append(url.path); saveSoon()
         } catch { s.messages.append(Message(role: "notice", text: "Could not attach image: \(error.localizedDescription)")) }
     }
+    func removeDraftImage(_ s: Session, path: String) {
+        guard let index = s.attachments.firstIndex(of: path) else { return }
+        s.attachments.remove(at: index); saveSoon()
+    }
     func submit(_ s: Session, interrupt: Bool = false) {
         if handleLocalCommand(s) { return }
         let hasInput = !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty
@@ -1031,7 +1035,47 @@ final class ConversationScrollView: NSScrollView {
         (documentView as? ConversationTextView)?.fitDocumentHeight()
     }
 }
+final class DraftImageRemoveButton: NSButton {
+    var remove: (() -> Void)?
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        isBordered = false; imagePosition = .imageOnly
+        image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Remove draft image")
+        contentTintColor = .white; wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor; layer?.cornerRadius = 11
+        toolTip = "Remove image from draft"; setAccessibilityLabel("Remove image from draft")
+        target = self; action = #selector(removeImage)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func removeImage() { remove?() }
+}
 final class ConversationTextView: NSTextView {
+    var draftImages: [(location: Int, path: String)] = []
+    private(set) var draftImageButtons: [DraftImageRemoveButton] = []
+    var imageRemove: ((String) -> Void)?
+    func configureDraftImageButtons() {
+        draftImageButtons.forEach { $0.removeFromSuperview() }; draftImageButtons = []
+        for image in draftImages {
+            let button = DraftImageRemoveButton()
+            button.remove = { [weak self] in self?.imageRemove?(image.path) }
+            addSubview(button); draftImageButtons.append(button)
+        }
+        layoutDraftImageButtons()
+    }
+    private var positioningImageButtons = false
+    func layoutDraftImageButtons() {
+        guard !positioningImageButtons, !draftImageButtons.isEmpty, let layout = layoutManager, let container = textContainer else { return }
+        positioningImageButtons = true; defer { positioningImageButtons = false }
+        layout.ensureLayout(for: container)
+        for (image, button) in zip(draftImages, draftImageButtons) {
+            button.isHidden = imageRemove == nil || !isEditable || image.location >= (string as NSString).length
+            guard !button.isHidden else { continue }
+            let glyph = layout.glyphRange(forCharacterRange: NSRange(location: image.location, length: 1), actualCharacterRange: nil)
+            let rect = layout.boundingRect(forGlyphRange: glyph, in: container).offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+            button.setFrameOrigin(NSPoint(x: max(rect.minX, rect.maxX - 24), y: rect.minY + 2))
+        }
+    }
+    override func layout() { super.layout(); layoutDraftImageButtons() }
     static let inputParagraphStyle: NSParagraphStyle = {
         let style = NSMutableParagraphStyle(); style.lineSpacing = 2; return style
     }()
@@ -1124,7 +1168,7 @@ final class ConversationTextView: NSTextView {
     }
     var userBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
-    func refreshDecorations() { needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
+    func refreshDecorations() { layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let layout = layoutManager, let container = textContainer else { return }
@@ -1196,6 +1240,7 @@ struct ScrollingConversation: NSViewRepresentable {
     var onSubmit: (() -> Void)? = nil
     var onDraftChanged: ((String) -> Void)? = nil
     var onImagePaste: ((NSImage) -> Void)? = nil
+    var onImageRemove: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(session) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
@@ -1218,6 +1263,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Command Return inserts a new line.")
         text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
+        text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
         text.isEditable = inputEnabled
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
@@ -1242,6 +1288,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
+            text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
             context.coordinator.render(text); text.refreshDecorations()
         }
     }
@@ -1366,11 +1413,15 @@ struct ScrollingConversation: NSViewRepresentable {
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
-            for path in session.attachments { if image(path) { append("\n") } }
+            text.draftImages = []
+            for path in session.attachments {
+                if image(path) { text.draftImages.append((document.length - 1, path)); append("\n") }
+            }
             text.inputStart = document.length
             let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: TranscriptPalette.draft(session.draft)]
             append(session.draft, draftStyle)
             text.textStorage?.setAttributedString(document)
+            text.configureDraftImageButtons()
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.insertionPointColor = .systemBlue
             text.undoManager?.removeAllActions()
@@ -2077,6 +2128,25 @@ func selfTest() {
     let image = NSImage(size: NSSize(width: 16, height: 16)); image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 16, height: 16).fill(); image.unlockFocus()
     store.attach(s, image: image)
     check(s.attachments.count == 1 && FileManager.default.fileExists(atPath: s.attachments[0]), "Pasted image saved as PNG")
+    let imageDraft = store.create(entry)
+    store.attach(imageDraft, image: image); store.attach(imageDraft, image: image)
+    let imagePaths = imageDraft.attachments
+    imageDraft.messages = [Message(role: "assistant", text: "Historical image", images: [imagePaths[0]])]
+    imageDraft.draft = "Keep this text"
+    let imageEditor = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let imageCoordinator = ScrollingConversation.Coordinator(imageDraft)
+    imageEditor.imageRemove = { path in store.removeDraftImage(imageDraft, path: path); imageCoordinator.render(imageEditor) }
+    imageCoordinator.render(imageEditor)
+    check(imageEditor.draftImageButtons.count == 2 && imageEditor.draftImages.allSatisfy { $0.location < imageEditor.inputStart }, "Only draft image previews receive native remove buttons; historical images remain protected")
+    imageEditor.setSelectedRange(NSRange(location: imageEditor.inputStart + 3, length: 0))
+    imageEditor.draftImageButtons[0].performClick(nil)
+    check(imageDraft.attachments == [imagePaths[1]] && imageDraft.draft == "Keep this text" && imageDraft.messages[0].images == [imagePaths[0]] && FileManager.default.fileExists(atPath: imagePaths[0]) && imageEditor.selectedRange().location == imageEditor.inputStart + 3, "Clicking a draft image X removes exactly that attachment and preserves text, caret, historical images and their files")
+    imageEditor.isEditable = false; imageEditor.refreshDecorations()
+    check(imageEditor.draftImageButtons.allSatisfy(\.isHidden), "Image removal controls are hidden when the pane cannot edit")
+    let restoredImages = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(imageDraft.saved)))
+    check(restoredImages.attachments == [imagePaths[1]] && restoredImages.draft == "Keep this text", "Per-image draft removal survives session persistence")
+    let remoteImages = RemoteComposer(); remoteImages.draft = "Remote draft"; remoteImages.blobHashes = ["one", "two"]; remoteImages.sentHashes = ["one", "two"]
+    check(remoteImages.removeImage(path: imagePaths[0], cache: ["one": URL(fileURLWithPath: imagePaths[0]), "two": URL(fileURLWithPath: imagePaths[1])]) && remoteImages.blobHashes == ["two"] && remoteImages.sentHashes == ["one", "two"] && remoteImages.draft == "Remote draft", "Remote removal resolves the clicked preview to its hash without altering text or an already submitted payload")
     let imageBoard = NSPasteboard.withUniqueName()
     let pngImage = NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!
     imageBoard.setData(pngImage, forType: .png)

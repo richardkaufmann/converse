@@ -16,6 +16,10 @@ final class RemoteComposer: ObservableObject {
     var hydratedKey = ""
     @Published var answers: [String: String] = [:]
     @Published var selections: [String: Set<String>] = [:]
+    @discardableResult func removeImage(path: String, cache: [String: URL]) -> Bool {
+        guard let index = blobHashes.firstIndex(where: { cache[$0]?.path == path }) else { return false }
+        blobHashes.remove(at: index); return true
+    }
     func restoreFailedSend(_ record: DeviceOutboxRecord) {
         if DeviceDraftRecovery.canRestore(text: draft, hashes: blobHashes, record: record) {
             draft = record.payload.text ?? ""; blobHashes = record.payload.blobHashes
@@ -200,7 +204,13 @@ struct RemotePane: View {
                 onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
                                   onDraftChanged: { composer.draft = $0; service.sendRemoteDraft(globalID: globalID, text: $0) },
-                                  onImagePaste: attach)
+                                  onImagePaste: attach,
+                                  onImageRemove: { path in
+                                      guard hasLease, !offline, composer.removeImage(path: path, cache: service.blobCache) else { return }
+                                      service.saveDraftAttachments(globalID: globalID, hashes: composer.blobHashes)
+                                      service.sendRemoteDraft(globalID: globalID, text: composer.draft, imageHashes: composer.blobHashes)
+                                      syncEditor()
+                                  })
             Divider()
             if let transcript {
                 HStack(spacing: 10) {
