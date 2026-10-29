@@ -818,10 +818,10 @@ public sealed partial class MainWindow : Window
             // fresh paragraphs.
             var selectionPinned = Transcript.Document.Selection.Length > 0 && !caretToEnd;
             var followTail = caretToEnd || (wasAtEnd && nearBottom && !selectionPinned);
+            var appended = (_historyText + _draftText).StartsWith(oldFull ?? "", StringComparison.Ordinal);
             if (!followTail && appended && !selectionPinned && _userScrollUtc is { } lastLook
                 && (DateTime.UtcNow - lastLook).TotalSeconds > 5)
                 followTail = true; // idle resume: quiet looking rejoins new arrivals
-            var appended = (_historyText + _draftText).StartsWith(oldFull ?? "", StringComparison.Ordinal);
             var seq = ++_rebuildSeq;
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
             {
