@@ -394,11 +394,12 @@ public sealed partial class MainWindow : Window
         UpdateWindowMinWidth(occupied.Count);
     }
 
-    // Occupancy changed: equal star-width columns with a draggable
-    // GridSplitter between panes (Mac auto-sizes; the splitter is the
-    // Windows adjustment affordance). Columns carry a minimum so a drag
-    // can never squeeze a pane shut; user widths survive refreshes until
-    // the next occupancy change resets to equal shares.
+    // Occupancy changed: equal star-width columns with a hand-rolled
+    // Border divider between panes (Mac auto-sizes; the divider is the
+    // Windows adjustment affordance — GridSplitter would need the
+    // Community Toolkit). Columns carry a minimum so a drag can never
+    // squeeze a pane shut; user widths survive refreshes until the next
+    // occupancy change resets to equal shares.
     private void RebuildPaneColumns(List<int> occupied)
     {
         PaneHost.Children.Clear();
@@ -429,16 +430,61 @@ public sealed partial class MainWindow : Window
                     Width = new GridLength(4),
                     MinWidth = 4,
                 });
-                var splitter = new GridSplitter
+                // Hand-rolled divider: GridSplitter lives in the Community
+                // Toolkit (a new third-party dependency), so a thin Border
+                // with pointer capture adjusts the two neighbour columns,
+                // like the sidebar splitter. The first drag freezes both to
+                // pixels; MinWidth keeps a pane from squeezing shut. Column
+                // indices are resolved at drag time: the right neighbour
+                // does not exist yet while this divider is built.
+                var leftIndex = column - 1;
+                var rightIndex = column + 1;
+                var divider = new Border
                 {
-                    ResizeDirection = GridSplitterResizeDirection.Columns,
-                    ResizeBehavior = GridSplitterResizeBehavior.PreviousAndNext,
+                    Width = 4,
                     HorizontalAlignment = HorizontalAlignment.Stretch,
                     VerticalAlignment = VerticalAlignment.Stretch,
-                    Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                    Background = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"],
                 };
-                Grid.SetColumn(splitter, column);
-                PaneHost.Children.Add(splitter);
+                var dragging = false;
+                var startX = 0.0;
+                var startLeft = 0.0;
+                var startRight = 0.0;
+                divider.PointerPressed += (_, e) =>
+                {
+                    var cols = PaneHost.ColumnDefinitions;
+                    if (leftIndex < 0 || rightIndex >= cols.Count) return;
+                    dragging = true;
+                    startX = e.GetCurrentPoint(PaneHost).Position.X;
+                    startLeft = Math.Max(cols[leftIndex].ActualWidth, 280);
+                    startRight = Math.Max(cols[rightIndex].ActualWidth, 280);
+                    cols[leftIndex].Width = new GridLength(startLeft, GridUnitType.Pixel);
+                    cols[rightIndex].Width = new GridLength(startRight, GridUnitType.Pixel);
+                    divider.CapturePointer(e.Pointer);
+                    e.Handled = true;
+                };
+                divider.PointerMoved += (_, e) =>
+                {
+                    if (!dragging) return;
+                    var cols = PaneHost.ColumnDefinitions;
+                    if (leftIndex < 0 || rightIndex >= cols.Count) return;
+                    var total = startLeft + startRight;
+                    var nextLeft = Math.Clamp(
+                        startLeft + e.GetCurrentPoint(PaneHost).Position.X - startX,
+                        280, total - 280);
+                    cols[leftIndex].Width = new GridLength(nextLeft, GridUnitType.Pixel);
+                    cols[rightIndex].Width = new GridLength(total - nextLeft, GridUnitType.Pixel);
+                    e.Handled = true;
+                };
+                void EndDrag(Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+                {
+                    dragging = false;
+                    try { divider.ReleasePointerCapture(e.Pointer); } catch { /* already released */ }
+                }
+                divider.PointerReleased += (_, e) => EndDrag(e);
+                divider.PointerCaptureLost += (_, e) => EndDrag(e);
+                Grid.SetColumn(divider, column);
+                PaneHost.Children.Add(divider);
                 column++;
             }
         }
@@ -466,8 +512,8 @@ public sealed partial class MainWindow : Window
         try
         {
             var size = AppWindow.Size;
-            if (size.X < _minWindowWidthPx)
-                AppWindow.Resize(new Windows.Graphics.SizeInt32(_minWindowWidthPx, size.Y));
+            if (size.Width < _minWindowWidthPx)
+                AppWindow.Resize(new Windows.Graphics.SizeInt32(_minWindowWidthPx, size.Height));
         }
         catch { /* window not ready yet; the Changed hook retries */ }
     }
