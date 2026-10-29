@@ -1,0 +1,82 @@
+import SwiftUI
+
+// Agent execution and credentials stay on the selected desktop home. Controls
+// use the same durable participant protocol as Mac, without taking a pane lease.
+struct PadAgentPanel: View {
+    let home: String
+    let target: String?
+    @ObservedObject private var service = DeviceSyncService.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = "New Agent"
+    @State private var settings: DeviceAgentSettings?
+    @State private var working = false
+    @State private var notice = ""
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section { Text("Runs on \(service.homes[home]?.deviceName ?? "its home computer") while Converse is open there. API keys stay on that computer.").font(.caption) }
+                if target == nil {
+                    TextField("Agent name", text: $title)
+                    Button("Create Agent") { perform("agent.create") }.disabled(working || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } else if settings != nil {
+                    TextField("Model", text: field(\.model))
+                    TextField("GitHub repository · optional", text: field(\.repository))
+                    Section("Objective and success criteria") { TextEditor(text: field(\.objective)).frame(minHeight: 110) }
+                    Section("Loop") {
+                        Toggle("Enable automatic loop", isOn: field(\.enabled))
+                        TextField("Interval in seconds", value: field(\.intervalSeconds), format: .number).keyboardType(.decimalPad)
+                        TextField("Text schedule · optional", text: Binding(get: { settings?.scheduleText ?? "" }, set: { settings?.scheduleText = $0 }), axis: .vertical)
+                        TextField("Time zone", text: Binding(get: { settings?.scheduleTimeZone ?? TimeZone.current.identifier }, set: { settings?.scheduleTimeZone = $0 }))
+                        if let settings {
+                            if let rule = try? AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) {
+                                Text(rule.description).font(.caption)
+                                Text("Next: " + rule.preview(after: Date()).map { $0.formatted(date: .abbreviated, time: .shortened) }.joined(separator: " · ")).font(.caption)
+                            } else { Text("Review the schedule. Unsupported conditions cannot be saved.").foregroundStyle(.red) }
+                        }
+                        Stepper("Automatic runs remaining: \(settings?.remainingRuns ?? 0)", value: field(\.remainingRuns), in: 0...1000)
+                        Stepper("Scoreboard every \(settings?.scoreboardEveryLoops ?? 1) loops", value: Binding(get: { settings?.scoreboardEveryLoops ?? 1 }, set: { settings?.scoreboardEveryLoops = $0 }), in: 1...1000)
+                        Toggle("Generate mood art", isOn: field(\.generateArt))
+                        Toggle("Speak on home", isOn: field(\.speak))
+                        Toggle("Allow Discord alerts", isOn: field(\.discord))
+                    }
+                    Section("Sessions this agent may read and message") {
+                        ForEach(service.participantHomes, id: \.deviceID) { host in
+                            Text(host.deviceName).font(.caption)
+                            ForEach(host.rows.filter { $0.globalID != target }) { row in
+                                Toggle(row.title, isOn: Binding(get: { settings?.watched.contains(row.globalID) == true }, set: { selected in
+                                    settings?.watched.removeAll { $0 == row.globalID }
+                                    if selected { settings?.watched.append(row.globalID) }
+                                }))
+                            }
+                        }
+                    }
+                    Button("Save settings") { perform("agent.configure") }.disabled(working)
+                    Button("Run once on home") { perform("agent.run") }.disabled(working)
+                    Button("Open scoreboard on home") { perform("agent.widget") }.disabled(working)
+                    Button("Reload settings") { perform("agent.settings") }.disabled(working)
+                } else if !working { Button("Load Agent Setup") { perform("agent.settings") } }
+                if working { ProgressView("Waiting for home…") }
+                if !notice.isEmpty { Text(notice).textSelection(.enabled) }
+            }.navigationTitle(target == nil ? "Create Agent" : "Agent Setup")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .task { if target != nil { perform("agent.settings") } }
+        }
+    }
+    func field<T>(_ path: WritableKeyPath<DeviceAgentSettings, T>) -> Binding<T> {
+        Binding(get: { settings![keyPath: path] }, set: { settings?[keyPath: path] = $0 })
+    }
+    func perform(_ action: String) {
+        guard !working else { return }
+        if action == "agent.configure", let settings {
+            do { _ = try AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) }
+            catch { notice = error.localizedDescription; return }
+        }
+        working = true
+        Task { @MainActor in
+            let response = await service.requestParticipant(home: home, action: action, target: target, title: title, settings: action == "agent.configure" ? settings : nil)
+            if let saved = response.settings { settings = saved }
+            notice = response.detail; working = false
+            if action == "agent.configure", response.outcome == "completed" { perform("agent.settings") }
+        }
+    }
+}

@@ -258,7 +258,7 @@ internal sealed class Peer
     public readonly SemaphoreSlim SendLock = new(1, 1);
 }
 
-public sealed class DeviceSyncService : IDisposable
+public sealed partial class DeviceSyncService : IDisposable
 {
     public const int DefaultPort = 48721;
     public string DeviceId { get; }
@@ -285,6 +285,7 @@ public sealed class DeviceSyncService : IDisposable
 
     private readonly byte[] _staticPrivate;
     private readonly SessionStore _store;
+    public AgentRuntime Agents { get; private set; } = null!;
     private readonly string _folder;
     private readonly DeviceCommandStore _commands;
     private readonly DeviceOutboxStore _outbox;
@@ -325,6 +326,10 @@ public sealed class DeviceSyncService : IDisposable
         RefreshGroupMembers();
         _store.Changed += PublishSidebars;
         _store.TranscriptAdvanced += PushTranscriptToHolder;
+        LoadParticipants();
+        _store.FinalParticipantReply = (session, reply) => { _ = ProcessParticipantReplyAsync(session, reply); };
+        _store.AcceptGroupPrompt = p => IsParticipantAllowed(p.OriginHomeID ?? "", p.OriginGroupID);
+        Agents = new AgentRuntime(_store, this);
     }
 
     // Turn progress/completion fan-out: the holder's viewer gets a fresh
@@ -452,6 +457,7 @@ public sealed class DeviceSyncService : IDisposable
 
     public void Dispose()
     {
+        Agents.Shutdown();
         _shutdown?.Cancel();
         try { _store.TranscriptAdvanced -= PushTranscriptToHolder; } catch { /* store outlives us */ }
         _mdns?.Dispose();
@@ -518,7 +524,8 @@ public sealed class DeviceSyncService : IDisposable
 
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
-        DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.1-windows-dev",
+        DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
+        Capabilities = new[] { "sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -835,16 +842,17 @@ public sealed class DeviceSyncService : IDisposable
     private void Disconnect(Peer peer)
     {
         peer.Client.Dispose();
-        _peers.Remove(peer.Id);
+        if (!_peers.Remove(peer.Id)) return; // Disconnect callbacks may arrive twice.
         GroupPairingPrompts.RemoveAll(p => p.PeerId == peer.Id);
         WithdrawGroupRequest(peer.Id);
-        if (peer.Hello is { } hello)
+        if (peer.Hello is { } hello && !_peers.Values.Any(p => p.TrustedReady && p.Hello?.DeviceID == hello.DeviceID))
         {
             if (Homes.TryGetValue(hello.DeviceID, out var home))
             {
                 home.Online = false;
                 foreach (var row in home.Rows)
                 {
+                    _pendingTakes.Remove(row.GlobalID);
                     RemoteLeases.Remove(row.GlobalID);
                     RemoteOffline.Add(row.GlobalID);
                     _outbox.MarkUncertain(row.GlobalID);
@@ -1331,6 +1339,7 @@ public sealed class DeviceSyncService : IDisposable
             LeaseHolder = _leases.Holder(session.Id)?.Device,
             LeaseEpoch = _leases.Holder(session.Id)?.Epoch,
             AccountName = session.Entry.AccountName,
+            MessagingEnabled = session.MessagingEnabled, ParticipantKind = session.Agent is null ? null : "agent", Attention = session.Agent?.Attention,
         }).ToList(),
     };
 
@@ -1341,10 +1350,17 @@ public sealed class DeviceSyncService : IDisposable
         { Kind = DeviceKind.SidebarSnapshot, HomeSeq = ++_homeSeq, Payload = DeviceJson.Encode(SidebarPayload()) });
     }
 
+    private readonly Dictionary<Guid, string> _publishedAgents = new();
     private void PublishSidebars()
     {
         if (CurrentGroup is null || LocallyRemoved) return;
         foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly)) _ = SendSidebarAsync(peer);
+        foreach (var session in _store.Sessions.Where(s => s.Agent is not null))
+        {
+            var signature = System.Text.Json.JsonSerializer.Serialize(session.Agent);
+            if (_publishedAgents.GetValueOrDefault(session.Id) == signature) continue;
+            _publishedAgents[session.Id] = signature; PushTranscriptToHolder(session);
+        }
     }
 
     private string ImageHash(string path)
@@ -1404,6 +1420,7 @@ public sealed class DeviceSyncService : IDisposable
             AccessOptions = ChoicesCatalog.AccessFor(session.Entry.Engine)
                 .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
             QueuePaused = session.QueuePaused,
+            AgentWidget = AgentWidgetFor(session),
         };
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         { Kind = DeviceKind.TranscriptSnapshot, HomeSeq = payload.HomeSeq, Boot = _boot, SessionID = payload.GlobalID, Epoch = holder.Value.Epoch, Payload = DeviceJson.Encode(payload) });
@@ -1492,6 +1509,8 @@ public sealed class DeviceSyncService : IDisposable
         string? failure = null;
         switch (command.Action)
         {
+                case "teachSwitchboard": TeachSwitchboard(session); break;
+
             case "submit":
                 var savedDraft = session.Draft;
                 var savedAttachments = new List<string>(session.Attachments);
@@ -1559,6 +1578,7 @@ public sealed class DeviceSyncService : IDisposable
         // Session traffic never crosses a group boundary: after Create or a
         // group change, queued sends from stale peers drop here silently.
         if (SessionKinds.Contains(envelope.Kind) && !IsGroupMember(peerHome)) return;
+        if (await HandleParticipantAsync(peer, envelope)) return;
         switch (envelope.Kind)
         {
             case DeviceKind.FabricMembers:

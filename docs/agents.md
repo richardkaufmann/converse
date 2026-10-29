@@ -157,3 +157,8 @@ Loop settings accept either a numeric interval (minutes in the UI, seconds on th
 Calendar windows anchor intervals at their opening time. The NYSE regular-session calendar uses New York time, holidays and early closes from the [official calendar](https://www.nyse.com/trade/hours-calendars), verified October 29, 2026 and bounded through 2028. It does not detect emergency closures or individual trading halts. An exhausted calendar pauses the loop visibly. Daily schedules skip nonexistent DST times and use the first occurrence of repeated times.
 
 There are no overlapping runs or catch-up bursts. Relaunch schedules a future check. Queued loop checks revalidate their window before starting; a skipped already-reserved check retains its turn charge conservatively. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.
+
+
+## Cross-platform release boundary (0.5.22)
+
+Mac and Windows host agents; iPad controls them on a desktop home. All three display attention, loop status, transcript images and scoreboards. Windows uses Windows Credential Manager for its Meta key and the same bounded direct Responses/Image APIs, with synthetic API and live loopback coverage. Voice, Discord and file triggers remain Mac-home features for this release; Windows explicitly rejects enabling unsupported options. Jolly continues to use the existing Mac bridge. No iPad background execution is promised.

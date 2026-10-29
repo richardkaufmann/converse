@@ -267,6 +267,12 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await UntilTakeover(() => holderSeenByUI == a.DeviceId),
             "Lease grant refreshes the home UI so it can park the local pane immediately");
         var firstEpoch = a.RemoteLeases.GetValueOrDefault(gid);
+        // A redundant dial loses arbitration; its close callback must not
+        // invalidate the existing trusted connection or its display lease.
+        await a.ConnectManualAsync("127.0.0.1", home.ListeningPort);
+        await Task.Delay(250);
+        Check(a.Homes.GetValueOrDefault(home.DeviceId)?.Online == true && a.RemoteLeases.GetValueOrDefault(gid) == firstEpoch && a.RemoteTranscripts.ContainsKey(gid),
+            "Discarded duplicate connection preserves the live viewer lease and online state");
         await a.AcquireRemoteAsync(gid);
         Check(a.RemoteLeases.GetValueOrDefault(gid) == firstEpoch && a.RemoteTranscripts.ContainsKey(gid),
             "Repeated Take on the current viewer keeps its live transcript and lease");
@@ -1996,6 +2002,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
     finally { Cleanup(dir); }
 }
+
+await AgentChecks.Run(Check, JoinPair);
 
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 foreach (var label in failedLabels) Console.WriteLine("FAILED: " + label);

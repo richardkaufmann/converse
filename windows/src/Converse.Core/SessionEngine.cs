@@ -57,6 +57,13 @@ public sealed class ChatMessage
 
 public sealed class PendingPrompt
 {
+    public bool Autonomous { get; set; }
+    public bool AgentLoopTick { get; set; }
+    public bool AgentRunReserved { get; set; }
+    public string? OriginGroupID { get; set; }
+    public string? OriginHomeID { get; set; }
+    public int Hop { get; set; }
+
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Text { get; set; } = "";
     public List<string> Images { get; set; } = new();
@@ -64,6 +71,11 @@ public sealed class PendingPrompt
 
 public sealed class ChatSession
 {
+    public AgentConfig? Agent { get; set; }
+    public bool MessagingEnabled { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public bool ActiveAgentLoopTick { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public int ActiveHop { get; set; }
+
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Title { get; set; } = "New session";
     public AgentEntry Entry { get; set; } = new();
@@ -216,6 +228,12 @@ public sealed class SessionStore
     public List<ChatSession> Sessions { get; private set; } = new();
     public List<AgentEntry> Entries { get; private set; } = new();
     public event Action? Changed;
+    public List<ParticipantReceipt> ParticipantReceipts { get; private set; } = new();
+    public Func<ChatSession, string, IReadOnlyList<string>, Task>? AgentRun { get; set; }
+    public Func<PendingPrompt, bool>? AcceptGroupPrompt { get; set; }
+    public Action<ChatSession, string>? FinalParticipantReply { get; set; }
+    internal void NotifyTranscript(ChatSession session) => TranscriptAdvanced?.Invoke(session);
+
     // Fires when the transcript holds new turn content: throttled stream
     // progress and turn completion. DeviceService pushes a snapshot to the
     // lease holder here; without it remote viewers keep the turn-start
@@ -224,6 +242,7 @@ public sealed class SessionStore
     private readonly IAgentRunner _runner;
     private sealed class Archive
     {
+        public List<ParticipantReceipt> ParticipantReceipts { get; set; } = new();
         public List<AgentEntry> Entries { get; set; } = new();
         public List<ChatSession> Sessions { get; set; } = new();
     }
@@ -237,7 +256,7 @@ public sealed class SessionStore
         if (File.Exists(file))
         {
             var archive = JsonSerializer.Deserialize<Archive>(File.ReadAllBytes(file));
-            if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; }
+            if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; ParticipantReceipts = archive.ParticipantReceipts; }
         }
         if (Entries.Count == 0) Entries = DefaultEntries();
         // One-time repair: early builds named the claude entry "Muse" or
@@ -274,6 +293,14 @@ public sealed class SessionStore
         return session;
     }
 
+    public ChatSession CreateAgent(string title, bool persist = true)
+    {
+        if (string.IsNullOrWhiteSpace(title) || System.Text.Encoding.UTF8.GetByteCount(title) > 200) throw new ArgumentException("Choose a name of 1–200 bytes.");
+        var session = new ChatSession { Title = title.Trim(), Agent = new(), MessagingEnabled = true, Entry = new AgentEntry { Name = "Agent", Engine = "agent" } };
+        session.Messages.Add(new ChatMessage { Role = "assistant", Text = "Open Agent Setup to add a Meta API key on this computer and select the sessions I may read. Automatic loops start paused." });
+        Sessions.Add(session); if (persist) Save(); return session;
+    }
+
     public void DeleteSession(ChatSession session)
     {
         Stop(session);
@@ -306,7 +333,7 @@ public sealed class SessionStore
 
     public void Save()
     {
-        AtomicJson.Write(Path.Combine(Folder, "sessions.json"), new Archive { Entries = Entries, Sessions = Sessions });
+        AtomicJson.Write(Path.Combine(Folder, "sessions.json"), new Archive { Entries = Entries, Sessions = Sessions, ParticipantReceipts = ParticipantReceipts });
         Changed?.Invoke();
     }
 
@@ -352,6 +379,7 @@ public sealed class SessionStore
             Save();
             return;
         }
+        session.ActiveAgentLoopTick = false; session.ActiveHop = 0;
         AppendUserMessage(session, text, images);
         _ = RunTurnAsync(session, text, images);
     }
@@ -359,10 +387,31 @@ public sealed class SessionStore
     public void RunNext(ChatSession session)
     {
         if (session.Busy || session.QueuePaused || session.Pending.Count == 0) return;
+        while (session.Pending.FirstOrDefault() is { } candidate &&
+            (candidate.OriginGroupID is not null && AcceptGroupPrompt?.Invoke(candidate) != true ||
+             candidate.AgentLoopTick && !LoopPermitted(session)))
+        { session.Pending.RemoveAt(0); Save(); }
+        if (session.Pending.Count == 0) return;
         var next = session.Pending[0];
+        if (session.Agent is { } config && next.Autonomous && !next.AgentRunReserved)
+        {
+            if (config.Settings.RemainingRuns <= 0) { session.QueuePaused = true; config.Attention = "Automatic run budget exhausted."; Save(); return; }
+            var old = config.Settings.RemainingRuns; var enabled = config.Settings.Enabled; var revision = config.Settings.Revision;
+            config.Settings.RemainingRuns--; config.Settings.Revision = checked((revision ?? 0) + 1);
+            if (config.Settings.RemainingRuns == 0) config.Settings.Enabled = false;
+            next.AgentRunReserved = true;
+            try { Save(); }
+            catch { config.Settings.RemainingRuns = old; config.Settings.Enabled = enabled; config.Settings.Revision = revision; next.AgentRunReserved = false; session.QueuePaused = true; config.Attention = "Could not preserve run budget. Agent paused."; return; }
+        }
+        session.ActiveAgentLoopTick = next.AgentLoopTick; session.ActiveHop = next.Hop;
         session.Pending.RemoveAt(0);
         AppendUserMessage(session, next.Text, next.Images);
         _ = RunTurnAsync(session, next.Text, next.Images);
+    }
+
+    private static bool LoopPermitted(ChatSession session)
+    {
+        try { return session.Agent is { } c && AgentSchedule.Compile(c.Settings).Permits(DateTime.UtcNow); } catch { return false; }
     }
 
     // Mac injectPending parity: a named prompt moves to the front; with no
@@ -468,6 +517,8 @@ public sealed class SessionStore
         if (!string.IsNullOrEmpty(notice)) session.Messages.Add(new ChatMessage { Role = "notice", Text = notice });
         // Mac finishQueue parity: an interrupted turn runs the queue only
         // when an inject asked for the resume; anything else held pauses.
+        if (status == "Ready" && !session.Interrupted)
+            FinalParticipantReply?.Invoke(session, string.Join("\n", session.Messages.Where(m => session.MuseItems.Values.Contains(m.Id)).Select(m => m.FinalReply ?? m.Text)));
         var shouldRun = status == "Ready" || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -592,6 +643,12 @@ public sealed class SessionStore
 
     private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
     {
+        if (session.Agent is not null)
+        {
+            if (AgentRun is not null) await AgentRun(session, prompt, images);
+            else { session.Agent.Attention = "Agent runtime unavailable."; Save(); }
+            return;
+        }
         if (session.Entry.Engine == "muse") { await RunMuseTurnAsync(session, prompt, images); return; }
         session.Busy = true;
         session.Interrupted = false;
@@ -646,6 +703,8 @@ public sealed class SessionStore
         if (success && !string.IsNullOrEmpty(response.Text))
             await ResponseImages.ImportAsync(Folder, session, response);
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
+        if (success && !session.Interrupted && response.FinalReply is { } authoritative)
+            FinalParticipantReply?.Invoke(session, authoritative);
         var shouldRun = success || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -725,6 +784,7 @@ public sealed class SessionStore
                 if (obj.TryGetProperty("is_error", out var isError) && isError.ValueKind == JsonValueKind.True) session.TurnFailed = true;
                 if (GetString(obj, "result") is { } result)
                 {
+                    response.FinalReply = result;
                     // Some CLI final snapshots join text blocks directly.
                     // Keep only our display separators when the content is
                     // otherwise byte-for-byte the same; genuine corrections

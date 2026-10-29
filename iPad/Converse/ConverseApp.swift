@@ -17,9 +17,12 @@ struct ConversePadApp: App {
     }
 }
 
+struct PadAgentTarget: Identifiable { var id = UUID(); var home: String; var target: String? }
+
 struct PadRoot: View {
     @ObservedObject var model: PadModel
     @ObservedObject private var service = DeviceSyncService.shared
+    @State private var agentTarget: PadAgentTarget?
     @State private var dragWidth: Double?
     var body: some View {
         GeometryReader { geometry in
@@ -83,6 +86,7 @@ struct PadRoot: View {
         }
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
+        .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
     }
     var pin: some View {
@@ -99,26 +103,35 @@ struct PadRoot: View {
                 LazyVStack(alignment: .leading, spacing: 3) {
                     if let group = service.currentGroup { Text("Group").bold().padding(.top, 6); Text(group.name).font(.caption).foregroundStyle(.secondary) }
                     ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
-                        HStack { Circle().fill(home.online ? .green : .gray).frame(width: 8, height: 8); Text(home.deviceName).bold().lineLimit(1); Text(home.online ? "home" : "offline").font(.caption).foregroundStyle(.secondary) }.padding(.top, 10)
+                        if home.online {
+                        HStack { Circle().fill(.green).frame(width: 8, height: 8); Text(home.deviceName).bold().lineLimit(1); Text("remote").font(.caption).foregroundStyle(.secondary)
+                            if service.canHostAgent(home.deviceID) { Button { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("Create agent on " + home.deviceName) }
+                        }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
                         ForEach(home.rows) { row in
                             let pane = model.state.placements.firstIndex(of: row.globalID)
-                            let attention = row.status.hasPrefix("Waiting") && pane == nil
+                            let attention = !(row.attention ?? "").isEmpty || (row.status.hasPrefix("Waiting") && pane == nil)
                             HStack(spacing: 3) {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
                                 Text(row.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                                placementButton("P", selected: pane == nil) { model.park(row.globalID) }
-                                ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) }.disabled(!home.online) }
+                                HStack(spacing: 3) {
+                                    placementButton("P", selected: pane == nil) { model.park(row.globalID) }
+                                    ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
+                                    placementButton("X", selected: false) {}.disabled(true).opacity(0.3).accessibilityLabel("Close on home device")
+                                }.frame(width: 132).fixedSize(horizontal: true, vertical: false).disabled(!home.online)
                             }.font(.system(size: 13)).padding(.vertical, 4).padding(.horizontal, 3)
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
                                 .contextMenu {
-                                    Text(row.title); Text("Home: " + home.deviceName); Text("Account: " + (row.accountName ?? "Not reported")); Text("Model: " + row.model); Text(row.status)
+                                    Text(row.title); Text("Remote device: " + home.deviceName); Text("Account: " + (row.accountName ?? "Not reported")); Text("Model: " + row.model); Text(row.status)
                                     Button("Teach Session To Talk To Other Sessions") { service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }.disabled(!service.canTeachRemote(row.globalID))
+                                    if row.participantKind == "agent" { Button("Agent Setup / Loop") { agentTarget = PadAgentTarget(home: home.deviceID, target: row.globalID) } }
+                                    if let warning = row.attention, !warning.isEmpty { Text(warning) }
                                     Button("Park") { model.park(row.globalID) }
                                 }
                                 .accessibilityElement(children: .contain)
                         }
+                        } else { Text(home.deviceName).fontWeight(.regular).foregroundStyle(Color.primary.opacity(0.3)).padding(.top, 10) }
                     }
                     if service.homes.isEmpty { Text("Join a Converse group to see its devices and sessions.").font(.callout).foregroundStyle(.secondary).padding(10) }
                 }.padding(.horizontal, 5)
@@ -139,6 +152,7 @@ struct PadPane: View {
     @ObservedObject private var service = DeviceSyncService.shared
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
+    @State private var agentSetup = false
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
     var body: some View {
         VStack(spacing: 0) {
@@ -146,6 +160,10 @@ struct PadPane: View {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 Text(snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session").font(.title3).lineLimit(1)
                 Spacer()
+                if service.remoteRow(globalID: id)?.participantKind == "agent" {
+                    Button("Agent Setup / Loop") { agentSetup = true }
+                        .sheet(isPresented: $agentSetup) { if let global = DeviceGlobalID(id) { PadAgentPanel(home: global.home, target: id) } }
+                }
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
             Divider()
@@ -199,6 +217,7 @@ struct PadPane: View {
             PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers,
                           edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) })
             Divider()
+            if let status = snapshot?.agentWidget?.loopStatus { Text(status).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6) }
             if let snapshot {
                 ViewThatFits(in: .horizontal) {
                     HStack { settings(snapshot); Spacer(); Text(snapshot.status).font(.caption).foregroundStyle(.secondary) }

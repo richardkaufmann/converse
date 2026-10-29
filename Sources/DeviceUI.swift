@@ -137,7 +137,9 @@ struct RemoteSidebarRow: View {
                     PaneButton(label: String(pane), selected: localPane == pane) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here")
                 }
-            }.fixedSize(horizontal: true, vertical: false).disabled(!online)
+                PaneButton(label: "X", selected: false) {}.disabled(true).opacity(0.3)
+                    .help("Close this session on its home device")
+            }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
@@ -200,6 +202,7 @@ struct RemotePane: View {
                         Text(widget.summary).font(.caption).textSelection(.enabled)
                     }
                 }.padding(8)
+                if let status = widget.loopStatus { Text(status).font(.caption).padding(6) }
                 if !widget.attention.isEmpty { ApprovalHeading(detail: widget.attention, title: "ATTENTION REQUIRED") }
             }
             if offline {

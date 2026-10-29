@@ -332,8 +332,9 @@ final class DeviceSyncService: ObservableObject {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
-        hello.capabilities.append(contentsOf: ["agent-host-v1", "participant-control-v1", "agent-schedule-v1"])
+        hello.capabilities.append("agent-host-v1")
         #endif
+        hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
@@ -746,7 +747,7 @@ extension DeviceSyncService {
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
-                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: (config.snapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.snapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }) })
+                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: config.scoreboard?.metrics.map { DeviceWidgetMetric(label: $0.label, value: $0.value) } ?? (config.repositorySnapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.scoreboard?.observedAt ?? config.repositorySnapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
         }

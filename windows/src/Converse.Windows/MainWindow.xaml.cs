@@ -13,7 +13,12 @@ namespace Converse.App;
 // sessions beneath their home, nothing else. Nearby undiscovered devices
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
-public sealed record SidebarHeader(string Key, string Title, string Status) : SidebarItem(Key);
+public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false) : SidebarItem(Key)
+{
+    public double Opacity => Offline ? 0.3 : 1;
+    public bool HasStatus => Status.Length > 0;
+    public Windows.UI.Text.FontWeight Weight => Offline ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.SemiBold;
+}
 public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
@@ -115,19 +120,20 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        var folder = Path.Combine(
+        var folder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR") ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
         _dataFolder = folder;
         _layout = SidebarLayoutState.Load(folder);
         _placements = PanePlacements.Load(folder);
         _store = new SessionStore(folder);
         _devices = new DeviceSyncService(folder, _store);
+        InitializeAgents();
         // No modal pairing prompt: joins surface as codes in the Groups
         // dialog, where both sides compare all eight groups. (The
         // PairingConfirmation callback stays for headless tests only.)
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
-        _ = _devices.StartAsync();
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync();
         _help = LoadHelp();
         Title = "Converse" + (_help is null ? " (dev)" : " " + _help.AppVersion
             + (_help.AppBuild.Length > 0 ? " (" + _help.AppBuild + ")" : ""));
@@ -536,8 +542,8 @@ public sealed partial class MainWindow : Window
                 _devices.Trust.Devices.Count(d => d.GroupID == current.Id) + " member(s)"));
         items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
         foreach (var session in _store.Sessions)
-            items.Add(new SidebarSession("local:" + session.Id, (session.Busy ? "● " : "") + session.Title,
-                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true,
+            items.Add(new SidebarSession("local:" + session.Id, (!string.IsNullOrEmpty(session.Agent?.Attention) ? "⚠ " : session.Busy ? "● " : "") + session.Title,
+                session.Agent?.LoopStatus ?? session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true,
                 PActive: _placements.PaneOf("local:" + session.Id) is null,
                 In1: _placements.KeyIn(1) == "local:" + session.Id,
                 In2: _placements.KeyIn(2) == "local:" + session.Id,
@@ -545,12 +551,13 @@ public sealed partial class MainWindow : Window
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
-                home.Online ? home.Rows.Count + " session(s)" : "Offline"));
+                home.Online ? "remote" : "", Offline: !home.Online));
+            if (!home.Online) continue;
             if (home.Rows.Count == 0)
                 items.Add(new SidebarSession("home:" + home.DeviceID + ":empty",
                     home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
-                items.Add(new SidebarSession("remote:" + row.GlobalID, (row.Busy ? "● " : "") + row.Title,
+                items.Add(new SidebarSession("remote:" + row.GlobalID, (!string.IsNullOrEmpty(row.Attention) ? "⚠ " : row.Busy ? "● " : "") + row.Title,
                     (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true, ShowGreyClose: true,
                     PActive: _placements.PaneOf("remote:" + row.GlobalID) is null,
                     In1: _placements.KeyIn(1) == "remote:" + row.GlobalID,

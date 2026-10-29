@@ -168,6 +168,7 @@ struct DeviceAgentWidget: Codable {
     var observedAt: Date?
     var attention: String
     var artHash: String?
+    var loopStatus: String? = nil
 }
 struct DeviceTranscriptPayload: Codable {
     var globalID: String

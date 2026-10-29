@@ -331,7 +331,7 @@ public sealed partial class ConversationPane : UserControl
             busy = session?.Busy == true;
             if (session is not null)
             {
-                parts.Add(session.Entry.Name + " · " + session.Status);
+                parts.Add(session.Agent?.LoopStatus ?? session.Entry.Name + " · " + session.Status);
                 if (session.Pending.Count > 0)
                     parts.Add(session.Pending.Count + " queued" + (session.QueuePaused ? " (paused)" : ""));
             }
@@ -342,7 +342,7 @@ public sealed partial class ConversationPane : UserControl
             busy = transcript?.Busy == true;
             if (transcript is not null)
             {
-                parts.Add(transcript.Status);
+                parts.Add(transcript.AgentWidget?.LoopStatus ?? transcript.Status);
                 if (!string.IsNullOrEmpty(transcript.AccountName)) parts.Add(transcript.AccountName);
                 if (transcript.Pending.Count > 0)
                     parts.Add(transcript.Pending.Count + " queued" + (transcript.QueuePaused ? " (paused)" : ""));
@@ -1188,12 +1188,32 @@ public sealed partial class ConversationPane : UserControl
         var outbox = gid is null ? null : _host.Devices.Unresolved(gid).FirstOrDefault();
         if (outbox is not null) signature.Append($"|out:{outbox.CommandID}:{outbox.Outcome}:{outbox.Detail}");
         signature.Append("|lease:").Append(gid is null || _host.Devices.RemoteLeases.ContainsKey(gid));
+        var widget = local?.Agent?.Widget ?? (gid is null ? null : _host.Devices.RemoteTranscripts.GetValueOrDefault(gid)?.AgentWidget);
+        var isAgent = local?.Agent is not null || widget is not null;
+        signature.Append("|agent:").Append(isAgent).Append(System.Text.Json.JsonSerializer.Serialize(widget)).Append(local?.Agent?.Attention);
         var text = signature.ToString();
         if (text == _bannerSignature) return;
         _bannerSignature = text;
         foreach (var stale in _host.AnswerStates.Keys.Where(k => !liveKeys.Contains(k)).ToList())
             _host.AnswerStates.Remove(stale);
         BannerStack.Children.Clear();
+        if (isAgent && _selected is { } selected)
+        {
+            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            var setup = new Button { Content = "Agent Setup / Loop" }; setup.Click += async (_, _) => await _host.OpenAgentSetup(selected); controls.Children.Add(setup);
+            var run = new Button { Content = "Run once" }; run.Click += async (_, _) => { run.IsEnabled = false; try { await _host.RunAgentOnce(selected); } finally { run.IsEnabled = true; } }; controls.Children.Add(run);
+            if (local is not null) { var show = new Button { Content = "Scoreboard" }; show.Click += (_, _) => _host.ShowAgentScoreboard(local); controls.Children.Add(show); }
+            BannerStack.Children.Add(controls);
+            var attention = local?.Agent?.Attention ?? widget?.Attention ?? "";
+            if (attention.Length > 0) BannerStack.Children.Add(new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Gold), Child = new TextBlock { Text = "⚠ " + attention, Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black), TextWrapping = TextWrapping.Wrap, Padding = new Thickness(8) } });
+            if (widget is not null)
+            {
+                var board = new StackPanel { Spacing = 6 };
+                board.Children.Add(new TextBlock { Text = string.Join(" · ", widget.Metrics.Select(m => m.Label + ": " + m.Value)), TextWrapping = TextWrapping.Wrap });
+                board.Children.Add(new TextBlock { Text = widget.Summary, TextWrapping = TextWrapping.Wrap });
+                BannerStack.Children.Add(new Expander { Header = "Agent scoreboard", Content = board, HorizontalAlignment = HorizontalAlignment.Stretch });
+            }
+        }
         foreach (var request in requests)
             BannerStack.Children.Add(BuildRequestPanel(request, local, gid, scope));
         if (pending.Count > 0 || paused)

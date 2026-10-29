@@ -113,3 +113,14 @@ skeleton in `src/Converse.Windows` is authored for first compile on the PC.
   `window-layout.json` holds only sidebar pin/width intent.
 - Device private key: DPAPI-protected blob in the same folder (app layer);
   test/core file storage is plain and must never ship as the app default.
+
+
+## Agents (0.5.22)
+
+Windows can create and host paused agents, store its Meta API key in Windows Credential Manager, run bounded loops, search the web, generate sentiment art, and show scoreboards. Agent Setup accepts fixed intervals or supported text schedules and previews upcoming runs. Session scope is explicit and group-bound; remote controls use durable IDs and revision-checked settings without acquiring display leases. Mac and iPad can create/configure/run a Windows-hosted agent; Windows can do the same on a Mac home.
+
+Voice, Discord alerts, and file triggers remain Mac-home features in this release. Windows rejects enabling those unsupported options rather than silently accepting them. Jolly remains routed through the existing Mac bridge. A local or group session must be taught switchboard messaging before accepting messages; the sidebar context menu provides that action. Commands execute only from a complete authoritative final response consisting of one `converse` fenced JSON block.
+
+Offline devices show only a dimmed device name. Every session row reserves the same P/1/2/3/X columns; remote X is disabled. Sidebar collapse/restore uses the native pushpin icon. Quit warnings count agents with enabled loops, not every saved agent.
+
+For isolated UI validation, set `CONVERSE_DATA_DIR` to a disposable directory before launching. This prevents test sessions from touching the normal archive.

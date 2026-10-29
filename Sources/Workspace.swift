@@ -186,7 +186,7 @@ struct SidebarSession: View {
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)")
                 }
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)")
-            }.fixedSize(horizontal: true, vertical: false)
+            }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .foregroundStyle(workspace.showsParkedApproval(session) ? Color.black : Color.primary)

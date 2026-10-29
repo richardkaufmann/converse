@@ -16,10 +16,10 @@
         <local:ActiveToBackgroundConverter x:Key="ActiveBg"/>
         <local:ActiveToForegroundConverter x:Key="ActiveFg"/>
         <DataTemplate x:Key="SidebarHeaderTemplate">
-            <StackPanel Padding="8,7,8,2">
-                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="12"
+            <StackPanel Padding="8,7,8,2" Opacity="{Binding Opacity}">
+                <TextBlock Text="{Binding Title}" FontWeight="{Binding Weight}" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                <TextBlock Text="{Binding Status}" FontSize="11"
+                <TextBlock Text="{Binding Status}" FontSize="11" Visibility="{Binding HasStatus, Converter={StaticResource BoolToVis}}"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
             </StackPanel>
         </DataTemplate>
@@ -27,6 +27,10 @@
              sessions as they place (Mac parity), so no separate Take. -->
         <DataTemplate x:Key="SidebarSessionTemplate">
             <Grid Padding="18,3,4,3">
+                <Grid.ContextFlyout><MenuFlyout>
+                    <MenuFlyoutItem Text="Agent Setup / Loop" Tag="{Binding}" Click="OnAgentSetupRow"/>
+                    <MenuFlyoutItem Text="Teach Session To Talk To Other Sessions" Tag="{Binding}" Click="OnTeachRow"/>
+                </MenuFlyout></Grid.ContextFlyout>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
@@ -84,6 +88,7 @@
                 <MenuFlyoutItem Text="Connect to Other Converses…" Click="OnConnectClick"/>
                 <MenuFlyoutSeparator/>
                 <MenuFlyoutItem Text="New session" Click="OnNewSessionClick"/>
+                <MenuFlyoutItem Text="New agent…" Click="OnNewAgentClick"/>
             </MenuBarItem>
             <MenuBarItem Title="Help">
                 <MenuFlyoutItem Text="Converse Help" Click="OnHelpClick"/>
@@ -103,8 +108,11 @@
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6" Padding="8,8,8,4" VerticalAlignment="Center">
                     <!-- Pin immediately left of the Conversation header: collapse/restore is layout only. -->
-                    <Button x:Name="CollapsePin" Content="Pin" Click="OnPinClick"
-                            ToolTipService.ToolTip="Collapse sidebar (sessions and leases are unaffected)"/>
+                    <Button x:Name="CollapsePin" Click="OnPinClick" Width="28" Height="28" Padding="4"
+                            Background="Transparent" BorderThickness="0" AutomationProperties.Name="Hide conversation sidebar"
+                            ToolTipService.ToolTip="Hide conversation sidebar">
+                        <SymbolIcon Symbol="Pin"/>
+                    </Button>
                     <TextBlock Text="Conversations" FontWeight="SemiBold" VerticalAlignment="Center"/>
                 </StackPanel>
                 <ListView x:Name="Sidebar" Grid.Row="1" SelectionMode="Single" SelectionChanged="OnSidebarSelection"
@@ -125,9 +133,12 @@
                  sidebar is collapsed. -->
             <Grid Grid.Column="2">
                 <Grid x:Name="PaneHost"/>
-                <Button x:Name="RestorePin" Content="Pin" Click="OnPinClick" Visibility="Collapsed"
+                <Button x:Name="RestorePin" Click="OnPinClick" Visibility="Collapsed" Width="28" Height="28" Padding="4"
                         HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,6"
-                        ToolTipService.ToolTip="Restore sidebar at its previous width"/>
+                        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" BorderThickness="0"
+                        AutomationProperties.Name="Show conversation sidebar" ToolTipService.ToolTip="Restore sidebar at its previous width">
+                    <SymbolIcon Symbol="Pin"/>
+                </Button>
             </Grid>
         </Grid>
     </Grid>

@@ -197,6 +197,10 @@ public sealed class DeviceSidebarRow
     [JsonPropertyName("leaseHolder")] public string? LeaseHolder { get; set; }
     [JsonPropertyName("leaseEpoch")] public ulong? LeaseEpoch { get; set; }
     [JsonPropertyName("accountName")] public string? AccountName { get; set; }
+    [JsonPropertyName("messagingEnabled")] public bool? MessagingEnabled { get; set; }
+    [JsonPropertyName("participantKind")] public string? ParticipantKind { get; set; }
+    [JsonPropertyName("attention")] public string? Attention { get; set; }
+
 }
 
 public sealed class DeviceSidebarPayload
@@ -242,6 +246,8 @@ public sealed class DeviceRequestDto
 
 public sealed class DeviceTranscriptPayload
 {
+    [JsonPropertyName("agentWidget")] public DeviceAgentWidget? AgentWidget { get; set; }
+
     [JsonPropertyName("globalID")] public string GlobalID { get; set; } = "";
     [JsonPropertyName("homeSeq")] public ulong HomeSeq { get; set; }
     [JsonPropertyName("epoch")] public ulong? Epoch { get; set; }

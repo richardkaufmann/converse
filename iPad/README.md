@@ -41,3 +41,8 @@ CONVERSE_APP_OUTPUT="$PWD/.build/PinAndHelp/Converse.app" ./build.sh
 `test.sh --interop` starts an isolated Mac home on an ephemeral TCP port, with disposable data and no CLI execution. It tests the actual Mac and simulator transports, mutual code verification, lease/snapshot, draft patch, bounded PNG storage, queued submit acknowledgment, rename and park/reacquire. Other tests cover offline draft persistence, late completion, conflicts, editor/history protection, pin state, image normalization and Help loading.
 
 Real-device gates remain: BigPad installation, LAN permission denial/recovery, Bonjour discovery across physical devices, background for 60 seconds, rotation during a lease, HEIC Photos import and Mac/Windows-home interoperability. A simulator run is not evidence that these physical-device checks passed.
+
+
+## Agents (0.5.22)
+
+Use + beside a capable remote home to create an agent there. Agent Setup / Loop is available in the agent pane and its sidebar context menu. Settings include objective, optional repository, explicit session scope, fixed or text schedule, run allowance and scoreboard cadence. The editor previews the schedule; home validates it and rejects stale revisions. Creation and control do not change display leases. The agent’s loop status, attention and flexible scoreboard arrive in transcript snapshots, with images fetched by verified content hash. Execution and secrets stay on the desktop home; iPad suspension does not stop the home loop.
