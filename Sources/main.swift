@@ -805,6 +805,13 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "activity", text: text))
         // Tool activity is retained for diagnostics, but does not reset visible-answer timing.
     }
+    static func claudeUnseparated(_ text: String, session: Session) -> String {
+        let unseparated = NSMutableString(string: text)
+        for range in session.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length {
+            unseparated.deleteCharacters(in: range)
+        }
+        return unseparated as String
+    }
     func consume(_ line: String, session s: Session, responseID: UUID) {
         guard !line.isEmpty else { return }
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -844,21 +851,28 @@ final class Store: ObservableObject {
                 }
             }
             if type == "assistant", let message = obj["message"] as? [String: Any], let content = message["content"] as? [[String: Any]] {
+                let accumulated = s.messages.first { $0.id == responseID }?.text ?? ""
                 for block in content {
-                    if let value = block["text"] as? String, !s.streamedText { text = (text ?? "") + value }
+                    // Later text blocks can arrive only in assistant events,
+                    // even after earlier blocks streamed. Deduplicate their
+                    // content, rather than dropping everything after a delta.
+                    if let value = block["text"] as? String, !value.isEmpty,
+                       !(Store.claudeUnseparated(accumulated, session: s) + (text ?? "")).contains(value) {
+                        text = (text ?? "") + value
+                    }
                     if block["type"] as? String == "tool_use" { activity("Using \(block["name"] as? String ?? "tool")", session: s) }
                 }
             } else if type == "result" {
                 if obj["is_error"] as? Bool == true { s.turnFailed = true }
                 if let result = obj["result"] as? String {
                     let accumulated = s.messages.first { $0.id == responseID }?.text ?? ""
-                    let unseparated = NSMutableString(string: accumulated)
-                    for range in s.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length { unseparated.deleteCharacters(in: range) }
-                    // Some CLI final snapshots join text blocks directly.
-                    // Keep only our display separators when the content is
-                    // otherwise byte-for-byte the same; genuine corrections
-                    // and error results still replace the accumulated text.
-                    text = !s.turnFailed && !s.claudeStreamSeparators.isEmpty && (unseparated as String) == result ? accumulated : result
+                    let unseparated = Store.claudeUnseparated(accumulated, session: s)
+                    // A successful final snapshot can contain only the last
+                    // block. Preserve earlier output and display separators;
+                    // genuine corrections and errors still replace it.
+                    let sameWithoutSeparators = !s.claudeStreamSeparators.isEmpty && unseparated == result
+                    let subset = !result.isEmpty && accumulated.contains(result)
+                    text = !s.turnFailed && (sameWithoutSeparators || subset) ? accumulated : result
                     replace = true
                 }
                 if let errors = obj["errors"] as? [String] { s.messages.append(Message(role: "notice", text: errors.joined(separator: "\n"))) }
@@ -2046,6 +2060,27 @@ func selfTest() {
     check(glued.messages[0].text == "tracked.While\n\nNext block continues" && gluedView.string.contains("\n\n[20 sec] Next block continues"), "Claude text blocks get one separator in storage and delay markers stay at the start of resumed blocks")
     store.consume(#"{"type":"result","result":"tracked.WhileNext block continues"}"#, session: glued, responseID: gluedID)
     check(glued.messages[0].text == "tracked.While\n\nNext block continues" && glued.messages[0].delays?.count == 2, "Claude final snapshots cannot glue separated text blocks back together or discard their delay marks")
+    let pong = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
+    let pongID = UUID(); pong.messages = [Message(id: pongID, role: "assistant", text: "")]
+    func pongLine(_ line: String) { store.consume(line, session: pong, responseID: pongID) }
+    pongLine(#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"PONG"}}}"#)
+    pongLine(#"{"type":"assistant","message":{"content":[{"type":"text","text":"PONG"},{"type":"tool_use","name":"Read"}]}}"#)
+    pongLine(#"{"type":"assistant","message":{"content":[{"type":"text","text":"Both files read now"}]}}"#)
+    check(pong.messages[0].text == "PONG\nBoth files read now", "Claude retains later unstreamed blocks without duplicating earlier streamed text")
+    pongLine(#"{"type":"result","result":"Both files read now"}"#)
+    check(pong.messages[0].text == "PONG\nBoth files read now", "Last-block-only final snapshot preserves the complete Claude reply")
+    let priorDelays = glued.messages[0].delays
+    store.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"tracked.WhileNext block continues"}]}}"#, session: glued, responseID: gluedID)
+    store.consume(#"{"type":"result","result":"Next block continues"}"#, session: glued, responseID: gluedID)
+    check(glued.messages[0].text == "tracked.While\n\nNext block continues" && glued.messages[0].delays?.count == priorDelays?.count, "Claude deduplicates separator-stripped assistant snapshots and retains delays for subset results")
+    pongLine(#"{"type":"result","result":"A genuine correction"}"#)
+    check(pong.messages[0].text == "A genuine correction", "A genuinely different Claude result still replaces accumulated output")
+    pongLine(#"{"type":"result","is_error":true,"result":"correction"}"#)
+    check(pong.turnFailed && pong.messages[0].text == "correction", "Claude error results replace output even when they are a subset")
+    let blocks = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
+    let blocksID = UUID(); blocks.messages = [Message(id: blocksID, role: "assistant", text: "")]
+    store.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"Unique block"},{"type":"text","text":"Unique block"}]}}"#, session: blocks, responseID: blocksID)
+    check(blocks.messages[0].text == "Unique block", "Claude deduplication includes text already accepted in the same assistant event")
     check(MarkdownText.renderedOffset(in: "plain\nNext", utf16Offset: 6) == 6 && MarkdownText.renderedOffset(in: "plainNext", utf16Offset: 5) == 5 && MarkdownText.renderedOffset(in: "é😀Next", utf16Offset: 3) == 3, "Rendered delay offsets preserve existing newlines and UTF-16 character positions")
     check(TranscriptStyle.isTraffic(#"{"command":"tell","text":"hi"}"#) && TranscriptStyle.isTraffic("tell Muse hello") && TranscriptStyle.isTraffic("[Converse message from Muse · session test]\nhello") && !TranscriptStyle.isTraffic("Please explain JSON objects") && !TranscriptStyle.isTraffic("{invalid}"), "Orange traffic classification covers JSON, tells and incoming envelopes without recoloring ordinary prose")
     store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
