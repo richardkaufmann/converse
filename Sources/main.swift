@@ -1908,6 +1908,40 @@ struct SettingsView: View {
     }
 }
 final class SettingsFlow: ObservableObject { @Published var request: SessionSetupRequest? = nil }
+struct ConverseQuitWarning {
+    let title: String
+    let detail: String
+    let quitButton: String
+    init?(sessions: [Session]) {
+        let running = sessions.filter(\.busy).count
+        // Store contains home sessions only; remote viewers must not warn about
+        // agents whose execution continues on a different device.
+        let agents = sessions.filter { $0.agent != nil }.count
+        guard running > 0 || agents > 0 else { return nil }
+        title = running > 0 ? "Quit with \(running) running session\(running == 1 ? "" : "s")?" : "Quit Converse?"
+        quitButton = running > 0 ? "Stop and Quit" : "Quit Converse"
+        var paragraphs: [String] = []
+        if running > 0 { paragraphs.append("Quitting stops active commands.") }
+        if agents > 0 {
+            paragraphs.append("This Mac hosts \(agents) agent\(agents == 1 ? "" : "s"). Exiting the app also terminates your agents; you won't be able to reach them, and they won't be running their loops until you restart.")
+        }
+        paragraphs.append("Your conversations, drafts, and settings are saved.")
+        detail = paragraphs.joined(separator: "\n\n")
+    }
+}
+
+extension Store {
+    func requestApplicationQuit(confirm: (ConverseQuitWarning) -> Bool, stopAgents: () -> Void) -> Bool {
+        if let warning = ConverseQuitWarning(sessions: sessions), !confirm(warning) { return false }
+        // Stop the scheduler before stopping CLI sessions or saving. Agent shutdown
+        // preserves enabled loops and held queues; ordinary Stop deliberately pauses.
+        stopAgents()
+        for session in sessions where session.busy && session.agent == nil { stop(session) }
+        save()
+        return true
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate!
     var windows: [(NSWindow, WindowState)] = []
@@ -2110,13 +2144,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let running = Store.shared.sessions.filter(\.busy)
-        if !running.isEmpty {
-            let alert = NSAlert(); alert.messageText = "Quit with \(running.count) running session(s)?"; alert.informativeText = "Quitting stops active commands. Your conversations and drafts are saved."; alert.addButton(withTitle: "Keep Running"); alert.addButton(withTitle: "Stop and Quit")
-            if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
-            for s in running { Store.shared.stop(s) }
-        }
-        Store.shared.save(); return .terminateNow
+        let confirmed = Store.shared.requestApplicationQuit(confirm: { warning in
+            let alert = NSAlert()
+            alert.messageText = warning.title; alert.informativeText = warning.detail
+            alert.addButton(withTitle: "Keep Running"); alert.addButton(withTitle: warning.quitButton)
+            return alert.runModal() == .alertSecondButtonReturn
+        }, stopAgents: { MainActor.assumeIsolated { AgentRuntime.shared.prepareForQuit() } })
+        return confirmed ? .terminateNow : .terminateCancel
     }
 }
 

@@ -8,9 +8,10 @@ import AVFoundation
     var keyReader: (String) throws -> String? = AgentSecrets.read
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var timer: Timer?
+    private var shuttingDown = false
     private var speech = AVSpeechSynthesizer()
     func start() {
-        guard timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
+        guard !shuttingDown, timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
         // Sleep/relaunch never causes a burst of missed ticks.
         for session in Store.shared.sessions where session.agent?.enabled == true {
             session.agent?.nextRunAt = Date().addingTimeInterval(max(60, session.agent?.intervalSeconds ?? 900))
@@ -19,6 +20,7 @@ import AVFoundation
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }
     }
     func tick(store: Store, now: Date = Date()) {
+        guard !shuttingDown else { return }
         ingestFileEvents(store: store)
         for session in store.sessions where !session.busy && !session.queuePaused && session.pending.isEmpty {
             guard var config = session.agent, config.reserveRun(at: now) else { continue }
@@ -29,6 +31,7 @@ import AVFoundation
     }
     struct FileEvent: Codable { var id: UUID; var text: String }
     func ingestFileEvents(store: Store) {
+        guard !shuttingDown else { return }
         for session in store.sessions where session.agent?.fileTriggers == true && !session.busy && !session.queuePaused && session.pending.isEmpty {
             let inbox = store.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox")
             do {
@@ -52,16 +55,26 @@ import AVFoundation
             } catch { session.agent?.fileTriggers = false; session.agent?.attention = "File trigger paused: " + error.localizedDescription; store.save() }
         }
     }
+    func prepareForQuit() {
+        shuttingDown = true
+        timer?.invalidate(); timer = nil
+        speech.stopSpeaking(at: .immediate)
+        for task in tasks.values { task.cancel() }
+        tasks.removeAll()
+        // Keep saved loop settings intact. Late cancellation callbacks must not
+        // pause configured loops, clear attention, or drain another queued prompt.
+    }
     func cancel(_ session: Session) {
         tasks.removeValue(forKey: session.id)?.cancel()
         session.agent?.enabled = false
     }
     func run(_ session: Session, store: Store, responseID: UUID) {
-        guard let config = session.agent else { return }
+        guard !shuttingDown, let config = session.agent else { return }
         session.started = true
         tasks[session.id] = Task { @MainActor [weak self, weak session] in
-            guard let self, let session else { return }
+            guard let self, let session, !self.shuttingDown else { return }
             do {
+                try Task.checkCancellation()
                 guard let key = try self.keyReader("meta"), !key.isEmpty else { throw AgentFailure.message("Add a Meta Model API key in Agent Setup to run this agent.") }
                 let token = try self.keyReader("github")
                 let snapshot = await self.api.metrics(repository: config.repository, token: token)
@@ -150,6 +163,7 @@ import AVFoundation
                         } catch is CancellationError { throw CancellationError() }
                         catch { session.messages.append(Message(role: "notice", text: "Status art unavailable; the measured scoreboard is still current.")) }
                     }
+                    try Task.checkCancellation()
                     if session.agent?.discord == true, let notification = reply.notifyDiscord, !notification.isEmpty {
                         try await self.notifyDiscord(String(notification.prefix(1800)))
                     }
@@ -185,7 +199,7 @@ import AVFoundation
     }
     private func finish(_ session: Session, store: Store, success: Bool, error: String? = nil) {
         tasks.removeValue(forKey: session.id)
-        guard store.sessions.contains(where: { $0 === session }) else { return }
+        guard !shuttingDown, store.sessions.contains(where: { $0 === session }) else { return }
         session.busy = false
         if let error {
             session.agent?.enabled = false; session.agent?.attention = error; session.agent?.lastOutcome = "Stopped: " + error

@@ -93,6 +93,62 @@ import Foundation
     probeAPI.request = { request in (Data(), HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!) }
     let unconfirmedDiscord = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
     check(unconfirmedDiscord.contains("did not confirm") && !unconfirmedDiscord.contains("confirmed the test"), "Discord test does not report delivery without a returned message receipt")
+    let quitStore = Store(folder: root.appendingPathComponent("quit-fixture"))
+    let quitCLI = quitStore.create(Entry(name: "Quit fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
+    check(ConverseQuitWarning(sessions: quitStore.sessions) == nil, "Idle ordinary sessions do not introduce an unnecessary quit confirmation")
+    let quitAgent = quitStore.createAgent(title: "Quit fixture agent")
+    quitAgent.queuePaused = true; quitAgent.draft = "Preserve this draft"
+    quitAgent.pending = [PendingPrompt(text: "Keep this queued", images: [])]
+    let pausedWarning = ConverseQuitWarning(sessions: quitStore.sessions)
+    check(pausedWarning?.detail.contains("won't be able to reach them") == true && pausedWarning?.detail.contains("until you restart") == true && pausedWarning?.quitButton == "Quit Converse", "Paused home agents still warn that quitting makes them unreachable and stops their loops")
+    quitCLI.busy = true
+    let combinedWarning = ConverseQuitWarning(sessions: quitStore.sessions)
+    check(combinedWarning?.title == "Quit with 1 running session?" && combinedWarning?.detail.contains("stops active commands") == true && combinedWarning?.detail.contains("terminates your agents") == true, "Busy sessions and home agents share one combined quit confirmation")
+    var quitShutdowns = 0
+    let cancelledQuit = quitStore.requestApplicationQuit(confirm: { _ in false }, stopAgents: { quitShutdowns += 1 })
+    check(!cancelledQuit && quitShutdowns == 0 && quitCLI.busy && !quitCLI.interrupted && quitAgent.draft == "Preserve this draft" && quitAgent.pending.count == 1, "Keep Running cancels quit without interrupting work, changing drafts or touching agent queues")
+    quitAgent.agent?.enabled = true; quitAgent.agent?.generateArt = false
+    let quitRuntime = AgentRuntime(); quitRuntime.keyReader = { _ in "isolated-quit-test-key" }
+    var suspendedReply: CheckedContinuation<(Data, HTTPURLResponse), Never>?
+    var replyRequest: URLRequest?
+    quitRuntime.api.request = { request in
+        if request.url?.path == "/v1/responses" {
+            replyRequest = request
+            return await withCheckedContinuation { suspendedReply = $0 }
+        }
+        let path = request.url!.path
+        let object: Any = path.contains("search/issues") ? ["total_count": 0] : (path.hasSuffix("/comments") || path.hasSuffix("/releases")) ? [] : ["stargazers_count": 0, "uniques": 0]
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    let quitResponseID = UUID(); quitAgent.messages.append(Message(id: quitResponseID, role: "assistant", text: "")); quitAgent.busy = true
+    quitRuntime.run(quitAgent, store: quitStore, responseID: quitResponseID)
+    let quitRequestDeadline = Date().addingTimeInterval(3)
+    while suspendedReply == nil && Date() < quitRequestDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(suspendedReply != nil, "Quit recovery fixture reaches an actual in-flight agent response")
+    let acceptedQuit = quitStore.requestApplicationQuit(confirm: { _ in true }, stopAgents: { quitShutdowns += 1; quitRuntime.prepareForQuit() })
+    check(acceptedQuit && quitShutdowns == 1 && quitCLI.interrupted && quitAgent.agent?.enabled == true && quitAgent.queuePaused && quitAgent.pending.count == 1, "Confirmed quit interrupts local CLI work but preserves enabled agent loops and paused queues for relaunch")
+    if let continuation = suspendedReply, let request = replyRequest {
+        let object: [String: Any] = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Late shutdown result must not apply\",\"attention\":\"\"}"]]]]]
+        continuation.resume(returning: (try! JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!))
+        let diagnostic = quitStore.folder.appendingPathComponent("Agents/" + quitAgent.id.uuidString + "/last-response.json")
+        let callbackDeadline = Date().addingTimeInterval(3)
+        while !FileManager.default.fileExists(atPath: diagnostic.path) && Date() < callbackDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        check(FileManager.default.fileExists(atPath: diagnostic.path) && quitAgent.agent?.enabled == true && !quitAgent.messages.contains { $0.text.contains("Late shutdown result") || $0.text.contains("Agent stopped.") } && quitAgent.pending.count == 1, "Late shutdown cancellation cannot apply a response, permanently pause the loop or drain queued input")
+    }
+    let budgetAfterQuit = quitAgent.agent?.remainingRuns
+    quitAgent.queuePaused = false; quitAgent.pending = []
+    quitRuntime.tick(store: quitStore, now: Date().addingTimeInterval(86400))
+    check(quitAgent.agent?.remainingRuns == budgetAfterQuit && quitAgent.pending.isEmpty, "Agent scheduler cannot reserve or start another loop after quit is confirmed")
+    let notStartedRuntime = AgentRuntime()
+    var startedAfterQuit = 0
+    notStartedRuntime.keyReader = { _ in startedAfterQuit += 1; return "isolated-quit-test-key" }
+    notStartedRuntime.run(quitAgent, store: quitStore, responseID: quitResponseID)
+    notStartedRuntime.prepareForQuit()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    check(startedAfterQuit == 0, "An agent task queued just before quit cannot read credentials or start an API request afterward")
+    let quitRestored = Store(folder: quitStore.folder).sessions.first { $0.id == quitAgent.id }
+    check(quitRestored?.agent?.enabled == true && quitRestored?.draft == "Preserve this draft" && quitRestored?.pending.count == 1, "Relaunch restores the enabled loop, draft and pending messages saved on confirmed quit")
+
     let runtime = AgentRuntime()
     runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id.uuidString, text: "Please review"), .init(to: blocked.id.uuidString, text: "Forbidden")]), from: agent, store: store)
     check(recipient.pending.count == 1 && blocked.pending.isEmpty && recipient.pending[0].text.contains(agent.id.uuidString), "Agent messages are visibly attributed and restricted to selected sessions")
