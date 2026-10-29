@@ -144,3 +144,7 @@ use the Converse-owned outbox; GET is non-consuming, and acknowledgements are
 separate. The existing tunnel and bearer credential are retained at handoff;
 the old service is disabled and its unread outbox is imported without deleting
 the original. No automatic fallback is installed.
+
+## Hands-free conversation (Mac)
+
+Start talking explicitly owns one local agent’s microphone turn. Sustained audio plus 1.5 seconds of silence produces one transcribed human prompt; idle silence never submits. Thinking and speech playback keep capture off. Only the correlated response can speak and re-arm capture, after a short echo guard. Stop, pane removal, failure, and app exit fence all late permission, transcription, model, and speech callbacks. Spoken turns preserve the separately edited draft and do not spend automatic-loop allowances. Loop ticks, file events, Jolly requests, and queued messages cannot take over that listening session. Dictate remains a review-before-send alternative.

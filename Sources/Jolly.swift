@@ -106,7 +106,7 @@ struct JollyRequest: Codable {
                 guard let session = Self.resolve(request, sessions: sessions) else {
                     try answer(id, text: "Which agent should answer? Specify its exact name or ID. Available agents: " + sessions.map { $0.title + " [" + $0.id.uuidString + "]" }.joined(separator: ", "), status: "needs_agent", store: store); continue
                 }
-                guard !session.busy, session.pending.isEmpty, !session.queuePaused, !session.changingSetting else {
+                guard !AgentConversation.shared.owns(session), !session.busy, session.pending.isEmpty, !session.queuePaused, !session.changingSetting else {
                     try answer(id, text: "Agent busy or queue paused. Nothing was injected. Try a new request when it is ready.", status: "busy", agent: session, store: store); continue
                 }
                 guard var config = session.agent, config.remainingRuns > 0 else {

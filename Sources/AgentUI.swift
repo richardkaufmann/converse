@@ -148,6 +148,7 @@ struct AgentControls: View {
     @State private var loopSettings = false
     @State private var dictating = false
     @StateObject private var voice = AgentDictation()
+    @ObservedObject private var conversation = AgentConversation.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             TimelineView(.periodic(from: .now, by: 5)) { context in
@@ -167,14 +168,26 @@ struct AgentControls: View {
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
                 Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.remainingRuns ?? 0) == 0)
                     .help("Check now using one automatic run; this does not enable the periodic loop")
-                Button("Dictate…") { dictating = true }
+                Button(conversation.owns(session) ? "Stop talking" : "Start talking!") {
+                    if conversation.owns(session) { conversation.stop() }
+                    else { dictating = false; voice.cancel(); conversation.start(session, store: .shared) }
+                }.help("Hands-free: a 1½-second pause sends your words; the agent answers aloud, then listens again. No microphone during its reply. Stop ends listening, not a question already sent.")
+                Button("Dictate…") { conversation.stop(); dictating = true }
                     .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
                     .help("Record with Muse Voice, review the transcription, then insert it into your draft")
                 Button("Scoreboard") { AgentWindows.shared.widget(session) }
                 Button("Agent Setup…") { AgentWindows.shared.setup(session) }
             } }
-        }.padding(8).frame(height: 66)
-            .onChange(of: session.id) { _, _ in voice.cancel(); dictating = false }
+            if conversation.sessionID == session.id {
+                Text(conversation.status).font(.caption).foregroundStyle(conversation.active ? Color.accentColor : Color.secondary)
+                    .lineLimit(2).help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)
+            }
+        }.padding(8).frame(height: conversation.sessionID == session.id ? 94 : 66)
+            .onChange(of: session.id) { old, _ in
+                voice.cancel(); dictating = false
+                if conversation.sessionID == old { conversation.stop() }
+            }
+            .onDisappear { if conversation.owns(session) { conversation.stop() } }
     }
 }
 

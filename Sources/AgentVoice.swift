@@ -29,7 +29,7 @@ extension AgentAPI {
 }
 
 // No modal session or responder-chain dictation action. Cancellation fences even
-// a late microphone-permission callback; audio never sends a prompt automatically.
+// a late microphone-permission callback. Manual dictation always reviews first.
 @MainActor final class AgentDictation: NSObject, ObservableObject, AVAudioRecorderDelegate {
     enum Phase: Equatable { case idle, permission, recording, transcribing, review, failed }
     @Published var phase: Phase = .idle
@@ -38,14 +38,22 @@ extension AgentAPI {
     var api = AgentAPI()
     var permission: () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) }
     var keyReader: () throws -> String? = { try AgentSecrets.read("meta") }
+    var onTranscript: ((String) -> Void)?
+    var onFailure: ((String) -> Void)?
+    private static weak var microphoneOwner: AgentDictation?
+    private var endpoint = VoiceEndpointDetector()
+    private var meter: Timer?
+    private var autoStop = false
     private var recorder: AVAudioRecorder?
     private var file: URL?
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var key = ""
     var active: Bool { [.permission, .recording, .transcribing].contains(phase) }
-    func record() {
-        cancel(); transcript = ""
+    func record(autoStop: Bool = false) {
+        Self.microphoneOwner?.cancel()
+        cancel(); transcript = ""; self.autoStop = autoStop; endpoint = VoiceEndpointDetector()
+        Self.microphoneOwner = self
         let token = generation
         phase = .permission; status = "Waiting for microphone permission… You can cancel and keep using Converse."
         task = Task { @MainActor [weak self] in
@@ -58,15 +66,22 @@ extension AgentAPI {
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("converse-voice-" + UUID().uuidString + ".wav")
                 file = url; self.key = key
                 let audio = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 24_000, AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsFloatKey: false])
-                recorder = audio; audio.delegate = self
+                recorder = audio; audio.delegate = self; audio.isMeteringEnabled = autoStop
                 guard audio.prepareToRecord(), audio.record(forDuration: 60) else { throw AgentFailure.message("The microphone could not start. Check the selected audio input and try again.") }
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                phase = .recording; status = "Recording · maximum 60 seconds. Press Stop & transcribe when finished."
+                phase = .recording
+                status = autoStop ? "Listening… · pause 1½ seconds to send · Stop talking ends the conversation" : "Recording · maximum 60 seconds. Press Stop & transcribe when finished."
+                if autoStop {
+                    meter = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                        Task { @MainActor in self?.sampleAudio() }
+                    }
+                }
             } catch { guard generation == token else { return }; fail(error.localizedDescription) }
         }
     }
     func stop() {
         guard phase == .recording, let file else { return }
+        meter?.invalidate(); meter = nil
         recorder?.delegate = nil; recorder?.stop(); recorder = nil
         let token = generation, savedKey = key
         phase = .transcribing; status = "Transcribing… You can cancel; other sessions remain available."
@@ -79,13 +94,17 @@ extension AgentAPI {
                 guard generation == token, !Task.isCancelled else { return }
                 transcript = text; phase = .review; status = "Review your words, then insert them into the blue draft. Nothing has been sent."
                 key = ""
+                if autoStop { onTranscript?(text) }
             } catch { guard generation == token else { return }; fail(error.localizedDescription) }
         }
     }
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         Task { @MainActor [weak self] in
             guard let self, self.recorder === recorder, phase == .recording else { return }
-            if flag { stop() } else { fail("Recording was interrupted. Please try again.") }
+            if flag {
+                if autoStop, endpoint.sample(power: -160, at: 60) != .send { fail("No speech detected. Press Start talking to try again.") }
+                else { stop() }
+            } else { fail("Recording was interrupted. Please try again.") }
         }
     }
     nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
@@ -94,10 +113,20 @@ extension AgentAPI {
             fail("The microphone could not record audio. Please try again.")
         }
     }
+    private func sampleAudio() {
+        guard phase == .recording, let recorder else { return }
+        recorder.updateMeters()
+        switch endpoint.sample(power: recorder.averagePower(forChannel: 0), at: recorder.currentTime) {
+        case .send: stop()
+        case .noSpeech: fail("No speech detected for 20 seconds. Microphone off; press Start talking to try again.")
+        case .keepListening: break
+        }
+    }
     private func cleanupFile() { if let file { try? FileManager.default.removeItem(at: file) }; file = nil }
-    private func fail(_ text: String) { cancel(); phase = .failed; status = text }
+    private func fail(_ text: String) { cancel(); phase = .failed; status = text; onFailure?(text) }
     func cancel() {
-        generation = UUID(); task?.cancel(); task = nil
+        generation = UUID(); task?.cancel(); task = nil; meter?.invalidate(); meter = nil
+        if Self.microphoneOwner === self { Self.microphoneOwner = nil }
         recorder?.delegate = nil; recorder?.stop(); recorder = nil; cleanupFile(); key = ""; phase = .idle
         status = "Ready to record. Audio goes to Meta; review the transcription before inserting."
     }
@@ -116,7 +145,7 @@ struct AgentDictationView: View {
             Text(voice.status).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             if voice.phase == .review { TextEditor(text: $voice.transcript).frame(height: 110).border(Color.secondary) }
             HStack {
-                if !voice.active { Button("Record") { voice.record() } }
+                if !voice.active { Button("Record") { AgentConversation.shared.stop(); voice.record() } }
                 if voice.phase == .recording { Button("Stop & transcribe") { voice.stop() } }
                 if voice.phase == .review {
                     Button("Insert into draft") {

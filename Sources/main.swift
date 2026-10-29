@@ -351,6 +351,7 @@ final class Store: ObservableObject {
         }
     }
     func runNext(_ s: Session) {
+        if s.agent != nil && MainActor.assumeIsolated({ AgentConversation.shared.owns(s) }) { return }
         sanitizeGroupQueue(s)
         if !s.busy && s.pending.isEmpty && s.injectionTargetID != nil {
             s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
@@ -401,6 +402,9 @@ final class Store: ObservableObject {
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
     func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil) {
+        if s.agent != nil && preservingAgentDraft == nil {
+            MainActor.assumeIsolated { if AgentConversation.shared.owns(s) { AgentConversation.shared.stop("Voice paused for your typed question · microphone off") } }
+        }
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
