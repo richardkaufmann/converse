@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import shutil
 root = Path(__file__).resolve().parents[1]
 version = json.loads((root / 'VERSION.json').read_text())
 output = Path(os.environ['DERIVED_FILE_DIR']); output.mkdir(parents=True, exist_ok=True)
@@ -27,4 +28,5 @@ info = {
 info['ITSAppUsesNonExemptEncryption'] = False
 with (output / 'Converse-Info.plist').open('wb') as file: plistlib.dump(info, file)
 resources = Path(os.environ['TARGET_BUILD_DIR']) / os.environ['UNLOCALIZED_RESOURCES_FOLDER_PATH']
+shutil.copytree(root/'Resources/ProviderLogos', resources/'ProviderLogos', dirs_exist_ok=True)
 subprocess.run(['/usr/bin/python3', str(root/'scripts/build-help.py'), str(root/'README.md'), str(resources/'Help')], check=True)

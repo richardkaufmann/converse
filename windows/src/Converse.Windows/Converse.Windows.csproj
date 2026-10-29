@@ -24,6 +24,10 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Converse.Core/Converse.Core.csproj" />
+    <Content Include="../../../Resources/ProviderLogos/*.png;../../../Resources/ProviderLogos/NOTICE.txt;../../../Resources/ProviderLogos/LICENSE.md">
+      <Link>Assets/ProviderLogos/%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
   <!-- Offline Help: generated at build time from the tracked README by the
        shared scripts/build-help.py (never checked in). The Exec is

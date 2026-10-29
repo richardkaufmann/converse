@@ -158,6 +158,7 @@ struct PadPane: View {
         VStack(spacing: 0) {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
+                PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
                 Text(snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session").font(.title3).lineLimit(1)
                 Spacer()
                 if service.remoteRow(globalID: id)?.participantKind == "agent" {
@@ -274,5 +275,24 @@ struct PadPane: View {
 enum PadLayout {
     static func sidebarWidth(preferred: Double, available: CGFloat) -> CGFloat {
         min(max(0, available) * 0.5, max(120, preferred))
+    }
+}
+
+private struct PadProviderLogo: View {
+    let engine: String
+    var body: some View {
+        let key = engine.lowercased()
+        let provider = ["muse": "meta", "claude": "anthropic", "codex": "openai"][key] ?? key
+        let label = ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI"][key] ?? engine.capitalized
+        let color: Color = key == "muse" ? Color(red: 4/255, green: 103/255, blue: 223/255) : key == "claude" ? Color(red: 217/255, green: 119/255, blue: 87/255) : .primary
+        if !engine.isEmpty {
+            Group {
+                if let url = Bundle.main.url(forResource: provider, withExtension: "png", subdirectory: "ProviderLogos"), let image = UIImage(contentsOfFile: url.path) {
+                    Image(uiImage: image).renderingMode(.template).resizable().scaledToFit()
+                } else {
+                    Text(String(label.prefix(1))).font(.system(size: 14, weight: .bold))
+                }
+            }.frame(width: 20, height: 20).foregroundStyle(color).accessibilityLabel(label)
+        }
     }
 }

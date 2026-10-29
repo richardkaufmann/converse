@@ -28,6 +28,10 @@
                         FontSize="11" FontWeight="SemiBold" MinWidth="28"
                         VerticalAlignment="Center"
                         ToolTipService.ToolTip="Focus this pane"/>
+                <Grid x:Name="ProviderMark" Width="20" Height="20" VerticalAlignment="Center" Visibility="Collapsed">
+                    <Image x:Name="ProviderImage" Stretch="Uniform"/>
+                    <TextBlock x:Name="ProviderFallback" FontSize="14" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+                </Grid>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock x:Name="PaneTitle" FontWeight="SemiBold" Text="No conversation selected"/>
                     <TextBlock x:Name="PaneSubtitle" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text=""/>

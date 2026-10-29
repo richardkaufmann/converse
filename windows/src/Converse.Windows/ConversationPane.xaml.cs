@@ -24,6 +24,7 @@ public sealed partial class ConversationPane : UserControl
     public ConversationPane()
     {
         InitializeComponent();
+        ActualThemeChanged += (_, _) => RenderProviderLogo();
     }
 
     internal int Pane => _pane;
@@ -191,8 +192,40 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
+    private string? _providerImageKey;
+    private void RenderProviderLogo()
+    {
+        if (_host is null || _selected is null) { ProviderMark.Visibility = Visibility.Collapsed; return; }
+        var engine = _selected.LocalSessionID is { } localId
+            ? _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Entry.Engine
+            : _host.Devices.RemoteTranscripts.GetValueOrDefault(_selected.GlobalID ?? "")?.Engine;
+        if (string.IsNullOrEmpty(engine) && _selected.GlobalID is { } gid)
+            engine = _host.Devices.Homes.Values.SelectMany(h => h.Rows).FirstOrDefault(r => r.GlobalID == gid)?.Engine;
+        var key = (engine ?? "").ToLowerInvariant();
+        ProviderMark.Visibility = key.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        var (asset, label) = key switch
+        {
+            "muse" => ("meta", "Meta"), "claude" => ("anthropic", "Anthropic"),
+            "codex" => (ActualTheme == ElementTheme.Dark ? "openai-dark" : "openai", "OpenAI"),
+            _ => ("", engine ?? "")
+        };
+        ToolTipService.SetToolTip(ProviderMark, label);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProviderMark, label);
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "ProviderLogos", asset + ".png");
+        var available = asset.Length > 0 && File.Exists(path);
+        ProviderImage.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        ProviderFallback.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
+        ProviderFallback.Text = label.Length > 0 ? label[..1].ToUpperInvariant() : "";
+        if (available && _providerImageKey != asset)
+        {
+            ProviderImage.Source = new BitmapImage(new Uri(path));
+            _providerImageKey = asset;
+        }
+    }
+
     internal void RenderPane(bool caretToEnd = false)
     {
+        RenderProviderLogo();
         if (_selected is null)
         {
             PaneTitle.Text = "No conversation selected";
