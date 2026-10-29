@@ -6,7 +6,9 @@ struct AgentConfig: Codable, Equatable {
     var settingsRevision: UInt64? = nil
     mutating func settingsChanged() { settingsRevision = min((settingsRevision ?? 0), UInt64.max - 1) + 1 }
     var objective = "Monitor this project. Ask what success means, compare actual progress with those goals, distinguish verified results from claims, and flag blockers."
-    var repository = "richardkaufmann/converse"
+    var repository = ""
+    var hasRepository: Bool { !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var repositorySnapshot: AgentRepoSnapshot? { hasRepository && snapshot?.repository == repository ? snapshot : nil }
     var watchedSessions: [UUID] = []
     var watchedParticipants: [String]? = nil
     func allows(local id: UUID, home: String?) -> Bool {
@@ -208,13 +210,15 @@ final class AgentAPI {
         return (bytes.isEmpty ? [:] : try JSONSerialization.jsonObject(with: bytes), response)
     }
     func testGitHub(repository: String, token: String?) async throws -> String {
-        guard AgentRepoSnapshot.validRepository(repository) else { throw AgentFailure.message("Enter a GitHub repository as owner/name before testing.") }
+        let repository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard repository.isEmpty || AgentRepoSnapshot.validRepository(repository) else { throw AgentFailure.message("Enter a GitHub repository as owner/name, or leave it blank.") }
         do {
             let authenticated = token?.isEmpty == false
             if authenticated {
                 let (user, _) = try await json(URL(string: "https://api.github.com/user")!, key: token)
                 guard (user as? [String: Any])?["id"] as? Int != nil else { throw AgentFailure.message("GitHub returned an invalid token verification response.") }
             }
+            guard !repository.isEmpty else { return authenticated ? "GitHub token accepted. No repository configured; repository checks skipped." : "GitHub is optional. No repository or token configured; nothing to test." }
             let (raw, _) = try await json(URL(string: "https://api.github.com/repos/" + repository)!, key: token)
             guard (raw as? [String: Any])?["id"] as? Int != nil else { throw AgentFailure.message("GitHub returned an invalid repository response.") }
             guard authenticated else { return "No token: public repository metadata is readable. Add a token with traffic access for visitor metrics. Nothing was changed." }
@@ -275,7 +279,9 @@ final class AgentAPI {
         return png
     }
     func metrics(repository: String, token: String?) async -> AgentRepoSnapshot {
+        let repository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
         var snapshot = AgentRepoSnapshot(repository: repository)
+        guard !repository.isEmpty else { return snapshot }
         guard AgentRepoSnapshot.validRepository(repository) else { snapshot.notes = ["Set a repository as owner/name."]; return snapshot }
         func get(_ path: String) async throws -> (Any, HTTPURLResponse) { try await json(URL(string: "https://api.github.com/" + path)!, key: token) }
         do {
@@ -328,13 +334,15 @@ extension AgentConfig {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
             throw AgentFailure.message("Agent settings or run budget changed. Reload settings before saving.")
         }
-        guard AgentRepoSnapshot.validRepository(wire.repository), !wire.model.isEmpty, wire.model.utf8.count <= 200,
+        let repository = wire.repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard repository.isEmpty || AgentRepoSnapshot.validRepository(repository), !wire.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, wire.model.utf8.count <= 200,
               wire.objective.utf8.count <= 16000, wire.watched.count <= 64, wire.watched.allSatisfy({ DeviceGlobalID($0) != nil }),
               wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
             throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
         }
         settingsChanged()
-        objective = wire.objective; repository = wire.repository; model = wire.model
+        if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
+        objective = wire.objective; self.repository = repository; model = wire.model
         watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
         intervalSeconds = wire.intervalSeconds; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
         if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }

@@ -40,7 +40,7 @@ struct AgentSetupView: View {
                         }
                         testStatus("discord")
                         HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model).disabled(testingServices.contains("meta")) }
-                        HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("GitHub repository · owner/name", text: $settings.repository).disabled(testingServices.contains("github")) }
+                        HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
                         HStack {
@@ -123,7 +123,9 @@ struct AgentSetupView: View {
     }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func save() {
-        guard AgentRepoSnapshot.validRepository(settings.repository), !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Enter a model and a repository as owner/name."; return }
+        settings.repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Enter a model."; return }
+        guard settings.repository.isEmpty || AgentRepoSnapshot.validRepository(settings.repository) else { error = "Enter a repository as owner/name, or leave it blank."; return }
         guard settings.intervalSeconds.isFinite else { error = "Enter a valid interval."; return }
         do {
             var current = session.agent ?? AgentConfig()
@@ -231,14 +233,14 @@ struct AgentWidgetView: View {
                     }
                     LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
                     VStack(alignment: .leading, spacing: 7) {
-                        Text("PROJECT SCOREBOARD").font(.caption.bold()).tracking(2).foregroundStyle(.white.opacity(0.8))
+                        Text(session.agent?.hasRepository == true ? "PROJECT SCOREBOARD" : "AGENT SCOREBOARD").font(.caption.bold()).tracking(2).foregroundStyle(.white.opacity(0.8))
                         Text(session.title).font(.system(size: 28, weight: .bold)).lineLimit(2)
-                        Text(session.agent?.snapshot?.repository ?? session.agent?.repository ?? "Repository not selected")
+                        Text(session.agent?.repository ?? "")
                             .font(.callout).foregroundStyle(.white.opacity(0.85)).lineLimit(2)
                     }.padding(24)
                 }.frame(height: 220).clipped()
                 VStack(alignment: .leading, spacing: 22) {
-                    if let snapshot = session.agent?.snapshot, snapshot.hasMeasurements {
+                    if let snapshot = session.agent?.repositorySnapshot, snapshot.hasMeasurements {
                         LazyVGrid(columns: [GridItem(.flexible(minimum: 0)), GridItem(.flexible(minimum: 0))], spacing: 10) {
                             ForEach(snapshot.metrics, id: \.0) { item in
                                 VStack(alignment: .leading, spacing: 7) {
@@ -248,7 +250,7 @@ struct AgentWidgetView: View {
                                     .background(card, in: RoundedRectangle(cornerRadius: 12))
                             }
                         }
-                    } else {
+                    } else if session.agent?.hasRepository == true {
                         VStack(alignment: .leading, spacing: 10) {
                             Label("Repository data unavailable", systemImage: "chart.bar.xaxis").font(.headline)
                             Text("Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.")
@@ -272,8 +274,8 @@ struct AgentWidgetView: View {
                         if let at = session.agent?.snapshot?.observedAt {
                             Text("Checked " + at.formatted(date: .abbreviated, time: .shortened))
                         }
-                        if session.agent?.snapshot?.hasMeasurements == true {
-                            ForEach(session.agent?.snapshot?.notes ?? [], id: \.self) { Text($0) }
+                        if session.agent?.repositorySnapshot?.hasMeasurements == true {
+                            ForEach(session.agent?.repositorySnapshot?.notes ?? [], id: \.self) { Text($0) }
                         }
                     }.font(.caption).foregroundStyle(.white.opacity(0.6))
                     HStack {
@@ -337,12 +339,12 @@ enum AgentWidgetExport {
         let config = session.agent ?? AgentConfig()
         var art = ""
         if let path = config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
-        let cells = (config.snapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
-        let metrics = config.snapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>"
+        let cells = (config.repositorySnapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
+        let metrics = !config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>"
         return """
         <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>
         *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}h2{font-size:17px;margin:0 0 10px}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric,.empty{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:28px;line-height:1.3}.metric span{font-size:12px;color:#bbc4d1}p{white-space:pre-wrap;margin:0}section{margin-bottom:24px}details{margin:24px 0}summary{cursor:pointer;font-weight:600;margin-bottom:10px}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}
-        </style><main><header>\(art)<div class=heading><div class=eyebrow>PROJECT SCOREBOARD</div><h1>\(escape(session.title))</h1><div class=repository>\(escape(config.snapshot?.repository ?? config.repository))</div></div></header><div class=content>\(metrics)<details open><summary>Agent update</summary><p>\(escape(config.widgetSummary))</p></details>\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Snapshot · \(escape(config.snapshot?.observedAt.formatted() ?? "Not measured yet"))<br>\(escape((config.snapshot?.notes ?? []).joined(separator: " · ")))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></div></main></html>
+        </style><main><header>\(art)<div class=heading><div class=eyebrow>\(config.hasRepository ? "PROJECT SCOREBOARD" : "AGENT SCOREBOARD")</div><h1>\(escape(session.title))</h1><div class=repository>\(escape(config.repository))</div></div></header><div class=content>\(metrics)<details open><summary>Agent update</summary><p>\(escape(config.widgetSummary))</p></details>\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Snapshot · \(escape(config.snapshot?.observedAt.formatted() ?? "Not measured yet"))<br>\(escape((config.repositorySnapshot?.notes ?? []).joined(separator: " · ")))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></div></main></html>
         """
     }
 
@@ -350,7 +352,9 @@ enum AgentWidgetExport {
         let folder = store.folder.appendingPathComponent("Agents/" + session.id.uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try html(session).write(to: folder.appendingPathComponent("widget.html"), atomically: true, encoding: .utf8)
-        if let snapshot = session.agent?.snapshot { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; try encoder.encode(snapshot).write(to: folder.appendingPathComponent("metrics.json"), options: .atomic) }
+        let metricsURL = folder.appendingPathComponent("metrics.json")
+        if let snapshot = session.agent?.repositorySnapshot { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; try encoder.encode(snapshot).write(to: metricsURL, options: .atomic) }
+        else if FileManager.default.fileExists(atPath: metricsURL.path) { try FileManager.default.removeItem(at: metricsURL) }
     }
 }
 
@@ -410,7 +414,7 @@ struct RemoteAgentSetupView: View {
     var globalID: String
     var onClose: () -> Void
     @ObservedObject var service = DeviceSyncService.shared
-    @State private var settings = DeviceAgentSettings(objective: "", repository: "richardkaufmann/converse", model: "muse-spark-1.3", watched: [], intervalSeconds: 900, remainingRuns: 20, enabled: false, generateArt: true, speak: false, discord: false)
+    @State private var settings = DeviceAgentSettings(objective: "", repository: "", model: "muse-spark-1.3", watched: [], intervalSeconds: 900, remainingRuns: 20, enabled: false, generateArt: true, speak: false, discord: false)
     @State private var loaded = false
     @State private var working = false
     @State private var outcome = "Loading home settings…"
@@ -420,7 +424,7 @@ struct RemoteAgentSetupView: View {
             Text("Credentials are configured on the execution home. This device changes settings without receiving API keys.").font(.callout).foregroundStyle(.secondary)
             ScrollView { VStack(alignment: .leading, spacing: 10) {
                 TextField("Objective and success criteria", text: $settings.objective, axis: .vertical).lineLimit(3...6)
-                TextField("Repository · owner/name", text: $settings.repository)
+                TextField("Optional repository · owner/name", text: $settings.repository)
                 TextField("Model", text: $settings.model)
                 HStack { Text("Interval, seconds"); TextField("Seconds", value: $settings.intervalSeconds, format: .number) }
                 Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)

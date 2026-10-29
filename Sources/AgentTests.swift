@@ -16,6 +16,18 @@ import Foundation
     }
     let agent = store.createAgent(); agent.queuePaused = true
     check(agent.agent?.watchedSessions.isEmpty == true, "New agents have no transcript scope until the user explicitly selects sessions")
+    check(agent.agent?.repository == "", "New agents do not assume a GitHub repository")
+    var optionalConfig = AgentConfig(repository: "owner/repo")
+    optionalConfig.snapshot = AgentRepoSnapshot(repository: "owner/repo", stars: 42)
+    var optionalWire = optionalConfig.wire(home: "local"); optionalWire.repository = " \n "
+    do {
+        try optionalConfig.apply(optionalWire)
+        let restored = try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(optionalConfig))
+        check(restored.repository.isEmpty && restored.snapshot == nil, "Blank repository saves and reloads, clearing prior repository measurements")
+        optionalWire = optionalConfig.wire(home: "local"); optionalWire.repository = "../repo"
+        do { try optionalConfig.apply(optionalWire); check(false, "Malformed nonblank repository must reject") }
+        catch { check(optionalConfig.repository.isEmpty, "Malformed nonblank repository is rejected without changing saved settings") }
+    } catch { check(false, "Optional repository settings: " + error.localizedDescription) }
     let recipient = store.create(Entry(name: "Fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")); recipient.queuePaused = true
     let blocked = store.create(recipient.entry); blocked.queuePaused = true
     agent.agent?.watchedSessions = [recipient.id]
@@ -67,6 +79,17 @@ import Foundation
     probeRequests = []
     let publicGitHub = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: nil) }
     check(publicGitHub.contains("No token") && probeRequests.count == 1 && probeRequests[0].value(forHTTPHeaderField: "Authorization") == nil, "GitHub test without a token reports public access honestly and does not claim authenticated success")
+    probeRequests = []
+    let optionalGitHub = probe { try await probeAPI.testGitHub(repository: " ", token: nil) }
+    check(optionalGitHub.contains("optional") && probeRequests.isEmpty, "Blank GitHub probe without a token makes no requests")
+    let tokenOnly = probe { try await probeAPI.testGitHub(repository: "", token: "test-token") }
+    check(tokenOnly.contains("token accepted") && probeRequests.map { $0.url?.path } == ["/user"], "Blank GitHub probe verifies only the token when supplied")
+    probeRequests = []
+    _ = probe {
+        let snapshot = await probeAPI.metrics(repository: " \n ", token: "unused")
+        return snapshot.notes.isEmpty && snapshot.repository.isEmpty ? "blank" : "unexpected"
+    }
+    check(probeRequests.isEmpty, "Blank repository metrics never call GitHub")
     responseStatus = 401; probeRequests = []
     let invalidGitHub = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: "test-token") }
     check(invalidGitHub.contains("rejected the token") && !invalidGitHub.contains("private-service-error-canary") && probeRequests.count == 1, "Rejected GitHub credentials stop the probe and never expose response bodies")
@@ -241,6 +264,7 @@ import Foundation
     check(blocked.pending.isEmpty && !store.switchboardDirectory(for: agent).contains(blocked.id.uuidString), "Agent scope also fences normal switchboard commands and directory lookup")
     agent.agent?.widgetSummary = "<script>alert('x')</script>"
     check(AgentWidgetExport.html(agent).contains("&lt;script&gt;") && !AgentWidgetExport.html(agent).contains("<script>"), "Exported agent widget escapes model text and disables scripts")
+    agent.agent?.repository = "owner/repo"
     agent.agent?.snapshot = AgentRepoSnapshot(repository: "owner/repo")
     check(AgentWidgetExport.html(agent).contains("Repository data unavailable") && !AgentWidgetExport.html(agent).contains("<div class=metric>"), "Scoreboard without GitHub data gives one setup explanation instead of empty metric tiles")
     agent.agent?.snapshot?.stars = 0
@@ -328,6 +352,29 @@ import Foundation
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
+
+    // Clearing GitHub must not make an unrelated saved credential a runtime dependency.
+    var noRepoSettings = agent.agent!.wire(home: localHome); noRepoSettings.repository = ""
+    do { try agent.agent?.apply(noRepoSettings) } catch { check(false, "Clear runtime repository") }
+    agent.agent?.generateArt = false; requests = []
+    runtime.keyReader = { name in
+        guard name != "github" else { throw AgentFailure.message("GitHub must not be read") }
+        return "isolated-test-key"
+    }
+    agent.busy = true
+    let noRepoID = UUID(); agent.messages.append(Message(id: noRepoID, role: "assistant", text: ""))
+    runtime.run(agent, store: store, responseID: noRepoID)
+    let noRepoDeadline = Date().addingTimeInterval(8)
+    while agent.busy && Date() < noRepoDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!agent.busy && agent.agent?.lastOutcome == "Completed" && requests.count == 1 && requests.first?.url?.host == "api.meta.ai", "Agent without a repository completes using only Meta, with GitHub credentials inaccessible")
+    let noRepoBody = requests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let noRepoEvidence = (noRepoBody?["input"] as? String)?.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    check(noRepoEvidence?["repository"] is NSNull, "General agent evidence explicitly omits repository data")
+    let noRepoHTML = AgentWidgetExport.html(agent)
+    check(noRepoHTML.contains("AGENT SCOREBOARD") && !noRepoHTML.contains("Repository data unavailable") && !noRepoHTML.contains("<div class=grid>"), "General scoreboard retains its report without GitHub warnings or metric tiles")
+    check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/metrics.json").path), "Clearing GitHub removes stale exported repository measurements")
+    check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.repository == "", "No-repository agent survives a full session archive reload")
+    runtime.keyReader = { _ in "isolated-test-key" }
 
     let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!
     runtime.api.request = { request in
