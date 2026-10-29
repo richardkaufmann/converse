@@ -138,6 +138,9 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
     var role: String
     var text: String
     var imageHashes: [String] = []
+    // Optional home-assigned visible-message ordinal, independent of raw
+    // paging offsets (which also count hidden activity and empty messages).
+    var messageNumber: Int? = nil
 }
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID

@@ -722,7 +722,10 @@ extension DeviceSyncService {
         let total = session.messages.count
         let end = min(max(beforeOffset ?? total, 0), total)
         let start = max(0, end - 200)
-        let slice = Array(session.messages[start..<end].map { wireMessage($0) })
+        let numbers = session.transcriptMessageNumbers()
+        let slice = Array(session.messages[start..<end].map { message in
+            var wire = wireMessage(message); wire.messageNumber = numbers[message.id]; return wire
+        })
         let draftKey = sessionID.uuidString
         let imageHashes = session.attachments.compactMap { imageHash(path: $0) }
         if draftAttachments[draftKey] != imageHashes {

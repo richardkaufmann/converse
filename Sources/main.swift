@@ -68,6 +68,19 @@ final class Session: ObservableObject, Identifiable {
     var identityError = ""
     var messagesRevision: UInt64 = 0
     @Published var messages: [Message] { didSet { messagesRevision &+= 1 } }
+    // Presentation metadata supplied by a remote home; never persisted as a
+    // second transcript. Local sessions derive their sequence from messages.
+    var messageNumbers: [UUID: Int] = [:] { didSet { if messageNumbers != oldValue { messagesRevision &+= 1 } } }
+    var messageNumberOffset = 0 { didSet { if messageNumberOffset != oldValue { messagesRevision &+= 1 } } }
+    private var numberedMessagesRevision: UInt64?
+    private var cachedMessageNumbers: [UUID: Int] = [:]
+    func transcriptMessageNumbers() -> [UUID: Int] {
+        if numberedMessagesRevision != messagesRevision {
+            cachedMessageNumbers = Store.transcriptMessageNumbers(messages)
+            numberedMessagesRevision = messagesRevision
+        }
+        return cachedMessageNumbers
+    }
     @Published var draft: String
     @Published var attachments: [String]
     @Published var pending: [PendingPrompt] = []
@@ -138,6 +151,14 @@ final class Session: ObservableObject, Identifiable {
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
+    static func transcriptMessageNumbers(_ messages: [Message]) -> [UUID: Int] {
+        var result: [UUID: Int] = [:], number = 0
+        for message in messages where message.role != "activity" {
+            guard TranscriptStyle.blockContentLength(visibleText(message.text)) > 0 || !message.images.isEmpty else { continue }
+            number += 1; result[message.id] = number
+        }
+        return result
+    }
     static let shared = Store()
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
     @Published var setupCompleted = false
@@ -1047,7 +1068,13 @@ enum TranscriptPalette {
     }
     static func draft(_ source: String) -> NSColor { TranscriptStyle.isTraffic(source) ? traffic : .systemBlue }
 }
-final class LineNumberRuler: NSRulerView {
+struct TranscriptMessageLabel: Equatable {
+    var location: Int
+    var number: Int
+    var prompt: Bool
+    var color: NSColor { prompt ? .systemBlue : .systemGray }
+}
+final class MessageNumberRuler: NSRulerView {
     override var isFlipped: Bool { true }
     weak var text: ConversationTextView?
     init(scroll: NSScrollView, text: ConversationTextView) {
@@ -1096,28 +1123,17 @@ final class LineNumberRuler: NSRulerView {
         NSColor.gray.withAlphaComponent(0.25).setStroke()
         let edge = NSBezierPath(); edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY)); edge.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY)); edge.lineWidth = 0.5; edge.stroke()
         let baseAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
-        var offset = 0; var number = 1; var previousY: CGFloat?
-        repeat {
-            let lineRect: NSRect
-            if offset < string.length {
-                let glyph = layout.glyphIndexForCharacter(at: offset)
-                lineRect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-            } else { lineRect = layout.extraLineFragmentRect }
-            let prompt = offset >= text.inputStart || text.userBlocks.contains { NSLocationInRange(offset, $0) }
-            let traffic = text.trafficBlocks.contains { NSLocationInRange(offset, $0) } || (offset >= text.inputStart && TranscriptStyle.isTraffic(string.substring(from: min(text.inputStart, string.length))))
-            let color: NSColor = traffic ? TranscriptPalette.traffic : dark ? (prompt ? NSColor.systemBlue : NSColor.white) : NSColor(white: 0.475, alpha: 1)
-            let label = NSAttributedString(string: String(number), attributes: baseAttrs.merging([.foregroundColor: color]) { _, new in new })
+        // One label at the start of each rendered message. Paragraph breaks,
+        // wrapping, images and the editable draft never consume numbers.
+        for message in text.messageLabels where message.location < string.length {
+            let glyph = layout.glyphIndexForCharacter(at: message.location)
+            let lineRect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let label = NSAttributedString(string: String(message.number), attributes: baseAttrs.merging([.foregroundColor: message.color]) { _, new in new })
             let y = origin + lineRect.minY + max(0, (lineRect.height - label.size().height) / 2)
-            let newRow = previousY == nil || abs(lineRect.minY - previousY!) > 0.5
-            if newRow && y + lineRect.height >= bounds.minY && y <= bounds.maxY {
+            if y + label.size().height >= bounds.minY && y <= bounds.maxY {
                 label.draw(at: NSPoint(x: ruleThickness - label.size().width - 9, y: y))
             }
-            if offset >= string.length { break }
-            let range = string.lineRange(for: NSRange(location: offset, length: 0))
-            offset = NSMaxRange(range)
-            if newRow { number += 1; previousY = lineRect.minY }
-            if offset == string.length && !text.string.hasSuffix("\n") { break }
-        } while offset <= string.length
+        }
     }
 }
 
@@ -1346,6 +1362,7 @@ final class ConversationTextView: NSTextView {
         menu.insertItem(.separator(), at: 0); menu.insertItem(item, at: 0)
         return menu
     }
+    var messageLabels: [TranscriptMessageLabel] = []
     var userBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
     func refreshDecorations() { layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
@@ -1449,7 +1466,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
-        scroll.verticalRulerView = LineNumberRuler(scroll: scroll, text: text)
+        scroll.verticalRulerView = MessageNumberRuler(scroll: scroll, text: text)
         scroll.hasVerticalRuler = true; scroll.rulersVisible = lineNumbers
         context.coordinator.render(text)
         if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
@@ -1481,6 +1498,8 @@ struct ScrollingConversation: NSViewRepresentable {
         let session: Session
         var renderedMessages: [Message]?
         var seenMessagesRevision: UInt64?
+        var renderedMessageNumbers: [UUID: Int] = [:]
+        var renderedMessageNumberOffset = 0
         var renderedAttachments: [String] = []
         var messageStarts: [UUID: Int] = [:]
         var historyEnd = 0
@@ -1539,6 +1558,9 @@ struct ScrollingConversation: NSViewRepresentable {
                 historyChanged = previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }
+            let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
+            historyChanged = historyChanged || numberingChanged
+            renderedMessageNumbers = session.messageNumbers; renderedMessageNumberOffset = session.messageNumberOffset
             let attachmentsChanged = renderedAttachments != session.attachments
             let current = text.textStorage?.mutableString ?? NSMutableString(string: text.string)
             if !historyChanged && !attachmentsChanged {
@@ -1588,6 +1610,8 @@ struct ScrollingConversation: NSViewRepresentable {
                 if document.length > 0 && !document.string.hasSuffix("\n") { append("\n") }
                 document.append(NSAttributedString(attachment: attachment)); return true
             }
+            text.messageLabels = []
+            var messageNumber = max(0, session.messageNumberOffset)
             text.userBlocks = []
             text.trafficBlocks = []
             text.copyBlocks = []
@@ -1629,6 +1653,8 @@ struct ScrollingConversation: NSViewRepresentable {
                 }
                 for path in message.images { image(path) }
                 guard document.length > start else { continue }
+                messageNumber = session.messageNumbers[message.id].flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber + 1)
+                text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user"))
                 let last = document.length - 1
                 let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
                 let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle
@@ -1686,7 +1712,7 @@ struct Conversation: View {
             HStack {
                 Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).layoutPriority(-1)
                 Spacer()
-                Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
+                Toggle("message numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
                 if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
                 if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
@@ -2330,6 +2356,33 @@ func selfTest() {
     let submittedFont = styled.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
     check(submittedFont.map { NSFontManager.shared.traits(of: $0).contains(.italicFontMask) } == true, "Submitted input renders in italics")
     check(styled.userBlocks.count == 1 && styled.userBlocks[0].length == 17, "Multiline input is enclosed as one separator block")
+    check(styled.messageLabels.map(\.number) == [1, 2] && styled.messageLabels.map(\.location) == [0, 18], "Gutter numbers multiline prompts and responses once per message")
+    check(styled.messageLabels[0].color == .systemBlue && styled.messageLabels[1].color == .systemGray, "Prompt numbers are blue and response numbers grey")
+    let labelSnapshot = styled.messageLabels
+    styledSession.draft = "draft\nwith\nthree lines"; styledCoordinator.render(styled)
+    check(styled.messageLabels == labelSnapshot, "Editable draft paragraphs never consume message numbers")
+    styledSession.messages += [Message(role: "activity", text: "hidden tool output"), Message(role: "assistant", text: ""), Message(role: "notice", text: "Switchboard: queued"), Message(role: "assistant", text: "paragraph one\n\nparagraph two\n```swift\nlet n = 1\n```" )]
+    styledCoordinator.render(styled)
+    check(styled.messageLabels.map(\.number) == [1, 2, 3, 4], "Hidden activity and empty placeholders consume no numbers; visible notices and code blocks each consume one")
+    check(styledSession.transcriptMessageNumbers().count == 4 && styledSession.transcriptMessageNumbers()[styledSession.messages.last!.id] == 4, "Home numbering matches visible message sequence")
+    styledSession.messages[3].text = "new streamed response"; styledCoordinator.render(styled)
+    check(styled.messageLabels.map(\.number) == [1, 2, 3, 4, 5] && styledSession.transcriptMessageNumbers()[styledSession.messages.last!.id] == 5, "An empty response gaining text refreshes numbering and the home cache")
+    let pagedComposer = RemoteComposer()
+    let pagedA = DeviceWireMessage(id: UUID(), role: "user", text: "page prompt\nsecond line", messageNumber: 41)
+    let pagedB = DeviceWireMessage(id: UUID(), role: "assistant", text: "page response", messageNumber: 42)
+    var paged = DeviceTranscriptPayload(globalID: "home/" + UUID().uuidString, homeSeq: 1, messages: [pagedA, pagedB], offset: 90, total: 92, draft: "", draftVersion: 0, busy: false, status: "Ready")
+    let pagedText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let pagedCoordinator = ScrollingConversation.Coordinator(pagedComposer.editor)
+    pagedComposer.updateEditor(transcript: paged, cache: [:]); pagedCoordinator.render(pagedText)
+    check(pagedText.messageLabels.map(\.number) == [41, 42], "Remote gutter uses home ordinals rather than raw paging offsets")
+    paged.messages.insert(DeviceWireMessage(id: UUID(), role: "assistant", text: "earlier", messageNumber: 40), at: 0); paged.offset = 89
+    pagedComposer.updateEditor(transcript: paged, cache: [:]); pagedCoordinator.render(pagedText)
+    check(pagedText.messageLabels.map(\.number) == [40, 41, 42], "Loading earlier messages preserves the numbers already on screen")
+    paged.messages.removeFirst(); paged.messages[0].messageNumber = 51; paged.messages[1].messageNumber = 52
+    pagedComposer.updateEditor(transcript: paged, cache: [:]); pagedCoordinator.render(pagedText)
+    check(pagedText.messageLabels.map(\.number) == [51, 52], "Home numbering-only updates refresh cached native history")
+    let legacyWire = try! JSONDecoder().decode(DeviceWireMessage.self, from: Data(("{\"id\":\"" + UUID().uuidString + "\",\"role\":\"assistant\",\"text\":\"old home\",\"imageHashes\":[]}").utf8))
+    check(legacyWire.messageNumber == nil && (try? JSONDecoder().decode(DeviceWireMessage.self, from: JSONEncoder().encode(pagedB)))?.messageNumber == 42, "Optional message ordinals round-trip while old wire messages still decode")
     let timed = Session(entry: entry)
     timed.messages = [Message(id: r, role: "assistant", text: "")]
     store.consume("muse: workspace root: /somewhere", session: timed, responseID: r)
@@ -2491,6 +2544,7 @@ func selfTest() {
     imageEditor.imageRemove = { path in store.removeDraftImage(imageDraft, path: path); imageCoordinator.render(imageEditor) }
     imageCoordinator.render(imageEditor)
     check(imageEditor.draftImageButtons.count == 2 && imageEditor.draftImages.allSatisfy { $0.location < imageEditor.inputStart }, "Only draft image previews receive native remove buttons; historical images remain protected")
+    check(imageEditor.messageLabels.map(\.number) == [1] && imageEditor.messageLabels[0].location < imageEditor.inputStart, "Historical images share their message number and draft attachment previews remain unnumbered")
     imageEditor.setSelectedRange(NSRange(location: imageEditor.inputStart + 3, length: 0))
     imageEditor.draftImageButtons[0].performClick(nil)
     check(imageDraft.attachments == [imagePaths[1]] && imageDraft.draft == "Keep this text" && imageDraft.messages[0].images == [imagePaths[0]] && FileManager.default.fileExists(atPath: imagePaths[0]) && imageEditor.selectedRange().location == imageEditor.inputStart + 3, "Clicking a draft image X removes exactly that attachment and preserves text, caret, historical images and their files")

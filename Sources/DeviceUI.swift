@@ -58,6 +58,10 @@ final class RemoteComposer: ObservableObject {
         editor.messages = (transcript?.messages ?? []).map { message in
             Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: nil)
         }
+        editor.messageNumbers = (transcript?.messages ?? []).reduce(into: [UUID: Int]()) { numbers, message in
+            if let number = message.messageNumber, number > 0 { numbers[message.id] = number }
+        }
+        editor.messageNumberOffset = max(0, transcript?.offset ?? 0)
         editor.draft = draft
         editor.attachments = blobHashes.compactMap { cache[$0]?.path }
         editor.busy = transcript?.busy ?? false
@@ -170,7 +174,7 @@ struct RemotePane: View {
             HStack {
                 Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
-                Toggle("line numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
+                Toggle("message numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button {
                     let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true
                     if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { attach(image) } } }

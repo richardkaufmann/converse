@@ -264,6 +264,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         }
         let session = Store.shared.create(entry)
         session.title = "Harness session"; session.draft = "home draft"
+        session.messages = (0..<10).map { Message(role: $0 < 3 ? "user" : "activity", text: "prefix \($0)") } + (0..<200).map { Message(role: $0.isMultiple(of: 2) ? "user" : "assistant", text: "message \($0)\nsecond line") }
         let draftImage = root.appendingPathComponent("draft-image.png")
         let draftBytes = Data("isolated image transfer fixture".utf8)
         try draftBytes.write(to: draftImage); session.attachments = [draftImage.path]
@@ -291,6 +292,11 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let snapshot = grantFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
         check(granted != nil && snapshot?.draft == "home draft" && snapshot?.epoch == granted?.epoch, "Service harness grants lease and streams matching home snapshot")
         check(snapshot?.draftImageHashes == [DeviceBlob.sha256Hex(draftBytes)], "Home snapshot carries staged draft attachment hashes for takeover")
+        check(snapshot?.offset == 10 && snapshot?.messages.first?.messageNumber == 4 && snapshot?.messages.last?.messageNumber == 203, "Home paged snapshot numbers visible messages across hidden prefix activity")
+        captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceTranscriptRequest(beforeOffset: 10))))
+        let earlier = try capturedEnvelopes().compactMap { frame in frame.kind == DeviceMessageKind.transcriptSnapshot.rawValue ? frame.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } : nil }.first
+        check(earlier?.prepend == true && earlier?.offset == 0 && earlier?.messages.compactMap(\.messageNumber) == [1, 2, 3], "Earlier home page keeps original message ordinals and omits hidden activity ordinals")
         captured = []
         let renameID = UUID()
         let renamePayload = try JSONEncoder().encode(DeviceCommandPayload(action: "rename", text: "Renamed remotely"))
