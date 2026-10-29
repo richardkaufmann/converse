@@ -442,7 +442,17 @@ public sealed class DeviceSyncService : IDisposable
         _shutdown?.Cancel();
         _mdns?.Dispose();
         _listener?.Stop();
-        foreach (var peer in _peers.Values.ToList()) peer.Client.Dispose();
+        // Best-effort shutdown: connect/accept threads can mutate _peers
+        // (a plain Dictionary) mid-snapshot, surfacing torn nulls — the
+        // RESULTS30 test-process crash. One bad peer never stops the rest.
+        List<Peer> peers;
+        try { peers = _peers.Values.ToList(); }
+        catch { peers = new List<Peer>(); }
+        foreach (var peer in peers)
+        {
+            try { peer.Client?.Dispose(); }
+            catch { /* already gone */ }
+        }
     }
 
     public async Task ConnectManualAsync(string host, int port, string? joiningGroupID = null)
