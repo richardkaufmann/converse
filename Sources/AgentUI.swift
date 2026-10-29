@@ -136,28 +136,78 @@ struct AgentControls: View {
 
 struct AgentWidgetView: View {
     @ObservedObject var session: Session
+    @State private var expandedReport = false
+    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let card = Color(red: 0.12, green: 0.16, blue: 0.22)
     var body: some View {
-        ZStack {
-            if let path = session.agent?.artPath, let image = NSImage(contentsOfFile: path) { Image(nsImage: image).resizable().scaledToFill() }
-            else { LinearGradient(colors: [.indigo, .teal, .black], startPoint: .topLeading, endPoint: .bottomTrailing) }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(session.title).font(.title.bold())
-                    Text(session.agent?.snapshot?.repository ?? "Set a repository in Agent Setup").font(.headline)
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                        ForEach(session.agent?.snapshot?.metrics ?? [], id: \.0) { item in
-                            VStack(alignment: .leading, spacing: 3) { Text(item.1).font(.title2.bold()); Text(item.0).font(.caption) }.frame(maxWidth: .infinity, alignment: .leading).padding(12).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                // Background art must never contribute its intrinsic size to the document.
+                ZStack(alignment: .bottomLeading) {
+                    GeometryReader { geometry in
+                        if let path = session.agent?.artPath, let image = NSImage(contentsOfFile: path) {
+                            Image(nsImage: image).resizable().scaledToFill()
+                                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                        } else {
+                            LinearGradient(colors: [.indigo, .teal], startPoint: .topLeading, endPoint: .bottomTrailing)
                         }
                     }
-                    Text(session.agent?.widgetSummary ?? "Tell me what success looks like.")
-                    if session.agent?.lastArtAt == nil { Text("Art has not been generated yet.").font(.caption).foregroundStyle(.white.opacity(0.75)) }
-                    if let attention = session.agent?.attention, !attention.isEmpty { Label(attention, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.black).padding(10).background(.yellow, in: RoundedRectangle(cornerRadius: 8)) }
-                    if let at = session.agent?.snapshot?.observedAt { Text("Measured " + at.formatted(date: .abbreviated, time: .shortened)).font(.caption) }
-                    ForEach(session.agent?.snapshot?.notes ?? [], id: \.self) { Text($0).font(.caption) }
-                    HStack { Button("Export widget…") { AgentWindows.shared.export(session) }; Button("Agent Setup…") { AgentWindows.shared.setup(session) } }
-                }.foregroundStyle(.white).padding(24).background(.black.opacity(0.35))
-            }
-        }.clipped().frame(minWidth: 420, minHeight: 500)
+                    LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("PROJECT SCOREBOARD").font(.caption.bold()).tracking(2).foregroundStyle(.white.opacity(0.8))
+                        Text(session.title).font(.system(size: 28, weight: .bold)).lineLimit(2)
+                        Text(session.agent?.snapshot?.repository ?? session.agent?.repository ?? "Repository not selected")
+                            .font(.callout).foregroundStyle(.white.opacity(0.85)).lineLimit(2)
+                    }.padding(24)
+                }.frame(height: 220).clipped()
+                VStack(alignment: .leading, spacing: 22) {
+                    if let snapshot = session.agent?.snapshot, snapshot.hasMeasurements {
+                        LazyVGrid(columns: [GridItem(.flexible(minimum: 0)), GridItem(.flexible(minimum: 0))], spacing: 10) {
+                            ForEach(snapshot.metrics, id: \.0) { item in
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(item.1 == "Unavailable" ? "—" : item.1).font(.system(size: 25, weight: .semibold, design: .rounded)).monospacedDigit()
+                                    Text(item.0).font(.caption).foregroundStyle(.white.opacity(0.7))
+                                }.frame(maxWidth: .infinity, minHeight: 65, alignment: .leading).padding(14)
+                                    .background(card, in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("Repository data unavailable", systemImage: "chart.bar.xaxis").font(.headline)
+                            Text("Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.")
+                                .font(.callout).foregroundStyle(.white.opacity(0.75))
+                            Button("Set up GitHub…") { AgentWindows.shared.setup(session) }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(18).background(card, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Agent update").font(.headline)
+                        Text((try? AttributedString(markdown: session.agent?.widgetSummary ?? "Tell me what success looks like.", options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(session.agent?.widgetSummary ?? "Tell me what success looks like."))
+                            .font(.callout).lineSpacing(4).lineLimit(expandedReport ? nil : 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button(expandedReport ? "Show less" : "Read full update") { expandedReport.toggle() }.buttonStyle(.link)
+                    }
+                    if let attention = session.agent?.attention, !attention.isEmpty {
+                        Label(attention, systemImage: "exclamationmark.triangle.fill").font(.callout)
+                            .foregroundStyle(.black).frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                            .background(.yellow, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let at = session.agent?.snapshot?.observedAt {
+                            Text("Checked " + at.formatted(date: .abbreviated, time: .shortened))
+                        }
+                        if session.agent?.snapshot?.hasMeasurements == true {
+                            ForEach(session.agent?.snapshot?.notes ?? [], id: \.self) { Text($0) }
+                        }
+                    }.font(.caption).foregroundStyle(.white.opacity(0.6))
+                    HStack {
+                        Button("Agent Setup…") { AgentWindows.shared.setup(session) }
+                        Spacer()
+                        Button("Export widget…") { AgentWindows.shared.export(session) }
+                    }
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }.background(ink).foregroundStyle(.white).preferredColorScheme(.dark)
+            .frame(minWidth: 420, minHeight: 500)
     }
 }
 
@@ -210,11 +260,15 @@ enum AgentWidgetExport {
         let config = session.agent ?? AgentConfig()
         var art = ""
         if let path = config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
-        let cells = (config.snapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
+        let cells = (config.snapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
+        let metrics = config.snapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>"
         return """
-        <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>body{margin:0;background:#0f172a;color:white;font:16px system-ui}main{max-width:780px;margin:auto;padding:32px;position:relative}.art{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.5;z-index:-1}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.metric{padding:18px;background:#101827d9;border-radius:12px}.metric strong{display:block;font-size:28px}.metric span{opacity:.8}p{white-space:pre-wrap;background:#101827cc;padding:16px;border-radius:12px}.attention{background:#facc15;color:#111}footer{font-size:12px}</style>\(art)<main><h1>\(escape(session.title))</h1><h2>\(escape(config.snapshot?.repository ?? config.repository))</h2><div class=grid>\(cells)</div><p>\(escape(config.widgetSummary))</p>\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Snapshot · \(escape(config.snapshot?.observedAt.formatted() ?? "Not measured yet"))<br>\(escape((config.snapshot?.notes ?? []).joined(separator: " · ")))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></main></html>
+        <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>
+        *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}h2{font-size:17px;margin:0 0 10px}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric,.empty{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:28px;line-height:1.3}.metric span{font-size:12px;color:#bbc4d1}p{white-space:pre-wrap;margin:0}section{margin-bottom:24px}details{margin:24px 0}summary{cursor:pointer;font-weight:600;margin-bottom:10px}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}
+        </style><main><header>\(art)<div class=heading><div class=eyebrow>PROJECT SCOREBOARD</div><h1>\(escape(session.title))</h1><div class=repository>\(escape(config.snapshot?.repository ?? config.repository))</div></div></header><div class=content>\(metrics)<details open><summary>Agent update</summary><p>\(escape(config.widgetSummary))</p></details>\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Snapshot · \(escape(config.snapshot?.observedAt.formatted() ?? "Not measured yet"))<br>\(escape((config.snapshot?.notes ?? []).joined(separator: " · ")))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></div></main></html>
         """
     }
+
     static func writeSnapshot(_ session: Session, store: Store) throws {
         let folder = store.folder.appendingPathComponent("Agents/" + session.id.uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

@@ -57,6 +57,9 @@ struct AgentRepoSnapshot: Codable, Equatable {
     var releaseDownloads: Int?
     var visitors14d: Int?
     var notes: [String] = []
+    var hasMeasurements: Bool {
+        [stars, openPRs, openIssues, openBugs, conversationComments, releaseDownloads, visitors14d].contains { $0 != nil }
+    }
     var metrics: [(String, String)] {
         [("Users", "Not measured"), ("Visitors · 14d", visitors14d.map(String.init) ?? "Unavailable"),
          ("Stars", stars.map(String.init) ?? "Unavailable"), ("Open PRs", openPRs.map(String.init) ?? "Unavailable"),

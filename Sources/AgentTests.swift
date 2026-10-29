@@ -37,6 +37,10 @@ import Foundation
     check(blocked.pending.isEmpty && !store.switchboardDirectory(for: agent).contains(blocked.id.uuidString), "Agent scope also fences normal switchboard commands and directory lookup")
     agent.agent?.widgetSummary = "<script>alert('x')</script>"
     check(AgentWidgetExport.html(agent).contains("&lt;script&gt;") && !AgentWidgetExport.html(agent).contains("<script>"), "Exported agent widget escapes model text and disables scripts")
+    agent.agent?.snapshot = AgentRepoSnapshot(repository: "owner/repo")
+    check(AgentWidgetExport.html(agent).contains("Repository data unavailable") && !AgentWidgetExport.html(agent).contains("<div class=metric>"), "Scoreboard without GitHub data gives one setup explanation instead of empty metric tiles")
+    agent.agent?.snapshot?.stars = 0
+    check(agent.agent?.snapshot?.hasMeasurements == true && AgentWidgetExport.html(agent).contains("<strong>0</strong>"), "Scoreboard distinguishes measured zero from missing GitHub data")
     agent.agent?.enabled = true; agent.agent?.remainingRuns = 2; agent.agent?.nextRunAt = now
     agent.draft = "User's unfinished thought"
     runtime.tick(store: store, now: now)
