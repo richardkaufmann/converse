@@ -34,21 +34,25 @@
                     <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                    <Button Content="1" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
+                    <Button Content="1" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 1 (takes remote sessions here)"/>
-                    <Button Content="2" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
+                    <Button Content="2" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 2 (takes remote sessions here)"/>
-                    <Button Content="3" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
+                    <Button Content="3" Click="OnPlaceClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 3 (takes remote sessions here)"/>
-                    <Button Content="P" Click="OnParkClick" Tag="{Binding}" FontSize="12"
+                    <Button Content="P" Click="OnParkClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Park (release this conversation to its home)"/>
-                    <Button Content="X" Click="OnCloseClick" Tag="{Binding}" FontSize="12"
+                    <Button Content="X" Click="OnCloseClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowClose, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Close session (keeps a recovery archive)"/>
+                    <Button Content="X" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
+                            Visibility="{Binding ShowGreyClose, Converter={StaticResource BoolToVis}}"
+                            IsEnabled="False"
+                            ToolTipService.ToolTip="Remote sessions close on their home device"/>
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -161,12 +165,22 @@
                                    LineStackingStrategy="BlockLineHeight"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
                     </ScrollViewer>
-                    <!-- One seamless document: protected history plus an editable blue draft tail. -->
+                    <!-- One seamless document: protected history plus an editable blue draft tail.
+                         Spellcheck stays off: the control's background spelling pass over a
+                         25k+ char formatted transcript is the prime crash suspect (see
+                         crash12/ dump analysis), and it is pointless on a transcript. -->
                     <RichEditBox x:Name="Transcript" Grid.Column="1" FontSize="16" Padding="0"
                                  PlaceholderText="Select a conversation to begin."
-                                 IsSpellCheckEnabled="True"
+                                 IsSpellCheckEnabled="False"
                                  PreviewKeyDown="OnTranscriptKeyDown"
-                                 TextChanged="OnTranscriptTextChanged"/>
+                                 TextChanged="OnTranscriptTextChanged">
+                        <RichEditBox.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Copy" Click="OnCopyClick"/>
+                                <MenuFlyoutItem Text="Select all" Click="OnSelectAllClick"/>
+                            </MenuFlyout>
+                        </RichEditBox.ContextFlyout>
+                    </RichEditBox>
                 </Grid>
                 <Grid Grid.Row="4" Padding="8,4">
                     <Grid.ColumnDefinitions>

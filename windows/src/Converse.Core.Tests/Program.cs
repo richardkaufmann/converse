@@ -230,6 +230,51 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
 }
 
+// Remote inject honesty (Mac failed-ack parity) + double-press guard.
+{
+    var homeRoot = Directory.CreateTempSubdirectory("converse-injhome-").FullName;
+    var viewerRoot = Directory.CreateTempSubdirectory("converse-injviewer-").FullName;
+    try
+    {
+        var homeStore = new SessionStore(homeRoot, new FakeRunner());
+        var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "codex"));
+        using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
+        using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        home.PairingConfirmation = _ => Task.FromResult(true);
+        viewer.PairingConfirmation = _ => Task.FromResult(true);
+        await home.StartAsync(0, enableDiscovery: false);
+        await viewer.StartAsync(0, enableDiscovery: false);
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
+        Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Inject loopback pairing publishes home sidebar");
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => viewer.RemoteLeases.ContainsKey(gid)), "Inject loopback take holds a lease");
+        var failed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(failed is not null && await Until(() => viewer.Unresolved(gid)
+            .Any(r => r.CommandID == failed && r.Outcome == "failed" && (r.Detail ?? "").Contains("already empty"))),
+            "Remote inject on an empty queue fails honestly");
+        viewer.DiscardOutbox(failed!.Value);
+        // Both sends start before either ack returns: the second must reuse
+        // the outstanding command instead of sending a duplicate interrupt.
+        var first = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        var second = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        var ids = await Task.WhenAll(first, second);
+        Check(ids[0] is not null && ids[0] == ids[1]
+            && viewer.Outbox.Count(r => r.SessionID == gid && r.Payload.Action == "injectAll") == 1,
+            "Double inject reuses the outstanding command");
+    }
+    finally
+    {
+        Cleanup(homeRoot);
+        Cleanup(viewerRoot);
+    }
+}
+
 // Muse MSP over loopback TCP: approval request surfaces and decides.
 {
     var root = Directory.CreateTempSubdirectory("converse-msp-").FullName;
@@ -717,6 +762,13 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(merged.Pending.Count == 0 && merged.Messages.Count(m => m.Role == "user") == 1
             && merged.Messages.First(m => m.Role == "user").Text == "alpha\n\nbeta",
             "Inject-all merges the queue into one prompt (Mac parity)");
+        var honest = mergeStore.Create(mergeStore.Entries.First(e => e.Engine == "codex"));
+        Check(mergeStore.InjectPending(honest) is string emptyFail && emptyFail.Length > 0 && honest.Pending.Count == 0,
+            "Inject on an empty queue reports honestly instead of going silent");
+        honest.Pending.Add(new Converse.Core.PendingPrompt { Text = "kept" });
+        Check(mergeStore.InjectPending(honest, Guid.NewGuid()) is string missingFail && missingFail.Length > 0
+            && honest.Pending.Count == 1 && honest.Pending[0].Text == "kept",
+            "Inject of a missing queued item reports honestly and keeps the queue");
     }
     finally { Cleanup(root); }
 }
@@ -752,6 +804,47 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     store.Consume("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"part\"}}}", failed, failedResponse);
     store.Consume("{\"type\":\"result\",\"is_error\":true,\"result\":\"part\"}", failed, failedResponse);
     Check(failedResponse.Text == "part" && failed.TurnFailed, "Error results replace without separator games");
+}
+
+// Round-12 item 3c: a final snapshot that omits the first streamed block
+// (text -> tool -> text) joins on overlap instead of deleting it.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-firstblock-").FullName;
+    try
+    {
+        var joinStore = new SessionStore(dir, new FakeRunner());
+        var joined = joinStore.Create(joinStore.Entries.First(e => e.Engine == "claude"));
+        var joinedResponse = new ChatMessage { Role = "assistant", Text = "" };
+        void Join(string json) => joinStore.Consume(json, joined, joinedResponse);
+        Join("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+        Join("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"First block. \"}}}");
+        Join("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"First block. \"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}");
+        Join("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+        Join("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"Second block.\"}}}");
+        Join("{\"type\":\"result\",\"result\":\"Second block. Final words.\"}");
+        Check(joinedResponse.Text.Contains("First block.", StringComparison.Ordinal)
+            && joinedResponse.Text.Contains("Final words.", StringComparison.Ordinal)
+            && joinedResponse.Text.Split("Second block.").Length == 2,
+            "Partial final snapshot joins instead of deleting the first streamed block");
+    }
+    finally { Cleanup(dir); }
+}
+
+// Crash hardening: streamed text reaches disk before the turn ends, so a
+// mid-stream death loses seconds, not the whole reply (round-12 leftovers).
+{
+    var dir = Directory.CreateTempSubdirectory("converse-streamsave-").FullName;
+    try
+    {
+        var saveStore = new SessionStore(dir, new FakeRunner());
+        var saving = saveStore.Create(saveStore.Entries.First(e => e.Engine == "claude"));
+        var savingResponse = new ChatMessage { Role = "assistant", Text = "" };
+        saving.Messages.Add(savingResponse);
+        saveStore.Consume("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial reply\"}}}", saving, savingResponse);
+        Check(File.ReadAllText(Path.Combine(dir, "sessions.json")).Contains("Partial reply", StringComparison.Ordinal),
+            "Streamed text persists before turn end");
+    }
+    finally { Cleanup(dir); }
 }
 
 // Entry naming repairs "Claude Code" as well as "Muse".
@@ -1459,8 +1552,10 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(runs.Any(r => r.Kind == MdRunKind.Code && r.Start == codeAt && r.Length == 4),
         "Code run matches the stripped span");
     var (fenced, fenceRuns) = MarkdownRuns.Render("```\n**not bold**\n```\na ** b `c");
-    Check(fenced == "**not bold**\na ** b `c" && fenceRuns.Count == 0,
-        "Fenced and unmatched markers stay literal with no runs");
+    Check(fenced == "**not bold**\na ** b `c"
+        && fenceRuns.Count(r => r.Kind == MdRunKind.Code) == 1
+        && fenceRuns.Any(r => r.Kind == MdRunKind.Code && r.Start == 0 && r.Length == "**not bold**".Length),
+        "Fenced code washes as one Code run; unmatched markers stay literal");
     var (table, tableRuns) = MarkdownRuns.Render("Intro\n| °C | °F |\n|---|---|\n| 20 | 68.0 |\n| 21 | 69.8 |\nAfter");
     Check(table == "Intro\n| °C | °F |\n| 20 | 68.0 |\n| 21 | 69.8 |\nAfter",
         "Table divider drops, header and rows kept verbatim");

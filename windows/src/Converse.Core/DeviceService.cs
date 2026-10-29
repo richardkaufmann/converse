@@ -1464,6 +1464,7 @@ public sealed class DeviceSyncService : IDisposable
             return;
         }
         _commands.MarkRunning(commandId);
+        string? failure = null;
         switch (command.Action)
         {
             case "submit":
@@ -1477,8 +1478,18 @@ public sealed class DeviceSyncService : IDisposable
                 session.Attachments = consumes ? new List<string>() : savedAttachments;
                 if (consumes) _drafts.Bump(session.Id.ToString("D"), "");
                 break;
-            case "inject": _store.InjectPending(session, command.PendingID); break;
-            case "injectAll": _store.InjectPending(session); break;
+            case "inject":
+                if (command.PendingID is null)
+                {
+                    _commands.MarkFailed(commandId);
+                    await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
+                        "Inject not applied: no queued item was specified. Nothing was sent.", envelope.Epoch);
+                    await SendTranscriptAsync(peer, session);
+                    return;
+                }
+                failure = _store.InjectPending(session, command.PendingID);
+                break;
+            case "injectAll": failure = _store.InjectPending(session); break;
             case "stop": _store.Stop(session); break;
             case "resumeQueue": session.QueuePaused = false; _store.Save(); _store.RunNext(session); break;
             case "pauseQueue": session.QueuePaused = true; _store.Save(); break;
@@ -1487,6 +1498,13 @@ public sealed class DeviceSyncService : IDisposable
             case "model": session.Choices.Model = command.Model; session.Choices.ModelProvider = command.ModelProvider; session.Choices.ModelProfile = command.ModelProfile; _store.Save(); break;
             case "effort": session.Choices.Effort = command.Effort; _store.Save(); break;
             case "access": session.Choices.Access = command.Access; _store.Save(); break;
+        }
+        if (failure is not null)
+        {
+            _commands.MarkFailed(commandId);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "failed", failure, envelope.Epoch);
+            await SendTranscriptAsync(peer, session);
+            return;
         }
         _commands.MarkCompleted(commandId);
         await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
@@ -1780,11 +1798,33 @@ public sealed class DeviceSyncService : IDisposable
         RemoteLeases.Remove(globalId);
     }
 
+    private static readonly HashSet<string> QueueActions = new() { "inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue" };
+
+    // Mac parity: the outstanding queue intent feeds the Injecting label and
+    // the double-press guard below. Falls back to the newest queue record so
+    // failed/completed feedback stays visible until discarded.
+    public DeviceOutboxRecord? QueueCommand(string globalId)
+    {
+        var records = _outbox.Records
+            .Where(r => r.SessionID == globalId && QueueActions.Contains(r.Payload.Action)).ToList();
+        return records.FirstOrDefault(r => r.Outcome is "pending" or "accepted" or "uncertain")
+            ?? records.LastOrDefault();
+    }
+
     public async Task<Guid?> SendRemoteCommandAsync(string globalId, DeviceCommandPayload command)
     {
         var parsed = DeviceGlobalID.Parse(globalId);
         if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before sending."; return null; }
+        // A double press is the same outstanding queue intent, not a second
+        // interrupt. Uncertain requests need Check home before retrying.
+        if (QueueActions.Contains(command.Action) && QueueCommand(globalId) is { } active
+            && active.Outcome is "pending" or "accepted" or "uncertain")
+        {
+            LastOutcome = "Queue request already pending. Check home for its result.";
+            return active.Payload.Action == command.Action && active.Payload.PendingID == command.PendingID
+                ? active.CommandID : null;
+        }
         var payloadData = DeviceJson.Encode(command);
         var record = new DeviceOutboxRecord
         { CommandID = Guid.NewGuid(), SessionID = globalId, Payload = command, PayloadHash = DeviceBlob.Sha256Hex(payloadData), Epoch = epoch };

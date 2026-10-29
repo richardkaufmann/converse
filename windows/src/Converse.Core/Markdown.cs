@@ -8,8 +8,9 @@ public sealed record MdRun(int Start, int Length, MdRunKind Kind, int Level = 0)
 /// Small chat-markdown renderer for the transcript: strips ## / ** / `
 /// / link markers and reports formatting runs in stripped coordinates, so
 /// the editor can tint ranges without skewing the gutter or draft math.
-/// Same-line inline spans only; ``` fences drop whole lines; unmatched
-/// markers stay literal. Headings are line-anchored ("## " prefix). Pipe
+/// Same-line inline spans only; ``` fence lines drop and their content
+/// washes as one Code run; unmatched markers stay literal. Headings are
+/// line-anchored ("## " prefix). Pipe
 /// tables render as one monospace run with the divider row dropped (RichEdit
 /// has no real tables); cell text stays literal so columns keep aligning.
 /// </summary>
@@ -27,6 +28,7 @@ public static class MarkdownRuns
         }
         var raws = (body ?? "").Split('\n');
         var index = 0;
+        var codeStart = 0;
         while (index < raws.Length)
         {
             var line = raws[index].EndsWith('\r') ? raws[index][..^1] : raws[index];
@@ -48,6 +50,13 @@ public static class MarkdownRuns
             var trimmed = line.TrimStart();
             if (trimmed.StartsWith("```", StringComparison.Ordinal))
             {
+                // Fenced code washes like inline code (Mac parity): the
+                // fence lines drop and one Code run covers the content, so
+                // the editor tints the block grey. Unmatched single markers
+                // still stay literal via Inline.
+                if (!inFence) codeStart = outText.Length == 0 ? 0 : outText.Length + 1;
+                else if (outText.Length > codeStart)
+                    runs.Add(new MdRun(codeStart, outText.Length - codeStart, MdRunKind.Code));
                 inFence = !inFence;
                 index++;
                 continue;
@@ -80,6 +89,8 @@ public static class MarkdownRuns
             AppendLine(plain);
             index++;
         }
+        if (inFence && outText.Length > codeStart)
+            runs.Add(new MdRun(codeStart, outText.Length - codeStart, MdRunKind.Code));
         return (outText.ToString(), runs);
     }
 

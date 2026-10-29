@@ -14,7 +14,7 @@ namespace Converse.App;
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
 public sealed record SidebarHeader(string Key, string Title, string Status) : SidebarItem(Key);
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -95,6 +95,12 @@ public sealed partial class MainWindow : Window
     // input. A text selection always pins the viewport: looking around and
     // copy-pasting never yanks.
     private DateTime? _userScrollUtc;
+    private int _unreadUpdates;
+    // Set before our own programmatic ChangeViews so the resulting event is
+    // adopted as a position only — never as user activity. Untagged events
+    // are the user, even mid-rebuild (the control-loss fix); only the
+    // SetText reset to the top is layout noise.
+    private bool _ownScroll;
     private StackPanel? _groupsPanel;
     private string _groupsSignature = "";
     private string _groupsCreateName = "";
@@ -331,7 +337,7 @@ public sealed partial class MainWindow : Window
                     home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true));
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true, ShowGreyClose: true));
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
@@ -701,9 +707,9 @@ public sealed partial class MainWindow : Window
             var scrollerBefore = TranscriptScroller();
             var oldScrollable = scrollerBefore?.ScrollableHeight ?? 0;
             var liveBefore = scrollerBefore?.VerticalOffset ?? 0;
-            // Following means caret AND viewport at the tail (Mac: 70px).
+            // Following means caret AND viewport at the tail (Mac: 200px).
             // A caret-only test drags mid-stream scrollers back down.
-            var nearBottom = scrollerBefore is null || scrollerBefore.ScrollableHeight - liveBefore < 70;
+            var nearBottom = scrollerBefore is null || scrollerBefore.ScrollableHeight - liveBefore < 200;
             var oldHistoryLength = Math.Max(0, oldDocLength - _draftText.Length);
             var selection = Transcript.Document.Selection;
             var wasAtEnd = selection.StartPosition >= oldDocLength && selection.EndPosition >= oldDocLength;
@@ -711,6 +717,10 @@ public sealed partial class MainWindow : Window
             var draftLength = selection.EndPosition > selection.StartPosition
                 ? Math.Min(selection.Length, Math.Max(0, _draftText.Length - (draftRelative ?? 0))) : 0;
 
+            // Crash mitigation (crash12/ dumps): never let RichEdit lay out a
+            // half-formatted document. Everything between SetText and the
+            // matching Apply in finally paints as one update.
+            Transcript.Document.BatchDisplayUpdates();
             Transcript.Document.SetText(TextSetOptions.None, _historyText + _draftText);
             // Locked row pitch: every paragraph is exactly 18pt (= 24px, the
             // gutter TextBlock's LineHeight), so editor rows and gutter rows
@@ -822,6 +832,32 @@ public sealed partial class MainWindow : Window
             if (!followTail && appended && !selectionPinned && _userScrollUtc is { } lastLook
                 && (DateTime.UtcNow - lastLook).TotalSeconds > 5)
                 followTail = true; // idle resume: quiet looking rejoins new arrivals
+            // Unread updates count output that arrives while parked (Mac
+            // parity); typing never rebuilds, so a parked miss is real news.
+            if (followTail) _unreadUpdates = 0;
+            else _unreadUpdates++;
+            // Synchronous restore: SetText parks the viewport at the top,
+            // and the deferred pass below runs after paint — without this,
+            // every streamed token flashes the top before jumping back (the
+            // jerk). ChangeView clamps against the stale layout; the
+            // deferred pass still corrects to the exact target.
+            if (TranscriptScroller() is { } syncScroller)
+            {
+                _ownScroll = true;
+                if (followTail) syncScroller.ChangeView(null, syncScroller.ScrollableHeight, null, true);
+                else
+                {
+                    var liveSync = syncScroller.VerticalOffset;
+                    if (liveSync > 1 && Math.Abs(liveSync - _lastStableOffset) > 1)
+                        _lastStableOffset = liveSync;
+                    else
+                    {
+                        var syncDelta = appended ? 0 : Math.Max(0, syncScroller.ScrollableHeight - oldScrollable);
+                        syncScroller.ChangeView(null, Math.Max(0, _lastStableOffset + syncDelta), null, true);
+                    }
+                }
+            }
+            UpdateJumpButton(followTail);
             var seq = ++_rebuildSeq;
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
             {
@@ -830,7 +866,7 @@ public sealed partial class MainWindow : Window
                 if (followTail)
                 {
                     ScrollTranscriptToEnd();
-                    JumpLatestButton.Visibility = Visibility.Collapsed;
+                    UpdateJumpButton(following: true);
                 }
                 else
                 {
@@ -841,6 +877,7 @@ public sealed partial class MainWindow : Window
                     else
                     {
                         var delta = appended ? 0 : Math.Max(0, scroller.ScrollableHeight - oldScrollable);
+                        _ownScroll = true;
                         scroller.ChangeView(null, Math.Max(0, _lastStableOffset + delta), null, true);
                     }
                 }
@@ -849,7 +886,7 @@ public sealed partial class MainWindow : Window
             });
             UpdateGutter();
         }
-        finally { _rebuilding = false; }
+        finally { try { Transcript.Document.ApplyDisplayUpdates(); } catch { /* already applied */ } _rebuilding = false; }
     }
 
     private int CurrentDocLength()
@@ -883,22 +920,45 @@ public sealed partial class MainWindow : Window
         if (sender is not ScrollViewer scroller) return;
         if (_layout.ShowLineNumbers)
             GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
-        // Track the settled position only when no restore is outstanding:
-        // a SetText reset firing late must never clobber the target. Settled
-        // input counts as looking around (idle-resume clock + jump button).
-        if (_rebuildSeq == _appliedSeq)
-        {
-            _lastStableOffset = scroller.VerticalOffset;
-            _userScrollUtc = DateTime.UtcNow;
-            JumpLatestButton.Visibility = scroller.VerticalOffset < scroller.ScrollableHeight - 70
-                ? Visibility.Visible : Visibility.Collapsed;
-        }
+        var offset = scroller.VerticalOffset;
+        // Our own restore: adopt the position, never the clock. Anything
+        // else is the user, even mid-rebuild — the old settled-only guard
+        // froze the offset through rebuild storms and every restore snapped
+        // back to it, making the viewport unscrollable while streaming.
+        // Only the SetText reset to the top is layout noise, not the user.
+        if (_ownScroll) { _ownScroll = false; _lastStableOffset = offset; return; }
+        if (_rebuilding && offset < 1) return;
+        _lastStableOffset = offset;
+        _userScrollUtc = DateTime.UtcNow;
+        UpdateJumpButton(following: offset >= scroller.ScrollableHeight - 200);
+    }
+
+    private void UpdateJumpButton(bool following)
+    {
+        JumpLatestButton.Content = _unreadUpdates == 0
+            ? "↓ Latest" : $"↓ Latest ({_unreadUpdates} new)";
+        var scrollable = TranscriptScroller()?.ScrollableHeight ?? 0;
+        JumpLatestButton.Visibility = !following && scrollable > 200
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnCopyClick(object sender, RoutedEventArgs e)
+    {
+        try { Transcript.Document.Selection.Copy(); } catch { /* clipboard busy: keyboard copy still works */ }
+        Transcript.Focus(FocusState.Programmatic);
+    }
+
+    private void OnSelectAllClick(object sender, RoutedEventArgs e)
+    {
+        Transcript.Document.Selection.SetRange(0, CurrentDocLength());
+        Transcript.Focus(FocusState.Programmatic);
     }
 
     private void OnJumpLatestClick(object sender, RoutedEventArgs e)
     {
         _userScrollUtc = DateTime.UtcNow;
-        JumpLatestButton.Visibility = Visibility.Collapsed;
+        _unreadUpdates = 0;
+        UpdateJumpButton(following: true);
         ScrollTranscriptToEnd();
         Transcript.Focus(FocusState.Programmatic);
     }
@@ -906,7 +966,9 @@ public sealed partial class MainWindow : Window
     private void ScrollTranscriptToEnd()
     {
         var scroller = TranscriptScroller();
-        scroller?.ChangeView(null, scroller.ScrollableHeight, null);
+        if (scroller is null) return;
+        _ownScroll = true;
+        scroller.ChangeView(null, scroller.ScrollableHeight, null);
     }
 
     // Line-number gutter: one number per paragraph, prompt paragraphs (user
@@ -1021,7 +1083,8 @@ public sealed partial class MainWindow : Window
         _draftText = "";
         _lastSentText = null;
         _userScrollUtc = null;
-        JumpLatestButton.Visibility = Visibility.Collapsed;
+        _unreadUpdates = 0;
+        UpdateJumpButton(following: true);
         _localCap = 200;
         if (session?.LocalSessionID is { } localId)
             _draftText = Breaks(_store.Sessions.FirstOrDefault(s => s.Id == localId)?.Draft ?? "");
@@ -1304,6 +1367,12 @@ public sealed partial class MainWindow : Window
     private StackPanel BuildPendingPanel(List<(Guid Id, string Text)> pending, bool paused, ChatSession? local, string? gid)
     {
         var panel = new StackPanel { Spacing = 4 };
+        // Mac parity: one outstanding remote queue intent disables the whole
+        // queue panel (double presses reuse it via the send-side guard), so
+        // a blocked press can never go silent. Local repeats stay enabled.
+        var queueRecord = gid is not null && local is null ? _devices.QueueCommand(gid) : null;
+        var queueBusy = queueRecord is not null
+            && queueRecord.Outcome is "pending" or "accepted" or "uncertain";
         if (pending.Count == 0)
         {
             // Paused with nothing held: a slim Resume row instead of a
@@ -1326,6 +1395,7 @@ public sealed partial class MainWindow : Window
                 }
                 Transcript.Focus(FocusState.Programmatic);
             };
+            resume.IsEnabled = !queueBusy;
             slim.Children.Add(resume);
             panel.Children.Add(slim);
             return panel;
@@ -1337,7 +1407,7 @@ public sealed partial class MainWindow : Window
             FontSize = 12,
             VerticalAlignment = VerticalAlignment.Center,
         });
-        var pause = new Button { Content = paused ? "Resume queue" : "Pause queue", FontSize = 12 };
+        var pause = new Button { Content = paused ? "Resume queue" : "Pause queue", FontSize = 12, IsEnabled = !queueBusy };
         pause.Click += (_, _) =>
         {
             if (local is not null)
@@ -1355,7 +1425,7 @@ public sealed partial class MainWindow : Window
             Transcript.Focus(FocusState.Programmatic);
         };
         controls.Children.Add(pause);
-        var clear = new Button { Content = "Clear queue", FontSize = 12 };
+        var clear = new Button { Content = "Clear queue", FontSize = 12, IsEnabled = !queueBusy };
         clear.Click += (_, _) =>
         {
             if (local is not null) { local.Pending.Clear(); _store.Save(); Refresh(); }
@@ -1381,7 +1451,13 @@ public sealed partial class MainWindow : Window
             };
             Grid.SetColumn(preview, 0);
             row.Children.Add(preview);
-            var inject = new Button { Content = "Inject now", FontSize = 12 };
+            var injectingThis = queueBusy && queueRecord?.Payload.Action == "inject" && queueRecord.Payload.PendingID == id;
+            var inject = new Button
+            {
+                Content = injectingThis ? "Injecting…" : "Inject now",
+                FontSize = 12,
+                IsEnabled = !queueBusy,
+            };
             inject.Click += (_, _) =>
             {
                 // Instant, unmissable feedback: interrupting a busy turn
@@ -1390,11 +1466,12 @@ public sealed partial class MainWindow : Window
                 // bug. Repeat presses while stopping are harmless.
                 if (local is not null)
                 {
-                    _notice = local.Busy
-                        ? "Interrupting the current turn — the queued prompt runs next."
-                        : "Queued prompt moved up — sending now.";
+                    var wasBusy = local.Busy;
+                    var failure = _store.InjectPending(local, id);
+                    _notice = failure
+                        ?? (wasBusy ? "Interrupting the current turn — the queued prompt runs next."
+                            : "Queued prompt moved up — sending now.");
                     _noticeUtc = DateTime.UtcNow;
-                    _store.InjectPending(local, id);
                     Refresh();
                 }
                 else if (gid is not null)

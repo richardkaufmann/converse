@@ -88,6 +88,7 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] public bool AnsweringRequest { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal MuseMspClient? Muse { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal Dictionary<string, Guid> MuseItems { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore] internal DateTime LastStreamSaveUtc { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal TaskCompletionSource<(string Status, string? Notice)>? MuseTurnDone { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal Process? RunningProcess { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal CancellationTokenSource? TurnCancellation { get; set; }
@@ -362,10 +363,14 @@ public sealed class SessionStore
     // Mac injectPending parity: a named prompt moves to the front; with no
     // id the whole queue merges into one prompt. A busy session is
     // interrupted and the prompt runs when the old turn winds down (never
-    // alongside it), via ResumeAfterInterrupt.
-    public void InjectPending(ChatSession session, Guid? id = null)
+    // alongside it), via ResumeAfterInterrupt. Returns null when applied,
+    // otherwise a human-readable reason (Mac refused() parity) so both the
+    // local banner and remote failed-acks report honestly instead of going
+    // silent — the mash-three-times bug.
+    public string? InjectPending(ChatSession session, Guid? id = null)
     {
-        if (session.Pending.Count == 0) return;
+        if (session.Pending.Count == 0)
+            return "Inject not applied: the queue is already empty. Nothing was sent.";
         if (id is null && session.Pending.Count > 1)
         {
             var merged = string.Join("\n\n", session.Pending.Select(p => p.Text));
@@ -376,13 +381,15 @@ public sealed class SessionStore
         else if (id is not null)
         {
             var target = session.Pending.FirstOrDefault(p => p.Id == id);
-            if (target is null) return;
+            if (target is null)
+                return "Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.";
             session.Pending.Remove(target);
             session.Pending.Insert(0, target);
         }
         session.QueuePaused = false;
         if (session.Busy) { session.ResumeAfterInterrupt = true; Stop(session); }
         else RunNext(session);
+        return null;
     }
 
     private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images)
@@ -708,16 +715,50 @@ public sealed class SessionStore
                     // Keep only our display separators when the content is
                     // otherwise byte-for-byte the same; genuine corrections
                     // and error results still replace the accumulated text.
-                    // (Unstreamed later blocks are rescued above, so by the
-                    // time a snapshot arrives the accumulation is complete and
-                    // a subset snapshot keeps it via the contains check below.)
+                    // A snapshot that drops an earlier streamed block (text
+                    // -> tool -> text where the result omits the first block,
+                    // round-12 item 3c) must not delete streamed text: join on
+                    // the longest suffix/prefix overlap instead. Duplication
+                    // beats loss; exact and subset snapshots keep the rules
+                    // below so normal turns are byte-identical.
                     var accumulated = response.Text;
                     var unseparated = StripSeparators(session, accumulated);
-                    text = !session.TurnFailed && session.ClaudeStreamSeparators.Count > 0 && unseparated == result
-                        ? accumulated
-                        : !session.TurnFailed && accumulated.Contains(result, StringComparison.Ordinal) && result.Length > 0
-                            ? accumulated
-                            : result;
+                    if (!session.TurnFailed && result.Length > 0)
+                    {
+                        if ((session.ClaudeStreamSeparators.Count > 0 && unseparated == result)
+                            || accumulated.Contains(result, StringComparison.Ordinal))
+                        {
+                            text = accumulated;
+                        }
+                        else if (unseparated.Length > 0 && result.Contains(unseparated, StringComparison.Ordinal))
+                        {
+                            text = result;
+                        }
+                        else if (accumulated.Length > 0)
+                        {
+                            var join = 0;
+                            var max = Math.Min(unseparated.Length, result.Length);
+                            for (var k = max; k > 0; k--)
+                                if (unseparated.EndsWith(result[..k], StringComparison.Ordinal)) { join = k; break; }
+                            // No shared text at all: a genuinely new result
+                            // still replaces (pinned by test). Any overlap
+                            // joins so streamed blocks survive.
+                            if (join == 0) text = result;
+                            else
+                            {
+                                var tail = VisibleText(result[join..]);
+                                text = tail.Length == 0 ? accumulated : accumulated + "\n\n" + tail;
+                            }
+                        }
+                        else
+                        {
+                            text = result;
+                        }
+                    }
+                    else
+                    {
+                        text = result;
+                    }
                     replace = true;
                 }
             }
@@ -748,6 +789,15 @@ public sealed class SessionStore
         if (session.Entry.Engine == "claude" && startsTextBlock && !replace && separator.Length > 0)
             session.ClaudeStreamSeparators.Add((response.Text.Length, separator.Length));
         response.Text = replace ? visible : response.Text + separator + visible;
+        // Crash hardening: the turn-end Save never runs if the app dies
+        // mid-stream (round-12 AccessViolation left stored replies empty).
+        // Persist streamed text at most every 2s; AtomicJson serializes under
+        // a lock, so the runner thread cannot corrupt the UI thread's save.
+        if ((DateTime.UtcNow - session.LastStreamSaveUtc).TotalSeconds >= 2)
+        {
+            session.LastStreamSaveUtc = DateTime.UtcNow;
+            Save();
+        }
     }
 
     private static string? GetString(JsonElement obj, string name) =>
