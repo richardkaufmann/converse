@@ -175,7 +175,7 @@ struct SidebarSession: View {
                 if session.agent != nil {
                     Button("Agent Setup…") { AgentWindows.shared.setup(session) }
                     Button("Show scoreboard") { AgentWindows.shared.widget(session) }
-                    Button("Run once") { Store.shared.enqueueSwitchboard(session, text: "[Manual agent run] Check progress and refresh the scoreboard.") }
+                    Button("Run once") { Store.shared.queueAgentRun(session) }
                     Button("Clear attention") { session.agent?.attention = ""; session.status = "Ready"; Store.shared.save() }
                 } else { Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy) }
                 ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }

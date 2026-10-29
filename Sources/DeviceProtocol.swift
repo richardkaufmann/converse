@@ -119,6 +119,7 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var leaseHolder: String? = nil
     var leaseEpoch: UInt64? = nil
     var accountName: String? = nil
+    var messagingEnabled: Bool? = nil
     var participantKind: String? = nil
     var attention: String? = nil
 }
@@ -249,4 +250,77 @@ struct GroupJoinReview: Codable, Identifiable {
 struct GroupDeviceLabel: Identifiable {
     var id: String
     var name: String
+}
+
+// Home-addressed control. These messages never acquire a display lease.
+struct DeviceTellPayload: Codable, Equatable {
+    var groupID: String
+    var source: String
+    var sourceTitle: String
+    var target: String
+    var text: String
+    var hop: Int
+    var urgent: Bool = false
+}
+struct GroupTellReceipt: Codable {
+    var id: UUID
+    var origin: String
+    var payloadHash: String
+}
+
+struct DeviceAgentSettings: Codable, Equatable {
+    var objective: String
+    var repository: String
+    var model: String
+    var watched: [String]
+    var intervalSeconds: Double
+    var remainingRuns: Int
+    var enabled: Bool
+    var generateArt: Bool
+    var speak: Bool
+    var discord: Bool
+    var fileTriggers: Bool = false
+    var revision: UInt64? = nil
+}
+struct DeviceParticipantRequest: Codable, Equatable {
+    var groupID: String
+    var action: String
+    var target: String? = nil
+    var title: String? = nil
+    var settings: DeviceAgentSettings? = nil
+}
+struct DeviceParticipantEvidence: Codable {
+    var globalID: String
+    var title: String
+    var busy: Bool
+    var status: String
+    var messages: [DeviceWireMessage]
+}
+struct DeviceParticipantResponse: Codable {
+    var groupID: String
+    var outcome: String
+    var detail: String
+    var target: String? = nil
+    var evidence: DeviceParticipantEvidence? = nil
+    var settings: DeviceAgentSettings? = nil
+}
+struct ParticipantMutationReceipt: Codable {
+    var id: UUID
+    var origin: String
+    var payloadHash: String
+    var response: DeviceParticipantResponse
+}
+
+enum DeviceCanonical {
+    static func encode<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(value)
+    }
+}
+struct DeviceParticipantIntent: Codable, Identifiable {
+    var id: UUID
+    var home: String
+    var request: DeviceParticipantRequest
+    var outcome: String = "pending"
+    var response: DeviceParticipantResponse? = nil
 }

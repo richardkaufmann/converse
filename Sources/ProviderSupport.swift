@@ -14,8 +14,16 @@ struct AccountProfile: Codable, Identifiable, Equatable {
                 AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude", useDefaultStore: true)]
     }
 }
+struct GroupMessageOrigin: Codable { var group: String; var home: String }
 struct PendingPrompt: Codable, Identifiable {
     var switchboardHop: Int? = nil
+    var originGroupID: String? = nil
+    var originHomeID: String? = nil
+    var components: [PendingPrompt]? = nil
+    var originParticipants: [GroupMessageOrigin]? = nil
+    var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
+    var agentRunReserved: Bool? = nil
+    var autonomous: Bool? = nil
     var id = UUID()
     var text: String
     var images: [String]

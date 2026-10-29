@@ -1,9 +1,12 @@
 # Agent plan: sessions with initiative
 
-Status: approved design and implementation plan. The current home-side prototype
-has bounded loops, local watched-session messaging, attention state and scoreboard
-art. Group-wide routing and creation described below are planned work, not a claim
-that the prototype already implements them.
+Status: approved design, with a Mac-only implementation. The Mac
+harness now contains home-run bounded loops, selected local/group session evidence
+and messaging, remote agent creation/configuration, file events, attention and
+scoreboard art. Validation and release status belong to the release notes. Windows
+and iPad work is explicitly deferred. Remote creation of ordinary CLI sessions
+remains future work; this change adds agent creation only. The original broader
+cross-platform design follows below.
 
 ## Sessions, creation and groups
 

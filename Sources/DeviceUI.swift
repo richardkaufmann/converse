@@ -175,6 +175,7 @@ struct RemotePane: View {
                 }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
+            if transcript?.engine == "agent" { Button("Agent Setup…") { AgentWindows.shared.remoteSetup(globalID) }.padding(6).disabled(offline) }
             if let widget = transcript?.agentWidget {
                 DisclosureGroup("Agent scoreboard") {
                     VStack(alignment: .leading, spacing: 8) {

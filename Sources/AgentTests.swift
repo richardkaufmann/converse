@@ -29,7 +29,7 @@ import Foundation
         catch { check(secretWrites == 1 && secretDeletes == 1, "Conflicting credential replacement/removal changes nothing") }
     } catch { check(false, "Credential edit policy: " + error.localizedDescription) }
     let runtime = AgentRuntime()
-    runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id, text: "Please review"), .init(to: blocked.id, text: "Forbidden")]), from: agent, store: store)
+    runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id.uuidString, text: "Please review"), .init(to: blocked.id.uuidString, text: "Forbidden")]), from: agent, store: store)
     check(recipient.pending.count == 1 && blocked.pending.isEmpty && recipient.pending[0].text.contains(agent.id.uuidString), "Agent messages are visibly attributed and restricted to selected sessions")
     agent.switchboardTurnStart = agent.messages.count
     agent.messages.append(Message(role: "assistant", text: "```converse\n{\"command\":\"tell\",\"to\":\"" + blocked.id.uuidString + "\",\"text\":\"Forbidden through alternate protocol\"}\n```"))
@@ -47,6 +47,40 @@ import Foundation
     let reloaded = Store(folder: root).sessions.first { $0.id == agent.id }
     check(reloaded?.agent?.watchedSessions == [recipient.id] && reloaded?.draft == "User's unfinished thought", "Agent settings and editable draft survive archive reload")
 
+    let stimulated = store.createAgent(title: "External stimulus fixture")
+    stimulated.agent?.fileTriggers = true; stimulated.agent?.remainingRuns = 1
+    stimulated.draft = "A separate human draft"
+    var starts = 0
+    store.startAgentRun = { session, _ in starts += 1; session.busy = true }
+    let inbox = root.appendingPathComponent("Agents/" + stimulated.id.uuidString + "/Inbox")
+    try! FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+    let event = AgentRuntime.FileEvent(id: UUID(), text: "A test result arrived; ask for evidence.")
+    let eventFile = inbox.appendingPathComponent("event.json")
+    try! JSONEncoder().encode(event).write(to: eventFile)
+    runtime.ingestFileEvents(store: store)
+    check(stimulated.pending.count == 1 && stimulated.agent?.processedEvents == [event.id] && !FileManager.default.fileExists(atPath: eventFile.path), "Opt-in file events persist provenance and deduplication before consuming the input file")
+    store.runNext(stimulated)
+    check(starts == 1 && stimulated.agent?.remainingRuns == 0 && stimulated.draft == "A separate human draft", "External stimuli reserve a persisted run budget before starting and preserve the human draft")
+    stimulated.busy = false
+    try! JSONEncoder().encode(event).write(to: eventFile)
+    runtime.ingestFileEvents(store: store)
+    check(stimulated.pending.isEmpty && starts == 1, "Repeated external event IDs do not enqueue or start duplicate runs")
+    store.enqueueSwitchboard(stimulated, text: "Another agent asks for work", hop: 1)
+    store.runNext(stimulated)
+    check(stimulated.queuePaused && stimulated.pending.count == 1 && starts == 1 && stimulated.agent?.attention.contains("budget exhausted") == true, "Incoming agent tells cannot bypass the autonomous turn allowance")
+    stimulated.agent?.fileTriggers = false; stimulated.pending = []
+    store.startAgentRun = nil
+    let migrated = AgentConfig(watchedSessions: [recipient.id])
+    let localHome = String(repeating: "a", count: 64), otherHome = String(repeating: "b", count: 64)
+    check(migrated.allows(global: DeviceGlobalID(home: localHome, session: recipient.id).string, home: localHome)
+        && !migrated.allows(global: DeviceGlobalID(home: otherHome, session: recipient.id).string, home: localHome), "Legacy agent scope migrates only within its original home, never a same-UUID remote session")
+
+    var revisionFixture = AgentConfig()
+    let staleSettings = revisionFixture.wire(home: localHome)
+    revisionFixture.settingsChanged(); revisionFixture.remainingRuns -= 1
+    do { try revisionFixture.apply(staleSettings); check(false, "Stale settings must reject") }
+    catch { check(revisionFixture.remainingRuns == 19, "Saving a stale setup form cannot restore an autonomous run already spent") }
+
     // Real engine path, fake HTTP. No credentials, external requests or billable calls.
     runtime.keyReader = { _ in "isolated-test-key" }
     var requests: [URLRequest] = []
@@ -57,7 +91,7 @@ import Foundation
         if path != "/v1/responses" { agent.agent?.watchedSessions = [] } // Revoke scope while repository requests are in flight.
         var object: Any = [:]
         if path == "/v1/responses" {
-            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[]}"]]]]]
+            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[],\"memory\":\"Keep release acceptance criteria\"}"]]]]]
         } else if path.contains("search/issues") { object = ["total_count": 0, "incomplete_results": false] }
         else if path.hasSuffix("/releases") || path.hasSuffix("/comments") { object = [] }
         else if path.hasSuffix("/views") { object = ["uniques": 7] }
@@ -73,6 +107,7 @@ import Foundation
     check(!agent.busy && agent.messages.contains { $0.text == "Measured progress" } && agent.agent?.snapshot?.stars == 12 && agent.agent?.snapshot?.visitors14d == 7 && agent.needsApproval, "Direct API agent completes a measured report and raises yellow attention")
     check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its scoreboard after the model response")
     let archive = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
+    check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.workingMemory == "Keep release acceptance criteria", "Agent's learned human criteria survive archive reload beyond the recent conversation window")
     check(!archive.contains("isolated-test-key") && !AgentWidgetExport.html(agent).contains("isolated-test-key"), "Agent credentials never enter persisted sessions or widget exports")
     let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
     check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
@@ -88,6 +123,14 @@ import Foundation
     let artDeadline = Date().addingTimeInterval(3)
     while !artDone && Date() < artDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(art != nil && NSBitmapImageRep(data: art!) != nil, "Muse Image response bytes become a validated portable PNG")
+    runtime.api.request = { request in
+        let object: [String: Any] = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "Not a structured agent action"]]]]]
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    agent.busy = true; let malformedID = UUID(); agent.messages.append(Message(id: malformedID, role: "assistant", text: "")); runtime.run(agent, store: store, responseID: malformedID)
+    let malformedDeadline = Date().addingTimeInterval(8)
+    while agent.busy && Date() < malformedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!agent.busy && agent.agent?.enabled == false && agent.agent?.attention.contains("invalid action format") == true, "Malformed completed agent output pauses the loop without applying actions")
     runtime.api.request = { request in
         (Data("{\"output\":[],\"status\":\"incomplete\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }

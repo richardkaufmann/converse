@@ -3,9 +3,19 @@ import Foundation
 import Security
 
 struct AgentConfig: Codable, Equatable {
+    var settingsRevision: UInt64? = nil
+    mutating func settingsChanged() { settingsRevision = min((settingsRevision ?? 0), UInt64.max - 1) + 1 }
     var objective = "Monitor this project. Ask what success means, compare actual progress with those goals, distinguish verified results from claims, and flag blockers."
     var repository = "richardkaufmann/converse"
     var watchedSessions: [UUID] = []
+    var watchedParticipants: [String]? = nil
+    func allows(local id: UUID, home: String?) -> Bool {
+        watchedSessions.contains(id) || home.map { watchedParticipants?.contains(DeviceGlobalID(home: $0, session: id).string) == true } == true
+    }
+    func allows(global: String, home: String?) -> Bool {
+        guard let id = DeviceGlobalID(global) else { return false }
+        return watchedParticipants?.contains(id.string) == true || (id.home == home && watchedSessions.contains(id.session))
+    }
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
     var remainingRuns = 20
@@ -13,11 +23,14 @@ struct AgentConfig: Codable, Equatable {
     var nextRunAt: Date? = nil
     var attention = ""
     var generateArt = true
+    var fileTriggers: Bool? = nil
+    var processedEvents: [UUID]? = nil
     var speak = false
     var discord = false
     var lastArtMood: String? = nil
     var lastArtAt: Date? = nil
     var snapshot: AgentRepoSnapshot? = nil
+    var workingMemory: String? = nil
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
     var artPath: String? = nil
     var lastRunAt: Date? = nil
@@ -26,6 +39,7 @@ struct AgentConfig: Codable, Equatable {
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now }
     mutating func reserveRun(at now: Date) -> Bool {
         guard due(at: now) else { return false }
+        settingsChanged()
         remainingRuns -= 1; nextRunAt = now.addingTimeInterval(max(60, intervalSeconds))
         if remainingRuns == 0 { enabled = false }
         return true
@@ -102,11 +116,13 @@ enum AgentFailure: LocalizedError {
 }
 
 struct AgentReply: Decodable {
-    struct Tell: Decodable { var to: UUID; var text: String }
+    struct Tell: Decodable { var to: String; var text: String }
     var reply: String
     var attention: String?
     var artPrompt: String?
     var tell: [Tell]?
+    var memory: String?
+    var speechIntent: String?
     var notifyDiscord: String?
     static func decode(_ text: String) -> AgentReply? {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -185,5 +201,30 @@ final class AgentAPI {
             catch { snapshot.notes.append("Visitors require GitHub repository traffic access.") }
         } else { snapshot.notes.append("Add a GitHub token in Agent Setup for private traffic metrics and higher rate limits.") }
         return snapshot
+    }
+}
+
+extension AgentConfig {
+    func wire(home: String) -> DeviceAgentSettings {
+        DeviceAgentSettings(objective: objective, repository: repository, model: model,
+            watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
+            intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, enabled: enabled,
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0)
+    }
+    mutating func apply(_ wire: DeviceAgentSettings) throws {
+        guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
+            throw AgentFailure.message("Agent settings or run budget changed. Reload settings before saving.")
+        }
+        guard AgentRepoSnapshot.validRepository(wire.repository), !wire.model.isEmpty, wire.model.utf8.count <= 200,
+              wire.objective.utf8.count <= 16000, wire.watched.count <= 64, wire.watched.allSatisfy({ DeviceGlobalID($0) != nil }),
+              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns) else {
+            throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
+        }
+        settingsChanged()
+        objective = wire.objective; repository = wire.repository; model = wire.model
+        watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
+        intervalSeconds = wire.intervalSeconds; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
+        generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
+        nextRunAt = Date().addingTimeInterval(intervalSeconds)
     }
 }

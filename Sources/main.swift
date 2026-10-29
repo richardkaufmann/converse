@@ -136,7 +136,7 @@ final class Session: ObservableObject, Identifiable {
     }
     var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent) }
 }
-struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil }
+struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
     static let shared = Store()
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
@@ -146,10 +146,15 @@ final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     let folder: URL
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
+    var startAgentRun: ((Session, UUID) -> Void)?
     let responseImageLoader = ResponseImageLoader()
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    var participantReceipts: [ParticipantMutationReceipt] = []
+    var groupTellReceipts: [GroupTellReceipt] = []
+    var switchboardService: DeviceSyncService?
+    var participantService: DeviceSyncService { switchboardService ?? .shared }
     var pendingSave: DispatchWorkItem?
     init(folder: URL? = nil) {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
@@ -158,6 +163,8 @@ final class Store: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
             let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: self.folder.appendingPathComponent("sessions.json")))
+            participantReceipts = archive.participantReceipts ?? []
+            groupTellReceipts = archive.groupTellReceipts ?? []
             setupCompleted = archive.setupCompleted ?? true
             entries = archive.entries; sessions = archive.sessions.map(Session.init)
             accounts = archive.accounts ?? accounts
@@ -198,19 +205,19 @@ final class Store: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
     func saveChecked() throws {
-        let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted))
+        let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts))
         try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
     }
     func save() {
         do { try saveChecked() }
         catch { NSLog("Save failed: %@", error.localizedDescription) }
     }
-    func create(_ entry: Entry) -> Session {
+    func create(_ entry: Entry, persist: Bool = true) -> Session {
         var entry = entry
         if entry.accountDirectory == nil, let profile = accounts.first(where: { $0.id == (entry.accountID ?? entry.engine + "-default") }) {
             entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         }
-        let s = Session(entry: entry); sessions.append(s); attachIdentity(s); save(); return s
+        let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
         s.queuePaused = true; s.resumeAfterInterrupt = false
@@ -269,6 +276,7 @@ final class Store: ObservableObject {
             }
             saveSoon(); return detail
         }
+        sanitizeGroupQueue(s)
         if s.changingSetting { return refused("Inject not applied: a session setting is still changing. Wait for its result, then try again.") }
         if s.pending.isEmpty { return refused("Inject not applied: the queue is already empty. Nothing was sent.") }
         if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID != nil {
@@ -285,7 +293,7 @@ final class Store: ObservableObject {
             s.pending.insert(prompt, at: 0)
         } else {
             let prompts = s.pending
-            s.pending = [PendingPrompt(switchboardHop: prompts.compactMap(\.switchboardHop).max(), text: prompts.map(\.text).joined(separator: "\n\n"), images: prompts.flatMap(\.images))]
+            s.pending = [PendingPrompt(switchboardHop: prompts.compactMap(\.switchboardHop).max(), components: prompts.flatMap { $0.components ?? [$0] }, originParticipants: prompts.flatMap { $0.groupOrigins }, agentRunReserved: prompts.contains { $0.agentRunReserved == true }, autonomous: prompts.contains { $0.autonomous == true || $0.agentRunReserved == true }, text: prompts.map(\.text).joined(separator: "\n\n"), images: prompts.flatMap(\.images))]
         }
         s.queuePaused = false
         s.injectionTargetID = s.pending.first?.id
@@ -296,12 +304,49 @@ final class Store: ObservableObject {
         save()
         return nil
     }
+    func sanitizeGroupQueue(_ session: Session) {
+        var discarded = false
+        func allowed(_ prompt: PendingPrompt) -> Bool { !prompt.groupOrigins.contains { !participantService.acceptsParticipant(home: $0.home, groupID: $0.group) } }
+        session.pending = session.pending.compactMap { prompt in
+            guard !allowed(prompt) else { return prompt }
+            discarded = true
+            // Inject all keeps the constituent inputs so revoking one origin
+            // never discards unrelated human input combined with it.
+            guard let components = prompt.components else { return nil }
+            let valid = components.filter(allowed)
+            guard !valid.isEmpty else { return nil }
+            var repaired = prompt
+            repaired.components = valid; repaired.originGroupID = nil; repaired.originHomeID = nil
+            repaired.originParticipants = valid.flatMap { $0.groupOrigins }
+            repaired.switchboardHop = valid.compactMap(\.switchboardHop).max()
+            repaired.agentRunReserved = valid.contains { $0.agentRunReserved == true }
+            repaired.autonomous = valid.contains { $0.autonomous == true }
+            repaired.text = valid.map(\.text).joined(separator: "\n\n"); repaired.images = valid.flatMap(\.images)
+            return repaired
+        }
+        if discarded {
+            session.messages.append(Message(role: "notice", text: "Switchboard: queued group message discarded because its sender is no longer in this group. Unrelated local input is preserved.")); save()
+        }
+    }
     func runNext(_ s: Session) {
+        sanitizeGroupQueue(s)
         if !s.busy && s.pending.isEmpty && s.injectionTargetID != nil {
             s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
             s.injectionTargetID = nil
         }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
+        if var config = s.agent, let next = s.pending.first,
+           ((next.switchboardHop ?? 0) > 0 || next.autonomous == true), next.agentRunReserved != true {
+            guard config.remainingRuns > 0 else {
+                s.queuePaused = true; s.agent?.attention = "Automatic run budget exhausted. Add runs in Agent Setup, then resume the queue."; save(); return
+            }
+            let previous = s.agent
+            config.settingsChanged(); config.remainingRuns -= 1
+            if config.remainingRuns == 0 { config.enabled = false }
+            s.agent = config; s.pending[0].agentRunReserved = true
+            do { try saveChecked() }
+            catch { s.agent = previous; s.pending[0].agentRunReserved = false; s.queuePaused = true; s.agent?.attention = "Could not save run budget. Agent paused."; return }
+        }
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
@@ -349,7 +394,7 @@ final class Store: ObservableObject {
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
-        if s.agent != nil { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID) }; save(); return }
+        if s.agent != nil { if let startAgentRun { startAgentRun(s, responseID) } else { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID) } }; save(); return }
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
@@ -1764,9 +1809,13 @@ struct RootView: View {
                                 }
                             }
                         }
+                        ForEach(store.sessions.filter { $0.agent != nil }) { session in
+                            SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
+                        }
                         DeviceSidebarSection(workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
                     }.padding(.top, 6)
                 }
+                Button("New agent…") { AgentWindows.shared.create() }.buttonStyle(.plain).padding(.vertical, 4)
                 Button { state.deviceConnect = true } label: {
                     HStack { Text("Converse Groups"); Spacer(); if !devices.groupRequests.isEmpty { Text(String(devices.groupRequests.count)).bold().foregroundStyle(.orange) } }
                 }.buttonStyle(.plain).padding(.vertical, 6)
@@ -1919,7 +1968,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
-        sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
@@ -1997,6 +2046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Workspace.shared.assign(session.id, to: state.id, pane: pane)
         if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }
     }
+    @objc func newAgent() { MainActor.assumeIsolated { AgentWindows.shared.create() } }
     @objc func restoreDeletedConversation() {
         guard let session = Store.shared.restoreDeleted() else { return }
         if windows.isEmpty { newWindow() }

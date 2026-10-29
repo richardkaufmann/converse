@@ -103,6 +103,10 @@ final class DeviceSyncService: ObservableObject {
     @Published var localCodeNote = ""
 
     // Platform adapters keep the reviewed transport identical on Mac and iPad.
+    #if os(macOS)
+    var participantStore: Store { storeOverride ?? .shared }
+    var storeOverride: Store?
+    #endif
     var deviceNameOverride: String?
     var isPlaced: ((String) -> Bool)?
     var onRemotePark: ((String) -> Void)?
@@ -137,6 +141,9 @@ final class DeviceSyncService: ObservableObject {
     private var blobPaths: [String: String] = [:]
     private var downloadBuffers: [String: Data] = [:]
     private var imageHashCache: [String: String] = [:]
+    @Published var participantIntents: [DeviceParticipantIntent] = []
+    private var participantReplies: [UUID: (home: String, group: String, finish: (DeviceParticipantResponse) -> Void)] = [:]
+    private var pendingTells: [UUID: (source: UUID, home: String, group: String)] = [:]
     private var pendingTakes: [String: Date] = [:]
     private var leaseBoots: [String: UInt64] = [:]
     private var pendingUploads: Set<String> = []
@@ -160,6 +167,7 @@ final class DeviceSyncService: ObservableObject {
         stateStore = try DeviceSyncStateStore(folder: folder)
         draftStore = try DeviceDraftStore(folder: folder)
         outboxStore = try DeviceOutboxStore(folder: folder)
+        try loadParticipantIntents()
         boot = stateStore?.beginBoot() ?? 0
         let store = stateStore
         leases = DeviceLeaseManager(initialEpochs: store?.loadedEpochs ?? [:]) { store?.saveEpochs($0) == true }
@@ -193,6 +201,7 @@ final class DeviceSyncService: ObservableObject {
             draftStore = try DeviceDraftStore(folder: folder)
             outboxStore = try DeviceOutboxStore(folder: folder)
             outbox = outboxStore?.records ?? []
+            try loadParticipantIntents()
             boot = stateStore?.beginBoot() ?? 0
             let store = stateStore
             leases = DeviceLeaseManager(initialEpochs: store?.loadedEpochs ?? [:]) { store?.saveEpochs($0) == true }
@@ -322,6 +331,9 @@ final class DeviceSyncService: ObservableObject {
     private func helloPayload(_ peer: DevicePeer) -> Data {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
+        #if os(macOS)
+        hello.capabilities.append(contentsOf: ["agent-host-v1", "participant-control-v1"])
+        #endif
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
@@ -676,13 +688,13 @@ extension DeviceSyncService {
     private func sidebarPayload() -> DeviceSidebarPayload {
         let home = identity?.deviceID ?? ""
         #if os(macOS)
-        let rows = Store.shared.sessions.map { session in
+        let rows = participantStore.sessions.map { session in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: session.id).string, sessionID: session.id,
                              title: session.title, assistant: session.entry.name, engine: session.entry.engine,
                              model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
                              status: session.status, busy: session.busy, queued: session.pending.count, queuePaused: session.queuePaused,
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
-                             accountName: session.entry.accountName, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention)
+                             accountName: session.entry.accountName, messagingEnabled: session.switchboardEnabled, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention)
         }
         #else
         let rows: [DeviceSidebarRow] = []
@@ -846,6 +858,10 @@ extension DeviceSyncService {
             guard !peer.controlOnly, currentGroup != nil else { return }
         }
         if locallyRemoved && !["fabric.members", "ping", "pong"].contains(envelope.kind) { return }
+        #if os(macOS)
+        if handleParticipantTell(peer, envelope) { return }
+        #endif
+        if handleParticipantControl(peer, envelope) { return }
         switch envelope.kind {
         case "fabric.members":
             guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
@@ -1519,6 +1535,233 @@ extension DeviceSyncService {
             if let review = try? JSONDecoder().decode(GroupJoinReview.self, from: data) { approveSponsored(review) }
         default: break
         }
+        return true
+    }
+}
+
+// MARK: Group participant messaging (independent of display leases)
+extension DeviceSyncService {
+    var localDeviceID: String? { identity?.deviceID }
+    func acceptsParticipant(home: String, groupID: String) -> Bool {
+        guard !locallyRemoved, currentGroup?.id == groupID else { return false }
+        if home == identity?.deviceID { return true }
+        return trusted.contains { $0.deviceID == home && $0.groupID == groupID }
+    }
+    var participantHomes: [RemoteHomeState] {
+        guard let group = currentGroup?.id else { return [] }
+        return homes.values.filter { acceptsParticipant(home: $0.deviceID, groupID: group) }.sorted { $0.deviceID < $1.deviceID }
+    }
+    func participantOnline(_ home: String) -> Bool {
+        guard let peer = peerForHome(home) else { return false }
+        return peer.hello?.capabilities.contains("participant-control-v1") == true
+    }
+    #if os(macOS)
+    func sendParticipantTell(source: Session, target: String, text: String, id: UUID, hop: Int, urgent: Bool) -> String? {
+        guard let global = DeviceGlobalID(target), let home = identity?.deviceID, let group = currentGroup?.id,
+              acceptsParticipant(home: global.home, groupID: group), let peer = peerForHome(global.home),
+              peer.hello?.capabilities.contains("participant-control-v1") == true else {
+            return "Target home is offline, outside this group, or needs a Converse update. Nothing was sent."
+        }
+        guard let row = homes[global.home]?.rows.first(where: { $0.globalID == global.string }), row.messagingEnabled == true else {
+            return "Target is missing or session messaging is disabled on its home. Nothing was sent."
+        }
+        let payload = DeviceTellPayload(groupID: group, source: DeviceGlobalID(home: home, session: source.id).string,
+                                       sourceTitle: source.title, target: global.string, text: text, hop: hop, urgent: urgent)
+        pendingTells[id] = (source.id, global.home, group)
+        source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " · " + id.uuidString))
+        participantStore.save()
+        sendEnvelope(peer, DeviceEnvelope(kind: "participant.tell", commandID: id, payload: try? JSONEncoder().encode(payload)))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+            guard let self, let pending = self.pendingTells.removeValue(forKey: id), let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
+            source.messages.append(Message(role: "notice", text: "Switchboard: delivery unconfirmed · " + id.uuidString + ". Check the target home before resending; no automatic replay."))
+            self.participantStore.save()
+        }
+        return nil
+    }
+    private func handleParticipantTell(_ peer: DevicePeer, _ envelope: DeviceEnvelope) -> Bool {
+        guard ["participant.tell", "participant.tell.ack"].contains(envelope.kind) else { return false }
+        guard let origin = peer.hello?.deviceID, let group = currentGroup?.id,
+              acceptsParticipant(home: origin, groupID: group), !peer.controlOnly,
+              peer.hello?.capabilities.contains("participant-control-v1") == true, let id = envelope.commandID else { return true }
+        let store = participantStore
+        if envelope.kind == "participant.tell.ack" {
+            guard let pending = pendingTells[id], pending.home == origin, pending.group == group,
+                  let bytes = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: bytes) else { return true }
+            pendingTells.removeValue(forKey: id)
+            if let source = store.sessions.first(where: { $0.id == pending.source }) {
+                source.messages.append(Message(role: "notice", text: "Switchboard: " + ack.outcome + " · " + id.uuidString + " · " + (ack.detail ?? "")))
+                store.save()
+            }
+            return true
+        }
+        func ack(_ outcome: String, _ detail: String) {
+            sendEnvelope(peer, DeviceEnvelope(kind: "participant.tell.ack", commandID: id, payload: try? JSONEncoder().encode(DeviceAckPayload(outcome: outcome, detail: detail))))
+        }
+        guard let bytes = envelope.payload, let request = try? JSONDecoder().decode(DeviceTellPayload.self, from: bytes),
+              request.groupID == group, let from = DeviceGlobalID(request.source), from.home == origin,
+              let to = DeviceGlobalID(request.target), to.home == identity?.deviceID,
+              request.hop > 0, request.hop <= 8, !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              request.text.utf8.count <= 32768, request.sourceTitle.utf8.count <= 1000 else { ack("rejected", "Invalid or out-of-group message. Nothing was queued."); return true }
+        let hash = DeviceBlob.sha256Hex((try? DeviceCanonical.encode(request)) ?? bytes)
+        if let receipt = store.groupTellReceipts.first(where: { $0.id == id }) {
+            ack(receipt.origin == origin && receipt.payloadHash == hash ? "queued" : "rejected", "Previously recorded delivery; nothing queued twice.")
+            return true
+        }
+        guard let target = store.sessions.first(where: { $0.id == to.session }), target.switchboardEnabled else {
+            ack("rejected", "Target is closed or session messaging is disabled. Nothing was queued."); return true
+        }
+        guard store.groupTellReceipts.count < 100000 else { ack("rejected", "Home delivery journal is full. Nothing was queued."); return true }
+        let label = "[Converse message from " + request.sourceTitle + " · session " + from.string + " · delivery " + id.uuidString + " · hop " + String(request.hop) + "/8]\n" + request.text
+        let prompt = PendingPrompt(switchboardHop: request.hop, originGroupID: group, originHomeID: origin, text: label, images: [])
+        let oldPending = target.pending, oldMessages = target.messages
+        if request.urgent { target.pending.insert(prompt, at: 0) } else { target.pending.append(prompt) }
+        target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + request.sourceTitle + " [" + from.string + "] · " + id.uuidString + "\n" + request.text))
+        store.groupTellReceipts.append(GroupTellReceipt(id: id, origin: origin, payloadHash: hash))
+        do { try store.saveChecked() }
+        catch { target.pending = oldPending; target.messages = oldMessages; store.groupTellReceipts.removeAll { $0.id == id }; ack("rejected", "Home could not save delivery. Nothing was queued."); return true }
+        ack("queued", "Persisted on " + deviceName + ". Queued does not mean read or answered.")
+        if request.urgent { target.queuePaused = false; if target.busy { target.resumeAfterInterrupt = true; store.interruptProcess(target) } }
+        if !target.busy { DispatchQueue.main.async { store.runNext(target) } }
+        return true
+    }
+    #endif
+}
+
+extension DeviceSyncService {
+    func canHostAgent(_ home: String) -> Bool {
+        #if os(macOS)
+        if home == identity?.deviceID { return true }
+        #endif
+        return peerForHome(home)?.hello?.capabilities.contains("agent-host-v1") == true
+    }
+    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
+        guard let group = currentGroup?.id, acceptsParticipant(home: home, groupID: group), let peer = peerForHome(home),
+              peer.hello?.capabilities.contains("participant-control-v1") == true else {
+            return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline, outside this group, or needs an update.")
+        }
+        let request = DeviceParticipantRequest(groupID: group, action: action, target: target, title: title, settings: settings)
+        let durable = !["inspect", "agent.settings"].contains(action)
+        let previous = participantIntents.first { $0.home == home && $0.request == request && ["pending", "uncertain"].contains($0.outcome) }
+        let id = explicitID ?? previous?.id ?? UUID()
+        if let old = participantIntents.first(where: { $0.id == id }), old.home != home || old.request != request {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Command ID is already bound to another operation.")
+        }
+        if let result = participantIntents.first(where: { $0.id == id })?.response { return result }
+        guard participantReplies[id] == nil else { return DeviceParticipantResponse(groupID: group, outcome: "pending", detail: "This operation is already awaiting home acceptance.") }
+        if durable && !participantIntents.contains(where: { $0.id == id }) {
+            guard participantIntents.count < 10000 else { return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Outgoing operation journal is full.") }
+            participantIntents.append(DeviceParticipantIntent(id: id, home: home, request: request))
+            do { try saveParticipantIntents() }
+            catch { participantIntents.removeAll { $0.id == id }; return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Could not save outgoing operation. Nothing was sent.") }
+        }
+        return await withCheckedContinuation { continuation in
+            participantReplies[id] = (home, group, { continuation.resume(returning: $0) })
+            sendEnvelope(peer, DeviceEnvelope(kind: "participant.request", commandID: id, payload: try? DeviceCanonical.encode(request)))
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, let pending = self.participantReplies.removeValue(forKey: id) else { return }
+                if let index = self.participantIntents.firstIndex(where: { $0.id == id }) { self.participantIntents[index].outcome = "uncertain"; try? self.saveParticipantIntents() }
+                pending.finish(DeviceParticipantResponse(groupID: group, outcome: "uncertain", detail: "Home response unconfirmed. Retry uses the saved operation ID; nothing replays automatically."))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: timeout)
+        }
+    }
+    private func loadParticipantIntents() throws {
+        let file = storageFolder.appendingPathComponent("participant-outbox.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return }
+        participantIntents = try JSONDecoder().decode([DeviceParticipantIntent].self, from: Data(contentsOf: file))
+        for index in participantIntents.indices where participantIntents[index].outcome == "pending" { participantIntents[index].outcome = "uncertain" }
+    }
+    private func saveParticipantIntents() throws {
+        let file = storageFolder.appendingPathComponent("participant-outbox.json")
+        try DeviceCanonical.encode(participantIntents).write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+    private func handleParticipantControl(_ peer: DevicePeer, _ envelope: DeviceEnvelope) -> Bool {
+        guard ["participant.request", "participant.response"].contains(envelope.kind) else { return false }
+        guard let origin = peer.hello?.deviceID, let group = currentGroup?.id,
+              acceptsParticipant(home: origin, groupID: group), !peer.controlOnly,
+              peer.hello?.capabilities.contains("participant-control-v1") == true, let id = envelope.commandID else { return true }
+        if envelope.kind == "participant.response" {
+            let pending = participantReplies[id]
+            let intent = participantIntents.first(where: { $0.id == id })
+            guard (pending?.home == origin && pending?.group == group) || (intent?.home == origin && intent?.request.groupID == group),
+                  let bytes = envelope.payload, let result = try? JSONDecoder().decode(DeviceParticipantResponse.self, from: bytes), result.groupID == group else { return true }
+            if let index = participantIntents.firstIndex(where: { $0.id == id }) {
+                participantIntents[index].outcome = result.outcome; participantIntents[index].response = result
+                do { try saveParticipantIntents() } catch { lastOutcome = "Home replied, but the local receipt could not be saved. Check home before retrying." }
+            }
+            participantReplies.removeValue(forKey: id)?.finish(result)
+            return true
+        }
+        func send(_ result: DeviceParticipantResponse) { sendEnvelope(peer, DeviceEnvelope(kind: "participant.response", commandID: id, payload: try? JSONEncoder().encode(result))) }
+        func reject(_ detail: String) { send(DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: detail)) }
+        guard let bytes = envelope.payload, bytes.count <= 64000, let request = try? JSONDecoder().decode(DeviceParticipantRequest.self, from: bytes), request.groupID == group else { reject("Invalid or former-group request."); return true }
+        #if os(macOS)
+        let store = participantStore
+        // Resolve with a separate binding; never match a same-UUID foreign home.
+        let global = request.target.flatMap(DeviceGlobalID.init)
+        let session = global.flatMap { reference in reference.home == identity?.deviceID ? store.sessions.first(where: { $0.id == reference.session }) : nil }
+        if request.action == "inspect" {
+            guard let session, let global else { reject("Target is closed or belongs to another home."); return true }
+            let evidence = DeviceParticipantEvidence(globalID: global.string, title: session.title, busy: session.busy, status: session.status,
+                messages: session.messages.filter { ["user", "assistant", "notice"].contains($0.role) }.suffix(20).map { DeviceWireMessage(id: $0.id, role: $0.role, text: String($0.text.prefix(4000))) })
+            send(DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Home evidence snapshot.", target: global.string, evidence: evidence)); return true
+        }
+        if request.action == "agent.settings" {
+            guard let config = session?.agent, let home = identity?.deviceID else { reject("Target is not an agent on this home."); return true }
+            send(DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Home-local credentials are never included.", target: request.target, settings: config.wire(home: home))); return true
+        }
+        let hash = DeviceBlob.sha256Hex((try? DeviceCanonical.encode(request)) ?? bytes)
+        if let record = store.participantReceipts.first(where: { $0.id == id }) {
+            if record.origin == origin && record.payloadHash == hash { send(record.response) } else { reject("Command ID is bound to a different request.") }
+            return true
+        }
+        guard store.participantReceipts.count < 100000 else { reject("Home command journal is full."); return true }
+        var created: Session?
+        let oldConfig = session?.agent
+        let oldPending = session?.pending
+        let oldModel = session?.toolStatus.model
+        var runAfterCommit = false
+        var widgetAfterCommit = false
+        do {
+            let result: DeviceParticipantResponse
+            switch request.action {
+            case "agent.create":
+                let name = request.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Converse Steward"
+                guard !name.isEmpty, name.utf8.count <= 200 else { reject("Choose an agent name of 1–200 bytes."); return true }
+                let agent = store.createAgent(title: name, persist: false); created = agent
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent created paused. Configure API credentials on its home.", target: DeviceGlobalID(home: identity!.deviceID, session: agent.id).string)
+            case "agent.run":
+                guard let session, var config = session.agent, config.remainingRuns > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
+                config.settingsChanged(); config.remainingRuns -= 1
+                if config.remainingRuns == 0 { config.enabled = false }
+                session.agent = config
+                session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and refresh the scoreboard.", images: []))
+                runAfterCommit = true
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: session.queuePaused ? "Run saved in paused queue. Resume the queue to run it." : "Agent run queued on home.", target: request.target)
+            case "agent.widget":
+                guard session?.agent != nil else { reject("Target is not an agent."); return true }
+                widgetAfterCommit = true
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Scoreboard opened on home.", target: request.target)
+            case "agent.configure":
+                guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
+                guard settings.watched.allSatisfy({ ref in DeviceGlobalID(ref).map { acceptsParticipant(home: $0.home, groupID: group) } == true }) else { reject("Scope includes a participant outside this group."); return true }
+                try session.agent?.apply(settings); session.toolStatus.model = settings.model
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent settings saved on home.", target: request.target)
+            default: reject("Unsupported participant operation."); return true
+            }
+            store.participantReceipts.append(ParticipantMutationReceipt(id: id, origin: origin, payloadHash: hash, response: result))
+            try store.saveChecked(); send(result); publishSidebarIfChanged()
+            if let session, runAfterCommit { DispatchQueue.main.async { store.runNext(session) } }
+            if let session, widgetAfterCommit, !isTestEnvironment { MainActor.assumeIsolated { AgentWindows.shared.widget(session) } }
+        } catch {
+            if let created { store.sessions.removeAll { $0 === created } }
+            if let session { session.agent = oldConfig; session.pending = oldPending ?? []; if let oldModel { session.toolStatus.model = oldModel } }
+            store.participantReceipts.removeAll { $0.id == id }; reject("Home could not validate or persist the operation. Nothing was applied.")
+        }
+        #else
+        reject("This device is a viewer. Choose a capable agent home.")
+        #endif
         return true
     }
 }
