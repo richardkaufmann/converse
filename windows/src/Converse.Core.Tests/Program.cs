@@ -230,6 +230,56 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
 }
 
+// A live takeover must notify the displaced viewer immediately, not at TTL.
+{
+    var roots = Enumerable.Range(0, 3).Select(_ => Directory.CreateTempSubdirectory("converse-takeover-").FullName).ToArray();
+    try
+    {
+        var store = new SessionStore(roots[0], new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        session.Draft = "takeover draft";
+        using var home = new DeviceSyncService(roots[0], store, "TakeoverHome");
+        using var a = new DeviceSyncService(roots[1], new SessionStore(roots[1], new FakeRunner()), "ViewerA");
+        using var b = new DeviceSyncService(roots[2], new SessionStore(roots[2], new FakeRunner()), "ViewerB");
+        foreach (var service in new[] { home, a, b })
+        {
+            service.PairingConfirmation = _ => Task.FromResult(true);
+            await service.StartAsync(0, enableDiscovery: false);
+        }
+        async Task<bool> UntilTakeover(Func<bool> done)
+        {
+            // Strictly below the 15-second lease expiry: expiry cannot pass this test.
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(10);
+            return done();
+        }
+        var gid = new DeviceGlobalID(home.DeviceId, session.Id).ToString();
+        Check(await JoinPair(home, a, () => a.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true)
+            && await JoinPair(home, b, () => b.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true),
+            "Takeover regression pairs a home and two viewers");
+        await a.AcquireRemoteAsync(gid);
+        Check(await UntilTakeover(() => a.RemoteTranscripts.ContainsKey(gid))
+            && home.DisplayHolder(session.Id) is { } firstHolder && firstHolder.Device == a.DeviceId
+            && firstHolder.Epoch == a.RemoteLeases.GetValueOrDefault(gid),
+            "Display holder reports the actual viewer and granted epoch");
+        var firstEpoch = a.RemoteLeases.GetValueOrDefault(gid);
+        await a.AcquireRemoteAsync(gid);
+        Check(a.RemoteLeases.GetValueOrDefault(gid) == firstEpoch && a.RemoteTranscripts.ContainsKey(gid),
+            "Repeated Take on the current viewer keeps its live transcript and lease");
+        await b.AcquireRemoteAsync(gid);
+        Check(await UntilTakeover(() => b.RemoteTranscripts.ContainsKey(gid)
+            && !a.RemoteLeases.ContainsKey(gid) && !a.RemoteTranscripts.ContainsKey(gid)),
+            "Live takeover sends stolen notice and clears the displaced viewer before lease expiry");
+        Check(home.DisplayHolder(session.Id) is { } secondHolder && secondHolder.Device == b.DeviceId
+            && secondHolder.Epoch > firstEpoch && secondHolder.Epoch == b.RemoteLeases.GetValueOrDefault(gid),
+            "Takeover holder advances to the new viewer at its granted epoch");
+        await b.ReleaseRemoteAsync(gid);
+        Check(await UntilTakeover(() => home.DisplayHolder(session.Id) is null),
+            "Display holder clears on release so the home pane can be shown again");
+    }
+    finally { Cleanup(roots); }
+}
+
 // Remote inject honesty (Mac failed-ack parity) + double-press guard.
 {
     var homeRoot = Directory.CreateTempSubdirectory("converse-injhome-").FullName;

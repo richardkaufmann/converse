@@ -1592,6 +1592,20 @@ public sealed class DeviceSyncService : IDisposable
                 {
                     var result = _leases.Acquire(leased.Id, peerHome);
                     if (!result.Granted) { await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseDenied, Boot = _boot, SessionID = envelope.SessionID }); break; }
+                    // Mac parity: the displaced previous holder must drop its
+                    // view, or two devices show one session as live. The
+                    // local pane parks in the UI refresh below via
+                    // DisplayHolder; remote holders get lease.stolen here.
+                    if (result.Displaced is { } displaced && displaced != peerHome)
+                        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == displaced))
+                        {
+                            old.LeasedSessions.Remove(leased.Id);
+                            await SendEnvelopeAsync(old, new DeviceEnvelope
+                            {
+                                Kind = DeviceKind.LeaseStolen, Boot = _boot,
+                                SessionID = new DeviceGlobalID(DeviceId, leased.Id).ToString(), Epoch = result.Epoch,
+                            });
+                        }
                     peer.LeasedSessions.Add(leased.Id);
                     await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseGranted, Boot = _boot, SessionID = envelope.SessionID, Epoch = result.Epoch });
                     await SendTranscriptAsync(peer, leased);
@@ -1849,6 +1863,10 @@ public sealed class DeviceSyncService : IDisposable
 
     public List<DeviceOutboxRecord> Unresolved(string globalId) =>
         _outbox.Records.Where(r => r.SessionID == globalId).ToList();
+
+    // Mac Workspace.shared.park parity: the UI parks a local session whose
+    // display lease is held by another device (one active display each).
+    public (string Device, ulong Epoch)? DisplayHolder(Guid sessionId) => _leases.Holder(sessionId);
 
     // Mac parity: page earlier messages ahead of the retained transcript.
     public async Task RequestEarlierAsync(string globalId)
