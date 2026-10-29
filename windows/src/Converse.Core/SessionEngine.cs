@@ -216,6 +216,11 @@ public sealed class SessionStore
     public List<ChatSession> Sessions { get; private set; } = new();
     public List<AgentEntry> Entries { get; private set; } = new();
     public event Action? Changed;
+    // Fires when the transcript holds new turn content: throttled stream
+    // progress and turn completion. DeviceService pushes a snapshot to the
+    // lease holder here; without it remote viewers keep the turn-start
+    // snapshot ("working") forever, because viewers never poll latest text.
+    internal event Action<ChatSession>? TranscriptAdvanced;
     private readonly IAgentRunner _runner;
     private sealed class Archive
     {
@@ -439,7 +444,7 @@ public sealed class SessionStore
             session.Status = "Working…";
             session.TurnCancellation = new CancellationTokenSource();
             using var registration = session.TurnCancellation.Token.Register(() => _ = client.InterruptAsync());
-            await client.SubmitAsync(prompt, prompt, images, session.Choices.Effort);
+            await client.SubmitAsync(ImageGuidance.WithGuidance(prompt), prompt, images, session.Choices.Effort);
             if (session.Interrupted) await client.InterruptAsync();
             var (status, notice) = await session.MuseTurnDone.Task;
             FinishMuse(session, status, notice);
@@ -467,6 +472,8 @@ public sealed class SessionStore
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
         Save();
+        // Push the completed turn before the queued next one mutates state.
+        TranscriptAdvanced?.Invoke(session);
         if (shouldRun) RunNext(session);
         Changed?.Invoke();
     }
@@ -609,7 +616,7 @@ public sealed class SessionStore
         var exit = -1;
         try
         {
-            exit = await _runner.RunAsync(session, args, prompt,
+            exit = await _runner.RunAsync(session, args, ImageGuidance.WithGuidance(prompt),
                 line => Consume(line, session, response), session.TurnCancellation.Token);
         }
         catch (Exception error)
@@ -643,6 +650,8 @@ public sealed class SessionStore
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
         Save();
+        // Push the completed turn before the queued next one mutates state.
+        TranscriptAdvanced?.Invoke(session);
         if (shouldRun) RunNext(session);
         Changed?.Invoke();
     }
@@ -802,6 +811,7 @@ public sealed class SessionStore
         {
             session.LastStreamSaveUtc = DateTime.UtcNow;
             Save();
+            TranscriptAdvanced?.Invoke(session);
         }
     }
 

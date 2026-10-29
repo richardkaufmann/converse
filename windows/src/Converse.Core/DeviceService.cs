@@ -324,6 +324,19 @@ public sealed class DeviceSyncService : IDisposable
         InitializeGroups();
         RefreshGroupMembers();
         _store.Changed += PublishSidebars;
+        _store.TranscriptAdvanced += PushTranscriptToHolder;
+    }
+
+    // Turn progress/completion fan-out: the holder's viewer gets a fresh
+    // snapshot with a higher HomeSeq, which its sequence gate accepts.
+    // Non-holders and lapsed leases drop inside SendTranscriptAsync.
+    private void PushTranscriptToHolder(ChatSession session)
+    {
+        var holder = _leases.Holder(session.Id);
+        if (holder is null) return;
+        var peer = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == holder.Value.Device);
+        if (peer is null) return;
+        _ = SendTranscriptAsync(peer, session);
     }
 
     // First launch with pre-group trust: deterministic legacy migration
@@ -440,6 +453,7 @@ public sealed class DeviceSyncService : IDisposable
     public void Dispose()
     {
         _shutdown?.Cancel();
+        try { _store.TranscriptAdvanced -= PushTranscriptToHolder; } catch { /* store outlives us */ }
         _mdns?.Dispose();
         _listener?.Stop();
         // Best-effort shutdown: connect/accept threads can mutate _peers

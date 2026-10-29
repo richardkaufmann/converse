@@ -331,6 +331,48 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     }
 }
 
+// A completed remote turn pushes its final transcript to the lease holder:
+// without the push the viewer keeps the turn-start snapshot ("working")
+// forever, because the viewer never polls latest text.
+{
+    var homeRoot = Directory.CreateTempSubdirectory("converse-push-").FullName;
+    var viewerRoot = Directory.CreateTempSubdirectory("converse-pushviewer-").FullName;
+    try
+    {
+        var homeRunner = new FakeRunner { Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var homeStore = new SessionStore(homeRoot, homeRunner);
+        var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "codex"));
+        using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
+        using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        home.PairingConfirmation = _ => Task.FromResult(true);
+        viewer.PairingConfirmation = _ => Task.FromResult(true);
+        await home.StartAsync(0, enableDiscovery: false);
+        await viewer.StartAsync(0, enableDiscovery: false);
+        async Task<bool> UntilPush(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        var gid = new DeviceGlobalID(home.DeviceId, homeSession.Id).ToString();
+        Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Push setup pairs home and viewer");
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await UntilPush(() => viewer.RemoteLeases.ContainsKey(gid)), "Push setup viewer holds the lease");
+        var submit = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "submit", Text = "say hello" });
+        Check(submit is not null && await UntilPush(() => homeSession.Busy), "Push setup remote submit starts the home turn");
+        Check(viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Messages.Any(m => m.Text.Contains("fake reply")) != true, "Gated turn has not leaked its reply yet");
+        homeRunner.Gate!.TrySetResult(true);
+        Check(await UntilPush(() => !homeSession.Busy), "Push setup home turn completes");
+        Check(await UntilPush(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } pushed && !pushed.Busy
+            && pushed.Messages.Any(m => m.Text.Contains("fake reply"))), "Completed turn pushes its final transcript to the holder");
+    }
+    finally
+    {
+        Cleanup(homeRoot);
+        Cleanup(viewerRoot);
+    }
+}
+
 // Muse MSP over loopback TCP: approval request surfaces and decides.
 {
     var root = Directory.CreateTempSubdirectory("converse-msp-").FullName;
@@ -1770,6 +1812,41 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(dataDir); Cleanup(workDir); }
 }
 
+// Picture requests earn agent delivery guidance (raw CLIs otherwise save
+// SVGs and shell open a browser); ordinary prompts pass through untouched.
+{
+    Check(ImageGuidance.WantsPicture("show me a picture of a red truck"), "Picture request is detected");
+    Check(ImageGuidance.WantsPicture("Generate an image of a spinning top"), "Image request is detected case-insensitively");
+    Check(ImageGuidance.WantsPicture("draw me a cat"), "Draw request is detected");
+    Check(!ImageGuidance.WantsPicture("show me the code for Dispose"), "Non-picture request is ignored");
+    Check(!ImageGuidance.WantsPicture("picture this: a green build"), "Bare 'picture' without 'of' is ignored");
+    Check(!ImageGuidance.WantsPicture("see ![x](y.png) now"), "Prompt already carrying markdown needs no steering");
+    Check(ImageGuidance.WithGuidance("show me the diff") == "show me the diff", "Ordinary prompt is byte-identical");
+    var guided = ImageGuidance.WithGuidance("draw me a cat");
+    Check(guided.StartsWith("draw me a cat", StringComparison.Ordinal) && guided.Contains("![caption](absolute path)")
+        && guided.Contains("Do not open a browser"), "Guidance appends PNG-plus-markdown delivery, keeps the prompt");
+}
+
+// Guidance reaches the runner while history keeps the original prompt.
+{
+    var root = Directory.CreateTempSubdirectory("converse-guidance-").FullName;
+    try
+    {
+        var runner = new FakeRunner();
+        var store = new SessionStore(root, runner);
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        session.Draft = "show me a picture of a red truck";
+        store.Submit(session);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (session.Busy && DateTime.UtcNow < deadline) await Task.Delay(20);
+        Check(runner.Prompts.Count == 1 && runner.Prompts[0].StartsWith("show me a picture of a red truck", StringComparison.Ordinal)
+            && runner.Prompts[0].Contains("Do not open a browser"), "Runner-bound picture prompt carries delivery guidance");
+        Check(session.Messages.Any(m => m.Role == "user" && m.Text == "show me a picture of a red truck"),
+            "Stored user message keeps the original prompt without guidance");
+    }
+    finally { Cleanup(root); }
+}
+
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
 // batches fall back to a quoted cmd.exe wrapper, misses resolve null.
 {
@@ -1942,14 +2019,18 @@ sealed class GatedRunner : Converse.Core.IAgentRunner
 
 sealed class FakeRunner : Converse.Core.IAgentRunner
 {
-    public Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
+    public readonly List<string> Prompts = new();
+    public TaskCompletionSource<bool>? Gate;
+    public async Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
         Action<string> onLine, CancellationToken cancellationToken)
     {
+        Prompts.Add(prompt);
+        if (Gate is not null) await Gate.Task;
         onLine("{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}");
         onLine("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fake reply\"}}");
         var finalIndex = arguments.ToList().IndexOf("--output-last-message");
         if (finalIndex >= 0) File.WriteAllText(arguments[finalIndex + 1], "fake reply\n");
         onLine("{\"type\":\"turn.completed\"}");
-        return Task.FromResult(0);
+        return 0;
     }
 }
