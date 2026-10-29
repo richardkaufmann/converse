@@ -379,11 +379,14 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         // Fake server expects its sessionId echo; align by using any id (client filters mismatches).
         session.Draft = "do it";
         store.Submit(session);
-        var deadline = DateTime.UtcNow.AddSeconds(15);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
         while (session.Requests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
         Check(session.Requests.Count == 1 && session.Requests[0].Kind == "approval", "MSP approval request surfaces on session");
         if (session.Requests.Count == 1)
             Check(await store.AnswerMuseAsync(session, session.Requests[0], choice: "deny"), "MSP approval decision accepted by client");
+        // Fresh budget per phase: sharing one deadline across the request
+        // wait and the turn wait starves the second phase on slow machines.
+        deadline = DateTime.UtcNow.AddSeconds(30);
         while (session.Busy && DateTime.UtcNow < deadline) await Task.Delay(25);
         Check(decidedChoice == "deny" && session.Status == "Ready", "MSP decide reaches host and turn completes");
     }
@@ -1395,9 +1398,12 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         await a.StartAsync(0, enableDiscovery: false);
         await b.StartAsync(0, enableDiscovery: false);
         await c.StartAsync(0, enableDiscovery: false);
+        // 30 s budget: three DeviceSyncServices plus Noise handshakes can
+        // exceed 15 s on a loaded virtualized box; Until exits early when
+        // green, so this only costs time on genuine failure.
         async Task<bool> Until(Func<bool> done)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
             return done();
         }
@@ -1508,9 +1514,11 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         b.PairingConfirmation = _ => Task.FromResult(true);
         await a.StartAsync(0, enableDiscovery: false);
         await b.StartAsync(0, enableDiscovery: false);
+        // 30 s budget, same rule as the fence test below: Until exits
+        // early when green, so this only costs time on genuine failure.
         async Task<bool> Until(Func<bool> done)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
             return done();
         }
