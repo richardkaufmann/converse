@@ -14,7 +14,7 @@ namespace Converse.App;
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
 public sealed record SidebarHeader(string Key, string Title, string Status) : SidebarItem(Key);
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowTake, bool ShowClose, bool ShowPlace) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -312,22 +312,22 @@ public sealed partial class MainWindow : Window
         items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
         foreach (var session in _store.Sessions)
             items.Add(new SidebarSession("local:" + session.Id, (session.Busy ? "● " : "") + session.Title,
-                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowTake: false, ShowClose: true, ShowPlace: true));
+                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
                 home.Online ? home.Rows.Count + " session(s)" : "Offline"));
             if (home.Rows.Count == 0)
                 items.Add(new SidebarSession("home:" + home.DeviceID + ":empty",
-                    home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowTake: false, ShowClose: false, ShowPlace: false));
+                    home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowTake: home.Online, ShowClose: false, ShowPlace: true));
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true));
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
             SidebarHeader h => h.Title + "|" + h.Status,
-            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowTake + "|" + s.ShowClose + "|" + s.ShowPlace,
+            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace,
             _ => "",
         })));
         if (signature == _sidebarSignature) return;
@@ -1455,14 +1455,43 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnNewSessionClick(object sender, RoutedEventArgs e)
+    private async void OnNewSessionClick(object sender, RoutedEventArgs e)
     {
-        var entry = _store.Entries.FirstOrDefault();
-        if (entry is null) return;
-        var session = _store.Create(entry);
+        if (_store.Entries.Count == 0) return;
+        // New session asks which provider to run: entries carry bare
+        // commands resolved at spawn, so show what each resolves to and flag
+        // the ones with no CLI on PATH.
+        AgentEntry? chosen = null;
+        ContentDialog? dialog = null;
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = "Start a new session with:" });
+        foreach (var candidate in _store.Entries)
+        {
+            var resolved = FindOnPath(candidate.Command);
+            var entry = candidate;
+            var button = new Button
+            {
+                Content = candidate.Name + "  ·  " + candidate.Command
+                    + (resolved is null ? "  (not found)" : "  →  " + resolved),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+            };
+            button.Click += (_, _) => { chosen = entry; dialog?.Hide(); };
+            panel.Children.Add(button);
+        }
+        dialog = new ContentDialog
+        {
+            Title = "New session",
+            Content = new ScrollViewer { Content = panel },
+            CloseButtonText = "Cancel",
+            XamlRoot = Content.XamlRoot,
+        };
+        await dialog.ShowAsync();
+        if (chosen is null) return;
+        var session = _store.Create(chosen);
         var key = "local:" + session.Id;
         RefreshSidebar();
-        SelectSession(new SidebarSession(key, session.Title, "", null, session.Id, ShowPark: true, ShowTake: false, ShowClose: true, ShowPlace: true), caretToEnd: true);
+        SelectSession(new SidebarSession(key, session.Title, "", null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true), caretToEnd: true);
         Transcript.Focus(FocusState.Programmatic);
     }
 
@@ -1796,15 +1825,6 @@ public sealed partial class MainWindow : Window
     {
         if (_selected?.GlobalID is not { } gid) return;
         await _devices.AcquireRemoteAsync(gid);
-        Refresh();
-    }
-
-    private async void OnTakeClick(object sender, RoutedEventArgs e)
-    {
-        var button = sender as Button;
-        if (button?.Tag is not SidebarSession row || row.GlobalID is null) return;
-        SelectSession(row, caretToEnd: true);
-        await _devices.AcquireRemoteAsync(row.GlobalID);
         Refresh();
     }
 

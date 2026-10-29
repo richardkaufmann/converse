@@ -21,33 +21,32 @@
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
             </StackPanel>
         </DataTemplate>
+        <!-- Sessions nest under their home header; 1/2/3 take remote
+             sessions as they place (Mac parity), so no separate Take. -->
         <DataTemplate x:Key="SidebarSessionTemplate">
-            <Grid Padding="4,3">
+            <Grid Padding="18,3,4,3">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel>
+                <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-                    <Button Content="1" Click="OnPlaceClick" Tag="{Binding}"
+                    <Button Content="1" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 1 (takes remote sessions here)"/>
-                    <Button Content="2" Click="OnPlaceClick" Tag="{Binding}"
+                    <Button Content="2" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 2 (takes remote sessions here)"/>
-                    <Button Content="3" Click="OnPlaceClick" Tag="{Binding}"
+                    <Button Content="3" Click="OnPlaceClick" Tag="{Binding}" FontSize="12"
                             Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Show in pane 3 (takes remote sessions here)"/>
-                    <Button Content="P" Click="OnParkClick" Tag="{Binding}"
+                    <Button Content="P" Click="OnParkClick" Tag="{Binding}" FontSize="12"
                             Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Park (release this conversation to its home)"/>
-                    <Button Content="Take" Click="OnTakeClick" Tag="{Binding}"
-                            Visibility="{Binding ShowTake, Converter={StaticResource BoolToVis}}"
-                            ToolTipService.ToolTip="Take here"/>
-                    <Button Content="X" Click="OnCloseClick" Tag="{Binding}"
+                    <Button Content="X" Click="OnCloseClick" Tag="{Binding}" FontSize="12"
                             Visibility="{Binding ShowClose, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Close session (keeps a recovery archive)"/>
                 </StackPanel>
