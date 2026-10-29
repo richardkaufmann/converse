@@ -3,10 +3,11 @@ using Converse.Core;
 
 // Console check runner mirroring Sources/DeviceSyncTests.swift (PASS:/FAIL:).
 var failures = 0;
+var failedLabels = new List<string>();
 void Check(bool ok, string label)
 {
     Console.WriteLine((ok ? "PASS: " : "FAIL: ") + label);
-    if (!ok) failures++;
+    if (!ok) { failures++; failedLabels.Add(label); }
 }
 byte[] FixedKey(byte value)
 {
@@ -38,14 +39,23 @@ void Cleanup(params string[] dirs)
 async Task<bool> JoinPair(DeviceSyncService home, DeviceSyncService joiner, Func<bool> done)
 {
     if (home.CurrentGroup is null) await home.CreateGroupAsync("Test Group");
-    await joiner.ConnectManualAsync("127.0.0.1", home.ListeningPort, home.CurrentGroup!.Id);
-    var deadline = DateTime.UtcNow.AddSeconds(15);
-    while (home.GroupRequests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
+    // A first-run firewall prompt can stall the opening sockets; retry the
+    // dial while the sponsor still sees no request instead of failing setup.
+    var dialDeadline = DateTime.UtcNow.AddSeconds(45);
+    while (home.GroupRequests.Count == 0 && DateTime.UtcNow < dialDeadline)
+    {
+        // Redial only while the joiner also shows no prompt: a slow first
+        // attempt must not become a duplicate request.
+        if (joiner.GroupPairingPrompts.Count == 0)
+            await joiner.ConnectManualAsync("127.0.0.1", home.ListeningPort, home.CurrentGroup!.Id);
+        var slice = DateTime.UtcNow.AddSeconds(15);
+        while (home.GroupRequests.Count == 0 && DateTime.UtcNow < slice) await Task.Delay(25);
+    }
     if (home.GroupRequests.Count == 0) return false;
     await home.ReviewGroupRequestAsync(home.GroupRequests[0]);
     await home.ApproveGroupReviewAsync();
-    deadline = DateTime.UtcNow.AddSeconds(15);
-    while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+    var doneDeadline = DateTime.UtcNow.AddSeconds(15);
+    while (!done() && DateTime.UtcNow < doneDeadline) await Task.Delay(25);
     return done();
 }
 
@@ -1376,8 +1386,15 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             return done();
         }
         await a.CreateGroupAsync("Expiring");
-        await c.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
-        Check(await Until(() => a.GroupRequests.Count == 1 && c.GroupPairingPrompts.Count == 1),
+        var dialDeadline = DateTime.UtcNow.AddSeconds(45);
+        while (a.GroupRequests.Count == 0 && DateTime.UtcNow < dialDeadline)
+        {
+            if (c.GroupPairingPrompts.Count == 0)
+                await c.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
+            var slice = DateTime.UtcNow.AddSeconds(15);
+            while (a.GroupRequests.Count == 0 && DateTime.UtcNow < slice) await Task.Delay(25);
+        }
+        Check(a.GroupRequests.Count == 1 && c.GroupPairingPrompts.Count == 1,
             "Expiry setup sponsors a waiting joiner");
         var stale = a.GroupRequests[0];
         await a.ReviewGroupRequestAsync(stale);
@@ -1395,7 +1412,84 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(aRoot); Cleanup(cRoot); }
 }
 
+// Pane placements: assign parks occupants, park clears, layout persists.
+{
+    var p = new PanePlacements();
+    Check(p.PaneOf("local:a") is null, "Unplaced session has no pane");
+    Check(p.Assign("local:a", 1) is null, "First assignment evicts nobody");
+    Check(p.Assign("local:a", 1) is null && p.KeyIn(1) == "local:a", "Repeat assignment is stable");
+    Check(p.Assign("remote:b", 1) == "local:a", "Assigning a pane evicts its occupant");
+    Check(p.PaneOf("local:a") is null && p.PaneOf("remote:b") == 1, "Evicted session is parked");
+    Check(p.Assign("remote:b", 2) == null && p.KeyIn(1) is null && p.KeyIn(2) == "remote:b",
+        "Moving a session parks its old pane");
+    p.Assign("zzz", 9);
+    Check(p.KeyIn(9) is null && p.Slots.Count == 1, "Out-of-range pane refused");
+    p.Park("remote:b");
+    Check(p.KeyIn(2) is null, "Park clears the pane");
+    var layoutDir = Directory.CreateTempSubdirectory("converse-panes-").FullName;
+    try
+    {
+        p.Assign("local:a", 3);
+        p.Save(layoutDir);
+        var reloaded = PanePlacements.Load(layoutDir);
+        Check(reloaded.KeyIn(3) == "local:a", "Placements persist across restarts");
+        File.WriteAllText(Path.Combine(layoutDir, "pane-layout.json"), "{broken");
+        Check(PanePlacements.Load(layoutDir).Slots.Count == 0, "Corrupt layout loads empty, never crashes");
+    }
+    finally { Cleanup(layoutDir); }
+}
+
+// Chat markdown: markers strip, runs land in stripped coordinates.
+{
+    var (plain, runs) = MarkdownRuns.Render("## Title\nHello **bold** and `code`.\n[Docs](https://example.com/x)");
+    Check(plain == "Title\nHello bold and code.\nDocs", "Markdown markers strip to plain text");
+    Check(runs.Any(r => r.Kind == MdRunKind.Heading && r.Start == 0 && r.Length == 5 && r.Level == 2),
+        "Heading run covers the stripped title");
+    var boldAt = plain.IndexOf("bold", StringComparison.Ordinal);
+    Check(runs.Any(r => r.Kind == MdRunKind.Bold && r.Start == boldAt && r.Length == 4),
+        "Bold run matches the stripped span");
+    var codeAt = plain.IndexOf("code", StringComparison.Ordinal);
+    Check(runs.Any(r => r.Kind == MdRunKind.Code && r.Start == codeAt && r.Length == 4),
+        "Code run matches the stripped span");
+    var (fenced, fenceRuns) = MarkdownRuns.Render("```\n**not bold**\n```\na ** b `c");
+    Check(fenced == "**not bold**\na ** b `c" && fenceRuns.Count == 0,
+        "Fenced and unmatched markers stay literal with no runs");
+}
+
+// Command resolution: native exe wins, npm shims unwrap to node, unknown
+// batches fall back to a quoted cmd.exe wrapper, misses resolve null.
+{
+    var bin = Directory.CreateTempSubdirectory("converse-cmd-").FullName;
+    try
+    {
+        File.WriteAllText(Path.Combine(bin, "claude.exe"), "native");
+        var shimDir = Path.Combine(bin, "shim");
+        Directory.CreateDirectory(shimDir);
+        File.WriteAllText(Path.Combine(shimDir, "codex.cmd"),
+            "@IF EXIST \"%dp0%\\node.exe\" (\r\n  \"%dp0%\\node.exe\" \"%dp0%\\..\\lib\\codex.js\" %*\r\n)");
+        Directory.CreateDirectory(Path.Combine(shimDir, "..", "lib"));
+        File.WriteAllText(Path.GetFullPath(Path.Combine(shimDir, "..", "lib", "codex.js")), "cli");
+        File.WriteAllText(Path.Combine(shimDir, "node.exe"), "node");
+        File.WriteAllText(Path.Combine(bin, "tool.bat"), "batch");
+        var dirs = new[] { bin, shimDir };
+        var exe = CommandResolution.Resolve("claude", true, dirs);
+        Check(exe is not null && exe.FileName.EndsWith("claude.exe") && !exe.UsesCmd && exe.PrefixArguments.Count == 0,
+            "Native exe wins with no wrapper");
+        var unwrapped = CommandResolution.Resolve("codex", true, dirs);
+        Check(unwrapped is not null && unwrapped.FileName.EndsWith("node.exe") && !unwrapped.UsesCmd
+            && unwrapped.PrefixArguments.Count == 1 && unwrapped.PrefixArguments[0].EndsWith("codex.js"),
+            "npm shim unwraps to node plus script, never cmd.exe");
+        var batch = CommandResolution.Resolve("tool", true, dirs);
+        Check(batch is not null && batch.UsesCmd && batch.CmdPrefix is not null && batch.CmdPrefix.Contains("tool.bat"),
+            "Unknown batch falls back to a quoted cmd.exe wrapper");
+        Check(CommandResolution.Resolve("nope", true, dirs) is null, "Missing command resolves null");
+        Check(CommandResolution.Resolve("  ", true, dirs) is null, "Blank command resolves null");
+    }
+    finally { Cleanup(bin); }
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
+foreach (var label in failedLabels) Console.WriteLine("FAILED: " + label);
 return failures == 0 ? 0 : 1;
 
 sealed class GatedRunner : Converse.Core.IAgentRunner

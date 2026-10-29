@@ -32,6 +32,15 @@
                     <TextBlock Text="{Binding Subtitle}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                    <Button Content="1" Click="OnPlaceClick" Tag="{Binding}"
+                            Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            ToolTipService.ToolTip="Show in pane 1 (takes remote sessions here)"/>
+                    <Button Content="2" Click="OnPlaceClick" Tag="{Binding}"
+                            Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            ToolTipService.ToolTip="Show in pane 2 (takes remote sessions here)"/>
+                    <Button Content="3" Click="OnPlaceClick" Tag="{Binding}"
+                            Visibility="{Binding ShowPlace, Converter={StaticResource BoolToVis}}"
+                            ToolTipService.ToolTip="Show in pane 3 (takes remote sessions here)"/>
                     <Button Content="P" Click="OnParkClick" Tag="{Binding}"
                             Visibility="{Binding ShowPark, Converter={StaticResource BoolToVis}}"
                             ToolTipService.ToolTip="Park (release this conversation to its home)"/>
@@ -115,6 +124,8 @@
                             <TextBlock x:Name="PaneTitle" FontWeight="SemiBold" Text="No conversation selected"/>
                             <TextBlock x:Name="PaneSubtitle" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text=""/>
                         </StackPanel>
+                        <!-- Pane slots 1-3: assignments persist, focus follows clicks. Rebuilt in code behind. -->
+                        <StackPanel x:Name="PaneBar" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
                     <!-- Take appears for a remote session this window is not viewing yet. -->
                     <Button x:Name="TakeButton" Grid.Column="1" Content="Take here" Click="OnTakeHereClick"

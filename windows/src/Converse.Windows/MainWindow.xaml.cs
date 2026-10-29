@@ -14,7 +14,7 @@ namespace Converse.App;
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
 public sealed record SidebarHeader(string Key, string Title, string Status) : SidebarItem(Key);
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowTake, bool ShowClose) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowTake, bool ShowClose, bool ShowPlace) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -82,11 +82,16 @@ public sealed partial class MainWindow : Window
     private string? _notice;
     private readonly Dictionary<string, RequestAnswerState> _answerStates = new();
     private readonly Dictionary<string, List<string>> _remoteHashes = new();
+    // Pane slots 1-3 (Mac P/1/2/3/X parity): placements persist in
+    // pane-layout.json; focus (_selected) is independent of placement.
+    private readonly PanePlacements _placements;
+    private string _paneSignature = "";
     private StackPanel? _groupsPanel;
     private string _groupsSignature = "";
     private string _groupsCreateName = "";
     private string _groupsJoinHost = "";
     private string _groupsJoinPort = "";
+    private string _groupsJoinGroupId = "";
     private string? _groupsArmDissolve;
     private readonly HashSet<Guid> _groupsSeen = new();
 
@@ -97,6 +102,7 @@ public sealed partial class MainWindow : Window
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
         _dataFolder = folder;
         _layout = SidebarLayoutState.Load(folder);
+        _placements = PanePlacements.Load(folder);
         _store = new SessionStore(folder);
         _devices = new DeviceSyncService(folder, _store);
         // No modal pairing prompt: joins surface as codes in the Groups
@@ -290,6 +296,7 @@ public sealed partial class MainWindow : Window
             SelectSession(null, caretToEnd: false);
         RefreshSidebar();
         RenderPane();
+        RenderPaneBar();
         RenderGroupsDialog();
         AutoOpenGroups();
     }
@@ -305,22 +312,22 @@ public sealed partial class MainWindow : Window
         items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
         foreach (var session in _store.Sessions)
             items.Add(new SidebarSession("local:" + session.Id, (session.Busy ? "● " : "") + session.Title,
-                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: false, ShowTake: false, ShowClose: true));
+                session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowTake: false, ShowClose: true, ShowPlace: true));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
                 home.Online ? home.Rows.Count + " session(s)" : "Offline"));
             if (home.Rows.Count == 0)
                 items.Add(new SidebarSession("home:" + home.DeviceID + ":empty",
-                    home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowTake: false, ShowClose: false));
+                    home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowTake: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowTake: home.Online, ShowClose: false));
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowTake: home.Online, ShowClose: false, ShowPlace: true));
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
             SidebarHeader h => h.Title + "|" + h.Status,
-            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowTake + "|" + s.ShowClose,
+            SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowTake + "|" + s.ShowClose + "|" + s.ShowPlace,
             _ => "",
         })));
         if (signature == _sidebarSignature) return;
@@ -333,11 +340,16 @@ public sealed partial class MainWindow : Window
     }
 
     // Builds the protected history text for the selected conversation, the
-    // character ranges that render as italic user turns, and how many earlier
+    // character ranges that render as italic user turns, the chat-markdown
+    // runs (bold/code/headings) inside assistant turns, and how many earlier
     // messages the local cap hides (remote paging comes from home instead).
-    private (string History, List<(int Start, int Length)> UserRuns, int Hidden) BuildHistory()
+    // Markdown strips before break normalization, which is length-preserving,
+    // so run offsets stay valid in the final document coordinates.
+    private (string History, List<(int Start, int Length)> UserRuns,
+        List<(int Start, int Length, MdRunKind Kind, int Level)> MdRuns, int Hidden) BuildHistory()
     {
         var runs = new List<(int Start, int Length)>();
+        var mdRuns = new List<(int Start, int Length, MdRunKind Kind, int Level)>();
         var text = new System.Text.StringBuilder();
         List<(string Role, string Text)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
@@ -348,7 +360,7 @@ public sealed partial class MainWindow : Window
             lines = _devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text)).ToList();
-        if (lines is null) return ("", runs, 0);
+        if (lines is null) return ("", runs, mdRuns, 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
         if (hidden > 0)
@@ -367,10 +379,16 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                text.Append(Breaks(body)).Append("\r\r");
+                var flat = body.Replace("\r\n", "\n").Replace('\r', '\n');
+                var (plain, md) = MarkdownRuns.Render(flat);
+                var broken = plain.Replace("\n", "\r");
+                var start = text.Length;
+                text.Append(broken).Append("\r\r");
+                foreach (var run in md)
+                    mdRuns.Add((start + run.Start, run.Length, run.Kind, run.Level));
             }
         }
-        return (text.ToString(), runs, hidden);
+        return (text.ToString(), runs, mdRuns, hidden);
     }
 
     private void RenderPane()
@@ -411,7 +429,7 @@ public sealed partial class MainWindow : Window
             _lastSentText = null;
             _remoteHashes.Remove(_selected.GlobalID);
         }
-        var (history, _, hidden) = BuildHistory();
+        var (history, _, _, hidden) = BuildHistory();
         _hiddenLocal = _selected.LocalSessionID is not null ? hidden : 0;
         if (history != _historyText)
         {
@@ -698,7 +716,7 @@ public sealed partial class MainWindow : Window
             // following paragraph: pin the document upright first, apply
             // user italics, then pin the complement upright again.
             whole.CharacterFormat.Italic = FormatEffect.Off;
-            var (_, runs, _) = BuildHistory();
+            var (_, runs, mdRuns, _) = BuildHistory();
             var docEnd = CurrentDocLength();
             foreach (var (start, runLength) in runs)
             {
@@ -714,6 +732,30 @@ public sealed partial class MainWindow : Window
                 cursor = Math.Max(cursor, Math.Clamp(start + runLength, 0, docEnd));
             }
             if (cursor < docEnd) Transcript.Document.GetRange(cursor, docEnd).CharacterFormat.Italic = FormatEffect.Off;
+            // Chat markdown inside assistant turns: bold spans and headings
+            // bold on, code spans get a translucent grey wash that reads in
+            // both themes. Sizes stay untouched so the locked line pitch
+            // never clips. Assistant turns are upright, so no italic
+            // interaction; ranges clamp like the user runs above.
+            foreach (var (start, runLength, kind, level) in mdRuns)
+            {
+                var s = Math.Clamp(start, 0, docEnd);
+                var e = Math.Clamp(start + runLength, 0, docEnd);
+                if (e <= s) continue;
+                var format = Transcript.Document.GetRange(s, e).CharacterFormat;
+                switch (kind)
+                {
+                    case MdRunKind.Bold:
+                        format.Bold = FormatEffect.On;
+                        break;
+                    case MdRunKind.Code:
+                        format.BackgroundColor = Windows.UI.Color.FromArgb(28, 127, 127, 127);
+                        break;
+                    default:
+                        format.Bold = FormatEffect.On;
+                        break;
+                }
+            }
             if (_draftText.Length > 0)
             {
                 // Tail-measured: the history region may read back shorter
@@ -838,7 +880,7 @@ public sealed partial class MainWindow : Window
         if (count > 0 && parts[count - 1] == "") count--;
         count = Math.Max(1, count);
         var prompt = new HashSet<int>();
-        var (_, runs, _) = BuildHistory();
+        var (_, runs, _, _) = BuildHistory();
         foreach (var (start, _) in runs)
         {
             var index = 0;
@@ -982,6 +1024,8 @@ public sealed partial class MainWindow : Window
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         if (_selected?.LocalSessionID == localId) SelectSession(null, caretToEnd: false);
+        _placements.Park("local:" + localId);
+        _placements.Save(_dataFolder);
         _store.DeleteSession(session);
         Refresh();
     }
@@ -1418,7 +1462,7 @@ public sealed partial class MainWindow : Window
         var session = _store.Create(entry);
         var key = "local:" + session.Id;
         RefreshSidebar();
-        SelectSession(new SidebarSession(key, session.Title, "", null, session.Id, ShowPark: false, ShowTake: false, ShowClose: true), caretToEnd: true);
+        SelectSession(new SidebarSession(key, session.Title, "", null, session.Id, ShowPark: true, ShowTake: false, ShowClose: true, ShowPlace: true), caretToEnd: true);
         Transcript.Focus(FocusState.Programmatic);
     }
 
@@ -1705,20 +1749,42 @@ public sealed partial class MainWindow : Window
         createRow.Children.Add(create);
         panel.Children.Add(createRow);
 
+        // Join by address needs an explicit group: a blank group ID is
+        // refused by every member, so the picker names one of this device's
+        // known groups (no discovery required). The sponsor path is the same
+        // reviewed one discovery joins use; only the ID source differs.
+        var candidates = _devices.AvailableGroups()
+            .Where(g => g.Id != _devices.CurrentGroup?.Id).ToList();
+        if (!candidates.Any(g => g.Id == _groupsJoinGroupId))
+            _groupsJoinGroupId = candidates.FirstOrDefault()?.Id ?? "";
         var joinRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        var hostBox = new TextBox { PlaceholderText = "Host or IP", Width = 200, Text = _groupsJoinHost };
+        var hostBox = new TextBox { PlaceholderText = "Host or IP", Width = 160, Text = _groupsJoinHost };
         hostBox.TextChanged += (_, _) => _groupsJoinHost = hostBox.Text;
-        var portBox = new TextBox { PlaceholderText = "Port", Width = 80, Text = _groupsJoinPort };
+        var portBox = new TextBox { PlaceholderText = "Port", Width = 70, Text = _groupsJoinPort };
         portBox.TextChanged += (_, _) => _groupsJoinPort = portBox.Text;
-        var joinByAddress = new Button { Content = "Join by address", FontSize = 12 };
+        var groupBox = new ComboBox { Width = 200, FontSize = 12, PlaceholderText = "Group to join" };
+        var groupItems = candidates.Select(c => new SettingItem(c.Id, c.Name)).ToList();
+        if (groupItems.Count > 0) SyncCombo(groupBox, groupItems, _groupsJoinGroupId);
+        groupBox.SelectionChanged += (_, _) =>
+        {
+            if (groupBox.SelectedItem is SettingItem picked) _groupsJoinGroupId = picked.Id;
+        };
+        var joinByAddress = new Button
+        {
+            Content = "Join by address",
+            FontSize = 12,
+            IsEnabled = groupItems.Count > 0,
+        };
         joinByAddress.Click += async (_, _) =>
         {
+            if (groupBox.SelectedItem is SettingItem picked) _groupsJoinGroupId = picked.Id;
             if (int.TryParse(_groupsJoinPort, out var port))
-                await _devices.JoinGroupByAddressAsync(_groupsJoinHost, port, "");
+                await _devices.JoinGroupByAddressAsync(_groupsJoinHost, port, _groupsJoinGroupId);
             Refresh();
         };
         joinRow.Children.Add(hostBox);
         joinRow.Children.Add(portBox);
+        joinRow.Children.Add(groupBox);
         joinRow.Children.Add(joinByAddress);
         panel.Children.Add(joinRow);
 
@@ -1755,10 +1821,85 @@ public sealed partial class MainWindow : Window
 
     private async void OnParkClick(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: SidebarSession row } || row.GlobalID is null) return;
-        await _devices.ReleaseRemoteAsync(row.GlobalID);
-        if (_selected?.GlobalID == row.GlobalID) SelectSession(null, caretToEnd: false);
+        if (sender is not Button { Tag: SidebarSession row }) return;
+        // Parking is view state only: the lease releases for remotes, the
+        // placement clears for all, and the session keeps running at home.
+        _placements.Park(row.Key);
+        _placements.Save(_dataFolder);
+        if (row.GlobalID is not null) await _devices.ReleaseRemoteAsync(row.GlobalID);
+        if (_selected?.Key == row.Key) SelectSession(null, caretToEnd: false);
         Refresh();
+    }
+
+    // Pane slots 1-3 (Mac parity): placing focuses the session, takes the
+    // lease for remotes, evicts the pane's previous occupant, and persists.
+    private async void OnPlaceClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: SidebarSession row, Content: string label }) return;
+        if (label is not ("1" or "2" or "3")) return;
+        var pane = label[0] - '0';
+        _placements.Assign(row.Key, pane);
+        _placements.Save(_dataFolder);
+        if (_selected?.Key != row.Key) SelectSession(row, caretToEnd: true);
+        if (row.GlobalID is { } gid) await _devices.AcquireRemoteAsync(gid);
+        Refresh();
+    }
+
+    private void OnPaneClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: int pane }) return;
+        var key = _placements.KeyIn(pane);
+        if (key is null) return;
+        var item = Sidebar.Items.OfType<SidebarSession>().FirstOrDefault(i => i.Key == key);
+        if (item is null)
+        {
+            _placements.Park(key);
+            _placements.Save(_dataFolder);
+            Refresh();
+            return;
+        }
+        if (_selected?.Key != key) SelectSession(item, caretToEnd: true);
+        Refresh();
+    }
+
+    private void RenderPaneBar()
+    {
+        var keys = new HashSet<string>(Sidebar.Items.OfType<SidebarSession>().Select(i => i.Key));
+        var pruned = false;
+        foreach (var pane in new[] { 1, 2, 3 })
+            if (_placements.KeyIn(pane) is { } parked && !keys.Contains(parked))
+            {
+                _placements.Park(parked);
+                pruned = true;
+            }
+        if (pruned) _placements.Save(_dataFolder);
+        var titles = Sidebar.Items.OfType<SidebarSession>().ToDictionary(i => i.Key, i => i.Title);
+        var signature = string.Join("|", new[] { 1, 2, 3 }.Select(pane =>
+            pane + "=" + (_placements.KeyIn(pane) ?? "-") + "~"
+            + (titles.GetValueOrDefault(_placements.KeyIn(pane) ?? "") ?? "")))
+            + "|focus=" + (_selected?.Key ?? "-");
+        if (signature == _paneSignature) return;
+        _paneSignature = signature;
+        PaneBar.Children.Clear();
+        foreach (var pane in new[] { 1, 2, 3 })
+        {
+            var key = _placements.KeyIn(pane);
+            var title = key is not null && titles.TryGetValue(key, out var found) ? found : "—";
+            if (title.Length > 18) title = title[..17] + "…";
+            var slot = new Button
+            {
+                Content = pane + ": " + title,
+                Tag = pane,
+                FontSize = 11,
+                FontWeight = key is not null && key == _selected?.Key
+                    ? Microsoft.UI.Text.FontWeights.SemiBold
+                    : Microsoft.UI.Text.FontWeights.Normal,
+            };
+            Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(slot,
+                key is null ? "Empty pane" : titles.GetValueOrDefault(key) ?? "");
+            slot.Click += OnPaneClick;
+            PaneBar.Children.Add(slot);
+        }
     }
 
     private async void OnSendClick(object sender, RoutedEventArgs e)
