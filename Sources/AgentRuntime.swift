@@ -58,7 +58,7 @@ import AVFoundation
     }
     func prepareForQuit() {
         shuttingDown = true
-        AgentConversation.shared.stop()
+        AgentConversation.shared.stop(resumeQueued: false)
         timer?.invalidate(); timer = nil
         speech.stopSpeaking(at: .immediate)
         for task in tasks.values { task.cancel() }

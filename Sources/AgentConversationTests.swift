@@ -8,6 +8,12 @@ import AppKit
     var click = VoiceEndpointDetector()
     _ = click.sample(power: -10, at: 0.1)
     check(click.sample(power: -80, at: 20) == .noSpeech, "A brief microphone spike cannot trigger a hands-free query")
+    var clicks = VoiceEndpointDetector()
+    for n in 1...199 { _ = clicks.sample(power: n % 4 == 0 ? -10 : -80, at: Double(n) / 10) }
+    check(clicks.sample(power: -80, at: 20) == .noSpeech, "Separated keyboard clicks never accumulate into sustained speech")
+    var shortWord = VoiceEndpointDetector()
+    _ = shortWord.sample(power: -25, at: 0.1); _ = shortWord.sample(power: -25, at: 0.2)
+    check(shortWord.sample(power: -80, at: 1.8) == .send, "A short spoken answer can finish without requiring a long sentence")
     var speaking = VoiceEndpointDetector()
     for n in 1...5 { _ = speaking.sample(power: -25, at: Double(n) / 10) }
     check(speaking.sample(power: -80, at: 1.7) == .keepListening && speaking.sample(power: -80, at: 2.1) == .send, "Sustained speech ends after 1.5 seconds of quiet, not a shorter thinking pause")
@@ -72,7 +78,28 @@ import AppKit
     session.pending = [PendingPrompt(text: "queued fixture", images: [])]
     store.runNext(session)
     check(starts == 3 && session.pending.count == 1, "Queued switchboard work waits instead of stealing a listening agent")
+    talk.stop(resumeQueued: false); drain()
+    check(session.pending.count == 1 && starts == 3, "Quitting voice mode during app shutdown preserves queued work without starting a new turn")
     session.pending = []
+    talk.start(session, store: store)
     talk.audio.onFailure?("Synthetic transcription failure")
     check(!talk.active && talk.detail == "Synthetic transcription failure", "Transcription failure visibly ends hands-free mode with no retry loop")
+
+    let runtime = AgentRuntime()
+    runtime.keyReader = { _ in "synthetic-test-key" }
+    var spokenInstructions = false
+    runtime.api.request = { request in
+        let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+        spokenInstructions = (body["instructions"] as? String)?.contains("This is a spoken conversation.") == true
+        let reply = "{\"reply\":\"Hello from the fixture.\",\"attention\":\"\",\"tell\":[]}"
+        let data = try JSONSerialization.data(withJSONObject: ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": reply]]]]])
+        return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    session.agent?.generateArt = false; session.agent?.webSearch = false; session.agent?.enabled = false
+    store.startAgentRun = { s, id in runtime.run(s, store: store, responseID: id) }
+    talk.start(session, store: store); talk.transcribed("Say hello")
+    let deadline = Date().addingTimeInterval(4)
+    while talk.phase == .thinking && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(spokenInstructions && talk.phase == .speaking && speeches.last == "Hello from the fixture." && !session.busy,
+          "Real agent runtime carries a voice question through model parsing and completion into correlated speech")
 }

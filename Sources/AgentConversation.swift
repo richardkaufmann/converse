@@ -8,12 +8,15 @@ struct VoiceEndpointDetector {
     enum Decision { case keepListening, send, noSpeech }
     var silenceSeconds = 1.5
     private var voicedDuration: Double = 0
+    private var heardSpeech = false
     private var lastSpeech: Double?
     private var previousTime: Double = 0
     mutating func sample(power: Float, at time: Double) -> Decision {
         let delta = min(0.2, max(0, time - previousTime)); previousTime = time
-        if power.isFinite && power > -42 { voicedDuration += delta; lastSpeech = time }
-        let heardSpeech = voicedDuration >= 0.3
+        if power.isFinite && power > -42 {
+            voicedDuration += delta; lastSpeech = time
+            if voicedDuration >= 0.2 { heardSpeech = true }
+        } else { voicedDuration = 0 }
         if heardSpeech, let lastSpeech, time - lastSpeech >= silenceSeconds { return .send }
         if time >= 20 && !heardSpeech { return .noSpeech }
         if time >= 59.5 { return heardSpeech ? .send : .noSpeech }
@@ -140,10 +143,10 @@ struct VoiceEndpointDetector {
         }
         if let speakReply { speakReply(text, intent, done) } else { speaker.say(text, intent: intent, done: done) }
     }
-    func stop(_ message: String = "Conversation stopped · microphone off") {
+    func stop(_ message: String = "Conversation stopped · microphone off", resumeQueued: Bool = true) {
         generation = UUID(); task?.cancel(); task = nil; audio.cancel(); speaker.stop(); stopPlayback?()
         responseID = nil; phase = .stopped; detail = message
-        if let session, let store, !session.pending.isEmpty {
+        if resumeQueued, let session, let store, !session.pending.isEmpty {
             DispatchQueue.main.async { store.runNext(session) }
         }
     }
