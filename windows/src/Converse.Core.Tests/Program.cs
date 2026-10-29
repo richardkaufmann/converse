@@ -1488,6 +1488,61 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(bin); }
 }
 
+// Session Configure: retitle plus provider move, validated and persisted.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-config-").FullName;
+    try
+    {
+        var store = new SessionStore(dir, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "claude"));
+        var messages = session.Messages.Count;
+        var codex = store.Entries.First(e => e.Engine == "codex");
+        store.Configure(session, "  Research  ", codex, "C:\\work");
+        Check(session.Title == "Research" && session.Entry.Command == "codex" && session.Entry.Engine == "codex"
+            && session.Entry.Directory == "C:\\work" && session.Messages.Count == messages,
+            "Configure retitles, moves provider and directory, keeps history");
+        var reloaded = new SessionStore(dir, new FakeRunner());
+        var same = reloaded.Sessions.First(s => s.Id == session.Id);
+        Check(same.Title == "Research" && same.Entry.Command == "codex",
+            "Configured session persists across restarts");
+        var threw = false;
+        try { store.Configure(session, "   ", codex, ""); } catch (ArgumentException) { threw = true; }
+        Check(threw && session.Title == "Research", "Blank title is refused without touching the session");
+        threw = false;
+        try { store.Configure(session, "X", new AgentEntry { Name = "Bad", Command = " " }, ""); }
+        catch (ArgumentException) { threw = true; }
+        Check(threw && session.Entry.Command == "codex", "Blank provider command is refused");
+    }
+    finally { Cleanup(dir); }
+}
+
+// Configure isolation (review blocker): sessions own their entries, and the
+// saved login binding survives a provider move.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-configiso-").FullName;
+    try
+    {
+        var store = new SessionStore(dir, new FakeRunner());
+        var codex = store.Entries.First(e => e.Engine == "codex");
+        var claudeTemplate = store.Entries.First(e => e.Engine == "claude");
+        var aye = store.Create(claudeTemplate);
+        var bee = store.Create(claudeTemplate);
+        store.Configure(aye, "Aye", codex, "");
+        Check(aye.Entry.Engine == "codex" && bee.Entry.Engine == "claude"
+            && claudeTemplate.Engine == "claude"
+            && !ReferenceEquals(aye.Entry, bee.Entry) && !ReferenceEquals(aye.Entry, codex),
+            "Configure moves one session only; sibling and template keep their provider");
+        aye.Entry.AccountName = "me@example.com";
+        aye.Entry.AccountDirectory = "C:\\acct";
+        aye.Entry.UseDefaultAccountStore = true;
+        store.Configure(aye, "Aye", codex, "");
+        Check(aye.Entry.AccountName == "me@example.com" && aye.Entry.AccountDirectory == "C:\\acct"
+            && aye.Entry.UseDefaultAccountStore == true,
+            "Configure preserves the session's saved login binding");
+    }
+    finally { Cleanup(dir); }
+}
+
 // A turn shaped text -> tool -> text keeps every block: later blocks that
 // arrive only in assistant events are rescued (not dropped once anything
 // streamed), and a subset final snapshot keeps the accumulation (PONG).

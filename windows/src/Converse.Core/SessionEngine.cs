@@ -18,6 +18,21 @@ public sealed class AgentEntry
     public string? AccountName { get; set; }
     public string? AccountDirectory { get; set; }
     public bool? UseDefaultAccountStore { get; set; }
+
+    /// <summary>Session-owned copy: every session gets its own entry so a
+    /// later Configure can never leak across sessions or back into the
+    /// provider template. All fields are values or immutable strings.</summary>
+    public AgentEntry Copy() => new()
+    {
+        Id = Id,
+        Name = Name,
+        Command = Command,
+        Directory = Directory,
+        Engine = Engine,
+        AccountName = AccountName,
+        AccountDirectory = AccountDirectory,
+        UseDefaultAccountStore = UseDefaultAccountStore,
+    };
 }
 
 public sealed class SessionChoices
@@ -244,7 +259,9 @@ public sealed class SessionStore
 
     public ChatSession Create(AgentEntry entry)
     {
-        var session = new ChatSession { Entry = entry, Title = entry.Name };
+        // Session-owned copy: the template reference must never be shared,
+        // or a later Configure leaks across sessions and the template.
+        var session = new ChatSession { Entry = entry.Copy(), Title = entry.Name };
         session.Messages.Add(new ChatMessage { Role = "system", Text = "", CreatedAt = DateTime.UtcNow });
         Sessions.Add(session);
         Save();
@@ -255,6 +272,29 @@ public sealed class SessionStore
     {
         Stop(session);
         Sessions.Remove(session);
+        Save();
+    }
+
+    /// <summary>
+    /// Retitle a session and/or move it to another provider entry, Mac
+    /// Configure parity. The title applies immediately, even mid-turn. The
+    /// provider command and working directory apply to the next spawn; the
+    /// conversation keeps its history, draft and login binding.
+    /// </summary>
+    public void Configure(ChatSession session, string title, AgentEntry provider, string directory)
+    {
+        if (session is null) throw new ArgumentNullException(nameof(session));
+        if (provider is null) throw new ArgumentNullException(nameof(provider));
+        if (string.IsNullOrWhiteSpace(title)) throw new ArgumentException("A conversation needs a name.", nameof(title));
+        if (string.IsNullOrWhiteSpace(provider.Command)) throw new ArgumentException("The provider needs a command.", nameof(provider));
+        session.Title = title.Trim();
+        session.Entry.Name = provider.Name;
+        session.Entry.Command = provider.Command;
+        session.Entry.Engine = provider.Engine;
+        // The session's saved login binding is sticky: a provider move must
+        // never clobber it with template values. (Account fields intentionally
+        // untouched here; login changes are a separate control.)
+        if (!string.IsNullOrWhiteSpace(directory)) session.Entry.Directory = directory.Trim();
         Save();
     }
 
