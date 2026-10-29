@@ -659,6 +659,10 @@ public sealed partial class MainWindow : Window
             // always the document tail, so the history region is whatever
             // precedes it, regardless of break normalization.
             var oldDocLength = CurrentDocLength();
+            Transcript.Document.GetText(TextGetOptions.None, out var oldFull);
+            var scrollerBefore = TranscriptScroller();
+            var oldOffset = scrollerBefore?.VerticalOffset ?? 0;
+            var oldScrollable = scrollerBefore?.ScrollableHeight ?? 0;
             var oldHistoryLength = Math.Max(0, oldDocLength - _draftText.Length);
             var selection = Transcript.Document.Selection;
             var wasAtEnd = selection.StartPosition >= oldDocLength && selection.EndPosition >= oldDocLength;
@@ -678,14 +682,29 @@ public sealed partial class MainWindow : Window
             var whole = Transcript.Document.GetRange(0, CurrentDocLength());
             whole.ParagraphFormat.SpaceBefore = 0;
             whole.ParagraphFormat.SpaceAfter = 0;
-            whole.ParagraphFormat.LineSpacingRule = LineSpacingRule.Exactly;
-            whole.ParagraphFormat.LineSpacing = 18;
+            whole.ParagraphFormat.SetLineSpacing(LineSpacingRule.Exactly, 18); // WinUI 3: both properties are read-only
+            // Mac parity: submitted user turns render italic, everything
+            // else upright. RichEdit paragraph marks inherit the preceding
+            // run's format, so one italic run otherwise infects every
+            // following paragraph: pin the document upright first, apply
+            // user italics, then pin the complement upright again.
+            whole.CharacterFormat.Italic = FormatEffect.Off;
             var (_, runs, _) = BuildHistory();
+            var docEnd = CurrentDocLength();
             foreach (var (start, runLength) in runs)
             {
-                var range = Transcript.Document.GetRange(start, start + runLength);
-                range.CharacterFormat.Italic = FormatEffect.On;
+                var s = Math.Clamp(start, 0, docEnd);
+                var e = Math.Clamp(start + runLength, 0, docEnd);
+                if (e > s) Transcript.Document.GetRange(s, e).CharacterFormat.Italic = FormatEffect.On;
             }
+            var cursor = 0;
+            foreach (var (start, runLength) in runs)
+            {
+                var s = Math.Clamp(start, 0, docEnd);
+                if (s > cursor) Transcript.Document.GetRange(cursor, s).CharacterFormat.Italic = FormatEffect.Off;
+                cursor = Math.Max(cursor, Math.Clamp(start + runLength, 0, docEnd));
+            }
+            if (cursor < docEnd) Transcript.Document.GetRange(cursor, docEnd).CharacterFormat.Italic = FormatEffect.Off;
             if (_draftText.Length > 0)
             {
                 // Tail-measured: the history region may read back shorter
@@ -694,6 +713,7 @@ public sealed partial class MainWindow : Window
                 var draft = Transcript.Document.GetRange(
                     Math.Max(0, docLength - _draftText.Length), docLength);
                 draft.CharacterFormat.ForegroundColor = Microsoft.UI.Colors.Blue;
+                draft.CharacterFormat.Italic = FormatEffect.Off;
             }
 
             var newDocLength = CurrentDocLength();
@@ -717,8 +737,29 @@ public sealed partial class MainWindow : Window
             }
             Transcript.Document.Selection.SetRange(position, position + length);
             // Deferred past layout: ScrollableHeight is stale synchronously
-            // after SetText, which parks the view at the top on send.
-            if (caretToEnd || wasAtEnd) DispatcherQueue.TryEnqueue(ScrollTranscriptToEnd);
+            // after SetText, and SetText parks the viewport at the top while
+            // SetRange alone does not reliably scroll back. Every branch
+            // restores its scroll target here: the tail when following, the
+            // preserved offset otherwise (shifted when earlier messages were
+            // prepended above). The gutter resyncs in the same tick: syncing
+            // it synchronously reads the pre-scroll offset and leaves stale
+            // numbers beside fresh paragraphs.
+            var followTail = caretToEnd || wasAtEnd;
+            var appended = (_historyText + _draftText).StartsWith(oldFull ?? "", StringComparison.Ordinal);
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (TranscriptScroller() is { } scroller)
+                {
+                    if (followTail)
+                        ScrollTranscriptToEnd();
+                    else
+                    {
+                        var delta = appended ? 0 : Math.Max(0, scroller.ScrollableHeight - oldScrollable);
+                        scroller.ChangeView(null, Math.Max(0, oldOffset + delta), null, true);
+                    }
+                    GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
+                }
+            });
             UpdateGutter();
         }
         finally { _rebuilding = false; }
@@ -825,6 +866,7 @@ public sealed partial class MainWindow : Window
         var docLength = CurrentDocLength();
         var range = Transcript.Document.GetRange(Math.Max(0, docLength - _draftText.Length), docLength);
         range.CharacterFormat.ForegroundColor = Microsoft.UI.Colors.Blue;
+        range.CharacterFormat.Italic = FormatEffect.Off;
         UpdateGutter();
         ScheduleDraftFlush();
     }
@@ -1428,13 +1470,23 @@ public sealed partial class MainWindow : Window
         if (_groupsPanel is not null) return;
         _groupsSignature = "";
         _groupsArmDissolve = null;
-        var panel = new StackPanel { Spacing = 8, Width = 620 };
+        // No fixed width: a 620px panel overflows narrower dialogs, clips
+        // headers, and breaks the scroller's measure. Height caps to the
+        // live window so Create/Join stay reachable; horizontal scroll stays
+        // off so long names wrap or trim instead of pushing buttons out.
+        var panel = new StackPanel { Spacing = 8 };
         _groupsPanel = panel;
         RenderGroupsDialog();
         var dialog = new ContentDialog
         {
             Title = "Converse Groups",
-            Content = new ScrollViewer { Content = panel, MaxHeight = 560 },
+            Content = new ScrollViewer
+            {
+                Content = panel,
+                MaxHeight = Math.Max(320, Bounds.Height - 260),
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            },
             CloseButtonText = "Done",
             XamlRoot = Content.XamlRoot,
         };
@@ -1460,7 +1512,7 @@ public sealed partial class MainWindow : Window
         if (_groupsPanel is not { } panel) return;
         var signature = new System.Text.StringBuilder();
         signature.Append("g:").Append(_devices.CurrentGroup?.Id ?? "none");
-        foreach (var prompt in _devices.GroupPairingPrompts) signature.Append("|p:").Append(prompt.PeerId).Append(prompt.Code);
+        foreach (var pairing in _devices.GroupPairingPrompts) signature.Append("|p:").Append(pairing.PeerId).Append(pairing.Code);
         if (_devices.GroupReview is { } review) signature.Append("|r:").Append(review.Request.Id).Append(review.Code);
         foreach (var request in _devices.GroupRequests)
             signature.Append("|q:").Append(request.Id).Append(request.Approved).Append(request.RequesterName);
@@ -1550,23 +1602,32 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(new TextBlock { Text = "Groups", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         foreach (var group in _devices.AvailableGroups())
         {
-            var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-            header.Children.Add(new TextBlock
+            // Grid, not an unbounded horizontal stack: the name trims with
+            // an ellipsis and the buttons keep their space at any width.
+            var header = new Grid { ColumnSpacing = 8 };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var title = new TextBlock
             {
                 Text = group.Name + (group.Id == _devices.CurrentGroup?.Id ? " (current)" : ""),
                 FontWeight = Microsoft.UI.Text.FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center,
-            });
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            Grid.SetColumn(title, 0);
+            header.Children.Add(title);
+            var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            Grid.SetColumn(actions, 1);
             if (group.Id == _devices.CurrentGroup?.Id)
             {
                 var leave = new Button { Content = "Leave", FontSize = 12 };
                 leave.Click += async (_, _) => { await _devices.LeaveGroupAsync(); Refresh(); };
-                header.Children.Add(leave);
+                actions.Children.Add(leave);
             }
             else if (_devices.CanJoinGroup(group.Id))
             {
                 var join = new Button { Content = "Join", FontSize = 12 };
                 join.Click += async (_, _) => { await _devices.JoinGroupAsync(group); Refresh(); };
-                header.Children.Add(join);
+                actions.Children.Add(join);
             }
             var dissolve = new Button
             {
@@ -1581,12 +1642,13 @@ public sealed partial class MainWindow : Window
                 await _devices.DissolveGroupAsync(group);
                 Refresh();
             };
-            header.Children.Add(dissolve);
+            actions.Children.Add(dissolve);
+            header.Children.Add(actions);
             panel.Children.Add(header);
             foreach (var (_, label) in _devices.GroupDevices(group))
                 panel.Children.Add(new TextBlock
                 {
-                    Text = "    " + label, FontSize = 12,
+                    Text = "    " + label, FontSize = 12, TextWrapping = TextWrapping.Wrap,
                     Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
                 });
         }
@@ -1600,7 +1662,11 @@ public sealed partial class MainWindow : Window
         create.Click += async (_, _) =>
         {
             await _devices.CreateGroupAsync(_groupsCreateName);
+            // Clear the live box directly as well as the field: a skipped
+            // re-render must never leave a stale name behind.
+            createBox.Text = "";
             _groupsCreateName = "";
+            _groupsSignature = "";
             Refresh();
         };
         createRow.Children.Add(createBox);
@@ -1674,6 +1740,10 @@ public sealed partial class MainWindow : Window
             session.Draft = text;
             _draftText = "";
             _store.Submit(session);
+            // A busy submit changes no history, so RenderPane would skip the
+            // rebuild and the sent text would linger in the editor, inviting
+            // a duplicate send. Rebuild now; the refresh below no-ops.
+            RebuildDocument(caretToEnd: true);
         }
         else if (_selected.GlobalID is { } globalId)
         {

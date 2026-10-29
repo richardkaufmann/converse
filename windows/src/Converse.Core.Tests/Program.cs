@@ -191,8 +191,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
         home.PairingConfirmation = _ => Task.FromResult(true);
         viewer.PairingConfirmation = _ => Task.FromResult(true);
-        await home.StartAsync(0);
-        await viewer.StartAsync(0);
+        await home.StartAsync(0, enableDiscovery: false);
+        await viewer.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -536,8 +536,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
         home.PairingConfirmation = _ => Task.FromResult(true);
         viewer.PairingConfirmation = _ => Task.FromResult(true);
-        await home.StartAsync(0);
-        await viewer.StartAsync(0);
+        await home.StartAsync(0, enableDiscovery: false);
+        await viewer.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -770,6 +770,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(threw, "Invalid group IDs refuse adoption");
     var reloaded = new Converse.Core.ConverseGroupStore(dir);
     Check(reloaded.Existed && reloaded.Groups.Single().Dissolved, "Tombstones persist across restarts");
+    var stored = System.Text.Encoding.UTF8.GetString(Converse.Core.DeviceJson.Encode(group));
+    Check(!stored.Contains("valid", StringComparison.OrdinalIgnoreCase), "Computed group validity never serializes");
     Cleanup(dir);
 }
 
@@ -842,6 +844,40 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(wrapped.Contains("\"request\":{") && wrapped.Contains("\"code\":"), "Detail/approve keep the wrapper shape");
 }
 
+// Discovery phantoms expire past the 120s TTL, and this device lists
+// itself only under its current group (Mac parity).
+{
+    var dir = Directory.CreateTempSubdirectory("converse-phantom-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(dir, new SessionStore(dir, new FakeRunner()), "A");
+        await a.CreateGroupAsync("Home");
+        var home = a.CurrentGroup!;
+        var stale = new Converse.Core.ConverseGroup
+        { Id = Guid.NewGuid().ToString("d"), Name = "Alpha", Creator = new string('c', 64) };
+        var fresh = new Converse.Core.ConverseGroup
+        { Id = Guid.NewGuid().ToString("d"), Name = "Beta", Creator = new string('d', 64) };
+        lock (a.DiscoveredDevices)
+        {
+            a.DiscoveredDevices.Add(new Converse.Core.MdnsService("Ghost [deadbeef]", "127.0.0.1", 1,
+                stale, new string('e', 64), DateTime.UtcNow.AddSeconds(-121)));
+            a.DiscoveredDevices.Add(new Converse.Core.MdnsService("Live [cafef00d]", "127.0.0.1", 2,
+                fresh, new string('f', 64), DateTime.UtcNow));
+        }
+        var visible = a.AvailableGroups();
+        Check(visible.All(g => g.Name != "Alpha") && visible.Any(g => g.Name == "Beta"),
+            "Expired discoveries vanish while live hints stay");
+        Check(a.GroupDevices(home).Any(d => d.DeviceID == a.DeviceId), "This device lists under its current group");
+        var other = new Converse.Core.ConverseGroup
+        { Id = Guid.NewGuid().ToString("d"), Name = "Elsewhere", Creator = new string('a', 64) };
+        a.GroupStore.Adopt(other);
+        Check(a.GroupDevices(home).All(d => d.DeviceID != a.DeviceId)
+            && a.GroupDevices(other).Any(d => d.DeviceID == a.DeviceId),
+            "This device never lists under groups it left");
+    }
+    finally { Cleanup(dir); }
+}
+
 // Pins scope to groups: same device/key in another group is a fresh admission.
 {
     var dir = Directory.CreateTempSubdirectory("converse-pinscope-").FullName;
@@ -869,8 +905,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var home = new DeviceSyncService(homeRoot, new SessionStore(homeRoot, new FakeRunner()), "HomePC");
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
         viewer.PairingConfirmation = _ => Task.FromResult(true);
-        await home.StartAsync(0);
-        await viewer.StartAsync(0);
+        await home.StartAsync(0, enableDiscovery: false);
+        await viewer.StartAsync(0, enableDiscovery: false);
         await home.CreateGroupAsync("Codes");
         await viewer.ConnectManualAsync("127.0.0.1", home.ListeningPort, home.CurrentGroup!.Id);
         var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -897,9 +933,9 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         a.PairingConfirmation = _ => Task.FromResult(true);
         b.PairingConfirmation = _ => Task.FromResult(true);
         c.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
-        await c.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
+        await c.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -935,8 +971,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
         b.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
         await a.CreateGroupAsync("Gates");
         async Task<bool> Until(Func<bool> done)
         {
@@ -969,8 +1005,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
         b.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
         await a.CreateGroupAsync("Gates");
         async Task<bool> Until(Func<bool> done)
         {
@@ -987,6 +1023,23 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
+// A refused manual connect reports instead of throwing (its UI callers are async void).
+{
+    var rRoot = Directory.CreateTempSubdirectory("converse-refused-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(rRoot, new SessionStore(rRoot, new FakeRunner()), "A");
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        var closedPort = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        var threw = false;
+        try { await a.ConnectManualAsync("127.0.0.1", closedPort); } catch { threw = true; }
+        Check(!threw && a.LastOutcome.StartsWith("Could not reach"), "Refused manual connect reports instead of throwing");
+    }
+    finally { Cleanup(rRoot); }
+}
+
 // Cross-group and legacy peers are refused without pairing.
 {
     var aRoot = Directory.CreateTempSubdirectory("converse-iso1-").FullName;
@@ -995,8 +1048,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     {
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         using var d = new DeviceSyncService(dRoot, new SessionStore(dRoot, new FakeRunner()), "D");
-        await a.StartAsync(0);
-        await d.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await d.StartAsync(0, enableDiscovery: false);
         await a.CreateGroupAsync("Alpha");
         await d.CreateGroupAsync("Beta");
         await d.ConnectManualAsync("127.0.0.1", a.ListeningPort);
@@ -1019,13 +1072,14 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         var bStore = new SessionStore(bRoot, new FakeRunner());
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         a.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
         await a.CreateGroupAsync("Doomed");
         string groupId;
+        string bId;
         {
             using var b = new DeviceSyncService(bRoot, bStore, "B");
             b.PairingConfirmation = _ => Task.FromResult(true);
-            await b.StartAsync(0);
+            await b.StartAsync(0, enableDiscovery: false);
             async Task<bool> Until(Func<bool> done)
             {
                 var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -1033,14 +1087,30 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
                 return done();
             }
             groupId = a.CurrentGroup!.Id;
+            bId = b.DeviceId;
             Check(await JoinPair(a, b, () => b.CurrentGroup?.Id == groupId), "Dissolve setup joins B");
+            Check(await Until(() => a.Homes.GetValueOrDefault(bId)?.Online == true), "Dissolve setup trusts both directions");
         }
+        async Task<bool> UntilOff(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        // b's disposal must be fully observed before the dissolve: asserting
+        // "offline belief" while any socket is still draining is a race.
+        Check(await UntilOff(() => a.Homes.GetValueOrDefault(bId)?.Online != true),
+            "Dissolve setup waits for b's disconnect");
         await a.DissolveGroupAsync(a.KnownGroups.First(g => g.Id == groupId));
         Check(a.CurrentGroup is null && a.KnownGroups.Any(g => g.Id == groupId && g.Dissolved),
             "Dissolve clears current and stores the tombstone");
         using var b2 = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
-        await b2.StartAsync(0);
-        Check(b2.CurrentGroup?.Id == groupId, "Offline member still believes in the group");
+        // Belief is a file-state claim: assert it before any socket exists,
+        // so no reconnect can ever slip in ahead of the check.
+        var groupsFile = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(bRoot, "converse-groups.json")))!;
+        Check(b2.CurrentGroup?.Id == groupId && groupsFile["currentID"]?.GetValue<string>() == groupId,
+            "Offline member still believes in the group");
+        await b2.StartAsync(0, enableDiscovery: false);
         await b2.ConnectManualAsync("127.0.0.1", a.ListeningPort);
         async Task<bool> Until2(Func<bool> done)
         {
@@ -1066,8 +1136,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var b = new DeviceSyncService(bRoot, bStore, "B");
         a.PairingConfirmation = _ => Task.FromResult(true);
         b.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -1148,9 +1218,9 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         a.PairingConfirmation = _ => Task.FromResult(true);
         b.PairingConfirmation = _ => Task.FromResult(true);
         c.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
-        await c.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
+        await c.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -1193,7 +1263,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     {
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         a.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
         await a.CreateGroupAsync("Members");
         var aPub = a.Trust.Records.First(d => d.DeviceID == a.DeviceId).PublicKey;
         string bId;
@@ -1216,7 +1286,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         }
         using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
         b.PairingConfirmation = _ => Task.FromResult(true);
-        await b.StartAsync(0);
+        await b.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -1262,8 +1332,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
         a.PairingConfirmation = _ => Task.FromResult(true);
         b.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await b.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await b.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -1289,8 +1359,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
         using var c = new DeviceSyncService(cRoot, new SessionStore(cRoot, new FakeRunner()), "C");
         c.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0);
-        await c.StartAsync(0);
+        await a.StartAsync(0, enableDiscovery: false);
+        await c.StartAsync(0, enableDiscovery: false);
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);

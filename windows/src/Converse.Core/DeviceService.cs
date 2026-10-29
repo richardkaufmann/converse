@@ -406,12 +406,15 @@ public sealed class DeviceSyncService : IDisposable
 
     public IReadOnlyList<DeviceOutboxRecord> Outbox => _outbox.Records;
 
-    public async Task StartAsync(int port = DefaultPort)
+    // Tests run deaf and mute: without this flag the suite advertises on
+    // the real LAN and running apps list phantom test groups.
+    public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = true)
     {
         _shutdown = new CancellationTokenSource();
         _listener = new TcpListener(IPAddress.Any, port);
         _listener.Start();
         ListeningPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        if (!enableDiscovery) { _ = AcceptLoopAsync(_shutdown.Token); _ = HeartbeatLoopAsync(_shutdown.Token); await Task.CompletedTask; return; }
         try
         {
             _mdns = new MdnsDiscovery(DeviceName + " [" + DeviceId[..8] + "]", ListeningPort, CurrentGroup, DeviceId);
@@ -454,7 +457,15 @@ public sealed class DeviceSyncService : IDisposable
         try
         {
             var client = new TcpClient();
-            await client.ConnectAsync(host, port);
+            // A refused or unreachable host must not escape to the async void UI handlers.
+            try { await client.ConnectAsync(host, port); }
+            catch (SocketException ex)
+            {
+                client.Dispose();
+                LastOutcome = $"Could not reach {host}:{port} ({ex.SocketErrorCode}).";
+                Changed?.Invoke();
+                return;
+            }
             var peer = new Peer
             {
                 Id = id, Client = client, IsInitiator = true, ManualHost = host, ManualPort = port,
@@ -871,11 +882,20 @@ public sealed class DeviceSyncService : IDisposable
     }
 
     // ---- Converse Groups ----
+    // Discovery hints honor the 120s mDNS TTL: dead peers stop being
+    // listed (and rejoinable) until they announce again.
+    private void PruneDiscovery()
+    {
+        var now = DateTime.UtcNow;
+        DiscoveredDevices.RemoveAll(d => d.SeenAt != default && (now - d.SeenAt).TotalSeconds > 120);
+    }
+
     public List<ConverseGroup> AvailableGroups()
     {
         var groups = KnownGroups.Where(g => !g.Dissolved).ToList();
         lock (DiscoveredDevices)
         {
+            PruneDiscovery();
             foreach (var found in DiscoveredDevices)
             {
                 if (found.Group is { } hint && hint.Valid && !hint.Dissolved
@@ -894,9 +914,13 @@ public sealed class DeviceSyncService : IDisposable
             .OrderBy(d => d.Name.ToLowerInvariant()).ThenBy(d => d.DeviceID, StringComparer.Ordinal).ToList();
         foreach (var device in members)
             rows.Add((device.DeviceID, device.Name + " [" + device.DeviceID[..8] + "]"));
-        rows.Add((DeviceId, DeviceName + " [this device]"));
+        // Swift parity: this device appears only under its current group,
+        // never under left groups or strangers' advertisements.
+        if (group.Id == CurrentGroup?.Id)
+            rows.Add((DeviceId, DeviceName + " [this device]"));
         lock (DiscoveredDevices)
         {
+            PruneDiscovery();
             foreach (var found in DiscoveredDevices.Where(d => d.Group?.Id == group.Id && d.Group.Valid && !d.Group.Dissolved))
             {
                 var id = found.DeviceID;

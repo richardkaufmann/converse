@@ -8,7 +8,7 @@ namespace Converse.Core;
 // Minimal mDNS for _converse._tcp.local (RFC 6762/6763 subset): PTR/SRV/A
 // advertise + PTR browse with compression-aware decoding. Discovery is
 // unauthenticated hints only; pairing remains the trust boundary.
-public sealed record MdnsService(string Name, string Host, int Port, ConverseGroup? Group = null, string? DeviceID = null);
+public sealed record MdnsService(string Name, string Host, int Port, ConverseGroup? Group = null, string? DeviceID = null, DateTime SeenAt = default);
 
 public sealed class MdnsDiscovery : IDisposable
 {
@@ -137,7 +137,7 @@ public sealed class MdnsDiscovery : IDisposable
             var display = instance.Split('.')[0];
             if (!string.Equals(display, _instanceName, StringComparison.OrdinalIgnoreCase))
                 Found?.Invoke(new MdnsService(display, addresses.GetValueOrDefault(host, host), port,
-                    GroupHint(txt), txt?.GetValueOrDefault("device")));
+                    GroupHint(txt), txt?.GetValueOrDefault("device"), DateTime.UtcNow));
         }
     }
 

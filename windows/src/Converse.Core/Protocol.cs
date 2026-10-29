@@ -154,6 +154,7 @@ public sealed class ConverseGroup
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("creator")] public string Creator { get; set; } = "";
     [JsonPropertyName("dissolved")] public bool Dissolved { get; set; }
+    [JsonIgnore]
     public bool Valid =>
         Guid.TryParse(Id, out _) && Name.Trim().Length > 0
         && System.Text.Encoding.UTF8.GetByteCount(Name) <= 120
