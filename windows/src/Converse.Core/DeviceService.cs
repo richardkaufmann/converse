@@ -294,6 +294,7 @@ public sealed class DeviceSyncService : IDisposable
     private readonly Dictionary<string, string> _blobPaths = new();
     private readonly Dictionary<string, List<byte>> _staged = new();
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
+    private readonly Dictionary<string, TaskCompletionSource<string?>> _blobDownloads = new();
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
     private readonly SemaphoreSlim _pairingQueue = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> _connecting = new();
@@ -1749,6 +1750,44 @@ public sealed class DeviceSyncService : IDisposable
                 }
                 Changed?.Invoke();
                 break;
+            case DeviceKind.BlobData:
+                if (envelope.Payload is null) break;
+                var data = DeviceJson.Decode<DeviceBlobPayload>(envelope.Payload);
+                if (data.Chunk is not null)
+                {
+                    if (!_staged.TryGetValue(data.Sha256Hex, out var pending)) { pending = new List<byte>(); _staged[data.Sha256Hex] = pending; }
+                    pending.AddRange(data.Chunk);
+                    if (pending.Count > DeviceBlob.MaxBlob) _staged.Remove(data.Sha256Hex);
+                }
+                if (data.Done)
+                {
+                    string? stored = null;
+                    var bytes = _staged.GetValueOrDefault(data.Sha256Hex)?.ToArray() ?? Array.Empty<byte>();
+                    _staged.Remove(data.Sha256Hex);
+                    if (DeviceBlob.Verify(bytes, data.Sha256Hex))
+                    {
+                        var dir = Path.Combine(_folder, "Attachments", "Downloads");
+                        try
+                        {
+                            Directory.CreateDirectory(dir);
+                            var file = Path.Combine(dir, "Remote-" + data.Sha256Hex[..16] + ".png");
+                            await File.WriteAllBytesAsync(file, bytes);
+                            _blobPaths[data.Sha256Hex] = file;
+                            stored = file;
+                        }
+                        catch { /* disk failure resolves the waiter null below */ }
+                    }
+                    lock (_blobDownloads)
+                    {
+                        if (_blobDownloads.TryGetValue(data.Sha256Hex, out var waiter))
+                        {
+                            _blobDownloads.Remove(data.Sha256Hex);
+                            waiter.TrySetResult(stored);
+                        }
+                    }
+                    Changed?.Invoke();
+                }
+                break;
             case DeviceKind.BlobRequest:
                 if (HomeSession(envelope) is { } downloadSession && envelope.Payload is not null && await RequireLeaseAsync(peer, envelope, downloadSession))
                 {
@@ -1965,6 +2004,38 @@ public sealed class DeviceSyncService : IDisposable
             }
         }
         return await WaitBlobAckAsync(hash, waiter, required: true) == true ? hash : null;
+    }
+
+    // Fetches home bytes for a transcript image hash the viewer lacks,
+    // short-circuiting the local blob cache. Concurrent requests for one
+    // hash share a waiter. Returns the stored path, or null when the
+    // lease is gone, home lacks it, or the bytes time out.
+    public string? BlobPath(string hash) =>
+        _blobPaths.TryGetValue(hash, out var path) && File.Exists(path) ? path : null;
+
+    public async Task<string?> DownloadBlobAsync(string globalId, string hash)
+    {
+        if (BlobPath(hash) is { } cached) return cached;
+        var parsed = DeviceGlobalID.Parse(globalId);
+        if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
+            return null;
+        TaskCompletionSource<string?> waiter;
+        bool mine;
+        lock (_blobDownloads)
+        {
+            mine = !_blobDownloads.TryGetValue(hash, out waiter!);
+            if (mine) { waiter = new TaskCompletionSource<string?>(); _blobDownloads[hash] = waiter; }
+        }
+        if (mine)
+            await SendEnvelopeAsync(peer, new DeviceEnvelope
+            {
+                Kind = DeviceKind.BlobRequest, SessionID = globalId, Epoch = epoch,
+                Payload = DeviceJson.Encode(new DeviceBlobPayload { Sha256Hex = hash }),
+            });
+        var timeout = Task.Delay(TimeSpan.FromSeconds(60));
+        if (await Task.WhenAny(waiter.Task, timeout) != waiter.Task) return null;
+        var stored = await waiter.Task;
+        return stored is not null && File.Exists(stored) ? stored : null;
     }
 
     // Returns the stored flag, or null on timeout. Only the final ack treats

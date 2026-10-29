@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Text.Json.Nodes;
 using WinRT.Interop;
 
@@ -88,7 +89,7 @@ public sealed partial class ConversationPane : UserControl
     // streaming tick only re-renders the final message block and appends
     // any new ones; anything else takes a full block swap (cheap visual
     // swap, not a document rebuild).
-    private List<(string Role, string Text)> _renderedLines = new();
+    private List<(string Role, string Text, List<string> Images)> _renderedLines = new();
 
     private string? _lastChangeKey;
 
@@ -146,22 +147,47 @@ public sealed partial class ConversationPane : UserControl
     // cap applied (remote paging comes from home instead). Hidden messages
     // are counted so the message numbers stay continuous with what paging
     // hid — every visible message is numbered, prompts and responses.
-    private (List<(string Role, string Text)> Lines, int Hidden) VisibleLines()
+    // Remote images resolve through the blob cache; missing hashes kick
+    // one shared download each and appear on the next refresh (their
+    // captions render immediately).
+    private readonly HashSet<string> _imageFetching = new();
+
+    private (List<(string Role, string Text, List<string> Images)> Lines, int Hidden) VisibleLines()
     {
-        List<(string Role, string Text)>? lines = null;
+        List<(string Role, string Text, List<string> Images)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Messages
                 .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text)).ToList();
+                .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList())).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text)).ToList();
-        if (lines is null) return (new List<(string Role, string Text)>(), 0);
+                .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes))).ToList();
+        if (lines is null) return (new List<(string Role, string Text, List<string> Images)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
         if (hidden > 0) lines = lines.Skip(hidden).ToList();
         return (lines, hidden);
+    }
+
+    private List<string> RemoteImages(string globalId, string[] hashes)
+    {
+        var paths = new List<string>();
+        foreach (var hash in hashes.Take(8))
+        {
+            if (_host.Devices.BlobPath(hash) is { } path) paths.Add(path);
+            else _ = FetchRemoteImageAsync(globalId, hash);
+        }
+        return paths;
+    }
+
+    private async Task FetchRemoteImageAsync(string globalId, string hash)
+    {
+        lock (_imageFetching) { if (!_imageFetching.Add(hash)) return; }
+        try { await _host.Devices.DownloadBlobAsync(globalId, hash); }
+        catch { /* offline: caption stays, next sync retries */ }
+        finally { lock (_imageFetching) { _imageFetching.Remove(hash); } }
+        _host.RequestRefresh();
     }
 
 
@@ -183,7 +209,7 @@ public sealed partial class ConversationPane : UserControl
             _draftText = "";
             SetDraftBox();
             _lastChangeKey = null;
-            SyncLines(new List<(string Role, string Text)>(), 0, caretToEnd: true);
+            SyncLines(new List<(string Role, string Text, List<string> Images)>(), 0, caretToEnd: true);
             RenderBanners();
             UpdateEarlier();
             UpdateHint();
@@ -515,11 +541,11 @@ public sealed partial class ConversationPane : UserControl
     // visual elements — no transcript document is ever mutated, which
     // retires by construction the SetText crash class, the seam/tracker
     // bookkeeping, and the backspace hole of the single-document editor.
-    private static bool SameLine((string Role, string Text) a, (string Role, string Text) b)
-        => a.Role == b.Role && a.Text == b.Text;
+    private static bool SameLine((string Role, string Text, List<string> Images) a, (string Role, string Text, List<string> Images) b)
+        => a.Role == b.Role && a.Text == b.Text && a.Images.SequenceEqual(b.Images);
 
 
-    private static bool LinesEqual(List<(string Role, string Text)> a, List<(string Role, string Text)> b)
+    private static bool LinesEqual(List<(string Role, string Text, List<string> Images)> a, List<(string Role, string Text, List<string> Images)> b)
     {
         if (a.Count != b.Count) return false;
         for (var i = 0; i < a.Count; i++) if (!SameLine(a[i], b[i])) return false;
@@ -527,7 +553,7 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
-    private void SyncLines(List<(string Role, string Text)> lines, int hiddenMessages, bool caretToEnd)
+    private void SyncLines(List<(string Role, string Text, List<string> Images)> lines, int hiddenMessages, bool caretToEnd)
     {
         var key = (_selected?.Key ?? "none") + "|" + hiddenMessages;
         // Message numbers: every visible message is numbered in order,
@@ -616,7 +642,7 @@ public sealed partial class ConversationPane : UserControl
         }
     }
 
-    private Border BuildMessageBlock((string Role, string Text) line, int number)
+    private Border BuildMessageBlock((string Role, string Text, List<string> Images) line, int number)
     {
         var isUser = line.Role == "user";
         var showNumbers = _host.Layout.ShowLineNumbers;
@@ -647,6 +673,13 @@ public sealed partial class ConversationPane : UserControl
             : MarkdownBlocks.Parse(flat);
         foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
         if (body.Children.Count == 0) body.Children.Add(new RichTextBlock { FontSize = 16 });
+        // Inline response images (Mac message.images parity): the caption
+        // already renders as text above; each managed file draws bounded
+        // below it. Unreadable files show their caption only.
+        foreach (var imagePath in line.Images)
+        {
+            if (TryMakeImage(imagePath) is { } figure) body.Children.Add(figure);
+        }
         var dark = (Content as FrameworkElement)?.ActualTheme == ElementTheme.Dark;
         var border = new Border
         {
@@ -670,6 +703,28 @@ public sealed partial class ConversationPane : UserControl
         MdText text => RenderMdText(text, isUser),
         _ => new RichTextBlock { FontSize = 16 },
     };
+
+    private static FrameworkElement? TryMakeImage(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            // DecodePixelWidth bounds the decode; MaxWidth bounds layout.
+            var bitmap = new BitmapImage
+            {
+                DecodePixelWidth = 960,
+                UriSource = new Uri(path, UriKind.Absolute),
+            };
+            return new Image
+            {
+                Source = bitmap,
+                MaxWidth = 480,
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+        }
+        catch { return null; }
+    }
 
 
     private RichTextBlock RenderMdText(MdText block, bool isUser)
@@ -801,7 +856,7 @@ public sealed partial class ConversationPane : UserControl
     // Right-click copy per message (Mac spec): Copy acts on this block's
     // selection, whole Prompt/Response copy below it, and no Cut/Paste
     // anywhere near history.
-    private void AttachBlockMenu(Border border, (string Role, string Text) line)
+    private void AttachBlockMenu(Border border, (string Role, string Text, List<string> Images) line)
     {
         var copySelection = new MenuFlyoutItem { Text = "Copy" };
         var menu = new MenuFlyout();
@@ -1066,7 +1121,7 @@ public sealed partial class ConversationPane : UserControl
         _selected = session;
         _draftText = "";
         // Fresh blocks start empty: the next sync swaps everything in.
-        _renderedLines = new List<(string Role, string Text)>();
+        _renderedLines = new List<(string Role, string Text, List<string> Images)>();
         _lastChangeKey = null;
         _ownScrolls = 0;
         _lastSentText = null;

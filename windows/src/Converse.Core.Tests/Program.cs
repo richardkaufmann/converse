@@ -1705,6 +1705,71 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(empty.Count == 1 && ((MdText)empty[0]).Plain == "", "Empty body yields one empty text block");
 }
 
+// Response images: refs parse outside fences, roots gate reads, PNG
+// bounds parse from IHDR, and import strips markdown to captions.
+{
+    var refs = ResponseImages.ParseFileRefs("Look ![a cat](/tmp/cat.png) here.");
+    Check(refs.Count == 1 && refs[0].Caption == "a cat" && refs[0].Path == "/tmp/cat.png",
+        "File image ref parses with caption and path");
+    var angled = ResponseImages.ParseFileRefs("See ![x](<C:/pics/my cat.png>).");
+    Check(angled.Count == 1 && angled[0].Path == "C:/pics/my cat.png", "Angle-bracket path with spaces parses");
+    var fenced = ResponseImages.ParseFileRefs("```\n![no](/tmp/no.png)\n```\n> ![q](/tmp/q.png)\n`![c](/tmp/c.png)`\n\\![e](/tmp/e.png)");
+    Check(fenced.Count == 0, "Fenced, quoted, inline-code, and escaped refs stay text");
+    var web = ResponseImages.ParseFileRefs("![w](https://example.com/a.png)");
+    Check(web.Count == 0 && ResponseImages.ParseWebRefs("![w](https://example.com/a.png)").Count == 1,
+        "HTTPS refs route to the web parser, not the file parser");
+    var many = ResponseImages.ParseFileRefs(string.Join("\n",
+        Enumerable.Range(0, 10).Select(i => $"![{i}](/tmp/{i}.png)")));
+    Check(many.Count == 8, "Capture caps at eight images per message");
+
+    var root = Directory.CreateTempSubdirectory("converse-imgroot-").FullName;
+    try
+    {
+        var inside = Path.Combine(root, "sub", "a.png");
+        Check(ResponseImages.IsUnderRoot(inside, new[] { root }), "Nested path sits inside its root");
+        Check(!ResponseImages.IsUnderRoot(Path.Combine(root, "..", "evil.png"), new[] { root }),
+            "Traversal out of the root is refused");
+        Check(!ResponseImages.IsUnderRoot(Path.Combine(root, "a.png"), new[] { Path.Combine(root, "other") }),
+            "Sibling directory is outside the root");
+    }
+    finally { Cleanup(root); }
+
+    byte[] Png(int w, int h)
+    {
+        var bytes = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, (byte)'I', (byte)'H', (byte)'D', (byte)'R',
+            (byte)(w >> 24), (byte)(w >> 16), (byte)(w >> 8), (byte)w,
+            (byte)(h >> 24), (byte)(h >> 16), (byte)(h >> 8), (byte)h,
+            8, 2, 0, 0, 0, 0, 0, 0, 0 };
+        return bytes;
+    }
+    Check(ResponseImages.TryPngDimensions(Png(640, 480), out var w, out var h) && w == 640 && h == 480,
+        "PNG dimensions parse from IHDR");
+    Check(!ResponseImages.TryPngDimensions(Png(0, 480), out _, out _), "Zero-width PNG is rejected");
+    Check(!ResponseImages.TryPngDimensions(new byte[] { 1, 2, 3 }, out _, out _), "Truncated bytes are rejected");
+    Check(ResponseImages.IsSupportedImage(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }),
+        "JPEG magic is accepted");
+    Check(!ResponseImages.IsSupportedImage(System.Text.Encoding.UTF8.GetBytes("not an image at all........")),
+        "Text bytes are not an image");
+
+    var dataDir = Directory.CreateTempSubdirectory("converse-imgdata-").FullName;
+    var workDir = Directory.CreateTempSubdirectory("converse-imgwork-").FullName;
+    try
+    {
+        var source = Path.Combine(workDir, "pic.png");
+        await File.WriteAllBytesAsync(source, Png(100, 100));
+        var session = new ChatSession { Entry = new AgentEntry { Directory = workDir } };
+        var message = new ChatMessage { Role = "assistant", Text = $"Here ![a sunset]({source}) done." };
+        Check(await ResponseImages.ImportAsync(dataDir, session, message)
+            && message.Images.Count == 1 && File.Exists(message.Images[0])
+            && message.Text == "Here a sunset done.",
+            "Import stores the file, strips markdown to caption");
+        var outside = new ChatMessage { Role = "assistant", Text = "![x](/etc/hosts)" };
+        Check(!await ResponseImages.ImportAsync(dataDir, session, outside) && outside.Images.Count == 0
+            && outside.Text.Contains("!["), "Refs outside the roots stay untouched");
+    }
+    finally { Cleanup(dataDir); Cleanup(workDir); }
+}
+
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
 // batches fall back to a quoted cmd.exe wrapper, misses resolve null.
 {

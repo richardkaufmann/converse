@@ -633,6 +633,11 @@ public sealed class SessionStore
             if (string.IsNullOrEmpty(response.Text) && finalReply is not null)
                 response.Text = VisibleText(finalReply);
         }
+        // Explicit image refs in the reply become managed attachments
+        // (Mac importResponseImages parity); the viewer resolves them by
+        // hash, so generation stays wherever the agent ran.
+        if (success && !string.IsNullOrEmpty(response.Text))
+            await ResponseImages.ImportAsync(Folder, session, response);
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
         var shouldRun = success || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
