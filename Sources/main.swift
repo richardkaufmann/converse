@@ -350,7 +350,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         if s.injectionTargetID == next.id {
             if !s.busy { s.injectionNotice = "Injected prompt is held in the queue. Check the session notice before retrying." }
@@ -378,7 +378,7 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false) {
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
@@ -394,7 +394,7 @@ final class Store: ObservableObject {
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
-        if s.agent != nil { if let startAgentRun { startAgentRun(s, responseID) } else { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID) } }; save(); return }
+        if s.agent != nil { if let startAgentRun { startAgentRun(s, responseID) } else { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID, loopTick: agentLoopTick) } }; save(); return }
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
@@ -727,7 +727,7 @@ final class Store: ObservableObject {
             guard !s.museClosing, let connection = s.muse, connection.turnID != nil else {
                 remember(); s.settingNotice = "Change saved · applies next turn"; return
             }
-            s.changingSetting = true; s.settingNotice = "Applying change…"
+            s.changingSetting = true; s.settingNotice = "Waiting for Muse to confirm change… · you can keep typing"
             connection.changeSetting(change) { result in
                 s.changingSetting = false
                 switch result {
@@ -747,7 +747,7 @@ final class Store: ObservableObject {
             }
             return
         }
-        s.changingSetting = true; s.settingNotice = "Applying change…"
+        s.changingSetting = true; s.settingNotice = "Waiting for Muse to confirm change… · you can keep typing"
         let entry = s.entry, id = s.remoteID ?? s.id.uuidString
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id, change: change) }

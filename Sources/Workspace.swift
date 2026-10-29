@@ -74,8 +74,26 @@ struct SessionActivity: View {
     @ObservedObject var session: Session
     var showApproval = false
     var body: some View {
-        ConversationActivity(busy: session.busy, status: session.status,
-                             waiting: !session.requests.isEmpty || session.status.hasPrefix("Waiting"), showApproval: showApproval)
+        if let agent = session.agent {
+            HStack(spacing: 3) {
+                if !agent.attention.isEmpty {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.black).padding(3).background(.yellow, in: RoundedRectangle(cornerRadius: 3))
+                        .accessibilityLabel("Agent attention required").help(agent.attention)
+                }
+                if session.busy {
+                    ConversationActivity(busy: true, status: "Agent thinking", waiting: false)
+                } else {
+                    Image(systemName: agent.canSchedule && !session.queuePaused ? "arrow.triangle.2.circlepath" : "pause.circle")
+                        .font(.system(size: 11)).foregroundStyle(agent.canSchedule && !session.queuePaused ? Color.green : Color.secondary)
+                        .frame(width: 12, height: 12)
+                        .help(agent.loopStatus(at: Date(), busy: false, queuePaused: session.queuePaused, pendingCount: session.pending.count))
+                }
+            }.fixedSize()
+        } else {
+            ConversationActivity(busy: session.busy, status: session.status,
+                                 waiting: !session.requests.isEmpty || session.status.hasPrefix("Waiting"), showApproval: showApproval)
+        }
     }
 }
 // Both home and remote rows render the same animation and waiting state.
@@ -132,6 +150,12 @@ extension Session {
         if let directory = entry.accountDirectory, !directory.isEmpty { lines.append("Account directory: \(directory)") }
         if let observed = toolStatus.accountObservedAt { lines.append("Account observed: " + DateFormatter.localizedString(from: observed, dateStyle: .short, timeStyle: .medium)) }
         if !probeError.isEmpty { lines.append("Status refresh: \(probeError)") }
+        if let agent {
+            let loop = agent.loopStatus(at: Date(), busy: busy, queuePaused: queuePaused, pendingCount: pending.count)
+            lines.insert(loop, at: 1)
+            if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 2) }
+            if !agent.attention.isEmpty { lines.insert("ATTENTION REQUIRED\n" + agent.attention + "\n", at: 0) }
+        }
         return lines.joined(separator: "\n")
     }
 }
@@ -176,7 +200,7 @@ struct SidebarSession: View {
                     Button("Agent Setup…") { AgentWindows.shared.setup(session) }
                     Button("Show scoreboard") { AgentWindows.shared.widget(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }
-                    Button("Clear attention") { session.agent?.attention = ""; session.status = "Ready"; Store.shared.save() }
+                    Button("Clear attention") { session.agent?.attention = ""; session.status = session.busy ? "Working…" : "Ready"; Store.shared.save() }
                 } else { Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy) }
                 ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }
                 if let location = workspace.placements[session.id], location.windowID != state.id {

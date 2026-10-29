@@ -281,6 +281,7 @@ struct DeviceAgentSettings: Codable, Equatable {
     var discord: Bool
     var fileTriggers: Bool = false
     var revision: UInt64? = nil
+    var scoreboardEveryLoops: Int? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var groupID: String

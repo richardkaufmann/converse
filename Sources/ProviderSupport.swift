@@ -24,6 +24,7 @@ struct PendingPrompt: Codable, Identifiable {
     var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
     var agentRunReserved: Bool? = nil
     var autonomous: Bool? = nil
+    var agentLoopTick: Bool? = nil
     var id = UUID()
     var text: String
     var images: [String]

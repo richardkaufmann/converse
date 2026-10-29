@@ -149,6 +149,89 @@ import Foundation
     let quitRestored = Store(folder: quitStore.folder).sessions.first { $0.id == quitAgent.id }
     check(quitRestored?.agent?.enabled == true && quitRestored?.draft == "Preserve this draft" && quitRestored?.pending.count == 1, "Relaunch restores the enabled loop, draft and pending messages saved on confirmed quit")
 
+    let loopStore = Store(folder: root.appendingPathComponent("loop-fixture"))
+    let looping = loopStore.createAgent(title: "Loop presentation fixture")
+    looping.queuePaused = true; looping.draft = "Unfinished human thought"
+    func changeLoop(_ enabled: Bool) {
+        let config = looping.agent!
+        try! loopStore.configureAgentLoop(looping, enabled: enabled, interval: config.intervalSeconds, turns: config.remainingRuns, scoreboardEvery: config.scoreboardCadence, now: now)
+    }
+    check(looping.agent?.loopStatus(at: now, busy: false, queuePaused: true, pendingCount: 0) == "Loop paused · automatic checks off", "Paused agent loop status explicitly says automatic checks are off")
+    changeLoop(true)
+    check(looping.agent?.nextRunAt == now.addingTimeInterval(900) && looping.agent?.remainingRuns == 20 && !looping.queuePaused, "Resume loop schedules the first check one interval later, unblocks an empty stopped queue and does not spend a run")
+    var loopStarts = 0
+    loopStore.startAgentRun = { session, _ in loopStarts += 1; session.busy = true }
+    let loopRuntime = AgentRuntime()
+    loopRuntime.tick(store: loopStore, now: now.addingTimeInterval(899))
+    check(loopStarts == 0 && looping.agent?.remainingRuns == 20, "Enabled loop remains idle before its advertised next check")
+    loopRuntime.tick(store: loopStore, now: now.addingTimeInterval(900))
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    check(loopStarts == 1 && looping.agent?.remainingRuns == 19 && looping.draft == "Unfinished human thought", "Due loop performs one automatic check, spends one run and preserves the human draft")
+    changeLoop(false)
+    check(looping.busy && looping.agent?.enabled == false && !looping.interrupted, "Pause loop stops future checks without interrupting current thinking")
+    looping.busy = false; looping.queuePaused = true; looping.pending = [PendingPrompt(text: "Held by human", images: [])]
+    changeLoop(true)
+    check(looping.queuePaused && looping.pending.count == 1 && looping.agent?.loopStatus(at: now, busy: false, queuePaused: true, pendingCount: 1).contains("queue paused") == true, "Resume loop leaves held messages paused and explains that state")
+    looping.agent?.attention = "Review this blocker first"
+    let loopWorkspace = Workspace(), loopWindow = WindowState(workspace: loopWorkspace)
+    loopWorkspace.assign(looping.id, to: loopWindow.id, pane: 1)
+    let hoverText = looping.sidebarSummary(workspace: loopWorkspace, windowID: loopWindow.id)
+    let hoverAttributed = SidebarHoverView.attributedDetails(hoverText)
+    check(hoverText.hasPrefix("ATTENTION REQUIRED\nReview this blocker first\n\n") && hoverAttributed.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemYellow, "Agent hover puts its warning first and highlights it yellow even when the agent is displayed in a pane")
+
+    var loopRevision = looping.agent?.settingsRevision ?? 0
+    do {
+        try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision, now: now)
+        check(looping.agent?.intervalSeconds == 120 && looping.agent?.remainingRuns == 4 && looping.agent?.scoreboardCadence == 3, "Loop popover saves interval, finite turn budget and scoreboard cadence together")
+        loopRevision = looping.agent?.settingsRevision ?? 0
+        looping.agent?.settingsChanged(); looping.agent?.remainingRuns = 3
+        do { try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision); check(false, "Stale loop editor rejected") }
+        catch { check(looping.agent?.remainingRuns == 3, "A stale loop popover cannot restore a turn spent while it was open") }
+    } catch { check(false, "Loop options: " + error.localizedDescription) }
+    let cadenceStore = Store(folder: root.appendingPathComponent("cadence-fixture"))
+    let cadenceAgent = cadenceStore.createAgent(title: "Cadence fixture")
+    cadenceAgent.queuePaused = true; cadenceAgent.agent?.generateArt = false
+    cadenceAgent.agent?.repository = "owner/repo"
+    cadenceAgent.agent?.scoreboardEveryLoops = 2
+    cadenceAgent.agent?.snapshot = AgentRepoSnapshot(repository: "owner/repo", observedAt: now, stars: 7)
+    cadenceAgent.agent?.widgetSummary = "Existing scoreboard"
+    let cadenceRuntime = AgentRuntime(); cadenceRuntime.keyReader = { _ in "isolated-cadence-key" }
+    var measuredRequests = 0, cadenceResponses = 0
+    cadenceRuntime.api.request = { request in
+        let path = request.url!.path
+        let object: Any
+        if path == "/v1/responses" {
+            cadenceResponses += 1
+            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Cadence report \(cadenceResponses)\",\"attention\":\"\"}"]]]]]
+        } else {
+            measuredRequests += 1
+            object = path.contains("search/issues") ? ["total_count": 0] : (path.hasSuffix("/comments") || path.hasSuffix("/releases")) ? [] : ["stargazers_count": 12, "uniques": 0]
+        }
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    func cadenceRun(loop: Bool) {
+        let id = UUID(); cadenceAgent.messages.append(Message(id: id, role: "assistant", text: "")); cadenceAgent.busy = true
+        cadenceRuntime.run(cadenceAgent, store: cadenceStore, responseID: id, loopTick: loop)
+        let end = Date().addingTimeInterval(3)
+        while cadenceAgent.busy && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    cadenceRun(loop: true)
+    check(!cadenceAgent.busy && cadenceResponses == 1 && measuredRequests == 0 && cadenceAgent.agent?.snapshot?.observedAt == now && cadenceAgent.agent?.widgetSummary == "Existing scoreboard" && cadenceAgent.agent?.loopsSinceScoreboard == 1, "An intervening scheduled loop still reports in the conversation without re-fetching or replacing the scoreboard")
+    cadenceRun(loop: true)
+    check(cadenceResponses == 2 && measuredRequests > 0 && cadenceAgent.agent?.widgetSummary == "Cadence report 2" && cadenceAgent.agent?.loopsSinceScoreboard == 0, "Scoreboard refresh happens on the configured loop cadence and resets its persisted counter")
+    cadenceRun(loop: true)
+    let measuredBeforeManual = measuredRequests
+    cadenceRun(loop: false)
+    check(cadenceResponses == 4 && measuredRequests > measuredBeforeManual && cadenceAgent.agent?.widgetSummary == "Cadence report 4" && cadenceAgent.agent?.loopsSinceScoreboard == 0, "A manual check forces a fresh scoreboard and resets the loop cadence without enabling the loop")
+    cadenceAgent.agent?.repository = "owner/other"
+    let measuredBeforeRepositoryChange = measuredRequests
+    cadenceRun(loop: true)
+    check(measuredRequests > measuredBeforeRepositoryChange && cadenceAgent.agent?.snapshot?.repository == "owner/other", "Changing repository forces fresh metrics instead of reusing another project's cached scoreboard")
+    let legacyCadence = try! JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(AgentConfig()))
+    check(legacyCadence.scoreboardCadence == 1 && cadenceAgent.agent?.wire(home: String(repeating: "a", count: 64)).scoreboardEveryLoops == 2, "Existing agents default to refreshing every loop and custom cadence travels in secret-free settings")
+    let taggedLoop = PendingPrompt(agentLoopTick: true, text: "host tick", images: [])
+    check((try? JSONDecoder().decode(PendingPrompt.self, from: JSONEncoder().encode(taggedLoop)))?.agentLoopTick == true, "Scheduled loop provenance survives queue persistence without inferring it from prompt text")
+
     let runtime = AgentRuntime()
     runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id.uuidString, text: "Please review"), .init(to: blocked.id.uuidString, text: "Forbidden")]), from: agent, store: store)
     check(recipient.pending.count == 1 && blocked.pending.isEmpty && recipient.pending[0].text.contains(agent.id.uuidString), "Agent messages are visibly attributed and restricted to selected sessions")
@@ -210,10 +293,14 @@ import Foundation
     runtime.keyReader = { _ in "isolated-test-key" }
     var requests: [URLRequest] = []
     recipient.messages.append(Message(role: "assistant", text: "private scope canary"))
+    let currentWork = store.create(recipient.entry)
+    currentWork.title = "Currently working fixture"; currentWork.busy = true; currentWork.status = "Working…"
+    currentWork.messages = [Message(role: "user", text: "are you working?"), Message(role: "assistant", text: "")]
+    agent.agent?.watchedSessions = [recipient.id, currentWork.id]
     runtime.api.request = { request in
         requests.append(request)
         let path = request.url!.path
-        if path != "/v1/responses" { agent.agent?.watchedSessions = [] } // Revoke scope while repository requests are in flight.
+        if path != "/v1/responses" { agent.agent?.watchedSessions.removeAll { $0 == recipient.id } } // Revoke scope while repository requests are in flight.
         var object: Any = [:]
         if path == "/v1/responses" {
             object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[],\"memory\":\"Keep release acceptance criteria\"}"]]]]]
@@ -237,6 +324,9 @@ import Foundation
     let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
     check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
     let requestBody = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let evidenceInput = (requestBody?["input"] as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
+    check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
 
     let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!

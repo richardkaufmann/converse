@@ -104,18 +104,24 @@ struct RemoteSidebarRow: View {
     let localPane: Int?
     let park: () -> Void
     let assign: (Int) -> Void
+    @StateObject private var hover = SidebarHoverState()
     var helpText: String {
         var text = row.title + "\nHome: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if let account = row.accountName { text += "\nAccount: " + account }
-        return text + "\nExecution stays on " + homeName + "."
+        let warning = (row.engine == "agent" && !(row.attention ?? "").isEmpty) ? "ATTENTION REQUIRED\n" + (row.attention ?? "") + "\n\n" : ""
+        return warning + text + "\nExecution stays on " + homeName + "."
     }
     var body: some View {
         HStack(spacing: 6) {
-            ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.status.hasPrefix("Waiting"))
+            if row.engine == "agent", let attention = row.attention, !attention.isEmpty {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
+                    .padding(3).background(.yellow, in: RoundedRectangle(cornerRadius: 3)).help(attention)
+            }
+            ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
             Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
-            if (row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
+            if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title)
                 ForEach(1...3, id: \.self) { pane in
@@ -125,7 +131,8 @@ struct RemoteSidebarRow: View {
             }.fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
-            .help(helpText)
+            .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
+            .onHover { hover.setHovered($0) }
             .contextMenu {
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))

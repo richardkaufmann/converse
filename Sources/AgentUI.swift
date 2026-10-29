@@ -48,6 +48,7 @@ struct AgentSetupView: View {
                         }
                         Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
+                        Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
                         Toggle("Speak replies with expressive pace", isOn: $settings.speak)
                         Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
@@ -139,24 +140,74 @@ struct AgentSetupView: View {
 
 struct AgentControls: View {
     @ObservedObject var session: Session
+    @State private var loopSettings = false
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
-            Text(session.busy ? "Working…" : session.status).font(.caption)
-            Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Text("\(session.agent?.remainingRuns ?? 0) runs left").font(.caption).foregroundStyle(.secondary)
-            Button(session.agent?.enabled == true ? "Pause loop" : "Resume loop") {
-                session.agent?.settingsChanged(); session.agent?.enabled.toggle(); session.agent?.nextRunAt = Date().addingTimeInterval(max(60, session.agent?.intervalSeconds ?? 900)); Store.shared.save()
-            }.disabled((session.agent?.remainingRuns ?? 0) == 0)
-            Button("Dictate") {
-                guard let input = session.inputTextView else { return }
-                input.window?.makeFirstResponder(input)
-                input.setSelectedRange(NSRange(location: (input.string as NSString).length, length: 0))
-                NSApp.sendAction(Selector(("startDictation:")), to: input, from: nil)
-            }.help("Talk into the blue draft with macOS Dictation; review it, then press Return to send")
-            Button("Scoreboard") { AgentWindows.shared.widget(session) }
-            Button("Agent Setup…") { AgentWindows.shared.setup(session) }
-        }.padding(8) }.frame(height: 40)
+        VStack(alignment: .leading, spacing: 7) {
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                HStack(spacing: 8) {
+                    ConversationActivity(busy: session.busy, status: "Agent thinking", waiting: false)
+                    Text(session.busy ? "Thinking now" : "Idle").fontWeight(.semibold)
+                    Text(session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
+                        .foregroundStyle(.secondary).lineLimit(1)
+                        .help(session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
+                    Spacer(minLength: 0)
+                }.font(.caption)
+            }
+            ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
+                Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
+                Text("\(session.agent?.remainingRuns ?? 0) automatic runs left").font(.caption).foregroundStyle(.secondary)
+                Button("Loop…") { loopSettings = true }
+                    .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
+                Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.remainingRuns ?? 0) == 0)
+                    .help("Check now using one automatic run; this does not enable the periodic loop")
+                Button("Dictate") {
+                    guard let input = session.inputTextView else { return }
+                    input.window?.makeFirstResponder(input)
+                    input.setSelectedRange(NSRange(location: (input.string as NSString).length, length: 0))
+                    NSApp.sendAction(Selector(("startDictation:")), to: input, from: nil)
+                }.help("Talk into the blue draft with macOS Dictation; review it, then press Return to send")
+                Button("Scoreboard") { AgentWindows.shared.widget(session) }
+                Button("Agent Setup…") { AgentWindows.shared.setup(session) }
+            } }
+        }.padding(8).frame(height: 66)
+    }
+}
+
+struct AgentLoopOptions: View {
+    @ObservedObject var session: Session
+    @State private var enabled = false
+    @State private var minutes: Double = 15
+    @State private var turns = 20
+    @State private var scoreboardEvery = 1
+    @State private var revision: UInt64 = 0
+    @State private var error = ""
+    var close: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Agent loop").font(.headline)
+            Text(session.busy ? "Thinking now. Changing the loop does not stop this run." : "Idle. You can still talk to this agent while its loop is off.").font(.callout).foregroundStyle(.secondary)
+            Toggle("Automatic loop", isOn: $enabled)
+            HStack { Text("Check every"); TextField("Minutes", value: $minutes, format: .number).frame(width: 70); Text("minutes") }
+            Stepper("Automatic turns remaining: \(turns)", value: $turns, in: 0...1000)
+            Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
+            Text("Run once refreshes the scoreboard immediately. Artwork keeps its mood-change / hourly limit. Loops run while Converse is open on this agent’s home. Errors pause the loop.").font(.caption).foregroundStyle(.secondary)
+            if session.queuePaused && !session.pending.isEmpty { Text("Held messages require Resume queue before the loop can continue.").font(.caption).foregroundStyle(.orange) }
+            if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Button("Reload") { reload() }
+                Button("Run once now") { if save() { Store.shared.queueAgentRun(session); close() } }.disabled(session.busy || turns == 0)
+                Spacer()
+                Button("Done") { if save() { close() } }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(18).frame(width: 410).textFieldStyle(.roundedBorder).onAppear { reload() }
+    }
+    private func reload() {
+        let config = session.agent ?? AgentConfig()
+        enabled = config.enabled; minutes = config.intervalSeconds / 60; turns = config.remainingRuns; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
+    }
+    private func save() -> Bool {
+        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, expectedRevision: revision); return true }
+        catch { self.error = error.localizedDescription; return false }
     }
 }
 

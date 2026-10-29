@@ -34,7 +34,7 @@ struct MuseStatusProbe {
         var models: [MuseModelChoice] = []
         var access: [MuseAccessChoice] = []
     }
-    static func query(entry: Entry, sessionID: String, change: MuseSettingChange? = nil, serverArguments: [String] = []) throws -> Result {
+    static func query(entry: Entry, sessionID: String, change: MuseSettingChange? = nil, serverArguments: [String] = [], timeoutInterval: TimeInterval = 8, terminationGrace: TimeInterval = 1) throws -> Result {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         let quotedArguments = serverArguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
         process.arguments = ["-lc", "exec " + entry.command + " serve " + quotedArguments]
@@ -45,10 +45,27 @@ struct MuseStatusProbe {
         process.environment = env
         let input = Pipe(); let output = Pipe()
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw NSError(domain: "MuseStatus", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not prepare the Muse settings transport."])
+        }
         try process.run()
-        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 8, execute: timeout)
-        defer { timeout.cancel(); try? input.fileHandleForWriting.close(); if process.isRunning { process.terminate() }; process.waitUntilExit() }
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + terminationGrace) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutInterval, execute: timeout)
+        defer {
+            timeout.cancel(); try? input.fileHandleForWriting.close()
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + terminationGrace) {
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
+            }
+            process.waitUntilExit()
+        }
         var buffer = Data()
         func write(_ value: [String: Any]) throws {
             var data = try JSONSerialization.data(withJSONObject: value); data.append(10)

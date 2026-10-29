@@ -19,6 +19,8 @@ struct AgentConfig: Codable, Equatable {
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
     var remainingRuns = 20
+    var scoreboardEveryLoops: Int? = nil
+    var loopsSinceScoreboard: Int? = nil
     var enabled = false
     var nextRunAt: Date? = nil
     var attention = ""
@@ -35,6 +37,25 @@ struct AgentConfig: Codable, Equatable {
     var artPath: String? = nil
     var lastRunAt: Date? = nil
     var lastOutcome = "Not run yet"
+    var scoreboardCadence: Int { min(1000, max(1, scoreboardEveryLoops ?? 1)) }
+    func shouldRefreshScoreboard(loopTick: Bool) -> Bool {
+        !loopTick || snapshot == nil || snapshot?.repository != repository || (loopsSinceScoreboard ?? 0) >= scoreboardCadence - 1
+    }
+    var intervalLabel: String {
+        let seconds = Int(min(31536000, max(60, intervalSeconds.isFinite ? intervalSeconds : 900)))
+        if seconds % 3600 == 0 { return "\(seconds / 3600) hr" }
+        if seconds % 60 == 0 { return "\(seconds / 60) min" }
+        return "\(seconds) sec"
+    }
+    func loopStatus(at now: Date, busy: Bool, queuePaused: Bool, pendingCount: Int) -> String {
+        if remainingRuns <= 0 { return "Loop stopped · no automatic runs left" }
+        guard enabled else { return "Loop paused · automatic checks off" }
+        if queuePaused { return "Loop on · queue paused" }
+        if pendingCount > 0 && !busy { return "Loop on · waiting for \(pendingCount) queued message\(pendingCount == 1 ? "" : "s")" }
+        let schedule = "Loop on · every " + intervalLabel
+        guard let nextRunAt, nextRunAt > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
+        return schedule + " · next " + nextRunAt.formatted(date: .omitted, time: .shortened)
+    }
     var canSchedule: Bool { enabled && remainingRuns > 0 }
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now }
     mutating func reserveRun(at now: Date) -> Bool {
@@ -301,7 +322,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0)
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence)
     }
     mutating func apply(_ wire: DeviceAgentSettings) throws {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
@@ -309,13 +330,14 @@ extension AgentConfig {
         }
         guard AgentRepoSnapshot.validRepository(wire.repository), !wire.model.isEmpty, wire.model.utf8.count <= 200,
               wire.objective.utf8.count <= 16000, wire.watched.count <= 64, wire.watched.allSatisfy({ DeviceGlobalID($0) != nil }),
-              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns) else {
+              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
             throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
         }
         settingsChanged()
         objective = wire.objective; repository = wire.repository; model = wire.model
         watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
         intervalSeconds = wire.intervalSeconds; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
+        if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }
         generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
         nextRunAt = Date().addingTimeInterval(intervalSeconds)
     }

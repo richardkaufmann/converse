@@ -68,9 +68,17 @@ final class SidebarHoverView: NSView {
             if self.window?.isVisible != true || self.popover?.isShown != true || (self.hoverState?.inside != true && !self.pointerInRow && !inPanel) { self.closeDetails() }
         }
     }
+    static func attributedDetails(_ details: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(string: details, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor])
+        if details.hasPrefix("ATTENTION REQUIRED\n"), let end = details.range(of: "\n\n") {
+            let range = NSRange(details.startIndex..<end.lowerBound, in: details)
+            text.addAttributes([.font: NSFont.boldSystemFont(ofSize: 12), .foregroundColor: NSColor.black, .backgroundColor: NSColor.systemYellow], range: range)
+        }
+        return text
+    }
     private func updateDetails() {
         guard let text = textView else { return }
-        text.string = details
+        text.textStorage?.setAttributedString(Self.attributedDetails(details))
         if let container = text.textContainer, let layout = text.layoutManager {
             layout.ensureLayout(for: container)
             let height = max(100, layout.usedRect(for: container).height + 20)

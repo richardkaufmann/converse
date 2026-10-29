@@ -1,10 +1,42 @@
 import Foundation
 
+// Pipe backpressure belongs off the AppKit thread. Preserve JSON-RPC order and
+// fail on main, where connection state and callbacks are owned.
+final class MusePipeWriter {
+    private let handle: FileHandle
+    private let queue = DispatchQueue(label: "Converse.MusePipeWriter", qos: .userInitiated)
+    private let lock = NSLock()
+    private var closed = false
+    private let suppressesBrokenPipeSignal: Bool
+    init(handle: FileHandle) {
+        self.handle = handle
+        // Darwin's per-descriptor flag converts a vanished reader into EPIPE,
+        // without changing signal behavior globally or for child CLIs.
+        suppressesBrokenPipeSignal = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1) != -1
+    }
+    func send(_ object: [String: Any], failed: @escaping () -> Void) {
+        queue.async {
+            self.lock.lock(); let closed = self.closed; self.lock.unlock()
+            guard !closed else { return }
+            guard self.suppressesBrokenPipeSignal else { DispatchQueue.main.async(execute: failed); return }
+            do {
+                var data = try JSONSerialization.data(withJSONObject: object); data.append(10)
+                try self.handle.write(contentsOf: data)
+            } catch { DispatchQueue.main.async(execute: failed) }
+        }
+    }
+    func close() {
+        lock.lock(); closed = true; lock.unlock()
+        queue.async { try? self.handle.close() }
+    }
+}
+
 // One interactive MSP host per conversation. All state and callbacks run on main.
 // The host owns sandbox/approval policy; this client only returns server-minted choices.
 final class MuseConnection {
     let process = Process()
     private let input = Pipe(), output = Pipe(), errors = Pipe()
+    private lazy var writer = MusePipeWriter(handle: input.fileHandleForWriting)
     private var nextID = 0
     private var callbacks: [Int: (Result<[String: Any], Error>) -> Void] = [:]
     var event: ((String, [String: Any]) -> Void)?
@@ -62,6 +94,10 @@ final class MuseConnection {
         }
     }
     func rpc(_ method: String, _ params: [String: Any], completion: @escaping (Result<[String: Any], Error>) -> Void = { _ in }) {
+        guard !closing else {
+            completion(.failure(NSError(domain: "Muse", code: -1, userInfo: [NSLocalizedDescriptionKey: "Muse connection closed before confirming the request. Check session status before retrying."])))
+            return
+        }
         nextID += 1; let id = nextID; callbacks[id] = completion
         write(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
@@ -70,8 +106,8 @@ final class MuseConnection {
         }
     }
     private func write(_ object: [String: Any]) {
-        do { var data = try JSONSerialization.data(withJSONObject: object); data.append(10); try input.fileHandleForWriting.write(contentsOf: data) }
-        catch { closed() }
+        guard !closing else { return }
+        writer.send(object) { [weak self] in self?.closed() }
     }
     func receive(_ object: [String: Any]) {
         guard !closing else { return }
@@ -163,8 +199,11 @@ final class MuseConnection {
         closeWaiters.append(completion)
         guard !shutdownStarted else { return }
         shutdownStarted = true
-        closing = true; callbacks.removeAll()
-        try? input.fileHandleForWriting.close()
+        closing = true
+        let pending = callbacks; callbacks.removeAll()
+        writer.close()
+        let error = NSError(domain: "Muse", code: -1, userInfo: [NSLocalizedDescriptionKey: "Muse connection closed before confirming the request. Check session status before retrying."])
+        for callback in pending.values { callback(.failure(error)) }
         guard process.isRunning else { completeClose(); return }
         process.terminate()
         let process = process
@@ -189,6 +228,7 @@ final class MuseConnection {
             (error.localizedDescription.localizedCaseInsensitiveContains("session") && error.localizedDescription.localizedCaseInsensitiveContains("already in use"))
     }
     private func closed() {
+        writer.close()
         let pending = callbacks; callbacks = [:]
         let message = errorTail.isEmpty ? "Muse connection closed." : "Muse connection closed: " + errorTail
         for callback in pending.values { callback(.failure(NSError(domain: "Muse", code: -1, userInfo: [NSLocalizedDescriptionKey: message]))) }

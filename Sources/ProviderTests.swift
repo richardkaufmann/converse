@@ -17,6 +17,96 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     fabricTrustSelfTests(check)
     deviceFabricSelfTests(check)
     MainActor.assumeIsolated { agentSelfTests(check) }
+    // A real MSP process stops reading stdin after initialize. This pins the
+    // actual connection/setting path against UI stalls, not just the writer helper.
+    let pressureHost = FileManager.default.temporaryDirectory.appendingPathComponent("converse-slow-msp-" + UUID().uuidString + ".py")
+    let pressureSource = """
+    import json,sys,time
+    for line in sys.stdin:
+        message=json.loads(line)
+        if 'id' not in message or message.get('method') == 'fixture/never-ack': continue
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{}}),flush=True)
+        if message.get('method') == 'initialize': time.sleep(0.6)
+        if message.get('method') == 'fixture/block-next':
+            sys.stdin.read(4096)
+            print(json.dumps({'jsonrpc':'2.0','method':'fixture/blocked','params':{}}),flush=True)
+            time.sleep(30)
+    """
+    try! pressureSource.write(to: pressureHost, atomically: true, encoding: .utf8)
+    let pressureConnection = MuseConnection(sessionID: UUID().uuidString)
+    var pressureReady = false, pressureFailed = false, uiHeartbeat = false, pressureReplies: [Int] = []
+    pressureConnection.start(entry: Entry(name: "Backpressure fixture", command: "/usr/bin/python3 " + ProviderCommand.quote(pressureHost.path), directory: NSTemporaryDirectory(), engine: "muse")) { result in
+        if case .failure = result { pressureFailed = true }
+        pressureReady = true
+    }
+    let readyDeadline = Date().addingTimeInterval(3)
+    while !pressureReady && Date() < readyDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { uiHeartbeat = true }
+    let pressureStarted = ProcessInfo.processInfo.systemUptime
+    pressureConnection.rpc("fixture/large", ["payload": String(repeating: "x", count: 2_000_000)]) { result in
+        if case .failure = result { pressureFailed = true }; pressureReplies.append(1)
+    }
+    pressureConnection.changeSetting(.model(MuseModelChoice(id: "fixture-model", label: "Fixture", provider: "echo", profile: nil, efforts: []))) { result in
+        if case .failure = result { pressureFailed = true }; pressureReplies.append(2)
+    }
+    let sendLatency = ProcessInfo.processInfo.systemUptime - pressureStarted
+    let heartbeatDeadline = Date().addingTimeInterval(0.2)
+    while !uiHeartbeat && Date() < heartbeatDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
+    check(pressureReady && sendLatency < 0.2 && uiHeartbeat && pressureReplies.isEmpty, "Muse setting requests cannot block UI callbacks while its real host is not reading stdin")
+    let pressureDeadline = Date().addingTimeInterval(3)
+    while pressureReplies.count < 2 && Date() < pressureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    var abandonedSettingCallbacks = 0, abandonedSettingFailed = false
+    pressureConnection.rpc("fixture/never-ack", [:]) { result in
+        abandonedSettingCallbacks += 1
+        if case .failure = result { abandonedSettingFailed = Thread.isMainThread }
+    }
+    var pressureClosed = false
+    pressureConnection.close { pressureClosed = true }
+    let closeDeadline = Date().addingTimeInterval(2)
+    while !pressureClosed && Date() < closeDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(pressureClosed && !pressureFailed && pressureReplies == [1, 2], "Background Muse writes retain complete frames, ordered setting replies and clean shutdown")
+    check(abandonedSettingCallbacks == 1 && abandonedSettingFailed, "Closing a Muse connection settles unacknowledged settings once on main instead of leaving the picker stuck")
+    var closedRequestFailed = false
+    pressureConnection.rpc("session/setReasoningEffort", [:]) { result in if case .failure = result { closedRequestFailed = true } }
+    check(closedRequestFailed, "A settings request on an already-closed Muse connection fails immediately")
+    let blockedConnection = MuseConnection(sessionID: UUID().uuidString)
+    var blockedReady = false, blockArmed = false, pipeBlocked = false, blockedClosed = false
+    blockedConnection.event = { method, _ in if method == "fixture/blocked" { pipeBlocked = true } }
+    blockedConnection.start(entry: Entry(name: "Blocked shutdown fixture", command: "/usr/bin/python3 " + ProviderCommand.quote(pressureHost.path), directory: NSTemporaryDirectory(), engine: "muse")) { _ in blockedReady = true }
+    let blockedDeadline = Date().addingTimeInterval(3)
+    while !blockedReady && Date() < blockedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    blockedConnection.rpc("fixture/block-next", [:]) { _ in blockArmed = true }
+    while !blockArmed && Date() < blockedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    blockedConnection.rpc("fixture/large", ["payload": String(repeating: "x", count: 2_000_000)])
+    while !pipeBlocked && Date() < blockedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    blockedConnection.close { blockedClosed = true }
+    let blockedCloseDeadline = Date().addingTimeInterval(2)
+    while !blockedClosed && Date() < blockedCloseDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    // Drain the writer's failure callback after the child exits.
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    try? FileManager.default.removeItem(at: pressureHost)
+    check(pipeBlocked && blockedClosed, "Closing a real host during a proven blocked write survives EPIPE and completes without freezing or crashing")
+    let hangingEntry = Entry(name: "Ignoring timeout fixture", command: "/usr/bin/python3 -c 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(30)'", directory: NSTemporaryDirectory(), engine: "muse")
+    var timeoutCompleted = false, timeoutFailed = false, timeoutHeartbeat = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { timeoutHeartbeat = true }
+    DispatchQueue.global().async {
+        do { _ = try MuseStatusProbe.query(entry: hangingEntry, sessionID: UUID().uuidString, timeoutInterval: 0.5, terminationGrace: 0.2) }
+        catch { DispatchQueue.main.async { timeoutFailed = true } }
+        DispatchQueue.main.async { timeoutCompleted = true }
+    }
+    let timeoutDeadline = Date().addingTimeInterval(3)
+    while !timeoutCompleted && Date() < timeoutDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(timeoutCompleted && timeoutFailed && timeoutHeartbeat, "A Muse settings host that ignores termination is bounded without stalling the UI")
+    let vanishedEntry = Entry(name: "Closed pipe fixture", command: "/usr/bin/python3 -c 'import json,os,sys,time; m=json.loads(sys.stdin.readline()); os.close(0); print(json.dumps(dict(jsonrpc=\"2.0\",id=m[\"id\"],result={})),flush=True); time.sleep(30)'", directory: NSTemporaryDirectory(), engine: "muse")
+    var vanishedCompleted = false, vanishedFailed = false
+    DispatchQueue.global().async {
+        do { _ = try MuseStatusProbe.query(entry: vanishedEntry, sessionID: UUID().uuidString, timeoutInterval: 0.5, terminationGrace: 0.2) }
+        catch { DispatchQueue.main.async { vanishedFailed = true } }
+        DispatchQueue.main.async { vanishedCompleted = true }
+    }
+    let vanishedDeadline = Date().addingTimeInterval(3)
+    while !vanishedCompleted && Date() < vanishedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(vanishedCompleted && vanishedFailed, "A temporary Muse settings host closing stdin fails safely without a process-wide broken-pipe crash")
     let store = Store.shared
     let fixture = FileManager.default.currentDirectoryPath + "/Tests/provider_fixture.py"
     func pump(_ done: () -> Bool, seconds: Double = 8) {
