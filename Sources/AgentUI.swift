@@ -177,6 +177,7 @@ struct AgentControls: View {
                     .help("Record with Muse Voice, review the transcription, then insert it into your draft")
                 Button("Scoreboard") { AgentWindows.shared.widget(session) }
                 Button("Agent Setup…") { AgentWindows.shared.setup(session) }
+                AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
             } }
             if conversation.sessionID == session.id {
                 Text(conversation.status).font(.caption).foregroundStyle(conversation.active ? Color.accentColor : Color.secondary)

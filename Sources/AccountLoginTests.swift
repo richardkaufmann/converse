@@ -20,7 +20,10 @@ func accountLoginSelfTests(_ check: (Bool, String) -> Void) {
         let peer = store.create(entry); peer.title = "Other session"; peer.busy = true
         let originalPeer = peer.entry
         let id = session.id
+        session.toolStatus.accountUsage = AccountUsage(limits: [AccountLimit(name: "Old login", usedPercent: 99, resetsAt: nil)], observedAt: Date())
+        session.toolStatus.quota = "Weekly 99% used"; session.quotaRefreshedAt = Date()
         store.signInSession(session)
+        check(session.toolStatus.accountUsage == nil && session.toolStatus.quota == nil && session.quotaRefreshedAt == nil, engine + " login switch clears previous account quota observations")
         let isolated = store.loginAccount(for: session)!
         let script = try! String(contentsOf: opened.last!, encoding: .utf8)
         check(isolated.directory != original.path && session.id == id && script.contains(ProviderCommand.quote(isolated.directory)) && script.contains("custom-" + engine), engine + " session sign-in authenticates a fresh private store for the same session")

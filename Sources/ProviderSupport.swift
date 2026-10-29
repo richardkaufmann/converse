@@ -143,6 +143,12 @@ struct ProviderStatus {
         var thread: [String: Any] = [:]
         if let remoteID { thread = try rpc.rpc("thread/read", ["threadId": remoteID, "includeTurns": false])["thread"] as? [String: Any] ?? [:] }
         var result = resolveCodex(catalog: catalog, config: config, thread: thread)
+        // Optional telemetry must never make model/account discovery fail.
+        if let limits = try? rpc.rpc("account/rateLimits/read", [:]) {
+            let context = result.status.accountUsage?.context
+            result.status.accountUsage = AccountUsage.codexLimits(limits)
+            result.status.accountUsage?.context = context
+        }
         result.account = account?["email"] as? String ?? (account == nil ? "Not signed in" : "API key account")
         result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nApprovals: \(result.status.approval ?? "CLI default")\nAccount: \(result.account)\nCatalog availability does not guarantee account access."
         return result
@@ -162,7 +168,12 @@ struct ProviderStatus {
         result.status.approval = config["approval_policy"] as? String
         result.access = ["read-only", "workspace-write", "danger-full-access"].map { MuseAccessChoice(id: $0, label: $0, available: true) }
         if let path = thread["path"] as? String {
-            for object in tailRecords(path: path) where object["type"] as? String == "turn_context" {
+            for object in tailRecords(path: path) {
+                if let context = AccountUsage.codexContext(object) {
+                    if result.status.accountUsage == nil { result.status.accountUsage = AccountUsage() }
+                    result.status.accountUsage?.context = context
+                }
+                guard object["type"] as? String == "turn_context" else { continue }
                 if let context = object["payload"] as? [String: Any], let sandbox = context["sandbox_policy"] as? [String: Any], let type = sandbox["type"] as? String { result.status.access = type }
             }
         }
@@ -249,6 +260,7 @@ extension Store {
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                         s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.access.first { $0.id == snapshot.status.access }?.label ?? snapshot.status.access
                         s.toolStatus.approval = snapshot.status.approval
+                        s.toolStatus.accountUsage = snapshot.status.accountUsage
                         s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
                         s.statusDetails = snapshot.detail; s.probeError = ""; s.needsSignIn = AccountLogin.requiresSignIn(snapshot.account)
                     case .failure(let error): s.probeError = error.localizedDescription; if AccountLogin.requiresSignIn(s.probeError) { s.needsSignIn = true }

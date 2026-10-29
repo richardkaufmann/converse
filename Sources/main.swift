@@ -35,6 +35,7 @@ struct ToolStatus: Codable {
     var usage = "not reported"
     var totalUsage: String? = nil
     var quota: String? = nil
+    var accountUsage: AccountUsage? = nil
     var account: String? = nil
     var accountObservedAt: Date? = nil
 }
@@ -707,10 +708,11 @@ final class Store: ObservableObject {
                 case .success(let snapshot):
                     s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                     let previousQuota = s.toolStatus.quota
+                    let previousUsage = s.toolStatus.accountUsage
                     let identity = snapshot.status.account ?? "Muse CLI has no reported account email"
                     s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
                     s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
-                    if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota }
+                    if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
                 case .failure(let error):
                     s.statusDetails = "Muse status refresh failed: " + error.localizedDescription
@@ -720,7 +722,7 @@ final class Store: ObservableObject {
                 if let quotaResult {
                     s.quotaRefreshedAt = Date()
                     switch quotaResult {
-                    case .success(let value): s.toolStatus.quota = value
+                    case .success(let value): s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage()
                     case .failure(let error): s.toolStatus.quota = error.localizedDescription
                     }
                 }
@@ -1808,6 +1810,7 @@ struct Conversation: View {
                             }.menuStyle(.borderlessButton).fixedSize()
                                 .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
                         }
+                        AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.disabled(session.changingSetting)
                 }
                 if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }

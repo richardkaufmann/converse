@@ -49,6 +49,7 @@ extension Store {
         entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         session.entry = entry; session.accountStatus = ""; session.probeError = ""
         session.modelChoices = []; session.accessChoices = []; session.toolStatus.account = nil; session.toolStatus.accountObservedAt = nil
+        session.toolStatus.accountUsage = nil; session.toolStatus.quota = nil; session.quotaRefreshedAt = nil
         session.needsSignIn = false
     }
 }

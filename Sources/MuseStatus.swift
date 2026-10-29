@@ -197,6 +197,9 @@ struct MuseStatusProbe {
             status.usage = "Log unavailable"; status.totalUsage = "Log unavailable"
         }
         status.quota = quota.map { quotaSummary($0) } ?? "Muse has no observed account quota"
+        if let observed = quota?["observedAtMs"] as? Double, observed.isFinite {
+            status.accountUsage = AccountUsage(observedAt: Date(timeIntervalSince1970: observed / 1000))
+        }
         let modelSource = session.isEmpty ? "saved config" : "retained session"
         let detail = "Model: \(status.model) (\(modelSource))\nEffort: \(status.effort) — \(effortSource)\nAccess: \(status.access) (\(accessSource))\nLast turn: \(status.usage)\nSession total: \(status.totalUsage!) · \(calls) model calls\nAccount quota: \(status.quota!)"
         return Result(status: status, detail: detail)

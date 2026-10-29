@@ -209,6 +209,9 @@ extension Store {
         session.title = title
         var entry = session.entry; entry.command = command; entry.directory = directory
         session.entry = entry
+        if changed {
+            session.toolStatus.accountUsage = nil; session.toolStatus.quota = nil; session.quotaRefreshedAt = nil
+        }
         save()
         if changed { refreshStatus(session) }
     }

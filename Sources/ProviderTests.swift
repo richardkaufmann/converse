@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 func providerSelfTests(_ check: (Bool, String) -> Void) {
+    accountUsageSelfTests(check)
     responseImageSelfTests(check)
     helpSelfTests(check)
     workspaceSelfTests(check)

@@ -396,6 +396,17 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         var stale = snap; stale.homeSeq = 9; stale.title = "STALE"
         viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 9, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(stale)))
         check(viewer.remoteTranscripts[gid]?.title == "T2", "Viewer harness drops stale-sequence snapshots")
+        var running = snap; running.homeSeq = 11; running.busy = true; running.status = "Working"
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 11, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(running)))
+        check(viewer.remoteTranscripts[gid]?.busy == true, "Viewer accepts higher-sequence turn-start push")
+        var completed = running; completed.homeSeq = 12; completed.busy = false; completed.status = "Ready"
+        completed.messages[0].text = "Finished answer"
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 12, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(completed)))
+        let composer = RemoteComposer()
+        composer.updateEditor(transcript: viewer.remoteTranscripts[gid], cache: [:])
+        check(viewer.remoteTranscripts[gid]?.homeSeq == 12 && viewer.remoteTranscripts[gid]?.status == "Ready" && !composer.editor.busy && composer.editor.messages.last?.text == "Finished answer", "Completion push updates Mac viewer messages/status/busy before lease expiry")
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: 11, boot: 7, sessionID: gid, epoch: 4, payload: try JSONEncoder().encode(running)))
+        check(viewer.remoteTranscripts[gid]?.busy == false && viewer.remoteTranscripts[gid]?.messages.last?.text == "Finished answer", "Delayed turn-start cannot overwrite completion snapshot")
         viewer.sendRemoteDraft(globalID: gid, text: "first edit")
         let firstVersion: UInt64 = 6
         viewer.sendRemoteDraft(globalID: gid, text: "second edit")
