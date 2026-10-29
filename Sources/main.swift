@@ -1082,13 +1082,22 @@ final class InputClipView: NSClipView {
         else { super.mouseDown(with: event) }
     }
 }
+final class LatestOutputButton: NSButton {
+    override func draw(_ dirtyRect: NSRect) {
+        // A standard macOS bezel can show transcript text through its fill.
+        // Paint an opaque backing before AppKit draws the button and title.
+        NSColor.windowBackgroundColor.withAlphaComponent(1).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        super.draw(dirtyRect)
+    }
+}
 final class ConversationScrollView: NSScrollView {
     private var tiling = false
     private(set) var followState = TranscriptFollowState()
     private var idleResume: DispatchWorkItem?
     private var interactionMonitor: Any?
     private var liveScrolling = false
-    private let latest = NSButton(title: "Jump to latest", target: nil, action: nil)
+    private let latest = LatestOutputButton(title: "Jump to latest", target: nil, action: nil)
     override init(frame frameRect: NSRect) { super.init(frame: frameRect); configureFollowing() }
     required init?(coder: NSCoder) { super.init(coder: coder); configureFollowing() }
     deinit {
