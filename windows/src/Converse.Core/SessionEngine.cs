@@ -258,9 +258,11 @@ public sealed class SessionStore
         Changed?.Invoke();
     }
 
-    public static string VisibleText(string text)
+    // Strip fenced switchboard command blocks without trimming: streaming
+    // deltas keep their boundary newlines (Mac parity), so chunk edges
+    // never glue together mid-stream.
+    public static string StripConverseFences(string text)
     {
-        // Strip fenced switchboard command blocks from display text.
         var builder = new StringBuilder();
         var inFence = false;
         foreach (var line in text.Split('\n'))
@@ -270,8 +272,13 @@ public sealed class SessionStore
             if (inFence && trimmed.StartsWith("```")) { inFence = false; continue; }
             if (!inFence) builder.Append(line).Append('\n');
         }
-        return builder.ToString().Trim('\n');
+        // Splitting "a\n" yields ["a", ""], so drop the phantom trailing
+        // break the split invented; a lone "" (empty input) stays empty.
+        if (builder.Length > 0) builder.Length -= 1;
+        return builder.ToString();
     }
+
+    public static string VisibleText(string text) => StripConverseFences(text).Trim('\n');
 
     // Mac Store.submit parity: a busy session (or a nonempty queue)
     // enqueues only — the user message enters the transcript when the turn
@@ -671,7 +678,7 @@ public sealed class SessionStore
             }
         }
         if (text is null) return;
-        var visible = VisibleText(text);
+        var visible = delta ? StripConverseFences(text) : VisibleText(text);
         if (string.IsNullOrEmpty(visible)) return;
         string separator;
         if (string.IsNullOrEmpty(response.Text)) separator = "";

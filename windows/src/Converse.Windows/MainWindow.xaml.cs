@@ -64,6 +64,12 @@ public sealed partial class MainWindow : Window
     private string _draftText = "";
     private string? _lastSentText;
     private bool _rebuilding;
+    // Last settled viewport offset, tracked outside rebuilds: back-to-back
+    // rebuilds (turn finish + queued auto-start in one tick) must restore
+    // the pre-reset position, not the reset top the previous SetText left.
+    private double _lastStableOffset;
+    private ulong _rebuildSeq;
+    private ulong _appliedSeq;
     private string _sidebarSignature = "";
     private string _bannerSignature = "";
     private bool _suppressSettings;
@@ -661,8 +667,11 @@ public sealed partial class MainWindow : Window
             var oldDocLength = CurrentDocLength();
             Transcript.Document.GetText(TextGetOptions.None, out var oldFull);
             var scrollerBefore = TranscriptScroller();
-            var oldOffset = scrollerBefore?.VerticalOffset ?? 0;
             var oldScrollable = scrollerBefore?.ScrollableHeight ?? 0;
+            var liveBefore = scrollerBefore?.VerticalOffset ?? 0;
+            // Following means caret AND viewport at the tail (Mac: 70px).
+            // A caret-only test drags mid-stream scrollers back down.
+            var nearBottom = scrollerBefore is null || scrollerBefore.ScrollableHeight - liveBefore < 70;
             var oldHistoryLength = Math.Max(0, oldDocLength - _draftText.Length);
             var selection = Transcript.Document.Selection;
             var wasAtEnd = selection.StartPosition >= oldDocLength && selection.EndPosition >= oldDocLength;
@@ -736,29 +745,39 @@ public sealed partial class MainWindow : Window
                 length = Math.Min(selection.Length, newDocLength - position);
             }
             Transcript.Document.Selection.SetRange(position, position + length);
-            // Deferred past layout: ScrollableHeight is stale synchronously
-            // after SetText, and SetText parks the viewport at the top while
+            // Deferred past layout at low priority, so selection auto-scroll
+            // settles first: SetText parks the viewport at the top while
             // SetRange alone does not reliably scroll back. Every branch
             // restores its scroll target here: the tail when following, the
             // preserved offset otherwise (shifted when earlier messages were
-            // prepended above). The gutter resyncs in the same tick: syncing
-            // it synchronously reads the pre-scroll offset and leaves stale
-            // numbers beside fresh paragraphs.
-            var followTail = caretToEnd || wasAtEnd;
+            // prepended above). Only the newest rebuild in a tick owns the
+            // viewport; a user scroll mid-rebuild wins over the restore. The
+            // gutter resyncs in the same tick: syncing it synchronously
+            // reads the pre-scroll offset and leaves stale numbers beside
+            // fresh paragraphs.
+            var followTail = caretToEnd || (wasAtEnd && nearBottom);
             var appended = (_historyText + _draftText).StartsWith(oldFull ?? "", StringComparison.Ordinal);
-            DispatcherQueue.TryEnqueue(() =>
+            var seq = ++_rebuildSeq;
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
             {
-                if (TranscriptScroller() is { } scroller)
+                if (seq != _rebuildSeq) return;
+                if (TranscriptScroller() is not { } scroller) return;
+                if (followTail)
+                    ScrollTranscriptToEnd();
+                else
                 {
-                    if (followTail)
-                        ScrollTranscriptToEnd();
+                    // Untouched resets sit at ~0; anything else moved by hand.
+                    var liveNow = scroller.VerticalOffset;
+                    if (liveNow > 1 && Math.Abs(liveNow - _lastStableOffset) > 1)
+                        _lastStableOffset = liveNow;
                     else
                     {
                         var delta = appended ? 0 : Math.Max(0, scroller.ScrollableHeight - oldScrollable);
-                        scroller.ChangeView(null, Math.Max(0, oldOffset + delta), null, true);
+                        scroller.ChangeView(null, Math.Max(0, _lastStableOffset + delta), null, true);
                     }
-                    GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
                 }
+                GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
+                _appliedSeq = seq;
             });
             UpdateGutter();
         }
@@ -793,8 +812,12 @@ public sealed partial class MainWindow : Window
 
     private void OnTranscriptViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        if (sender is ScrollViewer scroller && _layout.ShowLineNumbers)
+        if (sender is not ScrollViewer scroller) return;
+        if (_layout.ShowLineNumbers)
             GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
+        // Track the settled position only when no restore is outstanding:
+        // a SetText reset firing late must never clobber the target.
+        if (_rebuildSeq == _appliedSeq) _lastStableOffset = scroller.VerticalOffset;
     }
 
     private void ScrollTranscriptToEnd()
@@ -1477,16 +1500,25 @@ public sealed partial class MainWindow : Window
         var panel = new StackPanel { Spacing = 8 };
         _groupsPanel = panel;
         RenderGroupsDialog();
+        var groupsScroller = new ScrollViewer
+        {
+            Content = panel,
+            MaxHeight = Math.Max(320, Bounds.Height - 260),
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
+        // The dialog swallows wheel routing to nested scrollers; drive it
+        // directly so the wheel works like the scrollbar does.
+        groupsScroller.PointerWheelChanged += (_, e) =>
+        {
+            e.Handled = true;
+            var delta = e.GetCurrentPoint(groupsScroller).Properties.MouseWheelDelta;
+            groupsScroller.ChangeView(null, groupsScroller.VerticalOffset - delta / 2, null);
+        };
         var dialog = new ContentDialog
         {
             Title = "Converse Groups",
-            Content = new ScrollViewer
-            {
-                Content = panel,
-                MaxHeight = Math.Max(320, Bounds.Height - 260),
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            },
+            Content = groupsScroller,
             CloseButtonText = "Done",
             XamlRoot = Content.XamlRoot,
         };

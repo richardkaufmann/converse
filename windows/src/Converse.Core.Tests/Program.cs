@@ -721,6 +721,14 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(response.Text == "Hello\n\nWorld", "Glued final snapshot keeps display separators");
     Line("{\"type\":\"result\",\"result\":\"Something new\"}");
     Check(response.Text == "Something new", "Genuinely new final text still replaces");
+    var streamed = store.Create(store.Entries.First(e => e.Engine == "claude"));
+    var streamedResponse = new ChatMessage { Role = "assistant", Text = "" };
+    void Chunk(string text) => store.Consume(
+        "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":" + System.Text.Json.JsonSerializer.Serialize(text) + "}}}",
+        streamed, streamedResponse);
+    Chunk("12\n");
+    Chunk("13\n");
+    Check(streamedResponse.Text == "12\n13\n", "Streamed chunk boundaries keep their newlines");
     var failed = store.Create(store.Entries.First(e => e.Engine == "claude"));
     var failedResponse = new ChatMessage { Role = "assistant", Text = "" };
     store.Consume("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}", failed, failedResponse);
