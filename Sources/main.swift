@@ -129,6 +129,7 @@ final class Session: ObservableObject, Identifiable {
     var requestAnswers = MuseRequestAnswers()
     @Published var requestError = ""
     @Published var answeringRequest = false
+    var answerRequestToken = UUID()
     var museItems: [String: UUID] = [:]
     var web: WKWebView?
     var textScrollOrigin: NSPoint?
@@ -399,7 +400,7 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil) {
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
@@ -415,7 +416,13 @@ final class Store: ObservableObject {
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
-        if s.agent != nil { if let startAgentRun { startAgentRun(s, responseID) } else { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID, loopTick: agentLoopTick) } }; save(); return }
+        if s.agent != nil {
+            // Restore before any runtime/save callback: an external request must
+            // never persist the transient empty composer over the human draft.
+            if let draft = preservingAgentDraft { s.draft = draft.text; s.attachments = draft.images }
+            if let startAgentRun { startAgentRun(s, responseID) } else { MainActor.assumeIsolated { AgentRuntime.shared.run(s, store: self, responseID: responseID, loopTick: agentLoopTick) } }
+            save(); return
+        }
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
@@ -648,12 +655,24 @@ final class Store: ObservableObject {
             method = cancel ? "userInput/cancel" : "userInput/answer"; params["userInputId"] = request.id
             if !cancel { params["answers"] = answers ?? [] }
         }
+        let answerToken = UUID(); s.answerRequestToken = answerToken
         s.answeringRequest = true; s.requestError = ""
         connection.rpc(method, params) { result in
+            guard s.muse === connection, s.answerRequestToken == answerToken else { return }
+            s.answeringRequest = false
+            if case .success = result {
+                // The RPC is itself an acknowledgement. Do not wait forever for
+                // a separate resolved event, and retain a newer approval stage.
+                s.requests.removeAll { current in
+                    current.id == request.id && current.kind == request.kind &&
+                    NSDictionary(dictionary: current.params).isEqual(to: request.params)
+                }
+            }
             if case .failure(let error) = result {
-                s.answeringRequest = false; s.requestError = error.localizedDescription
+                s.requestError = error.localizedDescription
                 // Refresh the race-guarded request after another client or a stage change wins.
                 connection.rpc("approval/listPending", ["sessionId": connection.sessionID]) { result in
+                    guard s.muse === connection, s.answerRequestToken == answerToken else { return }
                     if case .success(let value) = result {
                         s.requests = (value["approvals"] as? [[String: Any]] ?? []).compactMap { p in (p["approvalId"] as? String).map { MuseRequest(id: $0, kind: "approval", params: p) } }
                         s.requests += (value["userInputs"] as? [[String: Any]] ?? []).compactMap { p in (p["userInputId"] as? String).map { MuseRequest(id: $0, kind: "question", params: p) } }
@@ -1471,7 +1490,13 @@ struct ScrollingConversation: NSViewRepresentable {
         context.coordinator.render(text)
         if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
         if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
-        DispatchQueue.main.async { text.window?.makeFirstResponder(text) }
+        DispatchQueue.main.async {
+            // A newly mounted pane must not steal focus from a question answer,
+            // settings field, or another pane's draft.
+            guard let window = text.window, window.isKeyWindow,
+                  window.firstResponder == nil || window.firstResponder === window else { return }
+            window.makeFirstResponder(text)
+        }
         return scroll
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
@@ -1975,7 +2000,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
     var transcriptExporter: TranscriptExportController?
     lazy var helpController = ConverseHelpController()
-    lazy var kaosController = MainActor.assumeIsolated { KAOSWindowController() }
+    lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -1990,6 +2015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
         AgentRuntime.shared.start()
+        JollyRouter.shared.start()
         if ProcessInfo.processInfo.environment["CONVERSE_QA_GROUPS"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
             do {
                 let devices = DeviceSyncService.shared
@@ -2029,7 +2055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
-        sub.addItem(withTitle: "Jolly / KAOS…", action: #selector(showKAOS), keyEquivalent: "")
+        sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
@@ -2062,7 +2088,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
-    @objc func showKAOS() { MainActor.assumeIsolated { kaosController.show() } }
+    @objc func showJolly() { MainActor.assumeIsolated { jollyController.show() } }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app")]) }
     @objc func newWindow() {
@@ -2178,7 +2204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             alert.messageText = warning.title; alert.informativeText = warning.detail
             alert.addButton(withTitle: "Keep Running"); alert.addButton(withTitle: warning.quitButton)
             return alert.runModal() == .alertSecondButtonReturn
-        }, stopAgents: { MainActor.assumeIsolated { AgentRuntime.shared.prepareForQuit() } })
+        }, stopAgents: { MainActor.assumeIsolated { JollyRouter.shared.stop(store: .shared); AgentRuntime.shared.prepareForQuit() } })
         return confirmed ? .terminateNow : .terminateCancel
     }
 }

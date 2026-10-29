@@ -16,7 +16,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     fabricRevocationReconnectTests(check)
     fabricTrustSelfTests(check)
     deviceFabricSelfTests(check)
-    MainActor.assumeIsolated { agentSelfTests(check); kaosSelfTests(check) }
+    MainActor.assumeIsolated { agentSelfTests(check); jollySelfTests(check) }
     // A real MSP process stops reading stdin after initialize. This pins the
     // actual connection/setting path against UI stalls, not just the writer helper.
     let pressureHost = FileManager.default.temporaryDirectory.appendingPathComponent("converse-slow-msp-" + UUID().uuidString + ".py")
@@ -55,6 +55,23 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     check(pressureReady && sendLatency < 0.2 && uiHeartbeat && pressureReplies.isEmpty, "Muse setting requests cannot block UI callbacks while its real host is not reading stdin")
     let pressureDeadline = Date().addingTimeInterval(3)
     while pressureReplies.count < 2 && Date() < pressureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    let questionRoot = FileManager.default.temporaryDirectory.appendingPathComponent("converse-question-" + UUID().uuidString)
+    let questionStore = Store(folder: questionRoot)
+    let questionSession = questionStore.create(Entry(name: "Question fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "muse"))
+    questionSession.muse = pressureConnection
+    let question = MuseRequest(id: "question-fixture", kind: "question", params: ["questions": [["id": "q", "question": "Ready?"]]])
+    questionSession.requests = [question]
+    questionStore.answerMuse(questionSession, request: question, answers: [["questionId": "q", "freeText": "Yes"]])
+    let answerDeadline = Date().addingTimeInterval(2)
+    while questionSession.answeringRequest && Date() < answerDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!questionSession.answeringRequest && questionSession.requests.isEmpty, "Muse RPC acknowledgement unlocks answered question controls even without a resolved event")
+    questionSession.requests = [question]
+    questionStore.answerMuse(questionSession, request: question, cancel: true)
+    questionSession.requests = [MuseRequest(id: question.id, kind: "question", params: ["questions": [["id": "new", "question": "New question stage"]]])]
+    let stageDeadline = Date().addingTimeInterval(2)
+    while questionSession.answeringRequest && Date() < stageDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!questionSession.answeringRequest && questionSession.requests.count == 1, "A late question acknowledgement preserves a newer request stage")
+    questionSession.muse = nil; try? FileManager.default.removeItem(at: questionRoot)
     var abandonedSettingCallbacks = 0, abandonedSettingFailed = false
     pressureConnection.rpc("fixture/never-ack", [:]) { result in
         abandonedSettingCallbacks += 1

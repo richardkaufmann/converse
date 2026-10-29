@@ -2,12 +2,62 @@ import AppKit
 import Foundation
 
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
+    let voice = AgentDictation()
+    voice.keyReader = { "synthetic-key" }
+    voice.permission = { false }
+    voice.record()
+    let permissionDeadline = Date().addingTimeInterval(2)
+    while voice.phase == .permission && Date() < permissionDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(voice.phase == .failed && voice.status.contains("Microphone"), "Denied microphone permission leaves a visible recoverable state without a modal session")
+    var permissionReply: CheckedContinuation<Bool, Never>?
+    voice.permission = { await withCheckedContinuation { permissionReply = $0 } }
+    voice.record()
+    let cancelDeadline = Date().addingTimeInterval(2)
+    while permissionReply == nil && Date() < cancelDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    voice.cancel(); permissionReply?.resume(returning: true)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+    check(voice.phase == .idle && !voice.active && voice.status.contains("Ready"), "Cancelling Dictate fences a late permission approval instead of starting the microphone")
+    check(AgentDictation.inserting("new words", into: "typed meanwhile") == "typed meanwhile new words", "Dictation inserts into the current draft without erasing newer typing")
+    var wav = Data("RIFF".utf8); wav.append(Data(repeating: 0, count: 4)); wav.append(Data("WAVE".utf8)); wav.append(Data(repeating: 0, count: 40))
+    var voiceRequest: URLRequest?, voiceText: String?, voiceError: String?, voiceDone = false
+    voice.api.request = { request in
+        voiceRequest = request
+        return (Data("{\"transcript\":\" synthetic voice test \"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    Task { @MainActor in
+        do { voiceText = try await voice.api.transcribe(wav, key: "synthetic-key") } catch { voiceError = error.localizedDescription }; voiceDone = true
+    }
+    let voiceDeadline = Date().addingTimeInterval(2)
+    while !voiceDone && Date() < voiceDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    let multipart = voiceRequest?.httpBody.map { String(decoding: $0, as: UTF8.self) } ?? ""
+    check(voiceText == "synthetic voice test" && voiceError == nil && voiceRequest?.url?.path == "/v1/asr/transcribe" && multipart.contains("PUSH_TO_TALK") && multipart.contains("name=\"audio\"") && multipart.contains("WAVE"), "Dictation uses the documented multipart Meta Voice API and extracts the review text")
+    voiceDone = false
+    voice.api.request = { request in
+        (Data("private-error-canary".utf8), HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+    }
+    Task { @MainActor in
+        do { _ = try await voice.api.transcribe(wav, key: "synthetic-key") } catch { voiceError = error.localizedDescription }; voiceDone = true
+    }
+    let failureDeadline = Date().addingTimeInterval(2)
+    while !voiceDone && Date() < failureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(voiceError?.contains("401") == true && voiceError?.contains("private-error-canary") == false, "Voice API failures expose an actionable status without raw response bodies")
     let now = Date(timeIntervalSince1970: 1_000)
     var config = AgentConfig(); config.enabled = true; config.remainingRuns = 1; config.nextRunAt = now
     check(config.reserveRun(at: now) && config.remainingRuns == 0 && !config.enabled && !config.reserveRun(at: now), "Agent reserves its last scheduled run once and stops at the persisted cap")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")
+    let researchResponse: [String: Any] = ["output": [
+        ["type": "web_search_call", "status": "completed", "results": [["url": "https://example.com/quote", "title": "Quote"], ["url": "file:///private/secret", "title": "Unsafe"]]],
+        ["type": "message", "content": [["type": "output_text", "annotations": [["type": "url_citation", "url": "https://example.com/news", "title": "News"]]]]]]]
+    let research = AgentResearch.parse(researchResponse)
+    check(research.searched && research.sources.count == 2 && !research.markdown.contains("file:"), "Web research preserves actual result/citation URLs and rejects non-web links")
+    let board = AgentScoreboard(title: "Stock", summary: "Today’s verified snapshot", metrics: [
+        .init(label: "Price", value: "$123", sourceURL: "https://example.com/quote", asOf: "2026-10-29 16:00 ET · close"),
+        .init(label: "Invented", value: "999", sourceURL: "https://unseen.example/quote", asOf: "now")], sentiment: "up").validated(research: research, at: now)
+    check(board.metrics[0].value == "$123" && board.metrics[1].value == "Unavailable" && board.metrics[1].sourceURL == nil && board.observedAt == now, "Scoreboard keeps source time distinct from retrieval and refuses metrics whose source was not retrieved")
+    check(AgentScoreboardCards.html(board).contains("https://example.com/quote") && !AgentScoreboardCards.html(board).contains("999"), "Exported flexible scoreboard has clickable sources and omits unsupported values")
+    check(!AgentResearch.parse(["output": []]).searched && board.validated(research: AgentResearch()).metrics.allSatisfy { $0.value == "Unavailable" }, "Enabling search is not treated as evidence that a search ran")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-agents-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let store = Store(folder: root)
@@ -71,6 +121,17 @@ import Foundation
         if status != 200 { object = ["message": "private-service-error-canary"] }
         return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
+    let searchAPI = AgentAPI()
+    searchAPI.request = { request in
+        let final = "{\"reply\":\"Sourced answer\",\"scoreboard\":{\"summary\":\"News summary\",\"metrics\":[]}}"
+        let response: [String: Any] = ["status": "completed", "output": [
+            ["type": "message", "phase": "commentary", "content": [["type": "output_text", "text": "Searching now"]]],
+            ["type": "web_search_call", "status": "completed"],
+            ["type": "message", "phase": "final_answer", "content": [["type": "output_text", "text": final]]]]]
+        return (try JSONSerialization.data(withJSONObject: response), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    let searchedReply = probe { try await searchAPI.respond(model: "fixture", instructions: "fixture", input: "fixture", key: "fixture", webSearch: true) }
+    check(AgentReply.decode(searchedReply)?.reply == "Sourced answer" && !searchedReply.contains("Searching now"), "Hosted search commentary is excluded from the actionable final JSON")
     let githubOK = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: "test-token") }
     check(githubOK.contains("token accepted") && githubOK.contains("visitor metrics are readable") && probeRequests.count == 3 && probeRequests.allSatisfy { $0.httpMethod == "GET" && $0.httpBody == nil && $0.value(forHTTPHeaderField: "Authorization") == "Bearer test-token" }, "GitHub test checks token, repository metadata and traffic read-only; measured zero visitors succeeds")
     deniedTraffic = true; probeRequests = []
@@ -351,6 +412,7 @@ import Foundation
     let evidenceInput = (requestBody?["input"] as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
+    check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
 
     // Clearing GitHub must not make an unrelated saved credential a runtime dependency.

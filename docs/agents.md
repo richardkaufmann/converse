@@ -110,3 +110,37 @@ app users, which are not currently measured.
   continues, and its widget stays on the home by default.
 - An inline progress image renders through the ordinary transcript pipeline on
   local and remote panes, with the same attachment behavior as any session.
+
+## Web research and general scoreboards (Mac)
+
+Agent runs enable Meta Responses hosted web_search, with at most four built-in
+calls. No extra search credential is required. Users can disable research in
+Agent Setup. Tool output remains untrusted evidence; selected session scope and
+host-enforced messaging limits still apply. Progress messages emitted during
+search are not treated as the actionable final JSON.
+
+Scoreboards can contain user-requested metric labels, values, source URLs,
+source-reported observation times, a short summary, and sentiment. The host
+accepts metric URLs only when returned by that run's search results/citations;
+unavailable or unsupported values stay Unavailable. This is source-grounded
+model extraction, not an independently verified exchange feed. Observation
+times and retrieval time are distinct. Summaries/art are model interpretations.
+Requested logos and humor are allowed; data stays in legible overlay cards.
+
+## Jolly routing (Mac)
+
+Converse owns the authenticated connector bridge and its file journal. No other
+application is a fallback. The bridge lists eligible local agents, accepts an
+explicit name/ID, and asks for clarification when ambiguous. Agent selection
+does not acquire a display lease. Each admission uses a saved run allowance;
+busy/paused agents refuse without interrupting or changing the draft. Only the
+agent's already-authorized session scope is available to its run.
+
+Stable request IDs prevent repeat execution. The app stores its active request
+before starting a model call; after restart it reports an interrupted request
+as uncertain instead of replaying it. Replies remain available for polling.
+Closing the app withdraws its directory heartbeat. Explicit phone messages
+use the Converse-owned outbox; GET is non-consuming, and acknowledgements are
+separate. The existing tunnel and bearer credential are retained at handoff;
+the old service is disabled and its unread outbox is imported without deleting
+the original. No automatic fallback is installed.

@@ -18,6 +18,10 @@ struct AgentConfig: Codable, Equatable {
         guard let id = DeviceGlobalID(global) else { return false }
         return watchedParticipants?.contains(id.string) == true || (id.home == home && watchedSessions.contains(id.session))
     }
+    var webSearch: Bool? = nil
+    var jollyAllowed: Bool? = nil
+    var jollyRequestID: String? = nil
+    var scoreboard: AgentScoreboard? = nil
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
     var remainingRuns = 20
@@ -159,6 +163,7 @@ struct AgentReply: Decodable {
     var memory: String?
     var speechIntent: String?
     var notifyDiscord: String?
+    var scoreboard: AgentScoreboard?
     static func decode(_ text: String) -> AgentReply? {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("```json\n"), value.hasSuffix("\n```") { value = String(value.dropFirst(8).dropLast(4)) }
@@ -253,9 +258,12 @@ final class AgentAPI {
         return "Discord confirmed the test message. Check the webhook’s channel; no session content was sent."
     }
     static let outputTokenLimit = 8192
-    func respond(model: String, instructions: String, input: String, key: String, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
-        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: ["model": model, "instructions": instructions, "input": input, "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false], key: key)
+    func respond(model: String, instructions: String, input: String, key: String, webSearch: Bool = false, research: ((AgentResearch) -> Void)? = nil, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
+        var body: [String: Any] = ["model": model, "instructions": instructions, "input": input, "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false]
+        if webSearch { body["tools"] = [["type": "web_search"]]; body["include"] = ["web_search_call.results"]; body["max_tool_calls"] = 4 }
+        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: body, key: key)
         guard let response = raw as? [String: Any] else { throw AgentFailure.message("Agent service returned an invalid response. No actions applied.") }
+        research?(AgentResearch.parse(response))
         let rawStatus = response["status"] as? String ?? "unknown"
         let status = ["completed", "incomplete", "failed", "cancelled", "queued", "in_progress"].contains(rawStatus) ? rawStatus : "unknown"
         let rawReason = (response["incomplete_details"] as? [String: Any])?["reason"] as? String
@@ -269,7 +277,11 @@ final class AgentAPI {
             if reason == "content_filter" { throw AgentFailure.message("The model service stopped this response under its content policy. No actions applied.") }
             throw AgentFailure.message("Agent response stopped before completion (\(status)). No actions applied. The loop is paused; try Run once.")
         }
-        let text = (response["output"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "message" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }.filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        // Hosted search can emit progress messages before its final answer.
+        // Only the final message is actionable; never splice commentary into JSON.
+        let messages = (response["output"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "message" }
+        let final = messages.last { $0["phase"] as? String == "final_answer" } ?? messages.last
+        let text = (final?["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
         guard !text.isEmpty else { throw AgentFailure.message("Agent returned no answer.") }; return text
     }
     func art(prompt: String, key: String) async throws -> Data {

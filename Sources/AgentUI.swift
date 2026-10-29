@@ -50,6 +50,8 @@ struct AgentSetupView: View {
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
+                        Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
+                        Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
                         Toggle("Speak replies with expressive pace", isOn: $settings.speak)
                         Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
                         if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
@@ -134,6 +136,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discord", value: discordURL, remove: removeSecrets.contains("discord"))
+            current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             session.agent = current; session.toolStatus.model = current.model
             Store.shared.save(); close()
         } catch { self.error = error.localizedDescription }
@@ -143,6 +146,8 @@ struct AgentSetupView: View {
 struct AgentControls: View {
     @ObservedObject var session: Session
     @State private var loopSettings = false
+    @State private var dictating = false
+    @StateObject private var voice = AgentDictation()
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             TimelineView(.periodic(from: .now, by: 5)) { context in
@@ -162,16 +167,14 @@ struct AgentControls: View {
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
                 Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.remainingRuns ?? 0) == 0)
                     .help("Check now using one automatic run; this does not enable the periodic loop")
-                Button("Dictate") {
-                    guard let input = session.inputTextView else { return }
-                    input.window?.makeFirstResponder(input)
-                    input.setSelectedRange(NSRange(location: (input.string as NSString).length, length: 0))
-                    NSApp.sendAction(Selector(("startDictation:")), to: input, from: nil)
-                }.help("Talk into the blue draft with macOS Dictation; review it, then press Return to send")
+                Button("Dictate…") { dictating = true }
+                    .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
+                    .help("Record with Muse Voice, review the transcription, then insert it into your draft")
                 Button("Scoreboard") { AgentWindows.shared.widget(session) }
                 Button("Agent Setup…") { AgentWindows.shared.setup(session) }
             } }
         }.padding(8).frame(height: 66)
+            .onChange(of: session.id) { _, _ in voice.cancel(); dictating = false }
     }
 }
 
@@ -240,6 +243,9 @@ struct AgentWidgetView: View {
                     }.padding(24)
                 }.frame(height: 220).clipped()
                 VStack(alignment: .leading, spacing: 22) {
+                    if let board = session.agent?.scoreboard {
+                        AgentScoreboardCards(board: board)
+                    }
                     if let snapshot = session.agent?.repositorySnapshot, snapshot.hasMeasurements {
                         LazyVGrid(columns: [GridItem(.flexible(minimum: 0)), GridItem(.flexible(minimum: 0))], spacing: 10) {
                             ForEach(snapshot.metrics, id: \.0) { item in
@@ -340,7 +346,7 @@ enum AgentWidgetExport {
         var art = ""
         if let path = config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
         let cells = (config.repositorySnapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
-        let metrics = !config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>"
+        let metrics = AgentScoreboardCards.html(config.scoreboard) + (!config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>")
         return """
         <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>
         *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}h2{font-size:17px;margin:0 0 10px}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric,.empty{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:28px;line-height:1.3}.metric span{font-size:12px;color:#bbc4d1}p{white-space:pre-wrap;margin:0}section{margin-bottom:24px}details{margin:24px 0}summary{cursor:pointer;font-weight:600;margin-bottom:10px}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}
@@ -483,5 +489,42 @@ struct RemoteAgentSetupView: View {
                 if let config = fresh.settings { settings = config }
             }
         }
+    }
+}
+
+struct AgentScoreboardCards: View {
+    let board: AgentScoreboard
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let title = board.title { Text(title).font(.title2.bold()) }
+            Text(board.summary).font(.headline)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(Array(board.metrics.enumerated()), id: \.offset) { _, metric in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(metric.label).font(.caption)
+                        Text(metric.value).font(.title2.bold()).textSelection(.enabled)
+                        if let at = metric.asOf { Text("Source time: " + at).font(.caption) }
+                        if let link = metric.sourceURL.flatMap(AgentWebSource.safeURL) { Link("Source", destination: link).font(.caption) }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(14).background(Color(red: 0.12, green: 0.16, blue: 0.22), in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            if let at = board.observedAt { Text("Retrieved " + at.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary) }
+            ForEach(board.sources ?? [], id: \.url) { source in
+                if let url = AgentWebSource.safeURL(source.url) { Link(source.title, destination: url).font(.caption) }
+            }
+        }
+    }
+    static func html(_ board: AgentScoreboard?) -> String {
+        guard let board else { return "" }
+        func e(_ s: String) -> String { AgentWidgetExport.escape(s) }
+        let cells = board.metrics.map { metric in
+            "<div class=metric><span>" + e(metric.label) + "</span><strong>" + e(metric.value) + "</strong><span>" + e(metric.asOf.map { "Source time: " + $0 } ?? "") + "</span>" +
+            (metric.sourceURL.flatMap(AgentWebSource.safeURL).map { "<br><a href=\"" + e($0.absoluteString) + "\" rel=\"noreferrer\">Source</a>" } ?? "") + "</div>"
+        }.joined()
+        let sources = (board.sources ?? []).compactMap { source -> String? in
+            guard let url = AgentWebSource.safeURL(source.url) else { return nil }
+            return "<a href=\"" + e(url.absoluteString) + "\" rel=\"noreferrer\">" + e(source.title) + "</a>"
+        }.joined(separator: " · ")
+        return "<section><h2>" + e(board.title ?? "Scoreboard") + "</h2><p>" + e(board.summary) + "</p><div class=grid>" + cells + "</div><p>Retrieved " + e(board.observedAt?.formatted() ?? "Unknown") + "</p><p>" + sources + "</p></section>"
     }
 }
