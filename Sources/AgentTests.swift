@@ -28,6 +28,71 @@ import Foundation
         do { try AgentSecrets.update("fixture", value: "replacement", remove: true, write: { _, _ in secretWrites += 1 }, delete: { _ in secretDeletes += 1 }); check(false, "Conflicting secret edit rejected") }
         catch { check(secretWrites == 1 && secretDeletes == 1, "Conflicting credential replacement/removal changes nothing") }
     } catch { check(false, "Credential edit policy: " + error.localizedDescription) }
+    var credentialReads = 0
+    do {
+        let entered = try AgentCredentialProbe.resolve("  replacement  ", name: "fixture", read: { _ in credentialReads += 1; return "saved" })
+        let saved = try AgentCredentialProbe.resolve(" ", name: "fixture", read: { _ in credentialReads += 1; return " saved " })
+        let missing = try AgentCredentialProbe.resolve("", name: "fixture", read: { _ in credentialReads += 1; return nil })
+        check(entered == "replacement" && saved == "saved" && missing == nil && credentialReads == 2, "Connection tests prefer the entered credential, otherwise read the saved credential without modifying it")
+    } catch { check(false, "Connection test credential selection") }
+    let probeAPI = AgentAPI()
+    func probe(_ operation: @escaping @MainActor () async throws -> String) -> String {
+        var result = "Probe timed out", finished = false
+        Task { @MainActor in
+            do { result = try await operation() } catch { result = error.localizedDescription }
+            finished = true
+        }
+        let end = Date().addingTimeInterval(3)
+        while !finished && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        return result
+    }
+    var probeRequests: [URLRequest] = []
+    var deniedTraffic = false, responseStatus = 200
+    probeAPI.request = { request in
+        probeRequests.append(request)
+        var status = responseStatus
+        var object: [String: Any] = ["id": 42]
+        if request.url?.path.hasSuffix("/traffic/views") == true {
+            if deniedTraffic { status = 403 } else { object = ["uniques": 0] }
+        }
+        if request.url?.host == "discord.com" { object = ["id": "12345"] }
+        if status != 200 { object = ["message": "private-service-error-canary"] }
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+    }
+    let githubOK = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: "test-token") }
+    check(githubOK.contains("token accepted") && githubOK.contains("visitor metrics are readable") && probeRequests.count == 3 && probeRequests.allSatisfy { $0.httpMethod == "GET" && $0.httpBody == nil && $0.value(forHTTPHeaderField: "Authorization") == "Bearer test-token" }, "GitHub test checks token, repository metadata and traffic read-only; measured zero visitors succeeds")
+    deniedTraffic = true; probeRequests = []
+    let limitedGitHub = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: "test-token") }
+    check(limitedGitHub.contains("token accepted") && limitedGitHub.contains("Visitor metrics unavailable"), "GitHub test distinguishes a valid token from missing optional traffic permission")
+    probeRequests = []
+    let publicGitHub = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: nil) }
+    check(publicGitHub.contains("No token") && probeRequests.count == 1 && probeRequests[0].value(forHTTPHeaderField: "Authorization") == nil, "GitHub test without a token reports public access honestly and does not claim authenticated success")
+    responseStatus = 401; probeRequests = []
+    let invalidGitHub = probe { try await probeAPI.testGitHub(repository: "owner/repo", token: "test-token") }
+    check(invalidGitHub.contains("rejected the token") && !invalidGitHub.contains("private-service-error-canary") && probeRequests.count == 1, "Rejected GitHub credentials stop the probe and never expose response bodies")
+    probeRequests = []
+    let invalidRepository = probe { try await probeAPI.testGitHub(repository: "../repo", token: "test-token") }
+    check(invalidRepository.contains("owner/name") && probeRequests.isEmpty, "GitHub probe rejects an invalid repository before making any request")
+    responseStatus = 200; probeRequests = []
+    let testWebhook = "https://discord.com/api/webhooks/12345/test_token?thread_id=6789&wait=false"
+    let discordOK = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
+    let sentBody = probeRequests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let sentQuery = probeRequests.first?.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+    check(discordOK.contains("confirmed") && probeRequests.count == 1 && probeRequests[0].httpMethod == "POST" && sentBody?["content"] as? String == "Converse connection test — this webhook is working. No session content is included." && (sentBody?["allowed_mentions"] as? [String: Any])?["parse"] as? [String] == [] && sentQuery.contains(URLQueryItem(name: "wait", value: "true")) && sentQuery.contains(URLQueryItem(name: "thread_id", value: "6789")), "Discord test posts only the fixed labeled message, disables mentions, preserves thread routing and waits for confirmation")
+    for webhook in ["https://discord.com.attacker.test/api/webhooks/12345/test_token", "http://discord.com/api/webhooks/12345/test_token", "https://discord.com/api/users/@me", "https://name:password@discord.com/api/webhooks/12345/test_token", "https://discord.com/api/webhooks/12345/test_token?redirect=elsewhere"] {
+        probeRequests = []
+        let rejected = probe { try await probeAPI.testDiscord(webhook: webhook) }
+        check(rejected.contains("Integrations") && probeRequests.isEmpty, "Discord probe refuses non-webhook or untrusted destinations without sending")
+    }
+    responseStatus = 404; probeRequests = []
+    let missingWebhook = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
+    check(missingWebhook.contains("may have been deleted") && !missingWebhook.contains("private-service-error-canary") && !missingWebhook.contains("test_token"), "Discord probe explains a deleted webhook without exposing its URL or the API response")
+    probeAPI.request = { request in throw NSError(domain: "private-url-canary-test_token", code: -1, userInfo: [NSLocalizedDescriptionKey: request.url!.absoluteString]) }
+    let offlineDiscord = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
+    check(offlineDiscord.contains("Check the channel and network") && !offlineDiscord.contains("test_token"), "Discord network errors cannot leak secret webhook URLs")
+    probeAPI.request = { request in (Data(), HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!) }
+    let unconfirmedDiscord = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
+    check(unconfirmedDiscord.contains("did not confirm") && !unconfirmedDiscord.contains("confirmed the test"), "Discord test does not report delivery without a returned message receipt")
     let runtime = AgentRuntime()
     runtime.deliver(AgentReply(reply: "report", tell: [.init(to: recipient.id.uuidString, text: "Please review"), .init(to: blocked.id.uuidString, text: "Forbidden")]), from: agent, store: store)
     check(recipient.pending.count == 1 && blocked.pending.isEmpty && recipient.pending[0].text.contains(agent.id.uuidString), "Agent messages are visibly attributed and restricted to selected sessions")

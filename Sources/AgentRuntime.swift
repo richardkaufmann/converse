@@ -180,8 +180,8 @@ import AVFoundation
         }
     }
     private func notifyDiscord(_ text: String) async throws {
-        guard let secret = try keyReader("discord"), let url = URL(string: secret), url.scheme == "https", url.host == "discord.com", url.path.hasPrefix("/api/webhooks/") else { throw AgentFailure.message("Set a Discord webhook in Agent Setup before enabling notifications.") }
-        _ = try await api.json(url, body: ["content": text, "allowed_mentions": ["parse": []]])
+        guard let secret = try keyReader("discord") else { throw AgentFailure.message("Set a Discord webhook in Agent Setup before enabling notifications.") }
+        try await api.sendDiscord(text, webhook: secret)
     }
     private func finish(_ session: Session, store: Store, success: Bool, error: String? = nil) {
         tasks.removeValue(forKey: session.id)

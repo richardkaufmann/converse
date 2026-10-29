@@ -5,8 +5,8 @@ struct AgentSetupView: View {
     @ObservedObject var session: Session
     @State private var settings: AgentConfig
     @State private var metaKey = ""
-    @State private var testingKey = false
-    @State private var keyTestOutcome = ""
+    @State private var testingServices: Set<String> = []
+    @State private var testOutcomes: [String: String] = [:]
     @State private var githubKey = ""
     @State private var discordURL = ""
     @State private var removeSecrets: Set<String> = []
@@ -18,76 +18,102 @@ struct AgentSetupView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Agent Setup · " + session.title).font(.title2.bold())
             Text("Runs on this home computer while Converse is open. Only the selected sessions are sent to Meta. Keys and the Discord webhook stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    SecureField("Meta API key · blank keeps saved key", text: $metaKey)
-                    Button(testingKey ? "Testing…" : "Test key") { testKey() }.disabled(testingKey || removeSecrets.contains("meta")).help("One short model request with no session history; tests the entered key or the saved key")
-                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("meta") }, set: { if $0 { removeSecrets.insert("meta") } else { removeSecrets.remove("meta") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
-                }
-                HStack {
-                    SecureField("GitHub token · optional, blank keeps saved token", text: $githubKey)
-                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("github") }, set: { if $0 { removeSecrets.insert("github") } else { removeSecrets.remove("github") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
-                }
-                HStack {
-                    SecureField("Discord webhook · optional", text: $discordURL)
-                    Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("discord") }, set: { if $0 { removeSecrets.insert("discord") } else { removeSecrets.remove("discord") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
-                }
-                HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model) }
-                HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("GitHub repository · owner/name", text: $settings.repository) }
-                Text("What should this agent do? How will you judge success?").font(.headline)
-                TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
-                HStack {
-                    Text("Run every"); TextField("Seconds", value: $settings.intervalSeconds, format: .number).frame(width: 70); Text("seconds (minimum 60)")
-                }
-                Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
-                Toggle("Enable automatic loop", isOn: $settings.enabled)
-                Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
-                Toggle("Speak replies with expressive pace", isOn: $settings.speak)
-                Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
-                if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
-                Toggle("Allow Discord webhook alerts", isOn: $settings.discord)
-                Text("Sessions this agent may read and message · select explicitly").font(.headline)
-                ScrollView {
-                    VStack(alignment: .leading) {
-                        ForEach(Store.shared.sessions.filter { $0.id != session.id }) { other in
-                            Toggle(other.title, isOn: Binding(get: { settings.allows(local: other.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
-                                settings.watchedSessions.removeAll { $0 == other.id }
-                                if let home = DeviceSyncService.shared.localDeviceID { settings.watchedParticipants?.removeAll { $0 == DeviceGlobalID(home: home, session: other.id).string } }
-                                if on { settings.watchedSessions.append(other.id) }
-                            }))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            SecureField("Meta API key · blank keeps saved key", text: $metaKey).disabled(testingServices.contains("meta"))
+                            Button(testingServices.contains("meta") ? "Testing…" : "Test key") { testService("meta") }.disabled(testingServices.contains("meta") || removeSecrets.contains("meta")).help("One short model request with no session history; tests the entered key or the saved key")
+                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("meta") }, set: { if $0 { removeSecrets.insert("meta") } else { removeSecrets.remove("meta") } })).toggleStyle(.checkbox).disabled(testingServices.contains("meta")).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
                         }
-                        ForEach((settings.watchedParticipants ?? []).filter { !availableScope.contains($0) }, id: \.self) { id in
-                            Toggle("Unavailable selected participant · " + id, isOn: Binding(get: { true }, set: { if !$0 { settings.watchedParticipants?.removeAll { $0 == id } } })).font(.caption)
+                        testStatus("meta")
+                        HStack {
+                            SecureField("GitHub token · optional, blank keeps saved token", text: $githubKey).disabled(testingServices.contains("github"))
+                            Button(testingServices.contains("github") ? "Testing…" : "Test GitHub") { testService("github") }.disabled(testingServices.contains("github") || removeSecrets.contains("github")).help("Check the entered or saved token, repository metadata and optional visitor metrics. With no token, tests public access.")
+                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("github") }, set: { if $0 { removeSecrets.insert("github") } else { removeSecrets.remove("github") } })).toggleStyle(.checkbox).disabled(testingServices.contains("github")).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
                         }
-                        ForEach(DeviceSyncService.shared.participantHomes, id: \.deviceID) { home in
-                            Text(home.deviceName).font(.caption).foregroundStyle(.secondary)
-                            ForEach(home.rows) { row in
-                                Toggle(row.title + (home.online ? "" : " · offline"), isOn: Binding(get: { settings.watchedParticipants?.contains(row.globalID) == true }, set: { on in
-                                    settings.watchedParticipants = (settings.watchedParticipants ?? []).filter { $0 != row.globalID }
-                                    if on { settings.watchedParticipants?.append(row.globalID) }
-                                }))
-                            }
+                        testStatus("github")
+                        HStack {
+                            SecureField("Discord webhook · optional", text: $discordURL).disabled(testingServices.contains("discord"))
+                            Button(testingServices.contains("discord") ? "Sending…" : "Send test") { testService("discord") }.disabled(testingServices.contains("discord") || removeSecrets.contains("discord")).help("Posts one labeled test message to the entered or saved webhook’s channel; no session content or mentions")
+                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("discord") }, set: { if $0 { removeSecrets.insert("discord") } else { removeSecrets.remove("discord") } })).toggleStyle(.checkbox).disabled(testingServices.contains("discord")).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(height: 120)
+                        testStatus("discord")
+                        HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model).disabled(testingServices.contains("meta")) }
+                        HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("GitHub repository · owner/name", text: $settings.repository).disabled(testingServices.contains("github")) }
+                        Text("What should this agent do? How will you judge success?").font(.headline)
+                        TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
+                        HStack {
+                            Text("Run every"); TextField("Seconds", value: $settings.intervalSeconds, format: .number).frame(width: 70); Text("seconds (minimum 60)")
+                        }
+                        Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
+                        Toggle("Enable automatic loop", isOn: $settings.enabled)
+                        Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
+                        Toggle("Speak replies with expressive pace", isOn: $settings.speak)
+                        Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
+                        if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
+                        Toggle("Allow Discord webhook alerts", isOn: $settings.discord)
+                        Text("Sessions this agent may read and message · select explicitly").font(.headline)
+                        ScrollView {
+                            VStack(alignment: .leading) {
+                                ForEach(Store.shared.sessions.filter { $0.id != session.id }) { other in
+                                    Toggle(other.title, isOn: Binding(get: { settings.allows(local: other.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
+                                        settings.watchedSessions.removeAll { $0 == other.id }
+                                        if let home = DeviceSyncService.shared.localDeviceID { settings.watchedParticipants?.removeAll { $0 == DeviceGlobalID(home: home, session: other.id).string } }
+                                        if on { settings.watchedSessions.append(other.id) }
+                                    }))
+                                }
+                                ForEach((settings.watchedParticipants ?? []).filter { !availableScope.contains($0) }, id: \.self) { id in
+                                    Toggle("Unavailable selected participant · " + id, isOn: Binding(get: { true }, set: { if !$0 { settings.watchedParticipants?.removeAll { $0 == id } } })).font(.caption)
+                                }
+                                ForEach(DeviceSyncService.shared.participantHomes, id: \.deviceID) { home in
+                                    Text(home.deviceName).font(.caption).foregroundStyle(.secondary)
+                                    ForEach(home.rows) { row in
+                                        Toggle(row.title + (home.online ? "" : " · offline"), isOn: Binding(get: { settings.watchedParticipants?.contains(row.globalID) == true }, set: { on in
+                                            settings.watchedParticipants = (settings.watchedParticipants ?? []).filter { $0 != row.globalID }
+                                            if on { settings.watchedParticipants?.append(row.globalID) }
+                                        }))
+                                    }
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(height: 120)
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    if !error.isEmpty { Text(error).foregroundStyle(.red) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            .textFieldStyle(.roundedBorder)
-            if !keyTestOutcome.isEmpty { Text(keyTestOutcome).font(.caption).textSelection(.enabled) }
-            if !error.isEmpty { Text(error).foregroundStyle(.red) }
-            HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); error = "" }; Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction) }
-        }.padding(22).frame(width: 650)
+            HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); error = "" }.disabled(!testingServices.isEmpty); Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction).disabled(!testingServices.isEmpty) }
+        }.padding(22).frame(width: 650, height: 750)
     }
-    private func testKey() {
-        testingKey = true; keyTestOutcome = "Testing with a short request; no session history is sent."
-        let entered = metaKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = settings.model
+    @ViewBuilder private func testStatus(_ service: String) -> some View {
+        if let outcome = testOutcomes[service], !outcome.isEmpty {
+            Text(outcome).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    private func testService(_ service: String) {
+        guard !testingServices.contains(service), !removeSecrets.contains(service) else { return }
+        testingServices.insert(service)
+        testOutcomes[service] = service == "discord" ? "Sending one labeled test message; no session content or mentions." : "Checking access; no session history is sent."
+        let entered = service == "meta" ? metaKey : service == "github" ? githubKey : discordURL
+        let model = settings.model, repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
-            defer { testingKey = false }
+            defer { testingServices.remove(service) }
             do {
-                guard let key = entered.isEmpty ? try AgentSecrets.read("meta") : entered, !key.isEmpty else { throw AgentFailure.message("Enter a Meta API key or save one first.") }
-                _ = try await AgentAPI().respond(model: model, instructions: "Reply with the words Connection verified. Do not use tools.", input: "Converse API connection test. No private session data is included.", key: key)
-                keyTestOutcome = "Key accepted; the selected model returned a complete response. No session history was sent."
-            } catch { keyTestOutcome = error.localizedDescription }
+                let key = try AgentCredentialProbe.resolve(entered, name: service)
+                let api = AgentAPI()
+                switch service {
+                case "github": testOutcomes[service] = try await api.testGitHub(repository: repository, token: key)
+                case "discord":
+                    guard let key else { throw AgentFailure.message("Enter a Discord webhook URL or save one first.") }
+                    testOutcomes[service] = try await api.testDiscord(webhook: key)
+                default:
+                    guard let key else { throw AgentFailure.message("Enter a Meta API key or save one first.") }
+                    _ = try await api.respond(model: model, instructions: "Reply with the words Connection verified. Do not use tools.", input: "Converse API connection test. No private session data is included.", key: key)
+                    testOutcomes[service] = "Key accepted; the selected model returned a complete response. No session history was sent."
+                }
+            } catch let error as AgentFailure { testOutcomes[service] = error.localizedDescription }
+            catch { testOutcomes[service] = "Could not complete the test. Check Keychain access and the network, then try again." }
         }
     }
     private var availableScope: Set<String> {

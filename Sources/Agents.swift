@@ -113,6 +113,15 @@ enum AgentSecrets {
     }
 }
 
+enum AgentCredentialProbe {
+    // Probes never save replacements or delete the currently saved credential.
+    static func resolve(_ entered: String, name: String, read: (String) throws -> String? = AgentSecrets.read) throws -> String? {
+        let entered = entered.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = entered.isEmpty ? try read(name)?.trimmingCharacters(in: .whitespacesAndNewlines) : entered
+        return value?.isEmpty == false ? value : nil
+    }
+}
+
 enum AgentFailure: LocalizedError {
     case message(String)
     var errorDescription: String? { if case .message(let value) = self { return value }; return nil }
@@ -162,10 +171,61 @@ final class AgentAPI {
         guard (200..<300).contains(response.statusCode) else {
             if url.host == "api.meta.ai", response.statusCode == 401 { throw AgentFailure.message("Meta rejected the API key (HTTP 401). Check or replace it in Agent Setup.") }
             if url.host == "api.meta.ai", response.statusCode == 403 { throw AgentFailure.message("Meta denied access (HTTP 403). Check this key’s model/account permissions.") }
+            if url.host == "api.github.com" {
+                if response.statusCode == 401 { throw AgentFailure.message("GitHub rejected the token (HTTP 401). Check or replace it in Agent Setup.") }
+                if response.statusCode == 403 { throw AgentFailure.message("GitHub denied access or reached its rate limit (HTTP 403). Check token permissions or try again later.") }
+                if response.statusCode == 404 { throw AgentFailure.message("GitHub could not find this repository, or the token cannot access it (HTTP 404). Check owner/name and repository permissions.") }
+            }
+            if url.host == "discord.com" {
+                if [401, 403].contains(response.statusCode) { throw AgentFailure.message("Discord denied webhook access (HTTP \(response.statusCode)). Check or replace the webhook in Agent Setup.") }
+                if response.statusCode == 404 { throw AgentFailure.message("Discord could not find this webhook (HTTP 404). It may have been deleted; copy a new webhook URL from Discord.") }
+                if response.statusCode == 429 { throw AgentFailure.message("Discord is rate limiting this webhook (HTTP 429). Wait before testing again.") }
+            }
             throw AgentFailure.message("\(url.host ?? "Service") returned HTTP \(response.statusCode).")
         }
         guard bytes.count <= 32_000_000 else { throw AgentFailure.message("Service response too large.") }
         return (bytes.isEmpty ? [:] : try JSONSerialization.jsonObject(with: bytes), response)
+    }
+    func testGitHub(repository: String, token: String?) async throws -> String {
+        guard AgentRepoSnapshot.validRepository(repository) else { throw AgentFailure.message("Enter a GitHub repository as owner/name before testing.") }
+        do {
+            let authenticated = token?.isEmpty == false
+            if authenticated {
+                let (user, _) = try await json(URL(string: "https://api.github.com/user")!, key: token)
+                guard (user as? [String: Any])?["id"] as? Int != nil else { throw AgentFailure.message("GitHub returned an invalid token verification response.") }
+            }
+            let (raw, _) = try await json(URL(string: "https://api.github.com/repos/" + repository)!, key: token)
+            guard (raw as? [String: Any])?["id"] as? Int != nil else { throw AgentFailure.message("GitHub returned an invalid repository response.") }
+            guard authenticated else { return "No token: public repository metadata is readable. Add a token with traffic access for visitor metrics. Nothing was changed." }
+            var traffic = false
+            do {
+                let (raw, _) = try await json(URL(string: "https://api.github.com/repos/" + repository + "/traffic/views")!, key: token)
+                traffic = ((raw as? [String: Any])?["uniques"] as? Int).map { $0 >= 0 } == true
+            } catch { /* Token/repository success remains useful when optional traffic access is denied. */ }
+            return traffic ? "GitHub token accepted; repository metadata and visitor metrics are readable. Nothing was changed." : "GitHub token accepted; repository metadata is readable. Visitor metrics unavailable: check repository traffic access (Administration: read for a fine-grained token). Nothing was changed."
+        } catch let error as AgentFailure { throw error }
+        catch { throw AgentFailure.message("Could not complete the GitHub test. Check the network and try again.") }
+    }
+    func sendDiscord(_ text: String, webhook: String) async throws {
+        // Accept only Discord's executable webhook endpoint, never an arbitrary URL.
+        guard var components = URLComponents(string: webhook), components.scheme == "https", components.host == "discord.com",
+              components.user == nil, components.password == nil, components.fragment == nil,
+              components.port == nil || components.port == 443,
+              components.percentEncodedPath.range(of: "^/api/(v[0-9]+/)?webhooks/[0-9]+/[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
+              (components.queryItems ?? []).allSatisfy({ $0.name == "wait" || ($0.name == "thread_id" && $0.value?.allSatisfy(\.isNumber) == true && $0.value?.isEmpty == false) }) else {
+            throw AgentFailure.message("Enter a Discord webhook URL copied from the channel’s Integrations settings.")
+        }
+        components.queryItems = (components.queryItems ?? []).filter { $0.name != "wait" } + [URLQueryItem(name: "wait", value: "true")]
+        guard let url = components.url else { throw AgentFailure.message("Enter a valid Discord webhook URL.") }
+        do {
+            let (raw, _) = try await json(url, body: ["content": String(text.prefix(1800)), "allowed_mentions": ["parse": []]])
+            guard let id = (raw as? [String: Any])?["id"] as? String, !id.isEmpty else { throw AgentFailure.message("Discord did not confirm message delivery. Check the channel before retrying.") }
+        } catch let error as AgentFailure { throw error }
+        catch { throw AgentFailure.message("Could not confirm Discord delivery. Check the channel and network before retrying.") }
+    }
+    func testDiscord(webhook: String) async throws -> String {
+        try await sendDiscord("Converse connection test — this webhook is working. No session content is included.", webhook: webhook)
+        return "Discord confirmed the test message. Check the webhook’s channel; no session content was sent."
     }
     static let outputTokenLimit = 8192
     func respond(model: String, instructions: String, input: String, key: String, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
