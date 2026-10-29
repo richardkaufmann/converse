@@ -18,3 +18,7 @@ xcuserdata/
 *.ipa
 *.mobileprovision
 *.xcarchive/
+# Generated offline Help artifact (scripts/build-help.py); build output only.
+windows/src/Converse.Windows/Assets/help.json
+bin/
+obj/
