@@ -14,7 +14,7 @@ import AVFoundation
         guard !shuttingDown, timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
         // Sleep/relaunch never causes a burst of missed ticks.
         for session in Store.shared.sessions where session.agent?.enabled == true {
-            session.agent?.nextRunAt = Date().addingTimeInterval(max(60, session.agent?.intervalSeconds ?? 900))
+            session.agent?.nextRunAt = session.agent?.nextScheduledRun(after: Date())
         }
         Store.shared.save()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }
@@ -23,6 +23,13 @@ import AVFoundation
     func tick(store: Store, now: Date = Date()) {
         guard !shuttingDown else { return }
         ingestFileEvents(store: store)
+        for session in store.sessions where session.agent?.canSchedule == true {
+            if session.agent?.nextScheduledRun(after: now) == nil {
+                session.agent?.enabled = false
+                session.agent?.attention = "Loop paused: no future run in the supported schedule/calendar. Review Loop settings."
+                store.save()
+            }
+        }
         for session in store.sessions where !session.busy && !session.queuePaused && session.pending.isEmpty {
             guard !AgentConversation.shared.owns(session), var config = session.agent, config.reserveRun(at: now) else { continue }
             session.agent = config
@@ -244,17 +251,20 @@ import AVFoundation
 }
 
 extension Store {
-    func configureAgentLoop(_ session: Session, enabled: Bool, interval: Double, turns: Int, scoreboardEvery: Int, expectedRevision: UInt64? = nil, now: Date = Date()) throws {
+    func configureAgentLoop(_ session: Session, enabled: Bool, interval: Double, turns: Int, scoreboardEvery: Int, scheduleText: String? = nil, scheduleTimeZone: String? = nil, expectedRevision: UInt64? = nil, now: Date = Date()) throws {
         guard var config = session.agent else { throw AgentFailure.message("This session is not an agent.") }
         if let expectedRevision, expectedRevision != (config.settingsRevision ?? 0) { throw AgentFailure.message("Agent settings or turn budget changed. Reload before saving.") }
         guard interval.isFinite, (60...31536000).contains(interval), (0...1000).contains(turns), (1...1000).contains(scoreboardEvery) else {
             throw AgentFailure.message("Use an interval of at least one minute, 0–1000 turns, and a scoreboard interval of 1–1000 loops.")
         }
         guard !enabled || turns > 0 else { throw AgentFailure.message("Add at least one automatic turn before enabling the loop.") }
+        let rule = try AgentSchedule.compile(interval: interval, text: scheduleText, zone: scheduleTimeZone)
+        guard !enabled || rule.next(after: now) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
         let previous = config, paused = session.queuePaused
         config.settingsChanged(); config.enabled = enabled; config.intervalSeconds = interval; config.remainingRuns = turns; config.scoreboardEveryLoops = scoreboardEvery
+        config.scheduleText = scheduleText; config.scheduleTimeZone = rule.zoneID
         if !enabled { config.nextRunAt = nil }
-        else if !previous.enabled || previous.intervalSeconds != interval || previous.nextRunAt == nil { config.nextRunAt = now.addingTimeInterval(interval) }
+        else if !previous.enabled || previous.intervalSeconds != interval || previous.scheduleText != scheduleText || previous.scheduleTimeZone != rule.zoneID || previous.nextRunAt == nil { config.nextRunAt = rule.next(after: now) }
         session.agent = config
         if enabled && session.pending.isEmpty { session.queuePaused = false }
         do { try saveChecked() }

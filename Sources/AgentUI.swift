@@ -43,9 +43,7 @@ struct AgentSetupView: View {
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
-                        HStack {
-                            Text("Run every"); TextField("Seconds", value: $settings.intervalSeconds, format: .number).frame(width: 70); Text("seconds (minimum 60)")
-                        }
+                        AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
                         Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
@@ -192,10 +190,52 @@ struct AgentControls: View {
     }
 }
 
+struct AgentScheduleEditor: View {
+    @Binding var seconds: Double
+    @Binding var text: String?
+    @Binding var zone: String?
+    private var isText: Bool { !(text ?? "").isEmpty }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Picker("Frequency", selection: Binding(get: { isText }, set: { text = $0 ? "every 20 minutes while the US stock market is open" : ""; if zone == nil { zone = TimeZone.current.identifier } })) {
+                Text("Fixed interval").tag(false)
+                Text("Text schedule").tag(true)
+            }.pickerStyle(.segmented)
+            if isText {
+                TextField("Describe when to run", text: Binding(get: { text ?? "" }, set: { text = $0.isEmpty ? " " : $0 }), axis: .vertical).lineLimit(2...4)
+                TextField("Time zone", text: Binding(get: { zone ?? TimeZone.current.identifier }, set: { zone = $0 }))
+                    .help("IANA time zone. Market schedules always use America/New_York. Explicit ‘in America/New_York’ in the text overrides this field.")
+            } else {
+                HStack { Text("Check every"); TextField("Minutes", value: Binding(get: { seconds / 60 }, set: { seconds = $0 * 60 }), format: .number).frame(width: 80); Text("minutes (minimum 1)") }
+            }
+            TimelineView(.periodic(from: .now, by: 60)) { timeline in preview(at: timeline.date) }
+            Text("No overlapping runs or backlog bursts. A missed check may run once within its allowed window. Run once, messages and external events can still run outside this schedule.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    @ViewBuilder private func preview(at now: Date) -> some View {
+        switch Result(catching: { try AgentSchedule.compile(interval: seconds, text: text, zone: zone) }) {
+        case .failure(let error): Text(error.localizedDescription).font(.caption).foregroundStyle(.red)
+        case .success(let rule):
+            let dates = rule.preview(after: now)
+            Text(rule.description).font(.caption).foregroundStyle(.secondary)
+            if dates.isEmpty { Text("No future run in the supported calendar. Update the calendar or choose another schedule.").font(.caption).foregroundStyle(.red) }
+            else {
+                Text("Next slots: " + dates.map { date in
+                    let formatter = DateFormatter(); formatter.timeZone = TimeZone(identifier: rule.zoneID); formatter.dateFormat = "EEE MMM d, HH:mm z"
+                    return formatter.string(from: date)
+                }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+            }
+            if rule.kind == .market { Text("Published NYSE calendar through 2028; emergency closures and trading halts are not detected.").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 struct AgentLoopOptions: View {
     @ObservedObject var session: Session
     @State private var enabled = false
     @State private var minutes: Double = 15
+    @State private var scheduleText: String?
+    @State private var scheduleTimeZone: String?
     @State private var turns = 20
     @State private var scoreboardEvery = 1
     @State private var revision: UInt64 = 0
@@ -206,7 +246,7 @@ struct AgentLoopOptions: View {
             Text("Agent loop").font(.headline)
             Text(session.busy ? "Thinking now. Changing the loop does not stop this run." : "Idle. You can still talk to this agent while its loop is off.").font(.callout).foregroundStyle(.secondary)
             Toggle("Automatic loop", isOn: $enabled)
-            HStack { Text("Check every"); TextField("Minutes", value: $minutes, format: .number).frame(width: 70); Text("minutes") }
+            AgentScheduleEditor(seconds: Binding(get: { minutes * 60 }, set: { minutes = $0 / 60 }), text: $scheduleText, zone: $scheduleTimeZone)
             Stepper("Automatic turns remaining: \(turns)", value: $turns, in: 0...1000)
             Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
             Text("Run once refreshes the scoreboard immediately. Artwork keeps its mood-change / hourly limit. Loops run while Converse is open on this agent’s home. Errors pause the loop.").font(.caption).foregroundStyle(.secondary)
@@ -222,10 +262,10 @@ struct AgentLoopOptions: View {
     }
     private func reload() {
         let config = session.agent ?? AgentConfig()
-        enabled = config.enabled; minutes = config.intervalSeconds / 60; turns = config.remainingRuns; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
+        enabled = config.enabled; minutes = config.intervalSeconds / 60; scheduleText = config.scheduleText; scheduleTimeZone = config.scheduleTimeZone; turns = config.remainingRuns; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
     }
     private func save() -> Bool {
-        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, expectedRevision: revision); return true }
+        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, scheduleText: scheduleText, scheduleTimeZone: scheduleTimeZone, expectedRevision: revision); return true }
         catch { self.error = error.localizedDescription; return false }
     }
 }
@@ -446,7 +486,7 @@ struct RemoteAgentSetupView: View {
                 TextField("Objective and success criteria", text: $settings.objective, axis: .vertical).lineLimit(3...6)
                 TextField("Optional repository · owner/name", text: $settings.repository)
                 TextField("Model", text: $settings.model)
-                HStack { Text("Interval, seconds"); TextField("Seconds", value: $settings.intervalSeconds, format: .number) }
+                AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
                 Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
                 Toggle("Generate status art", isOn: $settings.generateArt)

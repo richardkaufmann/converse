@@ -82,18 +82,23 @@ struct DeviceSidebarSection: View {
         if service.currentGroup != nil && !homes.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(homes, id: \.deviceID) { home in
-                    HStack(spacing: 6) {
-                        Circle().fill(home.online ? Color.green : Color.gray).frame(width: 8, height: 8)
-                        Text(home.deviceName).fontWeight(.bold).lineLimit(1)
-                        Text(home.online ? "home" : "offline").font(.caption).foregroundStyle(.secondary)
-                    }.padding(.horizontal, 4)
-                    ForEach(home.rows) { row in
-                        RemoteSidebarRow(row: row, homeName: home.deviceName, online: home.online, showsModel: showsModel,
-                                         localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
-                                         park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
-                                         assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
+                    if home.online {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.green).frame(width: 8, height: 8)
+                            Text(home.deviceName).fontWeight(.bold).lineLimit(1)
+                            Text("remote").font(.caption).foregroundStyle(.secondary)
+                        }.padding(.horizontal, 4)
+                        ForEach(home.rows) { row in
+                            RemoteSidebarRow(row: row, homeName: home.deviceName, online: true, showsModel: showsModel,
+                                             localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                             park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
+                                             assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
+                        }
+                        if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
+                    } else {
+                        Text(home.deviceName).fontWeight(.regular).foregroundStyle(Color.primary.opacity(0.3))
+                            .lineLimit(1).padding(.horizontal, 4).help("Remote device offline. Sessions reappear when it reconnects.")
                     }
-                    if home.rows.isEmpty { Text(home.online ? "No sessions available." : "Offline. Last known sessions kept.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
                 }
             }
         }
@@ -110,7 +115,7 @@ struct RemoteSidebarRow: View {
     let assign: (Int) -> Void
     @StateObject private var hover = SidebarHoverState()
     var helpText: String {
-        var text = row.title + "\nHome: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
+        var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if let account = row.accountName { text += "\nAccount: " + account }
         let warning = (row.engine == "agent" && !(row.attention ?? "").isEmpty) ? "ATTENTION REQUIRED\n" + (row.attention ?? "") + "\n\n" : ""
         return warning + text + "\nExecution stays on " + homeName + "."

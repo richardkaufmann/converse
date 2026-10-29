@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
+    agentScheduleSelfTests(check)
     let voice = AgentDictation()
     voice.keyReader = { "synthetic-key" }
     voice.permission = { false }
@@ -44,6 +45,19 @@ import Foundation
     let now = Date(timeIntervalSince1970: 1_000)
     var config = AgentConfig(); config.enabled = true; config.remainingRuns = 1; config.nextRunAt = now
     check(config.reserveRun(at: now) && config.remainingRuns == 0 && !config.enabled && !config.reserveRun(at: now), "Agent reserves its last scheduled run once and stops at the persisted cap")
+    do {
+        let instant = ISO8601DateFormatter().date(from: "2026-11-27T17:50:00Z")!
+        var scheduled = AgentConfig(); scheduled.enabled = true; scheduled.remainingRuns = 3
+        scheduled.scheduleText = "every 20 minutes while the us stock market is open"; scheduled.scheduleTimeZone = "America/New_York"; scheduled.nextRunAt = instant
+        check(scheduled.reserveRun(at: instant) && !scheduled.reserveRun(at: instant) && scheduled.remainingRuns == 2, "Text schedule reserves a due run exactly once")
+        check(!scheduled.reserveRun(at: instant.addingTimeInterval(1200)) && scheduled.remainingRuns == 2, "Closed market does not spend a loop turn")
+        let encoded = try JSONEncoder().encode(scheduled)
+        let restored = try JSONDecoder().decode(AgentConfig.self, from: encoded)
+        check(restored.scheduleText == scheduled.scheduleText && restored.nextRunAt == scheduled.nextRunAt, "Text schedule and next deadline survive persistence")
+        var oldEditor = scheduled.wire(home: "local"); oldEditor.scheduleText = nil
+        do { try scheduled.apply(oldEditor); check(false, "Old editor cannot erase a text schedule") }
+        catch { check(scheduled.scheduleText == restored.scheduleText, "Old editor cannot erase a text schedule") }
+    } catch { check(false, "Schedule integration fixture: " + error.localizedDescription) }
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")
@@ -184,10 +198,13 @@ import Foundation
     quitAgent.queuePaused = true; quitAgent.draft = "Preserve this draft"
     quitAgent.pending = [PendingPrompt(text: "Keep this queued", images: [])]
     let pausedWarning = ConverseQuitWarning(sessions: quitStore.sessions)
-    check(pausedWarning?.detail.contains("won't be able to reach them") == true && pausedWarning?.detail.contains("until you restart") == true && pausedWarning?.quitButton == "Quit Converse", "Paused home agents still warn that quitting makes them unreachable and stops their loops")
+    check(pausedWarning == nil, "Paused agents do not introduce an unnecessary quit warning")
+    quitAgent.agent?.enabled = true
+    let loopWarning = ConverseQuitWarning(sessions: quitStore.sessions)
+    check(loopWarning?.detail.contains("1 agent with enabled loops will not run until the app is restarted.") == true, "Quit warning counts enabled loops rather than every hosted agent")
     quitCLI.busy = true
     let combinedWarning = ConverseQuitWarning(sessions: quitStore.sessions)
-    check(combinedWarning?.title == "Quit with 1 running session?" && combinedWarning?.detail.contains("stops active commands") == true && combinedWarning?.detail.contains("terminates your agents") == true, "Busy sessions and home agents share one combined quit confirmation")
+    check(combinedWarning?.title == "Quit with 1 running session?" && combinedWarning?.detail.contains("stops active commands") == true && combinedWarning?.detail.contains("enabled loops will not run") == true, "Busy sessions and home agents share one combined quit confirmation")
     var quitShutdowns = 0
     let cancelledQuit = quitStore.requestApplicationQuit(confirm: { _ in false }, stopAgents: { quitShutdowns += 1 })
     check(!cancelledQuit && quitShutdowns == 0 && quitCLI.busy && !quitCLI.interrupted && quitAgent.draft == "Preserve this draft" && quitAgent.pending.count == 1, "Keep Running cancels quit without interrupting work, changing drafts or touching agent queues")
@@ -362,6 +379,11 @@ import Foundation
     store.runNext(stimulated)
     check(stimulated.queuePaused && stimulated.pending.count == 1 && starts == 1 && stimulated.agent?.attention.contains("budget exhausted") == true, "Incoming agent tells cannot bypass the autonomous turn allowance")
     stimulated.agent?.fileTriggers = false; stimulated.pending = []
+    let expired = store.createAgent(title: "Expired tick fixture")
+    expired.agent?.scheduleText = "unsupported restriction"
+    expired.pending = [PendingPrompt(agentRunReserved: true, agentLoopTick: true, text: "Expired tick", images: [])]
+    store.runNext(expired)
+    check(expired.pending.isEmpty && !expired.busy && starts == 1, "Queued loop ticks revalidate restrictions before starting and do not block later human input")
     store.startAgentRun = nil
     let migrated = AgentConfig(watchedSessions: [recipient.id])
     let localHome = String(repeating: "a", count: 64), otherHome = String(repeating: "b", count: 64)

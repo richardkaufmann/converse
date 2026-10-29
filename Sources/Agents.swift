@@ -24,6 +24,8 @@ struct AgentConfig: Codable, Equatable {
     var scoreboard: AgentScoreboard? = nil
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
+    var scheduleText: String? = nil
+    var scheduleTimeZone: String? = nil
     var remainingRuns = 20
     var scoreboardEveryLoops: Int? = nil
     var loopsSinceScoreboard: Int? = nil
@@ -58,16 +60,20 @@ struct AgentConfig: Codable, Equatable {
         guard enabled else { return "Loop paused · automatic checks off" }
         if queuePaused { return "Loop on · queue paused" }
         if pendingCount > 0 && !busy { return "Loop on · waiting for \(pendingCount) queued message\(pendingCount == 1 ? "" : "s")" }
-        let schedule = "Loop on · every " + intervalLabel
-        guard let nextRunAt, nextRunAt > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
-        return schedule + " · next " + nextRunAt.formatted(date: .omitted, time: .shortened)
+        guard let rule = try? scheduleRule(), let future = rule.next(after: now) else { return "Loop blocked · review schedule/calendar" }
+        let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "") : "Loop on · every " + intervalLabel
+        let next = max(nextRunAt ?? future, rule.permits(now) ? (nextRunAt ?? future) : future)
+        guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
+        return schedule + " · next " + next.formatted(date: .abbreviated, time: .shortened)
     }
     var canSchedule: Bool { enabled && remainingRuns > 0 }
-    func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now }
+    func scheduleRule() throws -> AgentSchedule { try AgentSchedule.compile(interval: intervalSeconds, text: scheduleText, zone: scheduleTimeZone) }
+    func nextScheduledRun(after date: Date) -> Date? { (try? scheduleRule())?.next(after: date) }
+    func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now && (try? scheduleRule().permits(now)) == true }
     mutating func reserveRun(at now: Date) -> Bool {
         guard due(at: now) else { return false }
         settingsChanged()
-        remainingRuns -= 1; nextRunAt = now.addingTimeInterval(max(60, intervalSeconds))
+        remainingRuns -= 1; nextRunAt = nextScheduledRun(after: now)
         if remainingRuns == 0 { enabled = false }
         return true
     }
@@ -340,7 +346,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence)
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier)
     }
     mutating func apply(_ wire: DeviceAgentSettings) throws {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
@@ -352,13 +358,18 @@ extension AgentConfig {
               wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
             throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
         }
+        if !(scheduleText ?? "").isEmpty && wire.scheduleText == nil {
+            throw AgentFailure.message("This editor cannot preserve the text schedule. Update the viewing app before changing agent settings.")
+        }
+        let schedule = try AgentSchedule.compile(interval: wire.intervalSeconds, text: wire.scheduleText, zone: wire.scheduleTimeZone)
+        guard !wire.enabled || schedule.next(after: Date()) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
         settingsChanged()
         if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
         objective = wire.objective; self.repository = repository; model = wire.model
         watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
-        intervalSeconds = wire.intervalSeconds; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
+        intervalSeconds = wire.intervalSeconds; scheduleText = wire.scheduleText; scheduleTimeZone = schedule.zoneID; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
         if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }
         generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
-        nextRunAt = Date().addingTimeInterval(intervalSeconds)
+        nextRunAt = enabled ? schedule.next(after: Date()) : nil
     }
 }

@@ -359,6 +359,16 @@ final class Store: ObservableObject {
             s.injectionTargetID = nil
         }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
+        // A tick queued just before a window closes must not run after that
+        // window (or after a changed restriction). Its persisted reservation is
+        // retained conservatively; later human input is still allowed through.
+        while s.pending.first?.agentLoopTick == true,
+              (try? s.agent?.scheduleRule().permits(Date())) != true {
+            s.pending.removeFirst()
+            s.messages.append(Message(role: "notice", text: "Skipped a queued loop check outside its schedule. Its reserved turn remains counted; no catch-up run was started."))
+            save()
+        }
+        guard !s.pending.isEmpty else { return }
         if var config = s.agent, let next = s.pending.first,
            ((next.switchboardHop ?? 0) > 0 || next.autonomous == true), next.agentRunReserved != true {
             guard config.remainingRuns > 0 else {
@@ -1974,14 +1984,14 @@ struct ConverseQuitWarning {
         let running = sessions.filter(\.busy).count
         // Store contains home sessions only; remote viewers must not warn about
         // agents whose execution continues on a different device.
-        let agents = sessions.filter { $0.agent != nil }.count
+        let agents = sessions.filter { $0.agent?.canSchedule == true }.count
         guard running > 0 || agents > 0 else { return nil }
         title = running > 0 ? "Quit with \(running) running session\(running == 1 ? "" : "s")?" : "Quit Converse?"
         quitButton = running > 0 ? "Stop and Quit" : "Quit Converse"
         var paragraphs: [String] = []
         if running > 0 { paragraphs.append("Quitting stops active commands.") }
         if agents > 0 {
-            paragraphs.append("This Mac hosts \(agents) agent\(agents == 1 ? "" : "s"). Exiting the app also terminates your agents; you won't be able to reach them, and they won't be running their loops until you restart.")
+            paragraphs.append("\(agents) agent\(agents == 1 ? "" : "s") with enabled loops will not run until the app is restarted.")
         }
         paragraphs.append("Your conversations, drafts, and settings are saved.")
         detail = paragraphs.joined(separator: "\n\n")

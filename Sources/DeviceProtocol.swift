@@ -285,6 +285,8 @@ struct DeviceAgentSettings: Codable, Equatable {
     var fileTriggers: Bool = false
     var revision: UInt64? = nil
     var scoreboardEveryLoops: Int? = nil
+    var scheduleText: String? = nil
+    var scheduleTimeZone: String? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var groupID: String

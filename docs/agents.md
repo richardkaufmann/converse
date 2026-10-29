@@ -148,3 +148,12 @@ the original. No automatic fallback is installed.
 ## Hands-free conversation (Mac)
 
 Start talking explicitly owns one local agent’s microphone turn. Sustained audio plus 1.5 seconds of silence produces one transcribed human prompt; idle silence never submits. Thinking and speech playback keep capture off. Only the correlated response can speak and re-arm capture, after a short echo guard. Stop, pane removal, failure, and app exit fence all late permission, transcription, model, and speech callbacks. Spoken turns preserve the separately edited draft and do not spend automatic-loop allowances. Loop ticks, file events, Jolly requests, and queued messages cannot take over that listening session. Dictate remains a review-before-send alternative.
+
+
+## Deterministic schedules
+
+Loop settings accept either a numeric interval (minutes in the UI, seconds on the wire) or a supported text schedule. The editor shows the interpreted rule and the next three runs before saving. Examples: `every 20 minutes while the US stock market is open`, `every 2 hours on weekdays between 9am and 5pm`, and `daily at 09:00 in America/New_York`. Unknown conditions are rejected, never silently ignored or evaluated by a model.
+
+Calendar windows anchor intervals at their opening time. The NYSE regular-session calendar uses New York time, holidays and early closes from the [official calendar](https://www.nyse.com/trade/hours-calendars), verified October 29, 2026 and bounded through 2028. It does not detect emergency closures or individual trading halts. An exhausted calendar pauses the loop visibly. Daily schedules skip nonexistent DST times and use the first occurrence of repeated times.
+
+There are no overlapping runs or catch-up bursts. Relaunch schedules a future check. Queued loop checks revalidate their window before starting; a skipped already-reserved check retains its turn charge conservatively. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.

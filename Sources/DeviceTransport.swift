@@ -332,7 +332,7 @@ final class DeviceSyncService: ObservableObject {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
-        hello.capabilities.append(contentsOf: ["agent-host-v1", "participant-control-v1"])
+        hello.capabilities.append(contentsOf: ["agent-host-v1", "participant-control-v1", "agent-schedule-v1"])
         #endif
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
@@ -1641,6 +1641,9 @@ extension DeviceSyncService {
         guard let group = currentGroup?.id, acceptsParticipant(home: home, groupID: group), let peer = peerForHome(home),
               peer.hello?.capabilities.contains("participant-control-v1") == true else {
             return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline, outside this group, or needs an update.")
+        }
+        if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
         }
         let request = DeviceParticipantRequest(groupID: group, action: action, target: target, title: title, settings: settings)
         let durable = !["inspect", "agent.settings"].contains(action)
