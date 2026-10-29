@@ -1245,12 +1245,20 @@ public sealed partial class MainWindow : Window
         var (ok, draft) = EditorBoundary.Split(full, _historyText);
         if (!ok)
         {
-            // Edit touched protected history: revert and park the caret at the end.
+            // Edit touched protected history: revert and park the caret at
+            // the end. The document no longer matches the trackers, so the
+            // append path is blind — force the full rebuild that repairs it.
+            _renderedHistory = null;
             RebuildDocument(caretToEnd: true);
             return;
         }
         if (draft == _draftText) return;
         _draftText = draft;
+        // Round-16 ghost fix: the typed tail lives only in the document, so
+        // the render trackers must follow the typing, not just rebuilds.
+        // Otherwise a send (history append, empty draft) sees rendered and
+        // actual drafts both empty and leaves the typed text on screen.
+        _renderedDraft = draft;
         // The tail the user just typed is always blue (tail-measured so
         // collapsed history breaks cannot shift the range off the draft).
         var docLength = CurrentDocLength();
