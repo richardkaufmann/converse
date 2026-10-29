@@ -355,10 +355,10 @@ public sealed partial class MainWindow : Window
     }
 
     // Visible transcript lines for the selected conversation with the local
-    // cap applied (remote paging comes from home instead). Hidden user turns
-    // are counted so the prologue numbers stay continuous with what paging
-    // hid — the Mac numbers every submitted turn from 1.
-    private (List<(string Role, string Text)> Lines, int Hidden, int HiddenUsers) VisibleLines()
+    // cap applied (remote paging comes from home instead). Hidden messages
+    // are counted so the message numbers stay continuous with what paging
+    // hid — every visible message is numbered, prompts and responses.
+    private (List<(string Role, string Text)> Lines, int Hidden) VisibleLines()
     {
         List<(string Role, string Text)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
@@ -369,12 +369,11 @@ public sealed partial class MainWindow : Window
             lines = _devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text)).ToList();
-        if (lines is null) return (new List<(string Role, string Text)>(), 0, 0);
+        if (lines is null) return (new List<(string Role, string Text)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
-        var hiddenUsers = lines.Take(hidden).Count(line => line.Role == "user");
         if (hidden > 0) lines = lines.Skip(hidden).ToList();
-        return (lines, hidden, hiddenUsers);
+        return (lines, hidden);
     }
 
     private void RenderPane(bool caretToEnd = false)
@@ -420,7 +419,7 @@ public sealed partial class MainWindow : Window
             _remoteHashes.Remove(_selected.GlobalID);
             SetDraftBox();
         }
-        var (lines, hidden, hiddenUsers) = VisibleLines();
+        var (lines, hidden) = VisibleLines();
         _hiddenLocal = _selected.LocalSessionID is not null ? hidden : 0;
         if (!LinesEqual(lines, _renderedLines))
         {
@@ -439,8 +438,8 @@ public sealed partial class MainWindow : Window
                             _lastStreamRebuildUtc = DateTime.UtcNow;
                             // Re-read at fire time so the catch-up shows the
                             // freshest lines, not the ones that scheduled it.
-                            var (fresh, _, freshHiddenUsers) = VisibleLines();
-                            SyncLines(fresh, freshHiddenUsers, caretToEnd: false);
+                            var (fresh, freshHidden) = VisibleLines();
+                            SyncLines(fresh, freshHidden, caretToEnd: false);
                         };
                     }
                     _rebuildTimer.Interval = TimeSpan.FromMilliseconds(200);
@@ -450,7 +449,7 @@ public sealed partial class MainWindow : Window
             else
             {
                 _lastStreamRebuildUtc = DateTime.UtcNow;
-                SyncLines(lines, hiddenUsers, caretToEnd);
+                SyncLines(lines, hidden, caretToEnd);
             }
         }
         else if (caretToEnd) ScrollTranscriptToEnd();
@@ -724,15 +723,15 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
-    private void SyncLines(List<(string Role, string Text)> lines, int hiddenUsers, bool caretToEnd)
+    private void SyncLines(List<(string Role, string Text)> lines, int hiddenMessages, bool caretToEnd)
     {
-        var key = (_selected?.Key ?? "none") + "|" + hiddenUsers;
-        // Prologue numbers: prompts count up from 1 (past the paged-away
-        // ones); a response sits under its prompt's number, like the Mac
-        // ruler. Only prompt blocks print the number.
+        var key = (_selected?.Key ?? "none") + "|" + hiddenMessages;
+        // Message numbers: every visible message is numbered in order,
+        // continuing past the paged-away ones — prompts and responses
+        // alike, so any single message is addressable.
         var numbers = new int[lines.Count];
-        var n = hiddenUsers;
-        for (var i = 0; i < lines.Count; i++) { if (lines[i].Role == "user") n++; numbers[i] = n; }
+        var n = hiddenMessages;
+        for (var i = 0; i < lines.Count; i++) numbers[i] = ++n;
         var samePrefix = _lastChangeKey == key && lines.Count >= _renderedLines.Count;
         if (samePrefix)
             for (var i = 0; i < Math.Max(0, _renderedLines.Count - 1); i++)
@@ -816,16 +815,16 @@ public sealed partial class MainWindow : Window
         var grid = new Grid { ColumnSpacing = 8 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        // The Mac ruler's number, as a chip beside each prompt: prompts
-        // print it, responses keep the same left edge without one.
+        // The message number, as a chip beside every block: prompts print
+        // it steel blue, responses grey. Same left edge for all body text.
         var chip = new TextBlock
         {
-            Text = isUser && showNumbers ? number.ToString() : "",
+            Text = showNumbers ? number.ToString() : "",
             FontSize = 16,
             MinWidth = showNumbers ? 28 : 0,
             TextAlignment = TextAlignment.Right,
             Margin = new Thickness(0, 2, 0, 0),
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.SteelBlue),
+            Foreground = new SolidColorBrush(isUser ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray),
         };
         Grid.SetColumn(chip, 0);
         grid.Children.Add(chip);
