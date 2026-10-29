@@ -24,11 +24,18 @@ public partial class App : Application
         // AppInstance alone is not enough: unpackaged exes at different paths
         // do not see each other's registration, so a held mutex backs it.
         // A dead previous owner counts as acquired (the OS hands us the lock).
+        var instanceSuffix = "";
+        var testFolder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR");
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") == "1" &&
+            !string.IsNullOrWhiteSpace(testFolder) && Path.IsPathFullyQualified(testFolder) &&
+            Path.GetFullPath(testFolder).StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase))
+            instanceSuffix = "-Test-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(testFolder).ToUpperInvariant())));
         bool owned = true;
-        try { _singleInstance = new Mutex(true, "ConverseSingleInstance", out owned); }
+        try { _singleInstance = new Mutex(true, "ConverseSingleInstance" + instanceSuffix, out owned); }
         catch (AbandonedMutexException) { owned = true; }
         catch { _singleInstance?.Dispose(); _singleInstance = null; }
-        var instance = AppInstance.FindOrRegisterForKey("ConverseMain");
+        var instance = AppInstance.FindOrRegisterForKey("ConverseMain" + instanceSuffix);
         if (!instance.IsCurrent || !owned)
         {
             if (!instance.IsCurrent)
