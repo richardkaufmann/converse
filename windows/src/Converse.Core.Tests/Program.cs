@@ -1679,6 +1679,24 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(fresh.HistoryOk && fresh.Draft == "abc", "Empty history takes all text as draft");
 }
 
+// Block renderer: pipe tables become grids, surrounding text keeps runs.
+{
+    var intro = MarkdownBlocks.Parse("Intro **bold** text.\n\n| A | B |\n| --- | ---: |\n| 1 | 2 |\n| 3 | 4 |\n\nAfter.");
+    Check(intro.Count == 3 && intro[0] is MdText && intro[1] is MdTable && intro[2] is MdText,
+        "Table splits its message into text-table-text blocks");
+    var table = (MdTable)intro[1];
+    Check(table.Rows.Count == 3 && table.Rows[0].SequenceEqual(new[] { "A", "B" })
+        && table.Rows[2].SequenceEqual(new[] { "3", "4" }),
+        "Table cells parse with header first and divider dropped");
+    Check(table.Alignments.Count == 2 && table.Alignments[1].EndsWith(':'), "Divider carries column alignments");
+    var noDivider = MarkdownBlocks.Parse("a | b\nnot a divider");
+    Check(noDivider.Count == 1 && noDivider[0] is MdText, "Pipes without a divider row stay one text block");
+    var fenced = MarkdownBlocks.Parse("```\n| a |\n| - |\n```");
+    Check(fenced.Count == 1 && fenced[0] is MdText, "Table shapes inside a fence stay text");
+    var empty = MarkdownBlocks.Parse("");
+    Check(empty.Count == 1 && ((MdText)empty[0]).Plain == "", "Empty body yields one empty text block");
+}
+
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
 // batches fall back to a quoted cmd.exe wrapper, misses resolve null.
 {

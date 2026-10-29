@@ -150,40 +150,22 @@
                 </ScrollViewer>
                 <Button x:Name="EarlierButton" Grid.Row="2" Margin="8,4,8,0" Visibility="Collapsed"
                         HorizontalAlignment="Left" Click="OnEarlierClick" Content="Load earlier messages"/>
-                <Grid Grid.Row="3" Margin="8,4,8,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <!-- Line-number gutter, Mac parity: one number per paragraph,
-                         prompt paragraphs tinted, scrolled in lockstep with the editor. -->
-                    <ScrollViewer x:Name="GutterScroller" Grid.Column="0"
-                                  VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Hidden"
-                                  HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled">
-                        <TextBlock x:Name="LineGutter" FontSize="16" MinWidth="28" Margin="0,0,0,0"
-                                   Padding="0,0,6,0" TextAlignment="Right" LineHeight="24"
-                                   LineStackingStrategy="BlockLineHeight"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-                    </ScrollViewer>
-                    <!-- One seamless document: protected history plus an editable blue draft tail.
-                         Spellcheck stays off: the control's background spelling pass over a
-                         25k+ char formatted transcript is the prime crash suspect (see
-                         crash12/ dump analysis), and it is pointless on a transcript. -->
-                    <RichEditBox x:Name="Transcript" Grid.Column="1" FontSize="16" Padding="0"
-                                 PlaceholderText="Select a conversation to begin."
-                                 IsSpellCheckEnabled="False"
-                                 PreviewKeyDown="OnTranscriptKeyDown"
-                                 TextChanged="OnTranscriptTextChanged">
-                        <RichEditBox.ContextFlyout>
-                            <MenuFlyout Opening="OnContextMenuOpening">
-                                <MenuFlyoutItem Text="Copy" Click="OnCopyClick"/>
-                                <MenuFlyoutItem Text="Select all" Click="OnSelectAllClick"/>
-                                <MenuFlyoutSeparator x:Name="CopyMessageSeparator"/>
-                                <MenuFlyoutItem x:Name="CopyMessageItem" Text="Copy" Click="OnCopyMessageClick"/>
-                            </MenuFlyout>
-                        </RichEditBox.ContextFlyout>
-                    </RichEditBox>
-                </Grid>
+                <!-- Block transcript, Mac parity: each message is its own read-only
+                     block (RichTextBlock text, real Grid tables), prologue prompts
+                     carry their number chip, prompts sit on the light-blue ground.
+                     The draft is one persistent editable tail block, blue like the
+                     Mac's, and no rich-edit document is ever rebuilt or mutated —
+                     the SetText crash class is gone by construction. -->
+                <ScrollViewer x:Name="TranscriptScroller" Grid.Row="3" Margin="8,4,8,0"
+                              ViewChanged="OnTranscriptScrolled">
+                    <StackPanel x:Name="TranscriptStack" Spacing="10">
+                        <RichEditBox x:Name="DraftBox" FontSize="16" Padding="0" AcceptsReturn="True"
+                                     PlaceholderText="Select a conversation to begin."
+                                     IsSpellCheckEnabled="False" BorderThickness="0"
+                                     PreviewKeyDown="OnDraftKeyDown"
+                                     TextChanged="OnDraftTextChanged"/>
+                    </StackPanel>
+                </ScrollViewer>
                 <Grid Grid.Row="4" Padding="8,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
