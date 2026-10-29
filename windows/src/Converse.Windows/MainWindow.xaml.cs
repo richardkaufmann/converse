@@ -80,12 +80,21 @@ public sealed partial class MainWindow : Window
     private int _localCap = 200;
     private int _hiddenLocal;
     private string? _notice;
+    // Notices set with a timestamp expire on their own (inject feedback);
+    // notices without one persist until the next related action.
+    private DateTime? _noticeUtc;
     private readonly Dictionary<string, RequestAnswerState> _answerStates = new();
     private readonly Dictionary<string, List<string>> _remoteHashes = new();
     // Pane slots 1-3 (Mac P/1/2/3/X parity): placements persist in
     // pane-layout.json; focus (_selected) is independent of placement.
     private readonly PanePlacements _placements;
     private string _paneSignature = "";
+    // Scroll-follow: the tail is sticky while the caret sits at the end, but
+    // a manual scroll up parks the viewport (Jump to latest appears) until
+    // the user jumps back, or new arrivals come in after ~5s of no scroll
+    // input. A text selection always pins the viewport: looking around and
+    // copy-pasting never yanks.
+    private DateTime? _userScrollUtc;
     private StackPanel? _groupsPanel;
     private string _groupsSignature = "";
     private string _groupsCreateName = "";
@@ -508,6 +517,11 @@ public sealed partial class MainWindow : Window
 
     private void UpdateHint()
     {
+        if (_noticeUtc is { } stamp && (DateTime.UtcNow - stamp).TotalSeconds > 30)
+        {
+            _notice = null;
+            _noticeUtc = null;
+        }
         if (_devices.LastOutcome.Length > 0) HintText.Text = _devices.LastOutcome;
         else if (_notice is not null) HintText.Text = _notice;
         else
@@ -746,13 +760,18 @@ public sealed partial class MainWindow : Window
                 switch (kind)
                 {
                     case MdRunKind.Bold:
+                    case MdRunKind.Heading:
                         format.Bold = FormatEffect.On;
                         break;
                     case MdRunKind.Code:
                         format.BackgroundColor = Windows.UI.Color.FromArgb(28, 127, 127, 127);
                         break;
                     default:
-                        format.Bold = FormatEffect.On;
+                        // Pipe tables: monospace so space-padded columns
+                        // align (RichEdit has no real tables), divider row
+                        // already dropped by the parser.
+                        format.Name = "Consolas";
+                        format.BackgroundColor = Windows.UI.Color.FromArgb(28, 127, 127, 127);
                         break;
                 }
             }
@@ -797,7 +816,11 @@ public sealed partial class MainWindow : Window
             // gutter resyncs in the same tick: syncing it synchronously
             // reads the pre-scroll offset and leaves stale numbers beside
             // fresh paragraphs.
-            var followTail = caretToEnd || (wasAtEnd && nearBottom);
+            var selectionPinned = Transcript.Document.Selection.Length > 0 && !caretToEnd;
+            var followTail = caretToEnd || (wasAtEnd && nearBottom && !selectionPinned);
+            if (!followTail && appended && !selectionPinned && _userScrollUtc is { } lastLook
+                && (DateTime.UtcNow - lastLook).TotalSeconds > 5)
+                followTail = true; // idle resume: quiet looking rejoins new arrivals
             var appended = (_historyText + _draftText).StartsWith(oldFull ?? "", StringComparison.Ordinal);
             var seq = ++_rebuildSeq;
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
@@ -805,7 +828,10 @@ public sealed partial class MainWindow : Window
                 if (seq != _rebuildSeq) return;
                 if (TranscriptScroller() is not { } scroller) return;
                 if (followTail)
+                {
                     ScrollTranscriptToEnd();
+                    JumpLatestButton.Visibility = Visibility.Collapsed;
+                }
                 else
                 {
                     // Untouched resets sit at ~0; anything else moved by hand.
@@ -858,8 +884,23 @@ public sealed partial class MainWindow : Window
         if (_layout.ShowLineNumbers)
             GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
         // Track the settled position only when no restore is outstanding:
-        // a SetText reset firing late must never clobber the target.
-        if (_rebuildSeq == _appliedSeq) _lastStableOffset = scroller.VerticalOffset;
+        // a SetText reset firing late must never clobber the target. Settled
+        // input counts as looking around (idle-resume clock + jump button).
+        if (_rebuildSeq == _appliedSeq)
+        {
+            _lastStableOffset = scroller.VerticalOffset;
+            _userScrollUtc = DateTime.UtcNow;
+            JumpLatestButton.Visibility = scroller.VerticalOffset < scroller.ScrollableHeight - 70
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private void OnJumpLatestClick(object sender, RoutedEventArgs e)
+    {
+        _userScrollUtc = DateTime.UtcNow;
+        JumpLatestButton.Visibility = Visibility.Collapsed;
+        ScrollTranscriptToEnd();
+        Transcript.Focus(FocusState.Programmatic);
     }
 
     private void ScrollTranscriptToEnd()
@@ -979,6 +1020,8 @@ public sealed partial class MainWindow : Window
         _historyText = "";
         _draftText = "";
         _lastSentText = null;
+        _userScrollUtc = null;
+        JumpLatestButton.Visibility = Visibility.Collapsed;
         _localCap = 200;
         if (session?.LocalSessionID is { } localId)
             _draftText = Breaks(_store.Sessions.FirstOrDefault(s => s.Id == localId)?.Draft ?? "");
@@ -1341,9 +1384,23 @@ public sealed partial class MainWindow : Window
             var inject = new Button { Content = "Inject now", FontSize = 12 };
             inject.Click += (_, _) =>
             {
-                if (local is not null) { _store.InjectPending(local, id); Refresh(); }
+                // Instant, unmissable feedback: interrupting a busy turn
+                // takes seconds (SIGINT, escalate, notice), and every
+                // inject path was silent until then — the mash-three-times
+                // bug. Repeat presses while stopping are harmless.
+                if (local is not null)
+                {
+                    _notice = local.Busy
+                        ? "Interrupting the current turn — the queued prompt runs next."
+                        : "Queued prompt moved up — sending now.";
+                    _noticeUtc = DateTime.UtcNow;
+                    _store.InjectPending(local, id);
+                    Refresh();
+                }
                 else if (gid is not null)
                 {
+                    _notice = "Sent — waiting for home to interrupt and run it.";
+                    _noticeUtc = DateTime.UtcNow;
                     _ = _devices.SendRemoteCommandAsync(gid,
                         new DeviceCommandPayload { Action = "inject", PendingID = id });
                 }
@@ -1926,6 +1983,8 @@ public sealed partial class MainWindow : Window
     {
         var text = _draftText.Replace("\r", "\n");
         if (string.IsNullOrWhiteSpace(text) || _selected is null || !InputAllowed()) return;
+        _notice = null;
+        _noticeUtc = null;
         if (_selected.LocalSessionID is { } localId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);
@@ -1952,6 +2011,8 @@ public sealed partial class MainWindow : Window
 
     private async void OnStopClick(object sender, RoutedEventArgs e)
     {
+        _notice = null;
+        _noticeUtc = null;
         if (_selected?.LocalSessionID is { } localId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);

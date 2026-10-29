@@ -1454,6 +1454,16 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     var (fenced, fenceRuns) = MarkdownRuns.Render("```\n**not bold**\n```\na ** b `c");
     Check(fenced == "**not bold**\na ** b `c" && fenceRuns.Count == 0,
         "Fenced and unmatched markers stay literal with no runs");
+    var (table, tableRuns) = MarkdownRuns.Render("Intro\n| °C | °F |\n|---|---|\n| 20 | 68.0 |\n| 21 | 69.8 |\nAfter");
+    Check(table == "Intro\n| °C | °F |\n| 20 | 68.0 |\n| 21 | 69.8 |\nAfter",
+        "Table divider drops, header and rows kept verbatim");
+    var tableAt = table.IndexOf("| °C", StringComparison.Ordinal);
+    Check(tableRuns.Any(r => r.Kind == MdRunKind.Table && r.Start == tableAt
+        && r.Length == "| °C | °F |\n| 20 | 68.0 |\n| 21 | 69.8 |".Length),
+        "Table run covers the whole block for monospace alignment");
+    var (pipes, pipeRuns) = MarkdownRuns.Render("a | b\nnot a divider");
+    Check(pipes == "a | b\nnot a divider" && pipeRuns.Count == 0,
+        "Pipes without a divider row stay plain text");
 }
 
 // Command resolution: native exe wins, npm shims unwrap to node, unknown

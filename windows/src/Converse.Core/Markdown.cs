@@ -1,6 +1,6 @@
 namespace Converse.Core;
 
-public enum MdRunKind { Bold, Code, Heading }
+public enum MdRunKind { Bold, Code, Heading, Table }
 
 public sealed record MdRun(int Start, int Length, MdRunKind Kind, int Level = 0);
 
@@ -9,7 +9,9 @@ public sealed record MdRun(int Start, int Length, MdRunKind Kind, int Level = 0)
 /// / link markers and reports formatting runs in stripped coordinates, so
 /// the editor can tint ranges without skewing the gutter or draft math.
 /// Same-line inline spans only; ``` fences drop whole lines; unmatched
-/// markers stay literal. Headings are line-anchored ("## " prefix).
+/// markers stay literal. Headings are line-anchored ("## " prefix). Pipe
+/// tables render as one monospace run with the divider row dropped (RichEdit
+/// has no real tables); cell text stays literal so columns keep aligning.
 /// </summary>
 public static class MarkdownRuns
 {
@@ -18,20 +20,43 @@ public static class MarkdownRuns
         var runs = new List<MdRun>();
         var outText = new System.Text.StringBuilder();
         var inFence = false;
-        foreach (var raw in (body ?? "").Split('\n'))
+        void AppendLine(string text)
         {
-            var line = raw.EndsWith('\r') ? raw[..^1] : raw;
+            if (outText.Length > 0) outText.Append('\n');
+            outText.Append(text);
+        }
+        var raws = (body ?? "").Split('\n');
+        var index = 0;
+        while (index < raws.Length)
+        {
+            var line = raws[index].EndsWith('\r') ? raws[index][..^1] : raws[index];
+            if (!inFence && line.Contains('|') && index + 1 < raws.Length && IsDivider(raws[index + 1]))
+            {
+                var blockStart = outText.Length == 0 ? 0 : outText.Length + 1;
+                AppendLine(line);
+                index += 2;
+                while (index < raws.Length)
+                {
+                    var row = raws[index].EndsWith('\r') ? raws[index][..^1] : raws[index];
+                    if (row.Trim().Length == 0 || !row.Contains('|')) break;
+                    AppendLine(row);
+                    index++;
+                }
+                runs.Add(new MdRun(blockStart, outText.Length - blockStart, MdRunKind.Table));
+                continue;
+            }
             var trimmed = line.TrimStart();
             if (trimmed.StartsWith("```", StringComparison.Ordinal))
             {
                 inFence = !inFence;
+                index++;
                 continue;
             }
             var baseOffset = outText.Length == 0 ? 0 : outText.Length + 1;
             if (inFence)
             {
-                if (outText.Length > 0) outText.Append('\n');
-                outText.Append(line);
+                AppendLine(line);
+                index++;
                 continue;
             }
             var level = 0;
@@ -52,10 +77,27 @@ public static class MarkdownRuns
             else
                 foreach (var run in inline)
                     runs.Add(run with { Start = run.Start + baseOffset });
-            if (outText.Length > 0) outText.Append('\n');
-            outText.Append(plain);
+            AppendLine(plain);
+            index++;
         }
         return (outText.ToString(), runs);
+    }
+
+    private static bool IsDivider(string raw)
+    {
+        var line = (raw.EndsWith('\r') ? raw[..^1] : raw).Trim();
+        if (line.StartsWith('|')) line = line[1..];
+        if (line.EndsWith('|')) line = line[..^1];
+        var cells = line.Split('|');
+        if (cells.Length == 0) return false;
+        foreach (var cell in cells)
+        {
+            var trimmed = cell.Trim();
+            if (trimmed.Length < 1) return false;
+            var inner = trimmed.Trim(':');
+            if (inner.Length == 0 || inner.Any(c => c != '-')) return false;
+        }
+        return true;
     }
 
     private static (string Plain, List<MdRun> Runs) Inline(string text)

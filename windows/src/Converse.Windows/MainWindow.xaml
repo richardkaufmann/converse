@@ -125,6 +125,10 @@
                         </StackPanel>
                         <!-- Pane slots 1-3: assignments persist, focus follows clicks. Rebuilt in code behind. -->
                         <StackPanel x:Name="PaneBar" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        <!-- Appears when scrolled up: one click back to the newest messages. -->
+                        <Button x:Name="JumpLatestButton" Content="↓ Latest" Click="OnJumpLatestClick" Visibility="Collapsed"
+                                FontSize="11" Margin="8,0,0,0" VerticalAlignment="Center"
+                                ToolTipService.ToolTip="Back to the newest messages"/>
                     </StackPanel>
                     <!-- Take appears for a remote session this window is not viewing yet. -->
                     <Button x:Name="TakeButton" Grid.Column="1" Content="Take here" Click="OnTakeHereClick"
