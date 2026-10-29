@@ -836,7 +836,7 @@ public sealed partial class MainWindow : Window
         // Prompts are never markdown (Mac parity): italic plain text on the
         // light-blue ground. Responses parse to blocks with real tables.
         var blocks = isUser
-            ? new List<MdBlock> { new MdText(flat, new List<MdInline>()) }
+            ? new List<MdBlock> { new MdText(flat, new List<MdRun>()) }
             : MarkdownBlocks.Parse(flat);
         foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
         if (body.Children.Count == 0) body.Children.Add(new RichTextBlock { FontSize = 16 });
@@ -877,18 +877,22 @@ public sealed partial class MainWindow : Window
         var cursor = 0;
         foreach (var run in block.Runs)
         {
-            var start = Math.Clamp(run.Start, cursor, block.Text.Length);
-            var end = Math.Clamp(run.Start + run.Length, start, block.Text.Length);
-            AddRunSegment(para, block.Text, cursor, start, MdRunKind.Plain, isUser);
-            if (end > start) AddRunSegment(para, block.Text, start, end, run.Kind, isUser);
+            var start = Math.Clamp(run.Start, cursor, block.Plain.Length);
+            var end = Math.Clamp(run.Start + run.Length, start, block.Plain.Length);
+            AddRunSegment(para, block.Plain, cursor, start, null, isUser);
+            if (end > start) AddRunSegment(para, block.Plain, start, end, run, isUser);
             cursor = Math.Max(cursor, end);
         }
-        AddRunSegment(para, block.Text, cursor, block.Text.Length, MdRunKind.Plain, isUser);
+        AddRunSegment(para, block.Plain, cursor, block.Plain.Length, null, isUser);
         view.Blocks.Add(para);
         return view;
     }
 
-    private void AddRunSegment(Paragraph para, string source, int start, int end, MdRunKind kind, bool isUser)
+    // A null styled run is unstyled text between runs. Table-kind runs
+    // should not appear inside text segments (the parser lifts whole
+    // tables out first); if one ever does, it washes Consolas like code
+    // rather than rendering raw.
+    private void AddRunSegment(Paragraph para, string source, int start, int end, MdRun? styled, bool isUser)
     {
         if (end <= start) return;
         var parts = source[start..end].Split('\n');
@@ -903,7 +907,7 @@ public sealed partial class MainWindow : Window
                 italic.Inlines.Add(run);
                 para.Inlines.Add(italic);
             }
-            else switch (kind)
+            else switch (styled?.Kind)
             {
                 case MdRunKind.Bold:
                 case MdRunKind.Heading:
@@ -911,12 +915,8 @@ public sealed partial class MainWindow : Window
                     bold.Inlines.Add(run);
                     para.Inlines.Add(bold);
                     break;
-                case MdRunKind.Italic:
-                    var italic = new Italic();
-                    italic.Inlines.Add(run);
-                    para.Inlines.Add(italic);
-                    break;
                 case MdRunKind.Code:
+                case MdRunKind.Table:
                     var span = new Span { FontFamily = new FontFamily("Consolas") };
                     span.Inlines.Add(run);
                     para.Inlines.Add(span);
@@ -929,7 +929,17 @@ public sealed partial class MainWindow : Window
     }
 
     // NSTextTable parity: real borders, header row bold (the Mac's own
-    // stated semantics), alignments from the divider row.
+    // stated semantics), alignments from the divider row. The parser puts
+    // the header first in Rows and drops the divider, and alignments are
+    // the raw divider cells (":---" / ":---:" / "---:").
+    private static int AlignmentOf(string dividerCell)
+    {
+        var cell = dividerCell.Trim();
+        var left = cell.StartsWith(':');
+        var right = cell.EndsWith(':');
+        return left && right ? 1 : right ? 2 : 0;
+    }
+
     private Grid RenderMdTable(MdTable table)
     {
         var cols = 0;
@@ -944,8 +954,8 @@ public sealed partial class MainWindow : Window
             for (var c = 0; c < cols; c++)
             {
                 var cellText = c < table.Rows[r].Count ? table.Rows[r][c] : "";
-                var align = c < table.Alignments.Count ? table.Alignments[c] : 0;
-                var header = table.HasHeader && r == 0;
+                var align = c < table.Alignments.Count ? AlignmentOf(table.Alignments[c]) : 0;
+                var header = r == 0;
                 var text = new TextBlock
                 {
                     Text = cellText,
