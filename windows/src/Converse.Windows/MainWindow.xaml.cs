@@ -1242,7 +1242,9 @@ public sealed partial class MainWindow : Window
         if (_rebuilding || _selected is null) return;
         Transcript.Document.GetText(TextGetOptions.None, out var full);
         full = full.Replace("\r\n", "\r");
-        var (ok, draft) = EditorBoundary.Split(full, _historyText);
+        // The post-change caret disambiguates seam deletions strings alone
+        // cannot (a masked history-tail deletion settles inside the core).
+        var (ok, draft) = EditorBoundary.Split(full, _historyText, Transcript.Document.Selection.StartPosition);
         if (!ok)
         {
             // Edit touched protected history: revert and park the caret at

@@ -559,17 +559,17 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
 // Editor boundary: RichEdit GetText normalization must not eat keystrokes.
 {
     var history = "You: hi\r\r";
-    var exact = Converse.Core.EditorBoundary.Split("You: hi\r\rhello\r", history);
+    var exact = Converse.Core.EditorBoundary.Split("You: hi\r\rhello\r", history, 15);
     Check(exact.HistoryOk && exact.Draft == "hello", "Exact history match splits the draft tail");
-    var collapsed = Converse.Core.EditorBoundary.Split("You: hi\rhello\r", history);
+    var collapsed = Converse.Core.EditorBoundary.Split("You: hi\rhello\r", history, 14);
     Check(collapsed.HistoryOk && collapsed.Draft == "hello", "Collapsed trailing break still matches history");
-    var terminator = Converse.Core.EditorBoundary.Split("You: hi\r\r\r", history);
+    var terminator = Converse.Core.EditorBoundary.Split("You: hi\r\r\r", history, 11);
     Check(terminator.HistoryOk && terminator.Draft == "", "Lone GetText terminator leaves an empty draft");
-    var hacked = Converse.Core.EditorBoundary.Split("You: HACKED\r\rhello\r", history);
+    var hacked = Converse.Core.EditorBoundary.Split("You: HACKED\r\rhello\r", history, 20);
     Check(!hacked.HistoryOk, "Edited history fails the protected-region check");
-    var fresh = Converse.Core.EditorBoundary.Split("hello\r", "");
+    var fresh = Converse.Core.EditorBoundary.Split("hello\r", "", 6);
     Check(fresh.HistoryOk && fresh.Draft == "hello", "Empty history accepts first keystrokes");
-    var leading = Converse.Core.EditorBoundary.Split("H\r\r\rhello\r", "H\r\r");
+    var leading = Converse.Core.EditorBoundary.Split("H\r\r\rhello\r", "H\r\r", 11);
     Check(leading.HistoryOk && leading.Draft == "\rhello", "Genuine leading draft blank lines survive the separator budget");
 }
 
@@ -1646,6 +1646,28 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(!TranscriptHistory.NeedsFull("abc", "abc"), "Identical history needs no history work");
     Check(!TranscriptHistory.NeedsFull("abc", "abcdef") && TranscriptHistory.IsAppend("abc", "abcdef"),
         "Streaming growth absorbs as an append");
+}
+
+// Protected-history seam: deleting history's last content char while the
+// draft starts with the same char is byte-identical to a legal separator
+// trim, so strings alone cannot judge it. The post-change caret is the
+// witness: inside the core means revert, at/past it means adopt.
+{
+    var history = "You: hi\r\rResponse text\r\r";
+    var masked = "You: hi\r\rResponse tex" + "typing words";
+    Check(!EditorBoundary.Split(masked, history, 21).HistoryOk,
+        "Seam deletion masked by coinciding draft text still reverts");
+    var (ok, draft) = EditorBoundary.Split(masked, history, 22);
+    Check(ok && draft == "yping words",
+        "Legal separator-plus-draft-head deletion adopts the true draft");
+    var typed = EditorBoundary.Split(history + "q", history, history.Length + 1);
+    Check(typed.HistoryOk && typed.Draft == "q", "Draft typing keeps history intact");
+    var breaks = EditorBoundary.Split(history[..^1], history, history.Length - 1);
+    Check(breaks.HistoryOk && breaks.Draft == "", "Separator backspace is a legal no-op");
+    Check(!EditorBoundary.Split(history.Insert(10, "Q"), history, 11).HistoryOk,
+        "Typing inside history reverts");
+    var fresh = EditorBoundary.Split("abc", "", 3);
+    Check(fresh.HistoryOk && fresh.Draft == "abc", "Empty history takes all text as draft");
 }
 
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
