@@ -140,6 +140,10 @@ public sealed partial class MainWindow : Window
         _placeholder = new ConversationPane();
         _placeholder.Attach(this, 0);
         AppWindow.Changed += (_, e) => { if (e.DidSizeChange) ClampWindowWidth(); };
+        // The width floor computed pre-Activate uses scale 1.0 (no
+        // XamlRoot yet); re-apply it once the root exists. Clamp only
+        // ever grows toward the floor, never shrinks the user's window.
+        Activated += (_, _) => ClampWindowWidth();
         ApplyLayout();
         Refresh();
     }
@@ -502,7 +506,10 @@ public sealed partial class MainWindow : Window
     {
         var sidebar = SidebarColumn.Width.Value;
         if (sidebar <= 0) sidebar = _layout.EffectiveWidth(_windowWidth);
-        var scale = (Content as FrameworkElement)?.XamlRoot.RasterizationScale ?? 1.0;
+        // XamlRoot is null before Activate(): ?. only guarded Content, so
+        // the RasterizationScale read threw in the constructor. Default to
+        // 1.0 and re-apply the floor on Activated, when the root exists.
+        var scale = (Content as FrameworkElement)?.XamlRoot?.RasterizationScale ?? 1.0;
         _minWindowWidthPx = Math.Max(700, (int)Math.Ceiling((sidebar + 4 + paneCount * 340 + 24) * scale));
         ClampWindowWidth();
     }

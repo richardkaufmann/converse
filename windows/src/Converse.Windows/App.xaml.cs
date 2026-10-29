@@ -50,8 +50,14 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
+            // A constructor failure must never leave a headless process
+            // holding the mutex (later launches would redirect to it and
+            // die): release the lock and exit instead of re-throwing into
+            // WinUI's stowed exception, which keeps the process alive.
             WriteCrashLog(ex);
-            throw;
+            _singleInstance?.Dispose();
+            _singleInstance = null;
+            System.Diagnostics.Process.GetCurrentProcess().Kill();
         }
     }
 
