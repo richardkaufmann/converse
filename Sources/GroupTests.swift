@@ -36,23 +36,30 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         check(ConverseGroupStore.migration(records + [revoked], ownDeviceID: ownID) == nil, "Migration cannot readmit a locally revoked device")
         var removedPeer = records[0]; removedPeer.removed = true
         check(ConverseGroupStore.migration([removedPeer], ownDeviceID: ownID) == nil, "Removed peers do not turn a standalone device into a migrated group")
+        // Browse only this run's QA-prefixed instances. Never connect to or
+        // incorporate production devices into these isolated stores.
+        let runID = String(UUID().uuidString.prefix(8))
+        let discoveryPrefix = "QA-" + runID + " "
+        let workshopName = "Workshop " + runID, otherName = "Other workshop " + runID, freshName = "Fresh group " + runID
         func make(_ name: String) throws -> DeviceSyncService {
             let service = DeviceSyncService(); service.deviceNameOverride = name
             try service.configureForTesting(folder: root.appendingPathComponent(name)); try service.enableGroupsForTesting()
-            try service.startNetworkForTesting(); services.append(service); return service
+            try service.startNetworkForTesting(discoveryPrefix: discoveryPrefix); services.append(service); return service
         }
         let a = try make("Groups A"), b = try make("Groups B"), c = try make("Groups C"), d = try make("Groups D")
         check(a.currentGroup == nil && a.homes.isEmpty && a.trusted.isEmpty, "A device outside a group exposes no remote homes or sessions")
-        a.createGroup(name: "Workshop")
+        a.createGroup(name: workshopName)
         guard let groupA = a.currentGroup else { check(false, "Create group saves local membership"); return }
-        a.createGroup(name: " workshop ")
+        a.createGroup(name: " " + workshopName.lowercased() + " ")
         check(a.currentGroup == groupA && a.lastOutcome.contains("unique"), "Create Group refuses a conflicting name without leaving the current group")
-        d.createGroup(name: "Other workshop")
+        d.createGroup(name: otherName)
+        pump({ d.availableGroups.contains(where: { $0.id == groupA.id }) }, seconds: 12)
+        check(d.availableGroups.contains(where: { $0 == groupA }) && d.discovered.contains(where: { $0.deviceID == a.identity?.deviceID && $0.group == groupA }), "Real Bonjour TXT discovery reveals a nearby group and full device identity before pairing (" + d.serviceStatus + "; " + d.discovered.map { $0.name + ":" + ($0.group?.name ?? "no group") }.joined(separator: ", ") + ")")
         pump { a.testingPort != nil && d.testingPort != nil }
         guard let aPort = a.testingPort, let dPort = d.testingPort else { check(false, "Group listeners start on isolated ports"); return }
         d.connectManual(host: "127.0.0.1", port: Int(aPort))
         pump({ false }, seconds: 0.15)
-        check(d.currentGroup?.name == "Other workshop" && a.pairingPrompt == nil && d.pairingPrompt == nil && a.groupRequests.isEmpty, "Ordinary connections across groups cannot bypass explicit Join and Review")
+        check(d.currentGroup?.name == otherName && a.pairingPrompt == nil && d.pairingPrompt == nil && a.groupRequests.isEmpty, "Ordinary connections across groups cannot bypass explicit Join and Review")
         b.joinGroupByAddress(host: "127.0.0.1", port: Int(aPort))
         pump { b.pairingPrompt != nil && a.groupRequests.count == 1 }
         guard let promptB = b.pairingPrompt, let requestB = a.groupRequests.first else { check(false, "Joiner gets immediate code and sponsor gets a pending request"); return }
@@ -125,11 +132,17 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         check(Workspace.shared.placements[remotePlacement] == nil && Workspace.shared.placements[missingPlacement] == nil && Workspace.shared.placements[localSession.id] != nil, "Group exit parks remote and unknown panes while preserving local session placement")
         pump { b.currentGroup == nil }
         check(a.currentGroup == nil && b.currentGroup == nil && a.homes.isEmpty && b.homes.isEmpty, "Any member can dissolve the group and remove remote sidebar data")
+        a.createGroup(name: freshName)
+        check(a.currentGroup?.id != groupA.id && a.currentGroup?.name == freshName, "Creating after dissolution uses a fresh group identity")
+        let fresh = a.currentGroup!
+        pump({ d.discovered.contains(where: { $0.deviceID == a.identity?.deviceID && $0.group == fresh }) }, seconds: 12)
+        check(d.availableGroups.contains(fresh) && !d.discovered.contains(where: { $0.deviceID == a.identity?.deviceID && $0.group?.id == groupA.id }), "A group change updates an existing Bonjour service's TXT metadata without restarting the browser")
+        try c.startNetworkForTesting(discoveryPrefix: discoveryPrefix)
         c.connectManual(host: "127.0.0.1", port: Int(aPort))
         pump { c.currentGroup == nil }
-        check(c.currentGroup == nil && c.knownGroups.contains(where: { $0.id == groupA.id && $0.dissolved }), "An offline member receives dissolution without granting session authority")
-        a.createGroup(name: "Fresh group")
-        check(a.currentGroup?.id != groupA.id && a.currentGroup?.name == "Fresh group", "Creating after dissolution uses a fresh group identity")
+        check(c.currentGroup == nil && c.knownGroups.contains(where: { $0.id == groupA.id && $0.dissolved }) && c.homes.isEmpty && c.remoteLeases.isEmpty, "An offline member learns dissolution after its former host creates another group, without receiving sessions or joining it")
+        pump({ c.canJoinGroup(fresh.id) }, seconds: 12)
+        check(c.availableGroups.contains(fresh) && c.canJoinGroup(fresh.id) && c.pairingPrompt == nil, "The recovered member can discover and explicitly join the new group; reconnect never auto-joins")
         a.leaveGroup()
         check(a.currentGroup == nil && a.homes.isEmpty && a.lastOutcome.isEmpty, "Leave parks remote views and returns the device to local-only mode")
     } catch { check(false, "Converse Groups tests: " + error.localizedDescription) }

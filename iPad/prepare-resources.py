@@ -21,8 +21,10 @@ info = {
     'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
     'UIRequiresFullScreen': False,
 }
-# Noise provides application-level encryption. Export classification must be
-# answered honestly in App Store Connect; do not claim "no encryption" here.
+# Noise uses Apple CryptoKit primitives; URLSession uses Apple's HTTPS stack.
+# This describes exempt encryption, not an absence of encryption. Revisit if
+# a future dependency supplies cryptography outside Apple's operating system.
+info['ITSAppUsesNonExemptEncryption'] = False
 with (output / 'Converse-Info.plist').open('wb') as file: plistlib.dump(info, file)
 resources = Path(os.environ['TARGET_BUILD_DIR']) / os.environ['UNLOCALIZED_RESOURCES_FOLDER_PATH']
 subprocess.run(['/usr/bin/python3', str(root/'scripts/build-help.py'), str(root/'README.md'), str(resources/'Help')], check=True)

@@ -9,7 +9,7 @@ struct DiscoveredDevice: Identifiable, Equatable {
     var endpoint: NWEndpoint
     var group: ConverseGroup? = nil
     var deviceID: String? = nil
-    static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.id == b.id }
+    static func == (a: DiscoveredDevice, b: DiscoveredDevice) -> Bool { a.id == b.id && a.name == b.name && a.group == b.group && a.deviceID == b.deviceID }
 }
 
 struct PairingPrompt: Identifiable {
@@ -167,9 +167,15 @@ final class DeviceSyncService: ObservableObject {
     }
     func adoptPeerForTesting(_ peer: DevicePeer) { peers[peer.id] = peer }
     var testingPort: UInt16? { listener?.port.flatMap { $0.rawValue > 0 ? $0.rawValue : nil } }
-    func startNetworkForTesting() throws {
+    private var testingDiscoveryPrefix: String?
+    func startNetworkForTesting(discoveryPrefix: String? = nil) throws {
         guard isTestEnvironment, testFolder != nil else { throw CocoaError(.executableNotLoadable) }
+        if let discoveryPrefix {
+            guard discoveryPrefix.hasPrefix("QA-"), discoveryPrefix.count <= 20 else { throw CocoaError(.coderInvalidValue) }
+            testingDiscoveryPrefix = discoveryPrefix
+        }
         try startListener(portOverride: .any)
+        if discoveryPrefix != nil { startBrowser() }
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
         publishTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.publishSidebarIfChanged() }
     }
@@ -227,13 +233,18 @@ final class DeviceSyncService: ObservableObject {
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state { self?.serviceStatus = "Listen failed: " + error.localizedDescription }
-            if case .ready = state, let port = self?.listener?.port { self?.serviceStatus = "Listening on port " + String(port.rawValue) }
+            if case .ready = state, let port = self?.listener?.port {
+                self?.serviceStatus = "Listening on port " + String(port.rawValue)
+                self?.updateGroupAdvertisement()
+            }
         }
         self.listener = listener
         listener.start(queue: .main)
     }
     private func startBrowser() {
-        let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: NWParameters.tcp)
+        // Plain .bonjour omits TXT metadata, which contains device/group IDs
+        // and the group name. It also misses group changes on an existing service.
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: NWParameters.tcp)
         browser.stateUpdateHandler = { [weak self] state in
             switch state {
             case .waiting(let error), .failed(let error):
@@ -251,6 +262,7 @@ final class DeviceSyncService: ObservableObject {
             guard let self else { return }
             self.discovered = results.compactMap { result in
                 if case .service(let name, _, _, _) = result.endpoint, !name.hasSuffix("[" + String((self.identity?.deviceID ?? "").prefix(8)) + "]") {
+                    if let prefix = self.testingDiscoveryPrefix, !name.hasPrefix(prefix) { return nil }
                     var group: ConverseGroup?
                     var deviceID: String?
                     if case .bonjour(let txt) = result.metadata, case .string(let id) = txt.getEntry(for: "device"), id.count == 64, id.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) { deviceID = id }
@@ -422,7 +434,10 @@ extension DeviceSyncService {
             let known = trustStore.records.first { $0.deviceID == hello.deviceID && $0.publicKey == keys.remoteStatic }
             if let group = currentGroup, hello.group?.id == group.id, known?.groupID == group.id {
                 // Continue to the existing removed-member admission rules.
-            } else if let known, let id = known.groupID, (groupStore?.state.groups.first(where: { $0.id == id })?.dissolved == true && hello.group?.id == id) || (currentGroup?.id == id && hello.group == nil) {
+            } else if let known, let id = known.groupID, (groupStore?.state.groups.first(where: { $0.id == id })?.dissolved == true && hello.group?.id == id) || currentGroup?.id == id {
+                // A remembered member may have dissolved our stale group and
+                // already created another. Authenticate a state-only channel to
+                // learn its tombstone; this grants no access to either group's sessions.
                 peer.controlOnly = true
             } else { disconnect(peer); return }
             // Only the explicit join paths above may request human admission.
@@ -1290,7 +1305,7 @@ extension DeviceSyncService {
     private func groupAdvertisement() -> NWListener.Service {
         var hints: [String: String] = ["device": identity?.deviceID ?? ""]
         if let group = currentGroup { hints.merge(["group": group.id, "name": group.name, "creator": group.creator]) { _, new in new } }
-        return NWListener.Service(name: deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
+        return NWListener.Service(name: (testingDiscoveryPrefix ?? "") + deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
     }
     private func updateGroupAdvertisement() { listener?.service = groupAdvertisement(); lastSidebarJSON = "" }
     var availableGroups: [ConverseGroup] {

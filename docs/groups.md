@@ -48,6 +48,10 @@ they reconnect to an informed member. Revocation cannot reach an isolated partit
 instantaneously. A remembered key can establish a **control-only** connection to
 convey dissolution; it cannot carry sessions, prompts, leases, blobs or rosters.
 Only a device pinned to that group may convey its dissolution. Removed pins cannot.
+The state-only reconnect also works when a remembered member has already created
+or joined a different group. Its authenticated identity can convey the old group's
+tombstone under the remembered pin; that channel never exposes either group's
+sessions, roster, drafts or attachments, and never admits anyone to the new group.
 
 An existing ungrouped fabric migrates once, preserving keys, sessions and logins.
 Its group UUID is deterministically derived from the lexically smallest active
@@ -74,6 +78,9 @@ and `joinGroupID` (the requested destination). The final authenticated handshake
 payload includes the destination even when address-based connection only learns
 it from the responder. Bonjour TXT entries `device`, `group`, `name`, and `creator` are
 untrusted discovery hints only; the handshake must match the selected UUID.
+Swift browsers request `bonjourWithTXTRecord`, since plain `bonjour` results do
+not include those group hints. TXT changes on an existing service must refresh
+the group directory without requiring an app restart.
 
 All envelopes retain the existing encrypted/framed v1 format:
 
