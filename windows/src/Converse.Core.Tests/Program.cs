@@ -1635,17 +1635,26 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "Valid surrogate pairs pass through untouched");
 }
 
-// Round-16 crash fix: streaming appends absorb incrementally; anything else
-// takes the full rebuild. Parked-at-X plus appends is a UI behavior the Core
-// side cannot model (no RichEdit here); the decision table below is the
-// pinned contract the UI wires to its viewport preservation.
+// Round-16 crash fix, round-18 correction: streaming text lands BEFORE the
+// trailing separator, so prefix checks always miss. The common prefix is the
+// absorb point. Literals below are BuildHistory-shaped: every message ends
+// with the "\r\r" separator, including the streaming tail.
 {
-    Check(TranscriptHistory.NeedsFull(null, "abc"), "First render takes the full rebuild");
-    Check(TranscriptHistory.NeedsFull("abc", "xyzabc"), "Prepended earlier messages take the full rebuild");
-    Check(TranscriptHistory.NeedsFull("abc", "ab"), "Shrunk history takes the full rebuild");
-    Check(!TranscriptHistory.NeedsFull("abc", "abc"), "Identical history needs no history work");
-    Check(!TranscriptHistory.NeedsFull("abc", "abcdef") && TranscriptHistory.IsAppend("abc", "abcdef"),
-        "Streaming growth absorbs as an append");
+    var (fullOp, _) = TranscriptHistory.Plan(null, "abc", 0);
+    Check(fullOp == HistoryOp.Full, "First render takes the full rebuild");
+    var rendered = "First question\r\rFirst answer line one\r\r";
+    var grown = "First question\r\rFirst answer line one plus more\r\r";
+    var (repOp, repStart) = TranscriptHistory.Plan(rendered, grown, 16);
+    Check(repOp == HistoryOp.Replace && repStart == 37,
+        "Streaming growth before the separator absorbs from the common prefix");
+    var (gateOp, _) = TranscriptHistory.Plan(rendered, grown, 38);
+    Check(gateOp == HistoryOp.Full, "Divergence above the last message keeps the full rebuild");
+    var (pureOp, pureStart) = TranscriptHistory.Plan("abc", "abcdef", 0);
+    Check(pureOp == HistoryOp.Replace && pureStart == 3, "Pure tail append absorbs at the end");
+    var (sameOp, _) = TranscriptHistory.Plan("abc", "abc", 0);
+    Check(sameOp == HistoryOp.Same, "Identical history needs no history work");
+    var (preOp, _) = TranscriptHistory.Plan("A\r\rB", "Z\r\rA\r\rB", 8);
+    Check(preOp == HistoryOp.Full, "Prepended earlier messages take the full rebuild");
 }
 
 // Protected-history seam: deleting history's last content char while the

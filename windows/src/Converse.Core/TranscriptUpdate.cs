@@ -1,20 +1,29 @@
 namespace Converse.Core;
 
 // Decides how the transcript document absorbs a new history string without
-// whole-document SetText (round-16 crash fix: the dumps pin SetText with a
-// ~21K string as the faulting call). The UI tracks the last rendered history;
-// streaming turns are pure appends, everything else falls back to a full
-// rebuild. Pure so the Core suite can pin the transitions.
+// whole-document SetText (round-16 crash fix: the dumps pin SetText as the
+// faulting call). The UI tracks the last rendered history plus the start of
+// its last message. Streaming text lands BEFORE the trailing separator, so
+// the rendered string is never a prefix of the new history (round-16 miss);
+// the common prefix is the real absorb point. Pure so the Core suite can
+// pin the transitions with BuildHistory-shaped literals.
+public enum HistoryOp { Full, Replace, Same }
+
 public static class TranscriptHistory
 {
-    // True when the document cannot absorb the new history incrementally:
-    // first render, session switch, prepended earlier messages, or any edit
-    // above the tail.
-    public static bool NeedsFull(string? rendered, string history) =>
-        rendered is null || !history.StartsWith(rendered, System.StringComparison.Ordinal);
-
-    // True when the new history only adds to the rendered tail. Call only
-    // when NeedsFull is false.
-    public static bool IsAppend(string rendered, string history) =>
-        history.Length > rendered.Length;
+    public static (HistoryOp Op, int Start) Plan(string? rendered, string history, int lastMessageStart)
+    {
+        if (rendered is null)
+            return (HistoryOp.Full, 0);
+        var limit = System.Math.Min(rendered.Length, history.Length);
+        var p = 0;
+        while (p < limit && rendered[p] == history[p]) p++;
+        if (p == rendered.Length && p == history.Length)
+            return (HistoryOp.Same, p);
+        // Edits above the last message (prepend, mid-history rewrite) keep
+        // the full rebuild, which preserves the reading position.
+        if (p < lastMessageStart)
+            return (HistoryOp.Full, 0);
+        return (HistoryOp.Replace, p);
+    }
 }

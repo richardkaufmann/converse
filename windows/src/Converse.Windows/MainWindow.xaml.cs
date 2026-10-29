@@ -375,6 +375,12 @@ public sealed partial class MainWindow : Window
     // Message ranges backing the Copy Prompt / Copy Response menu: document
     // offsets of each rendered message plus its role and source text.
     private List<(int Start, int Length, string Role, string Text)> _lastMessageRanges = new();
+    // Start offset of the last rendered message: the planner absorbs any
+    // divergence at or after it and takes the full rebuild above it.
+    private int _lastMessageStart;
+    // User-run ranges from the latest BuildHistory, so the gutter never pays
+    // for a second full pass per rebuild.
+    private List<(int Start, int Length)> _lastUserRuns = new();
 
     private (string History, List<(int Start, int Length)> UserRuns,
         List<(int Start, int Length, MdRunKind Kind, int Level)> MdRuns, int Hidden) BuildHistory()
@@ -392,7 +398,12 @@ public sealed partial class MainWindow : Window
             lines = _devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text)).ToList();
-        if (lines is null) return ("", runs, mdRuns, 0);
+        if (lines is null)
+        {
+            _lastMessageStart = 0;
+            _lastUserRuns = runs;
+            return ("", runs, mdRuns, 0);
+        }
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
         if (hidden > 0)
@@ -411,6 +422,7 @@ public sealed partial class MainWindow : Window
                 text.Append(rendered).Append("\r\r");
                 runs.Add((start, rendered.Length));
                 _lastMessageRanges.Add((start, rendered.Length, "user", body));
+                _lastMessageStart = start;
             }
             else
             {
@@ -422,10 +434,12 @@ public sealed partial class MainWindow : Window
                 foreach (var run in md)
                     mdRuns.Add((start + run.Start, run.Length, run.Kind, run.Level));
                 _lastMessageRanges.Add((start, broken.Length, "assistant", body));
+                _lastMessageStart = start;
             }
         }
         // Lone surrogates never reach WinRT string marshalling (round-13
         // crash stack); the 1:1 scrub keeps every run offset valid.
+        _lastUserRuns = runs;
         return (MarkdownRuns.SanitizeLoneSurrogates(text.ToString()), runs, mdRuns, hidden);
     }
 
@@ -750,18 +764,20 @@ public sealed partial class MainWindow : Window
         Refresh();
     }
 
-    // Round-16 crash fix: absorb a streaming tail without whole-document
-    // SetText (the dumps pin SetText as the faulting call). Inserting at
-    // the history end moves neither the viewport nor existing text, so a
-    // parked reader is never disturbed and the caret stays byte-stable.
-    // Returns false (caller takes the full path) on anything unexpected.
-    private bool TryAppendDelta(
+    // Round-16 crash fix, round-18 correction: absorb history at the common
+    // prefix without whole-document SetText (the dumps pin SetText as the
+    // faulting call). Streaming text lands before the trailing separator, so
+    // the absorb point sits inside the last message: the tail from there is
+    // replaced and reformatted, never the whole document. A parked reader
+    // gets no scroll, no caret move, no selection touch. Returns false
+    // (caller takes the full path) on anything unexpected.
+    private bool TryReplaceFrom(
+        int p,
         string rendered,
         List<(int Start, int Length)> runs,
         List<(int Start, int Length, MdRunKind Kind, int Level)> mdRuns,
         int selStart, int selEnd, bool wasAtEnd, bool nearBottom, bool caretToEnd)
     {
-        var delta = _historyText.Substring(rendered.Length);
         var newH = _historyText.Length;
         // Never move the caret programmatically unless following the tail.
         // A parked selection keeps its position, shifted past the growth
@@ -771,30 +787,33 @@ public sealed partial class MainWindow : Window
         if (!follow && _userScrollUtc is { } lastLook
             && (DateTime.UtcNow - lastLook).TotalSeconds > 5)
             follow = true; // idle resume, same rule as the full path
-        if (delta.Length > 0)
+        if (newH != rendered.Length)
         {
-            Transcript.Document.GetRange(rendered.Length, rendered.Length)
-                .SetText(TextSetOptions.None, delta);
-            // New paragraphs get the locked pitch like the full path does.
-            var fresh = Transcript.Document.GetRange(rendered.Length, newH);
+            Transcript.Document.GetRange(p, rendered.Length)
+                .SetText(TextSetOptions.None, _historyText.Substring(p));
+            // Replaced paragraphs get the locked pitch like the full path.
+            var fresh = Transcript.Document.GetRange(p, newH);
             fresh.ParagraphFormat.SpaceBefore = 0;
             fresh.ParagraphFormat.SpaceAfter = 0;
             fresh.ParagraphFormat.SetLineSpacing(LineSpacingRule.Exactly, 18);
             fresh.CharacterFormat.Italic = FormatEffect.Off;
+            fresh.CharacterFormat.BackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
             foreach (var (start, runLength) in runs)
             {
-                if (start < rendered.Length) continue;
-                var s = Math.Clamp(start, 0, newH);
-                var e = Math.Clamp(start + runLength, 0, newH);
-                if (e > s) Transcript.Document.GetRange(s, e).CharacterFormat.Italic = FormatEffect.On;
+                var e = start + runLength;
+                if (e <= p) continue;
+                var s = Math.Clamp(Math.Max(start, p), 0, newH);
+                var end = Math.Clamp(e, 0, newH);
+                if (end > s) Transcript.Document.GetRange(s, end).CharacterFormat.Italic = FormatEffect.On;
             }
             foreach (var (start, runLength, kind, _) in mdRuns)
             {
-                if (start < rendered.Length) continue;
-                var s = Math.Clamp(start, 0, newH);
-                var e = Math.Clamp(start + runLength, 0, newH);
-                if (e <= s) continue;
-                var format = Transcript.Document.GetRange(s, e).CharacterFormat;
+                var e = start + runLength;
+                if (e <= p) continue;
+                var s = Math.Clamp(Math.Max(start, p), 0, newH);
+                var end = Math.Clamp(e, 0, newH);
+                if (end <= s) continue;
+                var format = Transcript.Document.GetRange(s, end).CharacterFormat;
                 // Twin of the full-path switch below; keep the two in sync.
                 switch (kind)
                 {
@@ -827,8 +846,13 @@ public sealed partial class MainWindow : Window
         if (follow) Transcript.Document.Selection.SetRange(trackedEnd, trackedEnd);
         else
         {
-            int Map(int p) => p < rendered.Length ? p
-                : Math.Min(newH + Math.Min(p - rendered.Length, _draftText.Length), trackedEnd);
+            // Positions before the absorb point are untouched. Old-draft
+            // positions shift past the new tail. Positions inside the
+            // rewritten span clamp to its start: their text is new.
+            int Map(int pos) => pos < p ? pos
+                : pos >= rendered.Length
+                    ? Math.Min(newH + Math.Min(pos - rendered.Length, _draftText.Length), trackedEnd)
+                    : Math.Min(p, trackedEnd);
             Transcript.Document.Selection.SetRange(Map(selStart), Map(selEnd));
         }
         if (follow)
@@ -839,7 +863,7 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            if (newH > rendered.Length) _unreadUpdates++;
+            if (!_historyText.Equals(rendered, StringComparison.Ordinal)) _unreadUpdates++;
             UpdateJumpButton(following: false);
         }
         _renderedHistory = _historyText;
@@ -877,22 +901,30 @@ public sealed partial class MainWindow : Window
             // Formatting runs are pure session state, computed before any
             // mutation so both the append and full paths share them.
             var (_, runs, mdRuns, _) = BuildHistory();
-            // Round-16 crash fix: streaming tails absorb without
-            // whole-document SetText (the dumps pin SetText as the faulting
-            // call). Anything unexpected falls through to the full path,
-            // which resets the trackers it relies on.
-            if (!TranscriptHistory.NeedsFull(_renderedHistory, _historyText))
+            // Round-16 crash fix, round-18 correction: absorb at the common
+            // prefix without whole-document SetText (the dumps pin SetText
+            // as the faulting call). Anything unexpected falls through to
+            // the full path, which resets the trackers it relies on. Full
+            // rebuilds while streaming are logged to rebuild-fallback.log
+            // beside the exe so the VM can count them without a dump.
+            var (historyOp, absorbAt) = TranscriptHistory.Plan(_renderedHistory, _historyText, _lastMessageStart);
+            if (historyOp == HistoryOp.Full)
+            {
+                if (SelectedBusy()) LogFallback("full-while-busy");
+            }
+            else
             {
                 try
                 {
-                    if (TryAppendDelta(_renderedHistory!, runs, mdRuns,
+                    if (TryReplaceFrom(absorbAt, _renderedHistory!, runs, mdRuns,
                         selection.StartPosition, selection.EndPosition, wasAtEnd, nearBottom, caretToEnd))
                     {
                         UpdateGutter();
                         return;
                     }
+                    if (SelectedBusy()) LogFallback("replace-catch");
                 }
-                catch { /* fall through to the full rebuild below */ }
+                catch { if (SelectedBusy()) LogFallback("replace-catch"); /* fall through below */ }
             }
             Transcript.Document.SetText(TextSetOptions.None, _historyText + _draftText);
             // Locked row pitch: every paragraph is exactly 18pt (= 24px, the
@@ -1176,6 +1208,20 @@ public sealed partial class MainWindow : Window
         Transcript.Focus(FocusState.Programmatic);
     }
 
+    // Counts full rebuilds that fire while the shown session works, to a
+    // log beside the exe. The VM tails it instead of dumping: any nonzero
+    // count means the incremental path missed and SetText ran hot again.
+    private void LogFallback(string reason)
+    {
+        try
+        {
+            var path = System.IO.Path.Combine(AppContext.BaseDirectory, "rebuild-fallback.log");
+            System.IO.File.AppendAllText(path,
+                $"{DateTime.UtcNow:o} session={_selected?.Key} reason={reason} historyLen={_historyText.Length}\n");
+        }
+        catch { /* logging never breaks rendering */ }
+    }
+
     private void OwnChangeView(ScrollViewer scroller, double vertical)
     {
         // No event comes when the offset is already there; counting one
@@ -1205,8 +1251,9 @@ public sealed partial class MainWindow : Window
         if (count > 0 && parts[count - 1] == "") count--;
         count = Math.Max(1, count);
         var prompt = new HashSet<int>();
-        var (_, runs, _, _) = BuildHistory();
-        foreach (var (start, _) in runs)
+        // User runs come from the latest BuildHistory via the shared field:
+        // a second full pass per rebuild kept the UI thread hot every chunk.
+        foreach (var (start, _) in _lastUserRuns)
         {
             var index = 0;
             for (var i = 0; i < start && i < _historyText.Length; i++)
@@ -1224,10 +1271,10 @@ public sealed partial class MainWindow : Window
                 Text = (i + 1) + (i + 1 < count ? "\n" : ""),
                 Foreground = prompt.Contains(i) ? accent : normal,
             });
-        // Resync immediately (toggle-on while scrolled shows stale numbers
-        // until the next scroll event otherwise).
-        if (TranscriptScroller() is { } scroller)
-            GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
+        // No same-tick drive: the gutter extent is stale until layout
+        // settles, so driving here parks the numbers short (the round-16
+        // freeze). OnTranscriptViewChanged is the only driver; every
+        // transcript scroll event re-syncs against the live offset.
     }
 
     private void OnLineNumbersToggled(object sender, RoutedEventArgs e)
@@ -1235,6 +1282,13 @@ public sealed partial class MainWindow : Window
         _layout.ShowLineNumbers = LineNumbersBox.IsChecked == true;
         _layout.Save(_dataFolder);
         UpdateGutter();
+        // Toggle-on while scrolled: one post-layout nudge, since no scroll
+        // event fires to carry the single-driver sync.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (TranscriptScroller() is { } scroller)
+                GutterScroller.ChangeView(null, scroller.VerticalOffset, null, true);
+        });
     }
 
     private void OnTranscriptTextChanged(object sender, RoutedEventArgs e)
