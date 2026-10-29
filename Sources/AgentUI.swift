@@ -5,6 +5,8 @@ struct AgentSetupView: View {
     @ObservedObject var session: Session
     @State private var settings: AgentConfig
     @State private var metaKey = ""
+    @State private var testingKey = false
+    @State private var keyTestOutcome = ""
     @State private var githubKey = ""
     @State private var discordURL = ""
     @State private var removeSecrets: Set<String> = []
@@ -19,6 +21,7 @@ struct AgentSetupView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     SecureField("Meta API key · blank keeps saved key", text: $metaKey)
+                    Button(testingKey ? "Testing…" : "Test key") { testKey() }.disabled(testingKey || removeSecrets.contains("meta")).help("One short model request with no session history; tests the entered key or the saved key")
                     Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("meta") }, set: { if $0 { removeSecrets.insert("meta") } else { removeSecrets.remove("meta") } })).toggleStyle(.checkbox).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
                 }
                 HStack {
@@ -69,9 +72,23 @@ struct AgentSetupView: View {
                 }.frame(height: 120)
             }
             .textFieldStyle(.roundedBorder)
+            if !keyTestOutcome.isEmpty { Text(keyTestOutcome).font(.caption).textSelection(.enabled) }
             if !error.isEmpty { Text(error).foregroundStyle(.red) }
             HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); error = "" }; Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction) }
         }.padding(22).frame(width: 650)
+    }
+    private func testKey() {
+        testingKey = true; keyTestOutcome = "Testing with a short request; no session history is sent."
+        let entered = metaKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = settings.model
+        Task { @MainActor in
+            defer { testingKey = false }
+            do {
+                guard let key = entered.isEmpty ? try AgentSecrets.read("meta") : entered, !key.isEmpty else { throw AgentFailure.message("Enter a Meta API key or save one first.") }
+                _ = try await AgentAPI().respond(model: model, instructions: "Reply with the words Connection verified. Do not use tools.", input: "Converse API connection test. No private session data is included.", key: key)
+                keyTestOutcome = "Key accepted; the selected model returned a complete response. No session history was sent."
+            } catch { keyTestOutcome = error.localizedDescription }
+        }
     }
     private var availableScope: Set<String> {
         let service = DeviceSyncService.shared

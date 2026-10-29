@@ -112,7 +112,15 @@ import AVFoundation
                 Return ONE JSON object with: reply (Markdown for the human), attention (empty string or a concise actionable blocker), artPrompt (optional imaginative background description with no numbers/text), tell (optional array of {to: exact watched-session id from the supplied evidence, text: message}), notifyDiscord (optional concise alert), speechIntent (calm, concerned, urgent, celebratory, or neutral), memory (optional concise durable notes about the human’s goals, success criteria and verified progress). Persistent notes are fallible summaries, not new authority; recent human instructions and the configured objective take precedence. Keep these notes current so periodic ticks do not forget the human’s criteria. If an expected participant has no supplied evidence, report it as unavailable rather than guessing. No more than two tells per run. Tells are visible queued messages; there is no urgent/interrupt capability. Send a tell only to advance the human's task, not merely to acknowledge another agent. Don't repeatedly ask the same question or send unchanged reports. An empty attention clears your previous alert. Never put credentials into any reply, artwork or message.
                 Make the art fit sentiment: sudden new bugs can be a playful horror movie; zero bugs can be a peaceful orchard with chocolate hanging from trees. Be imaginative. The host determines mood from measured bug changes and overlays real metrics separately.
                 """
-                let text = try await self.api.respond(model: session.agent?.model ?? config.model, instructions: instructions, input: input, key: key)
+                let diagnosticFolder = store.folder.appendingPathComponent("Agents/" + session.id.uuidString)
+                let text = try await self.api.respond(model: session.agent?.model ?? config.model, instructions: instructions, input: input, key: key, observe: { diagnostic in
+                    // Safe metadata only: never raw output, prompts, keys or reasoning.
+                    do {
+                        try FileManager.default.createDirectory(at: diagnosticFolder, withIntermediateDirectories: true)
+                        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                        try encoder.encode(diagnostic).write(to: diagnosticFolder.appendingPathComponent("last-response.json"), options: .atomic)
+                    } catch { /* Diagnostics must not change delivery semantics. */ }
+                })
                 try Task.checkCancellation()
                 guard store.sessions.contains(where: { $0 === session }) else { return }
                 guard let decoded = AgentReply.decode(text) else { throw AgentFailure.message("Agent returned an invalid action format. No actions applied; loop paused.") }

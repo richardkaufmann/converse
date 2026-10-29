@@ -131,6 +131,17 @@ struct AgentReply: Decodable {
     }
 }
 
+struct AgentResponseDiagnostic: Codable {
+    var model: String
+    var status: String
+    var incompleteReason: String?
+    var outputTokenLimit: Int
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var reasoningTokens: Int?
+    var observedAt = Date()
+}
+
 // Shared fixed-host HTTPS client; errors deliberately omit response bodies,
 // which may echo credentials or private prompts. Tests inject the transport.
 final class AgentAPI {
@@ -145,13 +156,31 @@ final class AgentAPI {
         if let key, !key.isEmpty { req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
         if let body { req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type"); req.httpBody = try JSONSerialization.data(withJSONObject: body) }
         let (bytes, response) = try await request(req)
-        guard (200..<300).contains(response.statusCode) else { throw AgentFailure.message("\(url.host ?? "Service") returned HTTP \(response.statusCode).") }
+        guard (200..<300).contains(response.statusCode) else {
+            if url.host == "api.meta.ai", response.statusCode == 401 { throw AgentFailure.message("Meta rejected the API key (HTTP 401). Check or replace it in Agent Setup.") }
+            if url.host == "api.meta.ai", response.statusCode == 403 { throw AgentFailure.message("Meta denied access (HTTP 403). Check this key’s model/account permissions.") }
+            throw AgentFailure.message("\(url.host ?? "Service") returned HTTP \(response.statusCode).")
+        }
         guard bytes.count <= 32_000_000 else { throw AgentFailure.message("Service response too large.") }
         return (bytes.isEmpty ? [:] : try JSONSerialization.jsonObject(with: bytes), response)
     }
-    func respond(model: String, instructions: String, input: String, key: String) async throws -> String {
-        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: ["model": model, "instructions": instructions, "input": input, "max_output_tokens": 2500, "store": false], key: key)
-        guard let response = raw as? [String: Any], response["status"] as? String == "completed" else { throw AgentFailure.message("Agent response did not complete. No actions applied.") }
+    static let outputTokenLimit = 8192
+    func respond(model: String, instructions: String, input: String, key: String, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
+        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: ["model": model, "instructions": instructions, "input": input, "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false], key: key)
+        guard let response = raw as? [String: Any] else { throw AgentFailure.message("Agent service returned an invalid response. No actions applied.") }
+        let rawStatus = response["status"] as? String ?? "unknown"
+        let status = ["completed", "incomplete", "failed", "cancelled", "queued", "in_progress"].contains(rawStatus) ? rawStatus : "unknown"
+        let rawReason = (response["incomplete_details"] as? [String: Any])?["reason"] as? String
+        let reason = ["max_output_tokens", "content_filter"].contains(rawReason ?? "") ? rawReason : nil
+        let usage = response["usage"] as? [String: Any]
+        observe?(AgentResponseDiagnostic(model: model, status: status, incompleteReason: reason, outputTokenLimit: Self.outputTokenLimit,
+            inputTokens: usage?["input_tokens"] as? Int, outputTokens: usage?["output_tokens"] as? Int,
+            reasoningTokens: (usage?["output_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int))
+        guard status == "completed" else {
+            if reason == "max_output_tokens" { throw AgentFailure.message("Agent hit its response limit (\(Self.outputTokenLimit) tokens including reasoning). No actions applied. Try fewer watched sessions or a shorter request, then Run once.") }
+            if reason == "content_filter" { throw AgentFailure.message("The model service stopped this response under its content policy. No actions applied.") }
+            throw AgentFailure.message("Agent response stopped before completion (\(status)). No actions applied. The loop is paused; try Run once.")
+        }
         let text = (response["output"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "message" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }.filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
         guard !text.isEmpty else { throw AgentFailure.message("Agent returned no answer.") }; return text
     }

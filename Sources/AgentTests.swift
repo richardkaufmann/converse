@@ -111,6 +111,8 @@ import Foundation
     check(!archive.contains("isolated-test-key") && !AgentWidgetExport.html(agent).contains("isolated-test-key"), "Agent credentials never enter persisted sessions or widget exports")
     let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
     check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
+    let requestBody = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
 
     let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!
     runtime.api.request = { request in
@@ -132,10 +134,17 @@ import Foundation
     while agent.busy && Date() < malformedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(!agent.busy && agent.agent?.enabled == false && agent.agent?.attention.contains("invalid action format") == true, "Malformed completed agent output pauses the loop without applying actions")
     runtime.api.request = { request in
-        (Data("{\"output\":[],\"status\":\"incomplete\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        let object: [String: Any] = ["status": "incomplete", "incomplete_details": ["reason": "max_output_tokens"], "usage": ["output_tokens": 8192, "output_tokens_details": ["reasoning_tokens": 8192]], "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Partial result\",\"tell\":[]}"]]]], "error": ["message": "private-api-canary"]]
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
     agent.busy = true; let failedID = UUID(); agent.messages.append(Message(id: failedID, role: "assistant", text: "")); runtime.run(agent, store: store, responseID: failedID)
     let failedDeadline = Date().addingTimeInterval(8)
     while agent.busy && Date() < failedDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(!agent.busy && agent.agent?.enabled == false && agent.agent?.attention.contains("No actions applied") == true, "Incomplete model responses cannot apply actions and pause the agent loop")
+    check(agent.agent?.attention.contains("response limit") == true, "Token exhaustion produces an actionable reason instead of a generic incomplete error")
+    let diagnosticPath = root.appendingPathComponent("Agents/" + agent.id.uuidString + "/last-response.json")
+    let diagnosticBytes = try! Data(contentsOf: diagnosticPath)
+    let diagnosticDecoder = JSONDecoder(); diagnosticDecoder.dateDecodingStrategy = .iso8601
+    let diagnostic = try! diagnosticDecoder.decode(AgentResponseDiagnostic.self, from: diagnosticBytes)
+    check(diagnostic.incompleteReason == "max_output_tokens" && diagnostic.reasoningTokens == 8192 && !String(decoding: diagnosticBytes, as: UTF8.self).contains("private-api-canary"), "Response diagnostics preserve safe termination and usage metadata without raw API bodies")
 }
