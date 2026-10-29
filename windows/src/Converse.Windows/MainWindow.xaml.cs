@@ -826,7 +826,7 @@ public sealed partial class MainWindow : Window
         portBox.TextChanged += (_, _) => _groupsJoinPort = portBox.Text;
         var groupBox = new ComboBox { Width = 200, FontSize = 12, PlaceholderText = "Group to join" };
         var groupItems = candidates.Select(c => new SettingItem(c.Id, c.Name)).ToList();
-        if (groupItems.Count > 0) SyncCombo(groupBox, groupItems, _groupsJoinGroupId);
+        if (groupItems.Count > 0) ConversationPane.SyncCombo(groupBox, groupItems, _groupsJoinGroupId);
         groupBox.SelectionChanged += (_, _) =>
         {
             if (groupBox.SelectedItem is SettingItem picked) _groupsJoinGroupId = picked.Id;

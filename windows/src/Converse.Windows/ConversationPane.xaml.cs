@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using System.Text.Json.Nodes;
+using WinRT.Interop;
 
 namespace Converse.App;
 
@@ -420,7 +421,7 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
-    private static void SyncCombo(ComboBox box, List<SettingItem> items, string currentId)
+    internal static void SyncCombo(ComboBox box, List<SettingItem> items, string currentId)
     {
         if (box.IsDropDownOpen) return;
         var existing = box.ItemsSource as List<SettingItem>;
@@ -1009,7 +1010,7 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
-    private void ShowSession(SidebarSession? session, bool caretToEnd)
+    internal void ShowSession(SidebarSession? session, bool caretToEnd)
     {
         _selected = session;
         _draftText = "";
