@@ -360,11 +360,13 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await UntilPush(() => viewer.RemoteLeases.ContainsKey(gid)), "Push setup viewer holds the lease");
         var submit = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "submit", Text = "say hello" });
         Check(submit is not null && await UntilPush(() => homeSession.Busy), "Push setup remote submit starts the home turn");
+        Check(await UntilPush(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid && r.Busy) == true), "Gated turn shows busy on the viewer sidebar");
         Check(viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Messages.Any(m => m.Text.Contains("fake reply")) != true, "Gated turn has not leaked its reply yet");
         homeRunner.Gate!.TrySetResult(true);
         Check(await UntilPush(() => !homeSession.Busy), "Push setup home turn completes");
         Check(await UntilPush(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } pushed && !pushed.Busy
             && pushed.Messages.Any(m => m.Text.Contains("fake reply"))), "Completed turn pushes its final transcript to the holder");
+        Check(await UntilPush(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid && !r.Busy && r.Status == "Ready") == true), "Completed turn clears the viewer sidebar busy");
     }
     finally
     {
