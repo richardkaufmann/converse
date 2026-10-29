@@ -36,16 +36,6 @@ public sealed partial class ConversationPane : UserControl
         PaneBadge.Content = pane > 0 ? pane.ToString() : "\u2014";
         PaneBadge.Visibility = pane > 0 ? Visibility.Visible : Visibility.Collapsed;
         SyncLineNumbersBox();
-        // Click-anywhere-to-type observation: history RichTextBlocks mark
-        // pointer presses handled for selection, so plain XAML wiring on
-        // the scroller never fires. handledEventsToo sees them without
-        // disturbing selection, drags, or the scrollbar.
-        TranscriptScroller.AddHandler(UIElement.PointerPressedEvent,
-            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptPressed), true);
-        TranscriptScroller.AddHandler(UIElement.PointerMovedEvent,
-            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptMoved), true);
-        TranscriptScroller.AddHandler(UIElement.PointerReleasedEvent,
-            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptReleased), true);
     }
 
     // The numbers checkbox mirrors the shared layout pref in every pane.
@@ -909,70 +899,47 @@ public sealed partial class ConversationPane : UserControl
 
 
 
-    // Click-anywhere-to-type (Mac parity): a plain left-click on history
-    // or the header jumps to the end and focuses the draft. A press that
-    // moves becomes a selection drag and never yanks; right-button presses
-    // (context menu) and DraftBox presses (editing) are excluded. Known
-    // tradeoff, same as the Mac: double-click word-select in history jumps
-    // instead — drag to select, right-click to copy.
-    private bool _pressArmed;
-    private Windows.Foundation.Point _pressPoint;
+    // Type-anywhere-to-entry (Mac parity, Richard-corrected): clicking
+    // history never scrolls — selection just works natively. Only TYPING
+    // jumps: a text key pressed while focus sits anywhere in the pane
+    // except the draft moves focus to the tail synchronously, and the
+    // keystroke itself keeps routing so the character lands in the draft.
+    // Enter, Tab and navigation never redirect; Ctrl/Alt/Win combos
+    // (copy, select-all) stay with the focused element.
+    private void OnTranscriptPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (IsInDraft(e.OriginalSource as DependencyObject)) return;
+        if (!IsTypeRedirectKey(e.Key)) return;
+        static bool Down(Windows.System.VirtualKey key) =>
+            Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key)
+                .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (Down(Windows.System.VirtualKey.Control) || Down(Windows.System.VirtualKey.Menu)
+            || Down(Windows.System.VirtualKey.LeftWindows) || Down(Windows.System.VirtualKey.RightWindows)) return;
+        var length = GetDraftText().Length;
+        DraftBox.Document.Selection.SetRange(length, length);
+        DraftBox.Focus(FocusState.Programmatic);
+        ScrollTranscriptToEnd();
+    }
 
-    // Draft presses edit; scrollbar presses scroll. Everything else in
-    // the transcript is history, and a plain click there jumps to entry.
-    private bool IsEntryOrChrome(DependencyObject? source)
+    private bool IsInDraft(DependencyObject? source)
     {
         var current = source;
         while (current is not null)
         {
             if (ReferenceEquals(current, DraftBox)) return true;
-            if (current is Microsoft.UI.Xaml.Controls.Primitives.ScrollBar) return true;
             current = VisualTreeHelper.GetParent(current);
         }
         return false;
     }
 
-    private void JumpToEntry()
+    private static bool IsTypeRedirectKey(Windows.System.VirtualKey key)
     {
-        _userScrollUtc = DateTime.UtcNow;
-        _unreadUpdates = 0;
-        UpdateJumpButton(following: true);
-        ScrollTranscriptToEnd();
-        DraftBox.Focus(FocusState.Programmatic);
-    }
-
-    private void OnTranscriptPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
-    {
-        _pressArmed = false;
-        var at = e.GetCurrentPoint(TranscriptScroller);
-        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonPressed) return;
-        if (IsEntryOrChrome(e.OriginalSource as DependencyObject)) return;
-        _pressArmed = true;
-        _pressPoint = at.Position;
-    }
-
-    private void OnTranscriptMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
-    {
-        if (!_pressArmed) return;
-        var at = e.GetCurrentPoint(TranscriptScroller).Position;
-        if (Math.Abs(at.X - _pressPoint.X) + Math.Abs(at.Y - _pressPoint.Y) > 6) _pressArmed = false;
-    }
-
-    private void OnTranscriptReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
-    {
-        if (!_pressArmed) return;
-        _pressArmed = false;
-        var at = e.GetCurrentPoint(TranscriptScroller);
-        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonReleased) return;
-        if (IsEntryOrChrome(e.OriginalSource as DependencyObject)) return;
-        JumpToEntry();
-    }
-
-    private void OnPaneHeaderPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
-    {
-        var at = e.GetCurrentPoint(PaneHeader);
-        if (at.Properties.PointerUpdateKind != Microsoft.UI.Input.PointerUpdateKind.LeftButtonPressed) return;
-        JumpToEntry();
+        var code = (int)key;
+        return (code >= 48 && code <= 57)    // 0-9
+            || (code >= 65 && code <= 90)    // A-Z
+            || (code >= 96 && code <= 111)   // numpad digits and operators
+            || code == 32 || code == 8       // space, backspace
+            || (code >= 186 && code <= 223); // OEM punctuation
     }
 
     private void OnTranscriptScrolled(object sender, ScrollViewerViewChangedEventArgs e)
