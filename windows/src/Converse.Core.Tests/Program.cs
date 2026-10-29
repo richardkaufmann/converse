@@ -1488,6 +1488,73 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(bin); }
 }
 
+// A turn shaped text -> tool -> text keeps every block: later blocks that
+// arrive only in assistant events are rescued (not dropped once anything
+// streamed), and a subset final snapshot keeps the accumulation (PONG).
+{
+    var dir = Directory.CreateTempSubdirectory("converse-pong-").FullName;
+    try
+    {
+        var store = new SessionStore(dir, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "claude"));
+        var response = new ChatMessage { Role = "assistant", Text = "" };
+        void Line(string json) => store.Consume(json, session, response);
+        Line("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+        Line("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"PONG\"}}}");
+        Line("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PONG\"},{\"type\":\"tool_use\",\"name\":\"Glob\"}]}}");
+        Line("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Both files read now\"}]}}");
+        Line("{\"type\":\"result\",\"result\":\"Both files read now\"}");
+        Check(response.Text.Contains("PONG", StringComparison.Ordinal)
+            && response.Text.Contains("Both files read now", StringComparison.Ordinal),
+            "Unstreamed later blocks survive; subset snapshot keeps PONG");
+        Check(response.Text.IndexOf("PONG", StringComparison.Ordinal)
+            == response.Text.LastIndexOf("PONG", StringComparison.Ordinal),
+            "Already-streamed blocks are not duplicated by their assistant event");
+
+        var streamed = store.Create(store.Entries.First(e => e.Engine == "claude"));
+        var streamedResponse = new ChatMessage { Role = "assistant", Text = "" };
+        void SLine(string json) => store.Consume(json, streamed, streamedResponse);
+        SLine("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+        SLine("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"A\"}}}");
+        SLine("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}}");
+        SLine("{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}}");
+        SLine("{\"type\":\"result\",\"result\":\"B\"}");
+        Check(streamedResponse.Text == "A\n\nB", "Last-block-only snapshot keeps earlier streamed blocks");
+    }
+    finally { Cleanup(dir); }
+}
+
+// CLI pipes are UTF-8 on every platform: .NET on Windows would otherwise
+// decode the redirected output as the ANSI code page (mojibake).
+{
+    var dir = Directory.CreateTempSubdirectory("converse-utf8-").FullName;
+    try
+    {
+        var store = new SessionStore(dir, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        var lines = new List<string>();
+        int exit;
+        if (OperatingSystem.IsWindows())
+        {
+            session.Entry.Command = "powershell";
+            exit = await new ProcessAgentRunner().RunAsync(session,
+                new[] { "-NoProfile", "-Command",
+                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output ([char]0x2013)" },
+                "ignored", lines.Add, CancellationToken.None);
+        }
+        else
+        {
+            session.Entry.Command = "/bin/sh";
+            exit = await new ProcessAgentRunner().RunAsync(session,
+                new[] { "-c", "printf '\\342\\200\\223'" },
+                "ignored", lines.Add, CancellationToken.None);
+        }
+        Check(exit == 0 && lines.Count == 1 && lines[0] == "–",
+            "Runner decodes multibyte UTF-8 CLI output exactly");
+    }
+    finally { Cleanup(dir); }
+}
+
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 foreach (var label in failedLabels) Console.WriteLine("FAILED: " + label);
 return failures == 0 ? 0 : 1;

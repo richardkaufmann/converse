@@ -97,6 +97,12 @@ public sealed class ProcessAgentRunner : IAgentRunner
             RedirectStandardInput = true,
             UseShellExecute = false,
             CreateNoWindow = true,
+            // CLI providers emit UTF-8 on every platform. Without explicit
+            // pipe encodings .NET on Windows decodes as the ANSI code page,
+            // mojibaking every non-ASCII reply (macOS defaults to UTF-8).
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
+            StandardInputEncoding = new UTF8Encoding(false),
         };
         var allArgs = arguments.Append("--").Append(prompt);
         var resolved = CommandResolution.Resolve(session.Entry.Command)
@@ -638,7 +644,17 @@ public sealed class SessionStore
             {
                 foreach (var block in content.EnumerateArray())
                 {
-                    if (GetString(block, "text") is { } value && !session.StreamedText) text = (text ?? "") + value;
+                    // Text the streamer never delivered (later blocks in tool
+                    // turns often arrive only in this event) must be kept: skip
+                    // only blocks the accumulated text already contains, instead
+                    // of dropping every block once anything streamed. Without
+                    // this, a turn shaped text → tool → text keeps just the
+                    // final snapshot and loses the earlier blocks (PONG). Dedup
+                    // spans the stored text plus blocks accepted earlier in
+                    // this same event (Mac parity).
+                    if (GetString(block, "text") is { } value && value.Length > 0
+                        && !StripSeparators(session, response.Text + (text ?? "")).Contains(value, StringComparison.Ordinal))
+                        text = (text ?? "") + value;
                     if (GetString(block, "type") == "tool_use")
                         session.Messages.Add(new ChatMessage { Role = "activity", Text = "Using " + (GetString(block, "name") ?? "tool") });
                 }
@@ -652,12 +668,16 @@ public sealed class SessionStore
                     // Keep only our display separators when the content is
                     // otherwise byte-for-byte the same; genuine corrections
                     // and error results still replace the accumulated text.
+                    // (Unstreamed later blocks are rescued above, so by the
+                    // time a snapshot arrives the accumulation is complete and
+                    // a subset snapshot keeps it via the contains check below.)
                     var accumulated = response.Text;
-                    var unseparated = accumulated;
-                    foreach (var (location, length) in session.ClaudeStreamSeparators.OrderByDescending(s => s.Location))
-                        if (location + length <= unseparated.Length) unseparated = unseparated.Remove(location, length);
+                    var unseparated = StripSeparators(session, accumulated);
                     text = !session.TurnFailed && session.ClaudeStreamSeparators.Count > 0 && unseparated == result
-                        ? accumulated : result;
+                        ? accumulated
+                        : !session.TurnFailed && accumulated.Contains(result, StringComparison.Ordinal) && result.Length > 0
+                            ? accumulated
+                            : result;
                     replace = true;
                 }
             }
@@ -693,5 +713,13 @@ public sealed class SessionStore
     private static string? GetString(JsonElement obj, string name) =>
         obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
+
+    internal static string StripSeparators(ChatSession session, string accumulated)
+    {
+        var unseparated = accumulated;
+        foreach (var (location, length) in session.ClaudeStreamSeparators.OrderByDescending(s => s.Location))
+            if (location + length <= unseparated.Length) unseparated = unseparated.Remove(location, length);
+        return unseparated;
+    }
 }
 
