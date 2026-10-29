@@ -1568,6 +1568,17 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         "Pipes without a divider row stay plain text");
 }
 
+// Render-boundary hardening: lone surrogates scrub to U+FFFD 1:1 (offsets
+// preserved) while valid pairs pass through untouched.
+{
+    var lone = "a\ud800b\udc00c\ud800";
+    var clean = MarkdownRuns.SanitizeLoneSurrogates(lone);
+    Check(clean == "a�b�c�", "Lone surrogates scrub to replacement chars");
+    var pair = "a\U0001F600b";
+    Check(MarkdownRuns.SanitizeLoneSurrogates(pair) == pair && pair.Length == 4,
+        "Valid surrogate pairs pass through untouched");
+}
+
 // Command resolution: native exe wins, npm shims unwrap to node, unknown
 // batches fall back to a quoted cmd.exe wrapper, misses resolve null.
 {

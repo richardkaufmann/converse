@@ -175,9 +175,11 @@
                                  PreviewKeyDown="OnTranscriptKeyDown"
                                  TextChanged="OnTranscriptTextChanged">
                         <RichEditBox.ContextFlyout>
-                            <MenuFlyout>
+                            <MenuFlyout Opening="OnContextMenuOpening">
                                 <MenuFlyoutItem Text="Copy" Click="OnCopyClick"/>
                                 <MenuFlyoutItem Text="Select all" Click="OnSelectAllClick"/>
+                                <MenuFlyoutSeparator x:Name="CopyMessageSeparator"/>
+                                <MenuFlyoutItem x:Name="CopyMessageItem" Text="Copy" Click="OnCopyMessageClick"/>
                             </MenuFlyout>
                         </RichEditBox.ContextFlyout>
                     </RichEditBox>

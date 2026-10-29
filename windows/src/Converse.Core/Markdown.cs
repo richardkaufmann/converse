@@ -16,6 +16,30 @@ public sealed record MdRun(int Start, int Length, MdRunKind Kind, int Level = 0)
 /// </summary>
 public static class MarkdownRuns
 {
+    // Render-boundary hardening: a lone UTF-16 surrogate handed to WinRT
+    // string marshalling faults inside WinUI rich text (round-13 crash stack
+    // dies in WindowsCreateStringReference during RebuildDocument). CLI bytes
+    // split across pipe reads can in principle leave surrogate halves in
+    // separate chunks, so scrub lone surrogates to U+FFFD before display.
+    // The replacement is 1:1, so formatting-run offsets never shift.
+    public static string SanitizeLoneSurrogates(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text ?? "";
+        var chars = text.ToCharArray();
+        var dirty = false;
+        for (var i = 0; i < chars.Length; i++)
+        {
+            if (char.IsHighSurrogate(chars[i]))
+            {
+                if (i + 1 >= chars.Length || !char.IsLowSurrogate(chars[i + 1]))
+                { chars[i] = '�'; dirty = true; }
+                else i++;
+            }
+            else if (char.IsLowSurrogate(chars[i])) { chars[i] = '�'; dirty = true; }
+        }
+        return dirty ? new string(chars) : text;
+    }
+
     public static (string Plain, List<MdRun> Runs) Render(string body)
     {
         var runs = new List<MdRun>();

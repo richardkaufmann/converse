@@ -101,6 +101,12 @@ public sealed partial class MainWindow : Window
     // are the user, even mid-rebuild (the control-loss fix); only the
     // SetText reset to the top is layout noise.
     private bool _ownScroll;
+    // Streaming rebuild coalescing (round-13 crash stack dies inside a
+    // per-token full rebuild): while the shown session works, history
+    // rebuilds run at most every 200ms with one trailing catch-up.
+    private DateTime _lastStreamRebuildUtc;
+    private bool _rebuildCoalesced;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _rebuildTimer;
     private StackPanel? _groupsPanel;
     private string _groupsSignature = "";
     private string _groupsCreateName = "";
@@ -360,11 +366,16 @@ public sealed partial class MainWindow : Window
     // messages the local cap hides (remote paging comes from home instead).
     // Markdown strips before break normalization, which is length-preserving,
     // so run offsets stay valid in the final document coordinates.
+    // Message ranges backing the Copy Prompt / Copy Response menu: document
+    // offsets of each rendered message plus its role and source text.
+    private List<(int Start, int Length, string Role, string Text)> _lastMessageRanges = new();
+
     private (string History, List<(int Start, int Length)> UserRuns,
         List<(int Start, int Length, MdRunKind Kind, int Level)> MdRuns, int Hidden) BuildHistory()
     {
         var runs = new List<(int Start, int Length)>();
         var mdRuns = new List<(int Start, int Length, MdRunKind Kind, int Level)>();
+        _lastMessageRanges = new List<(int Start, int Length, string Role, string Text)>();
         var text = new System.Text.StringBuilder();
         List<(string Role, string Text)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
@@ -387,10 +398,13 @@ public sealed partial class MainWindow : Window
         {
             if (role == "user")
             {
-                var label = "You: ";
+                // Mac parity: submitted turns carry no "You:" label (they
+                // render italic, like the Mac's prompt styling).
                 var start = text.Length;
-                text.Append(label).Append(Breaks(body)).Append("\r\r");
-                runs.Add((start, label.Length + Breaks(body).Length));
+                var rendered = Breaks(body);
+                text.Append(rendered).Append("\r\r");
+                runs.Add((start, rendered.Length));
+                _lastMessageRanges.Add((start, rendered.Length, "user", body));
             }
             else
             {
@@ -401,9 +415,12 @@ public sealed partial class MainWindow : Window
                 text.Append(broken).Append("\r\r");
                 foreach (var run in md)
                     mdRuns.Add((start + run.Start, run.Length, run.Kind, run.Level));
+                _lastMessageRanges.Add((start, broken.Length, "assistant", body));
             }
         }
-        return (text.ToString(), runs, mdRuns, hidden);
+        // Lone surrogates never reach WinRT string marshalling (round-13
+        // crash stack); the 1:1 scrub keeps every run offset valid.
+        return (MarkdownRuns.SanitizeLoneSurrogates(text.ToString()), runs, mdRuns, hidden);
     }
 
     private void RenderPane()
@@ -449,7 +466,31 @@ public sealed partial class MainWindow : Window
         if (history != _historyText)
         {
             _historyText = history;
-            RebuildDocument(caretToEnd: false);
+            if (SelectedBusy() && (DateTime.UtcNow - _lastStreamRebuildUtc).TotalMilliseconds < 200)
+            {
+                if (!_rebuildCoalesced)
+                {
+                    _rebuildCoalesced = true;
+                    if (_rebuildTimer is null)
+                    {
+                        _rebuildTimer = DispatcherQueue.CreateTimer();
+                        _rebuildTimer.Tick += (_, _) =>
+                        {
+                            _rebuildTimer.Stop();
+                            _rebuildCoalesced = false;
+                            _lastStreamRebuildUtc = DateTime.UtcNow;
+                            RebuildDocument(caretToEnd: false);
+                        };
+                    }
+                    _rebuildTimer.Interval = TimeSpan.FromMilliseconds(200);
+                    _rebuildTimer.Start();
+                }
+            }
+            else
+            {
+                _lastStreamRebuildUtc = DateTime.UtcNow;
+                RebuildDocument(caretToEnd: false);
+            }
         }
         UpdateGate();
         UpdateBusy();
@@ -457,6 +498,15 @@ public sealed partial class MainWindow : Window
         UpdateEarlier();
         UpdateHint();
         RefreshSettings();
+    }
+
+    private bool SelectedBusy()
+    {
+        if (_selected?.LocalSessionID is { } localId)
+            return _store.Sessions.FirstOrDefault(s => s.Id == localId)?.Busy == true;
+        if (_selected?.GlobalID is { } globalId)
+            return _devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Busy == true;
+        return false;
     }
 
     // Mac parity: remote input needs a live display lease on an online home.
@@ -951,6 +1001,40 @@ public sealed partial class MainWindow : Window
     private void OnSelectAllClick(object sender, RoutedEventArgs e)
     {
         Transcript.Document.Selection.SetRange(0, CurrentDocLength());
+        Transcript.Focus(FocusState.Programmatic);
+    }
+
+    // Whole-message copy: the menu opens at the caret, and a right click
+    // moves the caret to the pointer, so the selection start identifies the
+    // message. Cut/Paste are deliberately absent — history is protected, so
+    // Cut would only be reverted, and Paste belongs at the draft tail.
+    private string _contextMessage = "";
+
+    private void OnContextMenuOpening(object sender, object e)
+    {
+        var offset = Transcript.Document.Selection.StartPosition;
+        var hit = _lastMessageRanges.FirstOrDefault(r => offset >= r.Start && offset < r.Start + r.Length);
+        if (hit.Text is null)
+        {
+            CopyMessageItem.Visibility = Visibility.Collapsed;
+            CopyMessageSeparator.Visibility = Visibility.Collapsed;
+            return;
+        }
+        CopyMessageItem.Text = hit.Role == "user" ? "Copy Prompt" : "Copy Response";
+        _contextMessage = MarkdownRuns.SanitizeLoneSurrogates(hit.Text);
+        CopyMessageItem.Visibility = Visibility.Visible;
+        CopyMessageSeparator.Visibility = Visibility.Visible;
+    }
+
+    private void OnCopyMessageClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            package.SetText(_contextMessage);
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+        }
+        catch { /* clipboard busy: keyboard copy still works */ }
         Transcript.Focus(FocusState.Programmatic);
     }
 
@@ -2025,6 +2109,18 @@ public sealed partial class MainWindow : Window
             {
                 _placements.Park(parked);
                 pruned = true;
+            }
+        // Mac parity (Workspace.shared.park on remote take): a local session
+        // whose display lease is held by another device cannot stay on screen
+        // here. Park it and clear the selection so this end goes quiet.
+        foreach (var pane in new[] { 1, 2, 3 })
+            if (_placements.KeyIn(pane) is { } key && key.StartsWith("local:", StringComparison.Ordinal)
+                && Guid.TryParse(key["local:".Length..], out var localId)
+                && _devices.DisplayHolder(localId) is { } holder && holder.Device != _devices.DeviceId)
+            {
+                _placements.Park(key);
+                pruned = true;
+                if (_selected?.Key == key) SelectSession(null, caretToEnd: false);
             }
         if (pruned) _placements.Save(_dataFolder);
         var titles = Sidebar.Items.OfType<SidebarSession>().ToDictionary(i => i.Key, i => i.Title);
