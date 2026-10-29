@@ -57,11 +57,11 @@
         <!-- Latest-jump floats over the transcript's lower-right corner
              (Mac parity), not in the header. -->
         <Grid Grid.Row="3" Margin="8,4,8,0">
+            <!-- Click observation is registered in code with handledEventsToo:
+                 history text marks presses handled for selection, which
+                 XAML wiring never sees. -->
             <ScrollViewer x:Name="TranscriptScroller"
-                          ViewChanged="OnTranscriptScrolled"
-                          PointerPressed="OnTranscriptPressed"
-                          PointerMoved="OnTranscriptMoved"
-                          PointerReleased="OnTranscriptReleased">
+                          ViewChanged="OnTranscriptScrolled">
                 <StackPanel x:Name="TranscriptStack" Spacing="10">
                     <RichEditBox x:Name="DraftBox" FontSize="16" Padding="0" AcceptsReturn="True"
                                  PlaceholderText="Select a conversation to begin."

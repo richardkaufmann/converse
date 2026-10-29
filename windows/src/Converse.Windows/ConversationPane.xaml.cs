@@ -36,6 +36,16 @@ public sealed partial class ConversationPane : UserControl
         PaneBadge.Content = pane > 0 ? pane.ToString() : "\u2014";
         PaneBadge.Visibility = pane > 0 ? Visibility.Visible : Visibility.Collapsed;
         SyncLineNumbersBox();
+        // Click-anywhere-to-type observation: history RichTextBlocks mark
+        // pointer presses handled for selection, so plain XAML wiring on
+        // the scroller never fires. handledEventsToo sees them without
+        // disturbing selection, drags, or the scrollbar.
+        TranscriptScroller.AddHandler(UIElement.PointerPressedEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptPressed), true);
+        TranscriptScroller.AddHandler(UIElement.PointerMovedEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptMoved), true);
+        TranscriptScroller.AddHandler(UIElement.PointerReleasedEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(OnTranscriptReleased), true);
     }
 
     // The numbers checkbox mirrors the shared layout pref in every pane.
@@ -877,6 +887,11 @@ public sealed partial class ConversationPane : UserControl
         var range = DraftBox.Document.GetRange(0, text.Length);
         range.CharacterFormat.ForegroundColor = Microsoft.UI.Colors.Blue;
         range.CharacterFormat.Italic = FormatEffect.Off;
+        // Mac parity: genuine input follows the tail — typing while parked
+        // brings the view (and the character just typed) on screen.
+        // Programmatic sets return through _draftSetting above, so they
+        // never scroll.
+        ScrollTranscriptToEnd();
         ScheduleDraftFlush();
     }
 
