@@ -16,7 +16,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     fabricRevocationReconnectTests(check)
     fabricTrustSelfTests(check)
     deviceFabricSelfTests(check)
-    MainActor.assumeIsolated { agentSelfTests(check) }
+    MainActor.assumeIsolated { agentSelfTests(check); kaosSelfTests(check) }
     // A real MSP process stops reading stdin after initialize. This pins the
     // actual connection/setting path against UI stalls, not just the writer helper.
     let pressureHost = FileManager.default.temporaryDirectory.appendingPathComponent("converse-slow-msp-" + UUID().uuidString + ".py")

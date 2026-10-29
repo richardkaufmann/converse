@@ -1975,6 +1975,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
     var transcriptExporter: TranscriptExportController?
     lazy var helpController = ConverseHelpController()
+    lazy var kaosController = MainActor.assumeIsolated { KAOSWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.appearance = nil
@@ -2028,6 +2029,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
+        sub.addItem(withTitle: "Jolly / KAOS…", action: #selector(showKAOS), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
@@ -2060,6 +2062,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
+    @objc func showKAOS() { MainActor.assumeIsolated { kaosController.show() } }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app")]) }
     @objc func newWindow() {
