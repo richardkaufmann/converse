@@ -2,6 +2,13 @@ using System.Security.Cryptography;
 using Converse.Core;
 
 // Console check runner mirroring Sources/DeviceSyncTests.swift (PASS:/FAIL:).
+// Emit mode: the UTF-8 test spawns this same binary so the wire bytes are
+// exact (E2 80 93 + newline) on every platform, no shell involved.
+if (args.FirstOrDefault() == "--emit-utf8")
+{
+    Console.OpenStandardOutput().Write([0xE2, 0x80, 0x93, 0x0A]);
+    return 0;
+}
 var failures = 0;
 var failedLabels = new List<string>();
 void Check(bool ok, string label)
@@ -1590,30 +1597,24 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
 }
 
 // CLI pipes are UTF-8 on every platform: .NET on Windows would otherwise
-// decode the redirected output as the ANSI code page (mojibake).
+// decode the redirected output as the ANSI code page (mojibake). The child
+// is this same binary in emit mode, so the wire bytes are exact on every
+// platform (a powershell child follows console encoding and proved nothing).
 {
     var dir = Directory.CreateTempSubdirectory("converse-utf8-").FullName;
     try
     {
         var store = new SessionStore(dir, new FakeRunner());
         var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        session.Entry.Command = Environment.ProcessPath!;
+        // A user-local SDK (no global install) needs DOTNET_ROOT to reach
+        // grandchildren: the apphost resolves the runtime from it.
+        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        Environment.SetEnvironmentVariable("DOTNET_ROOT",
+            Path.GetFullPath(Path.Combine(runtimeDir, "..", "..", "..")));
         var lines = new List<string>();
-        int exit;
-        if (OperatingSystem.IsWindows())
-        {
-            session.Entry.Command = "powershell";
-            exit = await new ProcessAgentRunner().RunAsync(session,
-                new[] { "-NoProfile", "-Command",
-                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output ([char]0x2013)" },
-                "ignored", lines.Add, CancellationToken.None);
-        }
-        else
-        {
-            session.Entry.Command = "/bin/sh";
-            exit = await new ProcessAgentRunner().RunAsync(session,
-                new[] { "-c", "printf '\\342\\200\\223'" },
-                "ignored", lines.Add, CancellationToken.None);
-        }
+        var exit = await new ProcessAgentRunner().RunAsync(session,
+            new[] { "--emit-utf8" }, "ignored", lines.Add, CancellationToken.None);
         Check(exit == 0 && lines.Count == 1 && lines[0] == "–",
             "Runner decodes multibyte UTF-8 CLI output exactly");
     }
