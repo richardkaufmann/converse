@@ -59,8 +59,18 @@ struct PadRoot: View {
                         ContentUnavailableView {
                             Label("Your conversations, here", systemImage: "bubble.left.and.bubble.right")
                         } description: {
-                            Text("Join a Converse group, then tap 1, 2 or 3 beside a session. Models and logins stay on its home computer.")
-                        } actions: { Button("Converse Groups") { model.connectShown = true }.buttonStyle(.borderedProminent) }
+                            if service.currentGroup != nil {
+                                Text("Take a session here by tapping 1, 2, or 3 beside its name in the sidebar.")
+                            } else {
+                                Text("Join a Converse group, then tap 1, 2 or 3 beside a session. Models and logins stay on its home computer.")
+                            }
+                        } actions: {
+                            if service.currentGroup == nil {
+                                Button("Converse Groups") { model.connectShown = true }.buttonStyle(.borderedProminent)
+                            } else if model.state.sidebarHidden {
+                                Button("Show sessions") { model.state.sidebarHidden = false; model.persist() }.buttonStyle(.borderedProminent)
+                            }
+                        }
                     } else if geometry.size.width - (model.state.sidebarHidden ? 0 : width) >= CGFloat(assigned.count) * 360 {
                         HStack(spacing: 0) {
                             ForEach(assigned, id: \.self) { pane in
@@ -114,7 +124,8 @@ struct PadRoot: View {
                             HStack(spacing: 3) {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
-                                Text(row.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                                PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading)
+                                PadProviderLogo(engine: row.engine).frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
@@ -153,17 +164,31 @@ struct PadPane: View {
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
     @State private var agentSetup = false
+    @State private var scoreboardExpanded = false
+    @State private var agentActionBusy = false
+    @State private var agentActionError: String?
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
-                Text(snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session").font(.title3).lineLimit(1)
-                Spacer()
-                if service.remoteRow(globalID: id)?.participantKind == "agent" {
-                    Button("Agent Setup / Loop") { agentSetup = true }
+                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
+                if service.remoteRow(globalID: id)?.participantKind == "agent" || snapshot?.engine == "agent" {
+                    Menu {
+                        Button("Agent Setup / Loop…") { agentSetup = true }
+                        Button("Run once") { runAgentOnce() }
+                            .disabled(agentActionBusy || snapshot?.busy == true)
+                        Button("Scoreboard") { scoreboardExpanded = true }
+                            .disabled(snapshot?.agentWidget == nil)
+                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                        .fixedSize().accessibilityLabel("Agent actions")
+                        .disabled(service.remoteOffline.contains(id))
                         .sheet(isPresented: $agentSetup) { if let global = DeviceGlobalID(id) { PadAgentPanel(home: global.home, target: id) } }
+                        .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
+                            Button("OK", role: .cancel) { agentActionError = nil }
+                        } message: { Text(agentActionError ?? "") }
                 }
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
@@ -181,7 +206,7 @@ struct PadPane: View {
                 }.padding(8).background(Color.yellow.opacity(0.3))
             }
             if let widget = snapshot?.agentWidget {
-                DisclosureGroup("Agent scoreboard") {
+                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = UIImage(contentsOfFile: file.path) { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
                         Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
@@ -199,7 +224,7 @@ struct PadPane: View {
                         Button("Inject all") { command("injectAll") }
                         Button("Clear") { command("clearQueue") }
                     }
-                    ForEach(snapshot.pending) { item in HStack { Text(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
+                    ForEach(snapshot.pending) { item in HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
                 }.font(.caption).padding(8).background(Color.blue.opacity(0.06)).disabled(!model.canControl(id))
             }
             if let conflict = service.draftConflicts[id] {
@@ -217,6 +242,14 @@ struct PadPane: View {
             if let snapshot, snapshot.offset > 0 { Button("Load \(snapshot.offset) earlier messages") { service.requestEarlier(globalID: id) }.font(.caption).padding(4) }
             PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers, displayEpoch: service.remoteLeases[id],
                           edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 })
+                .overlay(alignment: .bottomTrailing) {
+                    if let state = snapshot?.compaction, state.visible {
+                        Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }
+                            .buttonStyle(.borderedProminent).tint(state.phase == "available" ? .yellow : .gray).foregroundStyle(.black)
+                            .font(.caption).help(state.detail).accessibilityHint(state.detail)
+                            .disabled(!model.canControl(id) || state.phase == "running").padding(.trailing, 12).padding(.bottom, 46)
+                    }
+                }
             Divider()
             if let status = snapshot?.agentWidget?.loopStatus { Text(status).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6) }
             if let snapshot {
@@ -273,8 +306,20 @@ struct PadPane: View {
             }
     }
     func command(_ action: String) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: action)) }
+    func runAgentOnce() {
+        guard !agentActionBusy, let global = DeviceGlobalID(id) else { return }
+        agentActionBusy = true
+        Task { @MainActor in
+            let result = await service.requestParticipant(home: global.home, action: "agent.run", target: id)
+            agentActionBusy = false
+            if result.outcome != "completed" { agentActionError = result.detail }
+        }
+    }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
         HStack(spacing: 8) {
+            if let state = snapshot.compaction {
+                Menu { Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(!model.canControl(id) || state.phase != "available") } label: { Image(systemName: "ellipsis.circle") }
+            }
             Menu(snapshot.model.isEmpty ? "Model" : snapshot.model) {
                 ForEach(snapshot.modelOptions) { choice in Button(choice.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model", model: choice.id, modelProvider: choice.provider, modelProfile: choice.profile)) } }
             }
@@ -294,7 +339,7 @@ enum PadLayout {
 private struct PadProviderLogo: View {
     let engine: String
     var body: some View {
-        let key = engine.lowercased()
+        let key = engine.lowercased() == "agent" ? "muse" : engine.lowercased()
         let provider = ["muse": "meta", "claude": "anthropic", "codex": "openai"][key] ?? key
         let label = ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI"][key] ?? engine.capitalized
         let color: Color = key == "muse" ? Color(red: 4/255, green: 103/255, blue: 223/255) : key == "claude" ? Color(red: 217/255, green: 119/255, blue: 87/255) : .primary
@@ -306,6 +351,17 @@ private struct PadProviderLogo: View {
                     Text(String(label.prefix(1))).font(.system(size: 14, weight: .bold))
                 }
             }.frame(width: 20, height: 20).foregroundStyle(color).accessibilityLabel(label)
+        }
+    }
+}
+
+struct PadSessionName: View {
+    let title: String
+    let isAgent: Bool
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(title).lineLimit(1).truncationMode(.tail)
+            if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
         }
     }
 }

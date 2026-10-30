@@ -2,11 +2,14 @@ import AppKit
 import Foundation
 
 func providerSelfTests(_ check: (Bool, String) -> Void) {
+    museToolFailureSelfTests(check)
+    compactionSelfTests(check)
     accountUsageSelfTests(check)
     responseImageSelfTests(check)
     helpSelfTests(check)
     workspaceSelfTests(check)
     switchboardSelfTests(check)
+    switchboardSupervisionSelfTests(check)
     groupSwitchboardSelfTests(check)
     transcriptExportSelfTests(check)
     setupSelfTests(check)
@@ -380,4 +383,82 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     check(archive.accounts == nil, "Archives predating account support remain readable")
     let q = ProviderCommand.script(entry: Entry(name: "Test", command: "codex", directory: "~", engine: "codex", accountDirectory: "/tmp/path ' $(literal)"), arguments: ["--", "$(literal)"])
     check(q.contains("export CODEX_HOME='/tmp/path '\\'' $(literal)'") && q.contains("'$(literal)'"), "Account paths and prompts are shell quoted without expansion")
+}
+
+func museToolFailureSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-tool-failure-" + UUID().uuidString)
+    let store = Store(folder: root)
+    defer { store.pendingSave?.cancel(); try? FileManager.default.removeItem(at: root) }
+    let session = store.create(Entry(name: "Muse tool failure fixture", command: "unused", directory: root.path, engine: "muse"))
+    let responseID = UUID()
+    session.messages = [Message(id: responseID, role: "assistant", text: "")]
+    session.busy = true
+    for code in [1, 134, 2, 2] {
+        store.consumeMuse("item/completed", ["item": ["kind": "toolCall", "itemId": UUID().uuidString, "tool": "shell", "status": "failed", "failureReason": "process exited with status \(code)"]], session: session, responseID: responseID)
+    }
+    check(session.busy && session.messages.filter { $0.role == "activity" }.count == 4 && session.messages.allSatisfy { $0.role != "notice" }, "Failed Muse tool attempts stay in diagnostic activity without failing or cluttering the running turn")
+    check(session.messages.last?.text == "Muse tool shell failed: process exited with status 2", "Muse tool diagnostics retain the provider failure reason and tool name")
+    store.consumeMuse("item/completed", ["item": ["kind": "agentMessage", "itemId": "answer", "text": "Recovered and finished."]], session: session, responseID: responseID)
+    store.consumeMuse("turn/completed", ["terminal": "completed"], session: session, responseID: responseID)
+    check(!session.busy && session.status == "Ready" && session.messages.contains { $0.role == "assistant" && $0.text == "Recovered and finished." } && session.messages.allSatisfy { $0.role != "notice" }, "A successful Muse turn after tool failures keeps its answer without a false session error")
+    session.busy = true
+    store.consumeMuse("turn/completed", ["terminal": "failed", "error": ["message": "Provider unavailable"]], session: session, responseID: responseID)
+    check(!session.busy && session.status == "Failed" && session.messages.last?.role == "notice" && session.messages.last?.text == "Muse turn failed. Provider unavailable", "A real Muse turn failure remains visible and explicitly identifies the failed turn")
+}
+
+func compactionSelfTests(_ check: (Bool, String) -> Void) {
+    let now = Date()
+    let fresh = ContextUsage(tokens: 80, capacity: 100, observedAt: now)
+    check(CompactionPolicy.recommends(fresh, after: nil, now: now), "Compaction recommends at 80 percent of actual current context")
+    check(!CompactionPolicy.recommends(ContextUsage(tokens: 79, capacity: 100, observedAt: now), after: nil, now: now), "Compaction stays quiet below threshold")
+    check(!CompactionPolicy.recommends(fresh, after: nil, now: now.addingTimeInterval(601)) && !CompactionPolicy.recommends(nil, after: nil, now: now), "Unknown and stale context cannot recommend compaction")
+    check(!CompactionPolicy.recommends(fresh, after: now, now: now) && !CompactionPolicy.recommends(fresh, after: nil, now: now.addingTimeInterval(-1)), "Compaction suppresses pre-compaction and future-dated telemetry")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-compact-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = Store(folder: root)
+    let fixture = FileManager.default.currentDirectoryPath + "/Tests/compaction_fixture.py"
+    func session(_ mode: String) -> Session {
+        let s = store.create(Entry(name: "Compaction fixture", command: "python3 " + ProviderCommand.quote(fixture) + " " + mode, directory: NSTemporaryDirectory(), engine: "codex"))
+        s.remoteID = "compact-thread"; s.messages = [Message(role: "user", text: "Keep this history")]
+        s.draft = "Keep my draft"; s.attachments = ["draft-image.png"]
+        return s
+    }
+    func pump(_ done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(8)
+        while !done() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let s = session("success")
+    s.busy = true; let messages = s.messages
+    check(store.requestCompaction(s) == nil && s.compactionRequested && !s.compacting, "Busy compaction waits without interrupting a turn")
+    _ = store.requestCompaction(s)
+    s.pending = [PendingPrompt(text: "next", images: [])]; s.busy = false
+    store.runNext(s)
+    check(s.compacting && s.pending.count == 1 && s.messages == messages && s.draft == "Keep my draft", "Compaction precedes queued prompts and never submits or clears the draft")
+    _ = store.requestCompaction(s)
+    pump { !s.busy && s.pending.isEmpty }
+    check(s.lastCompactedAt != nil && s.messages.filter { $0.text.hasPrefix("Context compacted.") }.count == 1 && s.messages.contains { $0.text == "after compact" }, "Compaction waits for correlated provider completion, ignores duplicate clicks, then drains the queue")
+    check(s.draft == "Keep my draft" && s.attachments == ["draft-image.png"] && s.remoteID == "compact-thread", "Compaction preserves identity, original history and draft images")
+    for mode in ["ack-only", "failed", "rejected", "busy"] {
+        let s = session(mode); s.pending = [PendingPrompt(text: "held", images: [])]
+        _ = store.requestCompaction(s); pump { !s.busy }
+        check(!s.busy && s.lastCompactedAt == nil && s.queuePaused && s.pending.count == 1 && s.draft == "Keep my draft", "Compaction \(mode) cannot claim success or consume queued input")
+    }
+    let restart = session("success"); restart.compacting = true
+    let reopened = Session(restart.saved)
+    check(reopened.queuePaused && !reopened.compacting && !reopened.compactionRequested && reopened.draft == restart.draft && reopened.messages.last?.text.contains("will not be retried") == true, "Interrupted compaction reopens with evidence, intact draft and no automatic retry")
+    restart.compacting = false; restart.entry.engine = "muse"
+    check(restart.compactionState == nil && store.requestCompaction(restart) != nil, "Unsupported provider never exposes a false compaction action")
+    for mode in ["claude-success", "claude-no-boundary", "claude-unsupported"] {
+        let c = session(mode); c.entry.engine = "claude"
+        _ = store.requestCompaction(c); pump { !c.busy }
+        check((c.lastCompactedAt != nil) == (mode == "claude-success") && c.messages.first?.text == "Keep this history" && c.draft == "Keep my draft", "Claude \(mode) requires advertised command and manual boundary, preserving history")
+    }
+    let c = session("claude-success"); c.entry.engine = "claude"
+    store.updateClaudeContext(["type": "assistant", "message": ["model": "claude-test", "usage": ["input_tokens": 10, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 50, "output_tokens": 5]]], session: c)
+    store.updateClaudeContext(["type": "result", "modelUsage": ["claude-test": ["contextWindow": 100, "inputTokens": 999999]]], session: c)
+    check(c.toolStatus.accountUsage?.context?.tokens == 85 && c.compactionState?.recommended == true, "Claude context includes cached inputs exactly once and ignores cumulative model billing")
+    store.updateClaudeContext(["type": "system", "subtype": "compact_boundary"], session: c)
+    check(c.toolStatus.accountUsage?.context == nil && c.compactionState?.recommended == false, "Provider automatic compaction clears the stale Claude recommendation")
+    let wire = DeviceCompactionState(recommended: true, phase: "queued", percent: 88, detail: "fixture")
+    check((try? JSONDecoder().decode(DeviceCompactionState.self, from: JSONEncoder().encode(wire))) == wire, "Compaction capability and state survive remote serialization")
 }

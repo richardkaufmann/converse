@@ -53,9 +53,14 @@ struct SavedSession: Codable {
     var pending: [PendingPrompt]? = nil
     var switchboardEnabled: Bool? = nil
     var switchboardHandled: [UUID]? = nil
+    var switchboardObligations: [SwitchboardObligation]? = nil
+    var switchboardExpectations: [SwitchboardExpectation]? = nil
+    var switchboardLastRecoveryAt: Date? = nil
     var createdAt: Date? = nil
     var titleUpdatedAt: Date? = nil
     var agent: AgentConfig? = nil
+    var compactionInProgress: Bool? = nil
+    var lastCompactedAt: Date? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -88,6 +93,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var queuePaused = false
     @Published var switchboardEnabled = false
     var switchboardHandled: [UUID] = []
+    var switchboardObligations: [SwitchboardObligation] = []
+    var switchboardExpectations: [SwitchboardExpectation] = []
+    var switchboardLastRecoveryAt: Date?
+    var switchboardProgress: (revision: UInt64, at: Date)?
     var switchboardTurnStart: Int?
     var switchboardHop = 0
     var interrupted = false
@@ -99,6 +108,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var accountStatus = ""
     @Published var probeError = ""
     @Published var needsSignIn = false
+    @Published var compactionRequested = false
+    @Published var compacting = false
+    var lastCompactedAt: Date?
+    var claudeLastContext: (model: String, tokens: Int)?
     @Published var busy = false
     @Published var status = "Ready"
     var retryDetail: String?
@@ -142,15 +155,24 @@ final class Session: ObservableObject, Identifiable {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages; agent = saved.agent
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
+        lastCompactedAt = saved.lastCompactedAt
         choices = saved.choices ?? SessionChoices()
         switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
+        switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
+        switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
+        // An interrupted supervised turn is uncertain after restart, never auto-replayed.
+        for index in switchboardObligations.indices where switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil { switchboardObligations[index].state = "cancelled" }
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
+        if saved.compactionInProgress == true {
+            queuePaused = true
+            messages.append(Message(role: "notice", text: "Compaction was interrupted when Converse closed. Its completion is unknown; it will not be retried automatically. Your transcript and draft are retained."))
+        }
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -245,6 +267,7 @@ final class Store: ObservableObject {
         let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
+        s.compactionRequested = false
         s.queuePaused = true; s.resumeAfterInterrupt = false
         if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
         interruptProcess(s)
@@ -361,6 +384,7 @@ final class Store: ObservableObject {
             s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
             s.injectionTargetID = nil
         }
+        if !s.busy, !s.changingSetting, s.compactionRequested { startCompaction(s); return }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
         // A tick queued just before a window closes must not run after that
         // window (or after a changed restriction). Its persisted reservation is
@@ -387,6 +411,7 @@ final class Store: ObservableObject {
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
         send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
+        else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
             if !s.busy { s.injectionNotice = "Injected prompt is held in the queue. Check the session notice before retrying." }
             else if s.entry.engine == "muse" && usesInteractiveMuse && s.agent == nil { s.injectionNotice = "Opening your injected prompt…" }
@@ -403,7 +428,7 @@ final class Store: ObservableObject {
     }
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
-        if success && !s.interrupted { processSwitchboard(s) }
+        if success && !s.interrupted { processSwitchboard(s); switchboardTurnFinished(s) }
         s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
@@ -411,7 +436,7 @@ final class Store: ObservableObject {
             s.messages.append(Message(role: "notice", text: "Interrupted before the CLI returned a conversation ID. Your queued message is held; use Resume queue to retry."))
         }
         s.interrupted = false; s.resumeAfterInterrupt = false
-        if !shouldRun { s.queuePaused = !s.pending.isEmpty }
+        if !shouldRun { s.queuePaused = !s.pending.isEmpty; s.compactionRequested = false }
         if !shouldRun && s.injectionTargetID != nil { s.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying." }
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
@@ -434,6 +459,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
+        s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
             // Restore before any runtime/save callback: an external request must
@@ -611,7 +637,9 @@ final class Store: ObservableObject {
         case "turn/completed":
             let terminal = params["terminal"] as? String ?? "unknown"
             let error = params["error"] as? [String: Any]
-            finishMuse(s, status: terminal == "completed" ? "Ready" : terminal.capitalized, notice: error?["message"] as? String ?? params["reason"] as? String)
+            let reason = error?["message"] as? String ?? params["reason"] as? String
+            let notice = terminal == "completed" ? reason : "Muse turn \(terminal)." + (reason.map { " " + $0 } ?? "")
+            finishMuse(s, status: terminal == "completed" ? "Ready" : terminal.capitalized, notice: notice)
         case "session/statusChanged":
             let attention = params["attention"] as? [String] ?? []
             if attention.contains("inputPending") { s.status = "Waiting for your answer" }
@@ -641,10 +669,16 @@ final class Store: ObservableObject {
                 s.messages.append(Message(role: "notice", text: "Approval " + decision + (diagnostics.isEmpty ? "" : ": " + diagnostics.joined(separator: "\n"))))
             }
             s.status = s.requests.isEmpty ? "Working…" : "Waiting for your answer"
+        case "session/contextUsage":
+            if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+            s.toolStatus.accountUsage?.context = AccountUsage.context(tokens: params["usedTokens"], capacity: params["windowTokens"], at: Date())
         case "session/tokenUsage":
             if let usage = params["usage"] as? [String: Any] { s.toolStatus.usage = "\((usage["inputTokens"] as? Int ?? 0).formatted()) in / \((usage["outputTokens"] as? Int ?? 0).formatted()) out" }
         case "item/started", "item/updated", "item/completed":
             guard let item = params["item"] as? [String: Any], let itemID = item["itemId"] as? String else { break }
+            if item["kind"] as? String == "compaction", method == "item/completed", item["outcome"] as? String == "compacted" {
+                s.lastCompactedAt = Date(); s.toolStatus.accountUsage?.context = nil
+            }
             if item["kind"] as? String == "agentMessage" {
                 if s.museItems[itemID] == nil {
                     if s.museItems.isEmpty { s.museItems[itemID] = responseID }
@@ -652,7 +686,9 @@ final class Store: ObservableObject {
                 }
                 if let value = item["text"] as? String { updateMuseText(value, append: false, itemID: itemID, session: s) }
             } else if item["kind"] as? String == "toolCall", method == "item/completed", item["status"] as? String == "failed" {
-                s.messages.append(Message(role: "notice", text: item["failureReason"] as? String ?? "Tool failed"))
+                // A failed tool attempt can be recovered by the model. Only
+                // turn/completed decides whether the conversation turn failed.
+                activity("Muse tool \(item["tool"] as? String ?? "call") failed: \(item["failureReason"] as? String ?? "No reason reported")", session: s)
             }
         case "item/delta":
             if (params["field"] as? String ?? "text") == "text", let itemID = params["itemId"] as? String, let delta = params["delta"] as? String { updateMuseText(delta, append: true, itemID: itemID, session: s) }
@@ -731,6 +767,10 @@ final class Store: ObservableObject {
                     let previousUsage = s.toolStatus.accountUsage
                     let identity = snapshot.status.account ?? "Muse CLI has no reported account email"
                     s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
+                    if let context = previousUsage?.context {
+                        if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+                        s.toolStatus.accountUsage?.context = context
+                    }
                     s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
@@ -742,7 +782,9 @@ final class Store: ObservableObject {
                 if let quotaResult {
                     s.quotaRefreshedAt = Date()
                     switch quotaResult {
-                    case .success(let value): s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage()
+                    case .success(let value):
+                        let context = s.toolStatus.accountUsage?.context
+                        s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage(context: context)
                     case .failure(let error): s.toolStatus.quota = error.localizedDescription
                     }
                 }
@@ -769,6 +811,7 @@ final class Store: ObservableObject {
         func remember() {
             switch change {
             case .model(let model):
+                s.toolStatus.accountUsage?.context = nil; s.claudeLastContext = nil
                 s.choices.model = model.id; s.choices.modelProvider = model.provider; s.choices.modelProfile = model.profile
                 if let effort = s.choices.effort, !model.efforts.contains(effort) {
                     s.choices.effort = s.entry.engine == "muse" ? nil : model.efforts.first
@@ -906,6 +949,7 @@ final class Store: ObservableObject {
         applySessionChoices(s)
     }
     func updateReportedStatus(_ obj: [String: Any], session s: Session) {
+        if s.entry.engine == "claude" { updateClaudeContext(obj, session: s) }
         let payload = obj["payload"] as? [String: Any] ?? obj
         if let quota = payload["allowance"] as? [String: Any], quota["window"] != nil { s.toolStatus.quota = MuseStatusProbe.quotaSummary(quota) }
         if let model = payload["model"] as? String { s.toolStatus.model = model }
@@ -990,7 +1034,7 @@ final class Store: ObservableObject {
             else if kind.contains("tool"), let raw = payload["text"] as? String,
                     let data = raw.data(using: .utf8), let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                     let code = result["exit_code"] as? Int, code != 0 {
-                s.messages.append(Message(role: "notice", text: Store.visibleText(raw)))
+                activity("Muse tool exited with status \(code): " + Store.visibleText(raw), session: s)
             }
             else if kind.contains("failed") || kind.contains("approval") {
                 let description = payload["reason"] as? String ?? payload["text"] as? String ?? payload["tool_name"] as? String
@@ -1127,11 +1171,14 @@ struct TranscriptMessageLabel: Equatable {
     var location: Int
     var number: Int
     var prompt: Bool
+    var timestamp: Date? = nil
     var color: NSColor { prompt ? .systemBlue : .systemGray }
 }
 final class MessageNumberRuler: NSRulerView {
     override var isFlipped: Bool { true }
     weak var text: ConversationTextView?
+    private var timestampTips: [Int: String] = [:]
+    @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String { timestampTips[tag] ?? "" }
     init(scroll: NSScrollView, text: ConversationTextView) {
         self.text = text
         super.init(scrollView: scroll, orientation: .verticalRuler)
@@ -1144,6 +1191,7 @@ final class MessageNumberRuler: NSRulerView {
     @objc func refresh() { needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) { drawHashMarksAndLabels(in: dirtyRect) }
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        removeAllToolTips(); timestampTips.removeAll()
         guard let text, let layout = text.layoutManager, let container = text.textContainer else { return }
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         (dark ? NSColor.black : NSColor.white).setFill(); bounds.fill()
@@ -1187,6 +1235,10 @@ final class MessageNumberRuler: NSRulerView {
             let y = origin + lineRect.minY + max(0, (lineRect.height - label.size().height) / 2)
             if y + label.size().height >= bounds.minY && y <= bounds.maxY {
                 label.draw(at: NSPoint(x: ruleThickness - label.size().width - 9, y: y))
+                if let date = message.timestamp {
+                    let tag = addToolTip(NSRect(x: 0, y: y, width: ruleThickness, height: max(18, label.size().height)), owner: self, userData: nil)
+                    timestampTips[tag] = "Recorded " + date.formatted(date: .abbreviated, time: .standard)
+                }
             }
         }
     }
@@ -1698,11 +1750,16 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
-                if message.role == "assistant" {
+                let trafficSummary = TranscriptStyle.trafficSummary(visible)
+                if let summary = trafficSummary {
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
+                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base))
+                } else if message.role == "assistant" {
                     if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
                     else { body = MarkdownText.render(visible); markdownCache[message.id] = (visible, NSAttributedString(attributedString: body)) }
                 } else { body = NSMutableAttributedString(string: visible, attributes: base) }
-                for mark in (message.delays ?? []).sorted(by: { $0.offset > $1.offset }) {
+                for mark in (trafficSummary == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
                     let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
                     let at = min(renderedOffset, body.length)
@@ -1731,7 +1788,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 for path in message.images { image(path) }
                 guard document.length > start else { continue }
                 messageNumber = session.messageNumbers[message.id].flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber + 1)
-                text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user"))
+                text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user", timestamp: message.createdAt))
                 let last = document.length - 1
                 let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
                 let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle
@@ -1818,6 +1875,11 @@ struct Conversation: View {
             }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
+                .overlay(alignment: .bottomTrailing) {
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        if let state = session.compactionState { CompactionControl(state: state) { if session.compactionRequested { session.compactionRequested = false } else { _ = store.requestCompaction(session) } }.disabled(session.changingSetting || session.interrupted).padding(.trailing, 12).padding(.bottom, 46) }
+                    }
+                }
             Divider()
             if session.agent != nil { AgentControls(session: session) } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -1858,6 +1920,12 @@ struct Conversation: View {
                                 Button("Untrusted") { store.setApproval(session, value: "untrusted") }
                             }.menuStyle(.borderlessButton).fixedSize()
                                 .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
+                        }
+                        if session.compactionState != nil {
+                            Menu {
+                                Button(session.busy ? "Compact after this turn" : "Compact context") { _ = store.requestCompaction(session) }
+                                    .disabled(session.compacting || session.compactionRequested || session.changingSetting)
+                            } label: { Image(systemName: "ellipsis.circle") }.help("Session actions")
                         }
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.disabled(session.changingSetting)

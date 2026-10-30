@@ -257,10 +257,17 @@ struct PadTranscript: UIViewRepresentable {
 
         let result = NSMutableAttributedString()
         view.promptBlocks = []; view.trafficBlocks = []
+        c.trafficDetails = [:]
         for message in visibleMessages {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
-            let body = Self.render(message.text)
+            let body: NSMutableAttributedString
+            if let summary = TranscriptStyle.trafficSummary(message.text) {
+                let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                let key = message.id.uuidString
+                c.trafficDetails[key] = message.text
+                body = NSMutableAttributedString(string: summary, attributes: [.font: UIFont.systemFont(ofSize: 16), .paragraphStyle: oneLine, .link: URL(string: "converse-traffic://message/" + key)!])
+            } else { body = Self.render(message.text) }
             let contentLength = TranscriptStyle.blockContentLength(body.string)
             body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
             if body.length == 0 && message.imageHashes.isEmpty { continue }
@@ -404,6 +411,18 @@ struct PadTranscript: UIViewRepresentable {
         var parent: PadTranscript
         weak var view: TailTextView?
         var updating = false
+        var trafficDetails: [String: String] = [:]
+        func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
+            guard URL.scheme == "converse-traffic" else { return true }
+            guard let full = trafficDetails[URL.lastPathComponent] else { return false }
+            let alert = UIAlertController(title: "Switchboard message", message: full, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Copy", style: .default) { _ in UIPasteboard.general.string = full })
+            alert.addAction(UIAlertAction(title: "Done", style: .cancel))
+            var presenter = textView.window?.rootViewController
+            while let next = presenter?.presentedViewController { presenter = next }
+            presenter?.present(alert, animated: true)
+            return false
+        }
         var historyLength = 0
         var signature = ""
         var lastDraft = ""

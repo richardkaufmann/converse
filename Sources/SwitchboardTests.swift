@@ -50,8 +50,15 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     check(restored.switchboardEnabled && restored.switchboardHandled == source.switchboardHandled, "Messaging opt-in and handled reply IDs survive persistence")
     let recipient = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(target.saved)))
     check(recipient.pending.first?.switchboardHop == 1 && recipient.queuePaused, "Received message and hop budget survive restart paused")
+    reply(block("tell", to: target.id.uuidString, text: "past old limit"), hop: 8)
+    check(target.pending.last?.switchboardHop == 9, "Switchboard continues beyond the old eight-hop limit")
+    reply(block("tell", to: target.id.uuidString, text: "last permitted delivery"), hop: 99)
+    check(target.pending.last?.switchboardHop == 100 && target.pending.last?.text.contains("hop 100/100]") == true, "Switchboard delivers and labels the hundredth hop")
     let count = target.pending.count
-    reply(block("tell", to: target.id.uuidString, text: "loop"), hop: 8)
+    reply(block("tell", to: target.id.uuidString, text: "loop"), hop: 100)
+    let directoryCount = source.pending.count
+    reply(block("list-sessions"), hop: 100)
+    check(source.pending.count == directoryCount, "Directory responses also stop at one hundred hops")
     reply(block("tell", to: source.id.uuidString, text: "self"))
     reply(block("tell", to: UUID().uuidString, text: "closed"))
     reply(block("tell", to: target.id.uuidString, text: ""))
@@ -106,6 +113,12 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(target.pending.count == 1 && source.messages.contains { $0.text.contains("Switchboard: queued · " + delivery.uuidString + " · Previously recorded") }, "Repeated remote delivery IDs cannot queue the same message twice")
         let reload = Store(folder: root.appendingPathComponent("B"))
         check(reload.groupTellReceipts.contains { $0.id == delivery } && reload.sessions.first(where: { $0.id == target.id })?.pending.count == 1, "Remote receipt and recipient queue survive one atomic archive reload")
+        let tracked = UUID()
+        check(sa.deliverSwitchboard(from: source, to: gid, text: "Tracked remote question", id: tracked, hop: 1, replyExpected: true) == nil && pump { target.switchboardObligations.contains { $0.id == tracked } }, "Remote supervised request is recorded on its authenticated receiving home")
+        let replyID = UUID(), sourceGlobal = DeviceGlobalID(home: aid, session: source.id).string
+        check(sb.deliverSwitchboard(from: target, to: sourceGlobal, text: "Remote answer", id: replyID, hop: 2, inReplyTo: tracked) == nil && pump { target.switchboardObligations.first(where: { $0.id == tracked })?.state == "resolved" && source.switchboardExpectations.first(where: { $0.id == tracked })?.answered == true }, "Remote correlated reply closes only after a persisted home receipt")
+        target.pending.removeAll { $0.text.contains("Tracked remote question") }
+        source.pending.removeAll { $0.text.contains("Remote answer") }
         func request(_ action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, id: UUID? = nil) -> DeviceParticipantResponse? {
             var response: DeviceParticipantResponse?
             Task { @MainActor in response = await a.requestParticipant(home: bid, action: action, target: target, title: title, settings: settings, id: id) }
@@ -143,6 +156,24 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         let spoof = DeviceTellPayload(groupID: b.currentGroup!.id, source: DeviceGlobalID(home: String(repeating: "f", count: 64), session: source.id).string, sourceTitle: "Spoof", target: gid, text: "No", hop: 1)
         b.handleEnvelope(fake, DeviceEnvelope(kind: "participant.tell", commandID: UUID(), payload: try JSONEncoder().encode(spoof)))
         check(target.pending.count == before, "Authenticated peer cannot forge another home's switchboard sender identity")
+        // Ordinary tells, no replyExpected, over the real authenticated transport.
+        _ = sb.deliverSwitchboard(from: target, to: sourceGlobal, text: "Mutual remote queue", id: UUID(), hop: 1)
+        check(pump { source.pending.contains { $0.text.contains("Mutual remote queue") } }, "Mutual-queue fixture receives an ordinary remote tell")
+        let recoveryNow = Date()
+        for (store, session) in [(sa, source), (sb, target)] {
+            session.busy = true; session.queuePaused = false
+            session.switchboardProgress = (session.messagesRevision, recoveryNow.addingTimeInterval(-130))
+            for index in session.switchboardObligations.indices { session.switchboardObligations[index].createdAt = recoveryNow.addingTimeInterval(-130) }
+            store.recoverMutualSwitchboardQueues(now: recoveryNow)
+        }
+        check(pump { a.switchboardQueueReports[bid] != nil && b.switchboardQueueReports[aid] != nil }, "Authenticated homes exchange bounded queue identities without prompt content")
+        sa.recoverMutualSwitchboardQueues(now: Date()); sb.recoverMutualSwitchboardQueues(now: Date())
+        check(source.interrupted != target.interrupted, "Cross-home reciprocal queues elect exactly one home to inject")
+        source.interrupted = false; target.interrupted = false
+        sa.recoverMutualSwitchboardQueues(now: Date()); sb.recoverMutualSwitchboardQueues(now: Date())
+        check(!source.interrupted && !target.interrupted, "Cross-home mutual recovery does not interrupt the other side on another scan")
+        source.busy = false; target.busy = false; source.queuePaused = true; target.queuePaused = true
+        source.pending.removeAll { $0.text.contains("Mutual remote queue") }
         target.pending.append(PendingPrompt(text: "Additional local queue item", images: []))
         target.busy = true
         _ = sb.injectPending(target)
@@ -153,4 +184,78 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(!sb.switchboardDirectory(for: target).contains("Group sender"), "Ungrouped directory hides remote sessions")
         check(sa.deliverSwitchboard(from: source, to: DeviceGlobalID(home: String(repeating: "e", count: 64), session: target.id).string, text: "Outside", id: UUID(), hop: 1) != nil, "Tells to an unknown or other-group home fail visibly without queuing")
     } catch { check(false, "Group switchboard integration: " + error.localizedDescription) }
+}
+
+func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("supervision-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let store = Store(folder: folder)
+    let entry = Entry(name: "Fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
+    let sender = store.create(entry), receiver = store.create(entry), watcher = store.create(entry)
+    sender.switchboardEnabled = true; receiver.switchboardEnabled = true
+    sender.queuePaused = true; receiver.queuePaused = true; watcher.queuePaused = true
+    receiver.agent = AgentConfig(watchedSessions: [sender.id]); watcher.agent = AgentConfig(watchedSessions: [receiver.id])
+    var starts = 0; store.startAgentRun = { _, _ in starts += 1 }
+    let id = UUID(), now = Date()
+    check(store.deliverSwitchboard(from: sender, to: receiver.id.uuidString, text: "Review this change", id: id, hop: 1, replyExpected: true) == nil,
+          "Tracked tell registers an explicit reply obligation")
+    let original = receiver.pending[0]
+    check(receiver.switchboardObligations.first?.id == id && original.text.contains("inReplyTo") && sender.switchboardExpectations.first?.id == id,
+          "Request ID and reply instructions persist with the original queue item")
+    store.superviseSwitchboard(now: now.addingTimeInterval(1000))
+    check(starts == 0 && receiver.pending.count == 1 && receiver.switchboardObligations[0].intervenedAt == nil, "Supervision never resumes a human-paused queue")
+    receiver.pending = []; store.switchboardStarted(receiver, prompt: original); store.switchboardTurnFinished(receiver, now: now)
+    receiver.queuePaused = false
+    store.superviseSwitchboard(now: now.addingTimeInterval(29))
+    check(starts == 0, "Missing reply gets a grace period after turn completion")
+    store.superviseSwitchboard(now: now.addingTimeInterval(31))
+    check(starts == 1 && receiver.switchboardObligations[0].intervenedAt != nil && receiver.draft.isEmpty,
+          "Missing reply receives exactly one corrective turn without changing the draft")
+    receiver.busy = false; store.switchboardTurnFinished(receiver, now: now.addingTimeInterval(32))
+    store.superviseSwitchboard(now: now.addingTimeInterval(160))
+    store.superviseSwitchboard(now: now.addingTimeInterval(1000))
+    check(starts == 1 && watcher.pending.count == 1 && watcher.queuePaused && receiver.switchboardObligations[0].state == "escalated",
+          "Failed correction escalates once to watching agents and preserves their pauses")
+    let reload = Store(folder: folder)
+    check(reload.sessions.first(where: { $0.id == receiver.id })?.switchboardObligations.first?.intervenedAt != nil,
+          "Restart preserves the consumed recovery allowance")
+    check(store.deliverSwitchboard(from: receiver, to: sender.id.uuidString, text: "Reviewed; here is the blocker", id: UUID(), hop: 2, inReplyTo: id) == nil && sender.switchboardExpectations[0].answered,
+          "A correctly attributed correlated reply closes the request even after escalation")
+    check(store.deliverSwitchboard(from: receiver, to: sender.id.uuidString, text: "Wrong request", id: UUID(), hop: 2, inReplyTo: UUID()) != nil,
+          "Unrelated reply IDs cannot satisfy an obligation")
+    let a = store.create(entry), b = store.create(entry)
+    a.switchboardEnabled = true; b.switchboardEnabled = true
+    a.queuePaused = true; b.queuePaused = true
+    a.draft = "keep A"; b.draft = "keep B"
+    _ = store.deliverSwitchboard(from: a, to: b.id.uuidString, text: "Waiting for your review", id: UUID(), hop: 1)
+    _ = store.deliverSwitchboard(from: b, to: a.id.uuidString, text: "Waiting for your answer", id: UUID(), hop: 1)
+    let mutualNow = Date()
+    a.switchboardProgress = (a.messagesRevision, mutualNow); b.switchboardProgress = (b.messagesRevision, mutualNow)
+    a.busy = true; b.busy = true
+    store.recoverMutualSwitchboardQueues(now: mutualNow.addingTimeInterval(121))
+    check(!a.interrupted && !b.interrupted, "Mutual queued tells never override human pauses")
+    a.queuePaused = false; b.queuePaused = false
+    store.recoverMutualSwitchboardQueues(now: mutualNow.addingTimeInterval(119))
+    check(!a.interrupted && !b.interrupted, "Mutual queue recovery waits for a quiet period")
+    store.recoverMutualSwitchboardQueues(now: mutualNow.addingTimeInterval(121))
+    check(a.interrupted != b.interrupted && a.pending.count == 1 && b.pending.count == 1 && a.draft == "keep A" && b.draft == "keep B",
+          "Reciprocal ordinary tells inject exactly one existing prompt and preserve both drafts")
+    a.interrupted = false; b.interrupted = false
+    store.recoverMutualSwitchboardQueues(now: mutualNow.addingTimeInterval(1000))
+    check(!a.interrupted && !b.interrupted, "Mutual queue intervention is not repeated on later scans")
+    let mutualReload = Store(folder: folder)
+    check(mutualReload.sessions.filter { $0.id == a.id || $0.id == b.id }.allSatisfy { $0.switchboardObligations.first?.intervenedAt != nil },
+          "Both sides of mutual recovery are durably marked before interruption")
+    a.busy = false; b.busy = false; a.queuePaused = true; b.queuePaused = true
+    let hoverText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+    let hoverScroll = NSScrollView(frame: hoverText.frame)
+    let ruler = MessageNumberRuler(scroll: hoverScroll, text: hoverText)
+    check(ruler.responds(to: NSSelectorFromString("view:stringForToolTip:point:userData:")),
+          "Message timestamp ruler exposes the native AppKit tooltip callback")
+    let summary = TranscriptStyle.trafficSummary("[Converse message from MuseConverse · session abc · delivery xyz · hop 1/100]\nPlease review\nsecond line")
+    check(summary == "Received ← MuseConverse · Please review second line" && summary?.contains("\n") == false,
+          "Traffic summary retains direction and session name on one line")
+    check(TranscriptStyle.trafficSummary("{\"ordinary\":\"JSON\"}") == nil && TranscriptStyle.trafficSummary("Example:\n```converse\n{\"command\":\"tell\"}\n```") == nil,
+          "Ordinary JSON and quoted switchboard examples remain expanded")
+    check(TranscriptStyle.trafficSummary("```converse\n{\"command\":\"tell\",\"to\":\"Muse\",\"text\":\"Review\"}\n```") == "Tell → Muse · Review", "Unexecuted command summaries never claim delivery")
 }

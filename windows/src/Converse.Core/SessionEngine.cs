@@ -57,6 +57,7 @@ public sealed class ChatMessage
 
 public sealed class PendingPrompt
 {
+    public List<Guid>? ComponentIDs { get; set; }
     public bool Autonomous { get; set; }
     public bool AgentLoopTick { get; set; }
     public bool AgentRunReserved { get; set; }
@@ -73,6 +74,9 @@ public sealed class ChatSession
 {
     public AgentConfig? Agent { get; set; }
     public bool MessagingEnabled { get; set; }
+    public List<SwitchboardObligation> SwitchboardObligations { get; set; } = new();
+    public List<SwitchboardExpectation> SwitchboardExpectations { get; set; } = new();
+    public DateTime? SwitchboardLastRecoveryAt { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool ActiveAgentLoopTick { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public int ActiveHop { get; set; }
 
@@ -265,6 +269,8 @@ public sealed class SessionStore
             var archive = JsonSerializer.Deserialize<Archive>(File.ReadAllBytes(file));
             if (archive is not null) { Entries = archive.Entries; Sessions = archive.Sessions; ParticipantReceipts = archive.ParticipantReceipts; }
         }
+        foreach (var session in Sessions)
+            foreach (var item in session.SwitchboardObligations.Where(o => o.State == "submitted" && o.FinishedAt is null)) item.State = "cancelled";
         if (Entries.Count == 0) Entries = DefaultEntries();
         // One-time repair: early builds named the claude entry "Muse" or
         // "Claude Code". Sessions embed their own entry copy, so repair
@@ -411,6 +417,8 @@ public sealed class SessionStore
         }
         session.ActiveAgentLoopTick = next.AgentLoopTick; session.ActiveHop = next.Hop;
         session.Pending.RemoveAt(0);
+        foreach (var item in session.SwitchboardObligations.Where(o => o.PromptID == next.Id || next.ComponentIDs?.Contains(o.PromptID) == true))
+        { item.State = item.Kind == "request" ? "submitted" : "resolved"; item.FinishedAt = null; }
         AppendUserMessage(session, next.Text, next.Images);
         _ = RunTurnAsync(session, next.Text, next.Images);
     }
@@ -435,8 +443,9 @@ public sealed class SessionStore
         {
             var merged = string.Join("\n\n", session.Pending.Select(p => p.Text));
             var images = session.Pending.SelectMany(p => p.Images).ToList();
+            var ids = session.Pending.SelectMany(p => (p.ComponentIDs ?? new()).Append(p.Id)).Distinct().ToList();
             session.Pending.Clear();
-            session.Pending.Add(new PendingPrompt { Text = merged, Images = images });
+            session.Pending.Add(new PendingPrompt { Text = merged, Images = images, ComponentIDs = ids });
         }
         else if (id is not null)
         {

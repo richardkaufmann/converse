@@ -230,6 +230,11 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
             enableDiscovery: _options.EnableDiscovery && !_options.LoopbackOnly,
             loopbackOnly: _options.LoopbackOnly);
         FabricStarted = true;
+        var fabric = _devices;
+        fabric.CanSuperviseSwitchboard = () =>
+            !_shutdown.IsCancellationRequested &&
+            _admission == StartupAdmission.Open &&
+            fabric.AcceptingWork;
         if (_admission == StartupAdmission.Probation) _admission = StartupAdmission.Open;
     }
 
@@ -388,9 +393,16 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
         {
             while (await timer.WaitForNextTickAsync(cancellationToken))
             {
-                if (FabricStarted && _devices?.AcceptingWork == true &&
-                    _admission == StartupAdmission.Open)
-                    _devices.Agents.Tick(DateTime.UtcNow);
+                // Agent ticks run on the serialized state executor so
+                // supervision recovery cannot interleave with ledger, secret,
+                // or update transitions. Tick itself refuses closed admission,
+                // and CanSuperviseSwitchboard independently gates recovery.
+                await _stateExecutor.RunAsync(() =>
+                {
+                    if (FabricStarted && _devices?.AcceptingWork == true &&
+                        _admission == StartupAdmission.Open)
+                        _devices.Agents.Tick(DateTime.UtcNow);
+                }, cancellationToken);
             }
         }
         catch (OperationCanceledException) { }

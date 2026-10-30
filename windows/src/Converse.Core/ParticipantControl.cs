@@ -66,6 +66,18 @@ public sealed partial class DeviceSyncService
     private async Task<bool> HandleParticipantAsync(Peer peer, DeviceEnvelope envelope)
     {
         if (!envelope.Kind.StartsWith("participant.", StringComparison.Ordinal)) return false;
+        if (envelope.Kind == "participant.queue-watch")
+        {
+            if (peer.Hello is { } h && !peer.ControlOnly && h.Capabilities.Contains("switchboard-supervision-v1") &&
+                envelope.Payload is { Length: <= 64000 } reportBytes)
+            {
+                var report = DeviceJson.Decode<DeviceQueueWatchReport>(reportBytes);
+                if (IsParticipantAllowed(h.DeviceID, report.GroupID) && report.Entries.Count <= 128 &&
+                    report.Entries.All(e => DeviceGlobalID.Parse(e.Target)?.Home == h.DeviceID && DeviceGlobalID.Parse(e.Source)?.Home == DeviceId))
+                    _queueWatchReports[h.DeviceID] = (report, DateTime.UtcNow);
+            }
+            return true;
+        }
         if (peer.Hello is not { } hello || peer.ControlOnly || !IsGroupMember(hello.DeviceID) || CurrentGroup is not { } group || !hello.Capabilities.Contains("participant-control-v1") || envelope.CommandID is not { } id || envelope.Payload is not { } bytes || bytes.Length > 64000) return true;
         if (envelope.Kind == "participant.response")
         {
@@ -93,6 +105,19 @@ public sealed partial class DeviceSyncService
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.response", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
         }
+        if (envelope.Kind == "participant.tell.ack")
+        {
+            var ack = DeviceJson.Decode<DeviceAckPayload>(bytes);
+            foreach (var s in _store.Sessions)
+            {
+                var notice = s.Messages.LastOrDefault(m => m.Role == "notice" && m.Text.StartsWith("Switchboard: awaiting home acceptance → ") && m.Text.Contains(id.ToString()) && m.Text.Contains("[" + hello.DeviceID + "/"));
+                if (notice is not null) notice.Text = notice.Text.Replace("awaiting home acceptance →", (ack.Outcome == "queued" ? "queued" : "rejected") + " →");
+                foreach (var item in s.SwitchboardObligations.Where(o => o.ReplyDeliveryID == id && DeviceGlobalID.Parse(o.Source)?.Home == hello.DeviceID))
+                    item.State = ack.Outcome == "queued" ? "resolved" : "deliveryFailed";
+                if (ack.Outcome != "queued") foreach (var e in s.SwitchboardExpectations.Where(e => e.Id == id && DeviceGlobalID.Parse(e.Target)?.Home == hello.DeviceID)) e.Answered = true;
+            }
+            _store.Save(); return true;
+        }
         if (envelope.Kind == "participant.tell")
         {
             if (!TryBeginExternalWork())
@@ -112,14 +137,19 @@ public sealed partial class DeviceSyncService
                 var hash = DeviceBlob.Sha256Hex(bytes);
                 var prior = _store.ParticipantReceipts.FirstOrDefault(r => r.Id == id);
                 if (prior is not null) response = new() { Outcome = prior.Origin == hello.DeviceID && prior.Hash == hash ? "queued" : "rejected", Detail = "Previously recorded delivery; nothing queued twice." };
-                else if (session is not null && _store.ParticipantReceipts.Count < 100000)
+                else if (session is not null && _store.ParticipantReceipts.Count < 100000 && session.SwitchboardObligations.Count(o => !o.Terminal) < 128)
                 {
-                    var prompt = new PendingPrompt { Text = $"[Converse message from {request.SourceTitle} · session {request.Source} · delivery {id} · hop {request.Hop}/{SwitchboardMaxHops}]\n{request.Text}", Autonomous = true, OriginGroupID = group.Id, OriginHomeID = hello.DeviceID, Hop = request.Hop };
+                    var prompt = new PendingPrompt { Text = $"[Converse message from {request.SourceTitle} · session {request.Source} · delivery {id} · hop {request.Hop}/{SwitchboardMaxHops}]\n{request.Text}" + ReplyInstruction(id, request.ReplyExpected, request.InReplyTo), Autonomous = true, OriginGroupID = group.Id, OriginHomeID = hello.DeviceID, Hop = request.Hop };
+                    var oldObligations = JsonSerializer.SerializeToUtf8Bytes(session.SwitchboardObligations);
+                    var oldExpectations = JsonSerializer.SerializeToUtf8Bytes(session.SwitchboardExpectations);
                     session.Pending.Add(prompt);
+                    RecordSwitchboardIncoming(session, request.Source, request.SourceTitle, id, prompt, request.ReplyExpected, request.InReplyTo, group.Id, hello.DeviceID);
                     var receipt = new ParticipantReceipt { Id = id, Origin = hello.DeviceID, Hash = hash };
                     _store.ParticipantReceipts.Add(receipt);
                     try { _store.Save(); response = new() { Outcome = "queued", Detail = "Persisted on home. Queued does not mean read or answered." }; _store.RunNext(session); }
-                    catch { session.Pending.Remove(prompt); _store.ParticipantReceipts.Remove(receipt); }
+                    catch { session.Pending.Remove(prompt); _store.ParticipantReceipts.Remove(receipt);
+                        session.SwitchboardObligations = JsonSerializer.Deserialize<List<SwitchboardObligation>>(oldObligations)!;
+                        session.SwitchboardExpectations = JsonSerializer.Deserialize<List<SwitchboardExpectation>>(oldExpectations)!; }
                 }
             }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell.ack", CommandID = id, Payload = DeviceJson.Encode(response) });
@@ -197,20 +227,42 @@ public sealed partial class DeviceSyncService
             return Task.FromResult(Result("rejected", e is ArgumentException ? e.Message : "Home could not save the operation. Nothing applied."));
         }
     }
-    public async Task SendAgentTellAsync(ChatSession source, string target, string text)
+    public async Task SendAgentTellAsync(ChatSession source, string target, string text, bool replyExpected = false, Guid? inReplyTo = null)
     {
         if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
+        if (inReplyTo is not null && !source.SwitchboardObligations.Any(o => o.Id == inReplyTo && o.Kind == "request" && o.Source == target)) throw new ArgumentException("Reply does not match a request from that session.");
+        if (replyExpected && source.SwitchboardExpectations.Count(e => !e.Answered) >= 128) throw new ArgumentException("Too many unanswered requests.");
         var id = Guid.NewGuid(); var hop = source.ActiveHop + 1;
         if (to.Home == DeviceId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == to.Session && s.MessagingEnabled);
             if (session is null) return;
-            session.Pending.Add(new PendingPrompt { Text = $"[Converse message from {source.Title} · session {new DeviceGlobalID(DeviceId, source.Id)} · delivery {id} · hop {hop}/{SwitchboardMaxHops}]\n{text}", Autonomous = true, Hop = hop });
-            _store.Save(); _store.RunNext(session); return;
+            if (session.SwitchboardObligations.Count(o => !o.Terminal) >= 128) throw new ArgumentException("Target supervision queue is full.");
+            var prompt = new PendingPrompt { Text = $"[Converse message from {source.Title} · session {new DeviceGlobalID(DeviceId, source.Id)} · delivery {id} · hop {hop}/{SwitchboardMaxHops}]\n{text}" + ReplyInstruction(id, replyExpected, inReplyTo), Autonomous = true, Hop = hop };
+            var beforeSource = JsonSerializer.SerializeToUtf8Bytes(source);
+            var beforeTarget = JsonSerializer.SerializeToUtf8Bytes(session);
+            session.Pending.Add(prompt);
+            source.Messages.Add(new() { Role = "notice", Text = $"Switchboard: queued → {session.Title} [{target}] · {id}\n{text}" });
+            RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, false);
+            RecordSwitchboardIncoming(session, new DeviceGlobalID(DeviceId, source.Id).ToString(), source.Title, id, prompt, replyExpected, inReplyTo);
+            try { _store.Save(); } catch {
+                var oldSource = JsonSerializer.Deserialize<ChatSession>(beforeSource)!; var oldTarget = JsonSerializer.Deserialize<ChatSession>(beforeTarget)!;
+                source.SwitchboardObligations = oldSource.SwitchboardObligations; source.SwitchboardExpectations = oldSource.SwitchboardExpectations; source.Messages = oldSource.Messages;
+                session.Pending.Remove(prompt); session.SwitchboardObligations = oldTarget.SwitchboardObligations; session.SwitchboardExpectations = oldTarget.SwitchboardExpectations; throw;
+            }
+            _store.RunNext(session); return;
         }
         if (!IsParticipantAllowed(to.Home, CurrentGroup?.Id) || PeerForHome(to.Home) is not { } peer || peer.Hello?.Capabilities.Contains("participant-control-v1") != true || Homes.GetValueOrDefault(to.Home)?.Rows.Any(r => r.GlobalID == target && r.MessagingEnabled == true) != true) return;
-        var request = new DeviceTellPayload { GroupID = CurrentGroup!.Id, Source = new DeviceGlobalID(DeviceId, source.Id).ToString(), SourceTitle = source.Title, Target = target, Text = text, Hop = hop };
-        source.Messages.Add(new ChatMessage { Role = "notice", Text = $"Switchboard: sent to home for acceptance · {id}. No automatic replay." }); _store.Save();
+        if ((replyExpected || inReplyTo is not null) && peer.Hello?.Capabilities.Contains("switchboard-supervision-v1") != true) throw new ArgumentException("Target home needs an update for tracked replies.");
+        var targetTitle = Homes[to.Home].Rows.First(r => r.GlobalID == target).Title;
+        var sourceBefore = JsonSerializer.SerializeToUtf8Bytes(source);
+        RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, true);
+        var request = new DeviceTellPayload { ReplyExpected = replyExpected, InReplyTo = inReplyTo, GroupID = CurrentGroup!.Id, Source = new DeviceGlobalID(DeviceId, source.Id).ToString(), SourceTitle = source.Title, Target = target, Text = text, Hop = hop };
+        source.Messages.Add(new ChatMessage { Role = "notice", Text = $"Switchboard: awaiting home acceptance → {targetTitle} [{target}] · {id}\n{text}" });
+        try { _store.Save(); } catch {
+            var previous = JsonSerializer.Deserialize<ChatSession>(sourceBefore)!;
+            source.SwitchboardObligations = previous.SwitchboardObligations; source.SwitchboardExpectations = previous.SwitchboardExpectations; source.Messages = previous.Messages; throw;
+        }
         await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell", CommandID = id, Payload = DeviceJson.Encode(request) });
     }
 }
@@ -247,7 +299,7 @@ public sealed partial class DeviceSyncService
             else if (action == "tell" && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
-                await SendAgentTellAsync(source, target, text);
+                await SendAgentTellAsync(source, target, text, command["replyExpected"]?.GetValue<bool>() == true, command["inReplyTo"] is { } replyID ? Guid.Parse(replyID.GetValue<string>()) : null);
             }
             else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions or tell." }); _store.Save(); }
         }

@@ -1,6 +1,10 @@
 import CryptoKit
 import Foundation
 
+enum SwitchboardPolicy {
+    static let maxHops = 100
+}
+
 // Versioned wire protocol for device sync. Independent of UI and Store types
 // so later Windows and iPad clients can implement the same schema.
 enum DeviceMessageKind: String, Codable {
@@ -198,6 +202,16 @@ struct DeviceTranscriptPayload: Codable {
     var requests: [DeviceRequestDTO] = []
     var queuePaused: Bool = false
     var agentWidget: DeviceAgentWidget? = nil
+    var compaction: DeviceCompactionState? = nil
+}
+// Optional capability/state: older homes omit it and viewers show no action.
+struct DeviceCompactionState: Codable, Equatable {
+    var recommended: Bool
+    var phase: String // available, queued, running
+    var percent: Int?
+    var detail: String
+    var title: String { phase == "running" ? "Compacting…" : phase == "queued" ? "Cancel compact" : "Compact" }
+    var visible: Bool { recommended || phase != "available" }
 }
 struct DeviceTranscriptRequest: Codable, Equatable {
     var beforeOffset: Int
@@ -266,6 +280,8 @@ struct DeviceTellPayload: Codable, Equatable {
     var text: String
     var hop: Int
     var urgent: Bool = false
+    var replyExpected: Bool? = nil
+    var inReplyTo: UUID? = nil
 }
 struct GroupTellReceipt: Codable {
     var id: UUID
@@ -340,4 +356,15 @@ struct DeviceParticipantIntent: Codable, Identifiable {
     var request: DeviceParticipantRequest
     var outcome: String = "pending"
     var response: DeviceParticipantResponse? = nil
+}
+
+// Only queue identities, never prompt text. Readiness is computed on its home.
+struct DeviceQueueWatch: Codable {
+    var target: String
+    var source: String
+    var delivery: UUID
+}
+struct DeviceQueueWatchReport: Codable {
+    var groupID: String
+    var entries: [DeviceQueueWatch]
 }

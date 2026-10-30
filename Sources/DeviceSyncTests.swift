@@ -264,6 +264,9 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         }
         let session = Store.shared.create(entry)
         session.title = "Harness session"; session.draft = "home draft"
+        let originalEngine = session.entry.engine
+        session.entry.engine = "codex"; session.remoteID = "compact-fixture"
+        session.toolStatus.accountUsage = AccountUsage(context: ContextUsage(tokens: 85, capacity: 100, observedAt: Date()))
         session.messages = (0..<10).map { Message(role: $0 < 3 ? "user" : "activity", text: "prefix \($0)") } + (0..<200).map { Message(role: $0.isMultiple(of: 2) ? "user" : "assistant", text: "message \($0)\nsecond line") }
         let draftImage = root.appendingPathComponent("draft-image.png")
         let draftBytes = Data("isolated image transfer fixture".utf8)
@@ -293,6 +296,23 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(granted != nil && snapshot?.draft == "home draft" && snapshot?.epoch == granted?.epoch, "Service harness grants lease and streams matching home snapshot")
         check(snapshot?.draftImageHashes == [DeviceBlob.sha256Hex(draftBytes)], "Home snapshot carries staged draft attachment hashes for takeover")
         check(snapshot?.offset == 10 && snapshot?.messages.first?.messageNumber == 4 && snapshot?.messages.last?.messageNumber == 203, "Home paged snapshot numbers visible messages across hidden prefix activity")
+        check(snapshot?.compaction?.recommended == true && snapshot?.compaction?.percent == 85, "Home advertises measured compaction state to a leased viewer")
+        session.busy = true // Exercise remote queueing without starting any provider.
+        let compactID = UUID(), compactPayload = try JSONEncoder().encode(DeviceCommandPayload(action: "compact"))
+        captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: UUID(), epoch: (granted?.epoch ?? 0) + 1, payload: compactPayload))
+        check(!session.compactionRequested, "Remote compaction rejects a stale display lease")
+        _ = try capturedEnvelopes(); captured = []
+        let compactEnvelope = DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: compactID, epoch: granted?.epoch, payload: compactPayload)
+        home.handleEnvelope(peer, compactEnvelope)
+        _ = try capturedEnvelopes(); captured = []
+        home.handleEnvelope(peer, compactEnvelope)
+        check(session.compactionRequested && !session.compacting && session.draft == "home draft", "Remote duplicate compaction queues one intent and preserves the home draft")
+        _ = try capturedEnvelopes(); captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: UUID(), epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceCommandPayload(action: "cancelCompact"))))
+        check(!session.compactionRequested && session.busy, "Remote cancel removes only the waiting compaction, leaving the turn running")
+        _ = try capturedEnvelopes()
+        session.busy = false; session.entry.engine = originalEngine; session.remoteID = nil
         captured = []
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceTranscriptRequest(beforeOffset: 10))))
         let earlier = try capturedEnvelopes().compactMap { frame in frame.kind == DeviceMessageKind.transcriptSnapshot.rawValue ? frame.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } : nil }.first

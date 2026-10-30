@@ -193,29 +193,36 @@ struct AgentControls: View {
                     Spacer(minLength: 0)
                 }.font(.caption)
             }
-            ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
-                Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
-                Text("\(session.agent?.turnLimit ?? 0) maximum turns per loop").font(.caption).foregroundStyle(.secondary)
-                if session.agent?.discordMentions == true {
-                    TimelineView(.periodic(from: .now, by: 5)) { _ in
-                        Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
+                    Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
+                    Text("\(session.agent?.turnLimit ?? 0) maximum turns per loop").font(.caption).foregroundStyle(.secondary)
+                    if session.agent?.discordMentions == true {
+                        TimelineView(.periodic(from: .now, by: 5)) { _ in
+                            Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                }
-                Button("Loop…") { loopSettings = true }
+                    AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
+                } }.frame(maxWidth: .infinity)
+                Menu {
+                    Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }
+                    Button("Run once") { Store.shared.queueAgentRun(session) }
+                        .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
+                    Button("Scoreboard") { AgentWindows.shared.widget(session) }
+                    Divider()
+                    Button("Loop controls…") { loopSettings = true }
+                    Button(conversation.owns(session) ? "Stop talking" : "Start talking!") {
+                        if conversation.owns(session) { conversation.stop() }
+                        else { dictating = false; voice.cancel(); conversation.start(session, store: .shared) }
+                    }
+                    Button("Dictate…") { conversation.stop(); dictating = true }
+                } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("Agent actions: setup, loop, run once, scoreboard and voice")
+                    .accessibilityLabel("Agent actions")
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
-                Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
-                    .help("Check now with a fresh per-activation limit; this does not enable the periodic loop")
-                Button(conversation.owns(session) ? "Stop talking" : "Start talking!") {
-                    if conversation.owns(session) { conversation.stop() }
-                    else { dictating = false; voice.cancel(); conversation.start(session, store: .shared) }
-                }.help("Hands-free: a 1½-second pause sends your words; the agent answers aloud, then listens again. No microphone during its reply. Stop ends listening, not a question already sent.")
-                Button("Dictate…") { conversation.stop(); dictating = true }
                     .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
-                    .help("Record with Muse Voice, review the transcription, then insert it into your draft")
-                Button("Scoreboard") { AgentWindows.shared.widget(session) }
-                Button("Agent Setup…") { AgentWindows.shared.setup(session) }
-                AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
-            } }
+            }
             if conversation.sessionID == session.id {
                 Text(conversation.status).font(.caption).foregroundStyle(conversation.active ? Color.accentColor : Color.secondary)
                     .lineLimit(2).help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)

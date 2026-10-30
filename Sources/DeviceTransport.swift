@@ -144,6 +144,7 @@ final class DeviceSyncService: ObservableObject {
     @Published var participantIntents: [DeviceParticipantIntent] = []
     private var participantReplies: [UUID: (home: String, group: String, finish: (DeviceParticipantResponse) -> Void)] = [:]
     private var pendingTells: [UUID: (source: UUID, home: String, group: String)] = [:]
+    var switchboardQueueReports: [String: (report: DeviceQueueWatchReport, at: Date)] = [:]
     private var pendingTakes: [String: Date] = [:]
     private var resumeEpochs: [String: UInt64] = [:]
     private var leaseBoots: [String: UInt64] = [:]
@@ -335,7 +336,7 @@ final class DeviceSyncService: ObservableObject {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
-        hello.capabilities.append("agent-host-v1")
+        hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1"])
         #endif
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         hello.group = currentGroup
@@ -557,6 +558,7 @@ extension DeviceSyncService {
         } catch { disconnect(peer) }
     }
     private func disconnect(_ peer: DevicePeer, preserveDeviceState: Bool = false) {
+        if let home = peer.hello?.deviceID { switchboardQueueReports.removeValue(forKey: home) }
         if sponsoredRequests[peer.id] != nil { withdrawGroupRequest(peer.id) }
         guard peer.alive else { return }
         peer.alive = false; peer.connection.cancel()
@@ -764,7 +766,7 @@ extension DeviceSyncService {
         // Local home edits bump the version so transfer never reuses one.
         if drafts.text(session: draftKey) == nil { drafts.adopt(session: draftKey, version: max(1, drafts.version(session: draftKey)), text: session.draft); persistDrafts() }
         else if drafts.text(session: draftKey) != session.draft { _ = drafts.bump(session: draftKey, text: session.draft); persistDrafts() }
-        let payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: sessionID).string,
+        var payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: sessionID).string,
                                               homeSeq: stateStore?.nextSeq() ?? 0, epoch: holder.epoch, boot: boot,
                                               messages: slice, offset: start, total: total, prepend: beforeOffset != nil,
                                               draft: session.draft, draftVersion: drafts.version(session: sessionID.uuidString), draftImageHashes: imageHashes,
@@ -775,6 +777,7 @@ extension DeviceSyncService {
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
                                               requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: config.scoreboard?.metrics.map { DeviceWidgetMetric(label: $0.label, value: $0.value) } ?? (config.repositorySnapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.scoreboard?.observedAt ?? config.repositorySnapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
+        payload.compaction = session.compactionState
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
         }
@@ -802,7 +805,7 @@ extension DeviceSyncService {
         guard teaching || requireLease(peer, envelope, session) else { return }
         guard let origin = peer.hello?.deviceID, let commandStore else { return }
         let payloadHash = DeviceBlob.sha256Hex(data)
-        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard"]
+        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
         do {
             guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) else {
                 if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) {
@@ -840,6 +843,8 @@ extension DeviceSyncService {
             if let id = command.pendingID { failure = store.injectPending(session, id: id) }
             else { failure = "Inject not applied: no queued item was specified. Nothing was sent." }
         case "injectAll": failure = store.injectPending(session)
+        case "compact": failure = store.requestCompaction(session)
+        case "cancelCompact": session.compactionRequested = false
         case "stop": store.stop(session)
         case "resumeQueue": session.queuePaused = false; store.save(); store.runNext(session)
         case "pauseQueue": session.queuePaused = true; store.save()
@@ -890,6 +895,7 @@ extension DeviceSyncService {
         }
         if locallyRemoved && !["fabric.members", "ping", "pong"].contains(envelope.kind) { return }
         #if os(macOS)
+        if handleQueueWatch(peer, envelope) { return }
         if handleParticipantTell(peer, envelope) { return }
         #endif
         if handleParticipantControl(peer, envelope) { return }
@@ -1629,7 +1635,26 @@ extension DeviceSyncService {
         return peer.hello?.capabilities.contains("participant-control-v1") == true
     }
     #if os(macOS)
-    func sendParticipantTell(source: Session, target: String, text: String, id: UUID, hop: Int, urgent: Bool) -> String? {
+    func publishQueueWatch(_ entries: [DeviceQueueWatch]) {
+        guard let group = currentGroup?.id else { return }
+        for peer in peers.values where peer.trustedReady && !peer.controlOnly {
+            guard let home = peer.hello?.deviceID, acceptsParticipant(home: home, groupID: group),
+                  peer.hello?.capabilities.contains("switchboard-supervision-v1") == true else { continue }
+            let relevant = Array(entries.filter { DeviceGlobalID($0.source)?.home == home }.prefix(128))
+            let report = DeviceQueueWatchReport(groupID: group, entries: relevant)
+            sendEnvelope(peer, DeviceEnvelope(kind: "participant.queue-watch", payload: try? JSONEncoder().encode(report)))
+        }
+    }
+    private func handleQueueWatch(_ peer: DevicePeer, _ envelope: DeviceEnvelope) -> Bool {
+        guard envelope.kind == "participant.queue-watch" else { return false }
+        guard let home = peer.hello?.deviceID, let bytes = envelope.payload, bytes.count <= 64000,
+              peer.hello?.capabilities.contains("switchboard-supervision-v1") == true,
+              let report = try? JSONDecoder().decode(DeviceQueueWatchReport.self, from: bytes), report.entries.count <= 128,
+              acceptsParticipant(home: home, groupID: report.groupID), !peer.controlOnly,
+              report.entries.allSatisfy({ DeviceGlobalID($0.target)?.home == home && DeviceGlobalID($0.source)?.home == localDeviceID }) else { return true }
+        switchboardQueueReports[home] = (report, Date()); return true
+    }
+    func sendParticipantTell(source: Session, target: String, text: String, id: UUID, hop: Int, urgent: Bool, replyExpected: Bool = false, inReplyTo: UUID? = nil) -> String? {
         guard let global = DeviceGlobalID(target), let home = identity?.deviceID, let group = currentGroup?.id,
               acceptsParticipant(home: global.home, groupID: group), let peer = peerForHome(global.home),
               peer.hello?.capabilities.contains("participant-control-v1") == true else {
@@ -1638,8 +1663,17 @@ extension DeviceSyncService {
         guard let row = homes[global.home]?.rows.first(where: { $0.globalID == global.string }), row.messagingEnabled == true else {
             return "Target is missing or session messaging is disabled on its home. Nothing was sent."
         }
+        guard (!replyExpected && inReplyTo == nil) || peer.hello?.capabilities.contains("switchboard-supervision-v1") == true else {
+            return "Update the recipient home to support tracked switchboard replies. Nothing was sent."
+        }
         let payload = DeviceTellPayload(groupID: group, source: DeviceGlobalID(home: home, session: source.id).string,
-                                       sourceTitle: source.title, target: global.string, text: text, hop: hop, urgent: urgent)
+                                       sourceTitle: source.title, target: global.string, text: text, hop: hop, urgent: urgent, replyExpected: replyExpected ? true : nil, inReplyTo: inReplyTo)
+        let oldExpected = source.switchboardExpectations, oldWatches = source.switchboardObligations
+        participantStore.switchboardSent(source, to: target, id: id, replyExpected: replyExpected, inReplyTo: inReplyTo, remote: true)
+        do { try participantStore.saveChecked() } catch {
+            source.switchboardExpectations = oldExpected; source.switchboardObligations = oldWatches
+            return "Could not persist the tracked delivery. Nothing was sent."
+        }
         pendingTells[id] = (source.id, global.home, group)
         source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " · " + id.uuidString))
         participantStore.save()
@@ -1662,6 +1696,7 @@ extension DeviceSyncService {
                   let bytes = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: bytes) else { return true }
             pendingTells.removeValue(forKey: id)
             if let source = store.sessions.first(where: { $0.id == pending.source }) {
+                store.switchboardReceipt(source, delivery: id, accepted: ack.outcome == "queued")
                 source.messages.append(Message(role: "notice", text: "Switchboard: " + ack.outcome + " · " + id.uuidString + " · " + (ack.detail ?? "")))
                 store.save()
             }
@@ -1673,7 +1708,7 @@ extension DeviceSyncService {
         guard let bytes = envelope.payload, let request = try? JSONDecoder().decode(DeviceTellPayload.self, from: bytes),
               request.groupID == group, let from = DeviceGlobalID(request.source), from.home == origin,
               let to = DeviceGlobalID(request.target), to.home == identity?.deviceID,
-              request.hop > 0, request.hop <= 8, !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              request.hop > 0, request.hop <= SwitchboardPolicy.maxHops, !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.text.utf8.count <= 32768, request.sourceTitle.utf8.count <= 1000 else { ack("rejected", "Invalid or out-of-group message. Nothing was queued."); return true }
         let hash = DeviceBlob.sha256Hex((try? DeviceCanonical.encode(request)) ?? bytes)
         if let receipt = store.groupTellReceipts.first(where: { $0.id == id }) {
@@ -1684,14 +1719,17 @@ extension DeviceSyncService {
             ack("rejected", "Target is closed or session messaging is disabled. Nothing was queued."); return true
         }
         guard store.groupTellReceipts.count < 100000 else { ack("rejected", "Home delivery journal is full. Nothing was queued."); return true }
-        let label = "[Converse message from " + request.sourceTitle + " · session " + from.string + " · delivery " + id.uuidString + " · hop " + String(request.hop) + "/8]\n" + request.text
+        let label = "[Converse message from " + request.sourceTitle + " · session " + from.string + " · delivery " + id.uuidString + " · hop " + String(request.hop) + "/" + String(SwitchboardPolicy.maxHops) + "]\n" + request.text + Store.replyInstruction(id: id, expected: request.replyExpected == true, inReplyTo: request.inReplyTo)
         let prompt = PendingPrompt(switchboardHop: request.hop, originGroupID: group, originHomeID: origin, text: label, images: [])
+        guard target.switchboardObligations.filter({ !$0.terminal }).count < 128 else { ack("rejected", "Supervision journal is full."); return true }
+        let oldWatches = target.switchboardObligations, oldExpected = target.switchboardExpectations
         let oldPending = target.pending, oldMessages = target.messages
         if request.urgent { target.pending.insert(prompt, at: 0) } else { target.pending.append(prompt) }
         target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + request.sourceTitle + " [" + from.string + "] · " + id.uuidString + "\n" + request.text))
+        store.switchboardReceived(target, source: from.string, name: request.sourceTitle, id: id, prompt: prompt, replyExpected: request.replyExpected == true, inReplyTo: request.inReplyTo, group: group, home: origin)
         store.groupTellReceipts.append(GroupTellReceipt(id: id, origin: origin, payloadHash: hash))
         do { try store.saveChecked() }
-        catch { target.pending = oldPending; target.messages = oldMessages; store.groupTellReceipts.removeAll { $0.id == id }; ack("rejected", "Home could not save delivery. Nothing was queued."); return true }
+        catch { target.switchboardObligations = oldWatches; target.switchboardExpectations = oldExpected; target.pending = oldPending; target.messages = oldMessages; store.groupTellReceipts.removeAll { $0.id == id }; ack("rejected", "Home could not save delivery. Nothing was queued."); return true }
         ack("queued", "Persisted on " + deviceName + ". Queued does not mean read or answered.")
         if request.urgent { target.queuePaused = false; if target.busy { target.resumeAfterInterrupt = true; store.interruptProcess(target) } }
         if !target.busy { DispatchQueue.main.async { store.runNext(target) } }

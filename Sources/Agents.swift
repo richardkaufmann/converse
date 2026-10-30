@@ -184,7 +184,7 @@ enum AgentFailure: LocalizedError {
 }
 
 struct AgentReply: Decodable {
-    struct Tell: Decodable { var to: String; var text: String }
+    struct Tell: Decodable { var to: String; var text: String; var replyExpected: Bool?; var inReplyTo: UUID? }
     var reply: String
     var attention: String?
     var artPrompt: String?

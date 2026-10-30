@@ -1037,8 +1037,21 @@ try
                         probationCreate.Error?.Retryable == true &&
                         !probationSecret.Ok && probationSecret.Error?.Retryable == true,
                 "Probation rejects ordinary admin and secret work as retryable");
+            var supervisingDevices = (DeviceSyncService)typeof(LinuxHost).GetField(
+                "_devices", flags)!.GetValue(host)!;
+            checks.That(!supervisingDevices.CanSuperviseSwitchboard(),
+                "Supervision recovery cannot start during probation");
+            host.SetAcceptingWork(false);
+            checks.That(!supervisingDevices.CanSuperviseSwitchboard(),
+                "Supervision recovery cannot start while drain is closed");
+            var tickPendingBefore = supervisingDevices.WorkSnapshot().Total;
+            supervisingDevices.Agents.Tick(DateTime.UtcNow);
+            checks.That(supervisingDevices.WorkSnapshot().Total == tickPendingBefore,
+                "Closed admission runs no scheduler or recovery work");
             admissionField.SetValue(host, previousAdmission);
             host.SetAcceptingWork(true);
+            checks.That(supervisingDevices.CanSuperviseSwitchboard(),
+                "Supervision resumes once admission reopens");
 
             var badBinding = await AdminClient.SendAsync(paths, Request(
                 "pairing.join.confirm",

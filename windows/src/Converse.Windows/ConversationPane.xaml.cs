@@ -159,11 +159,11 @@ public sealed partial class ConversationPane : UserControl
         List<(string Role, string Text, List<string> Images)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Messages
-                .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList())).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
-                .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes))).ToList();
         if (lines is null) return (new List<(string Role, string Text, List<string> Images)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
@@ -206,7 +206,7 @@ public sealed partial class ConversationPane : UserControl
         ProviderMark.Visibility = key.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         var (asset, label) = key switch
         {
-            "muse" => ("meta", "Meta"), "claude" => ("anthropic", "Anthropic"),
+            "agent" or "muse" => ("meta", "Meta"), "claude" => ("anthropic", "Anthropic"),
             "codex" => (ActualTheme == ElementTheme.Dark ? "openai-dark" : "openai", "OpenAI"),
             _ => ("", engine ?? "")
         };
@@ -237,6 +237,7 @@ public sealed partial class ConversationPane : UserControl
             AttachButton.IsEnabled = false;
             ModelBox.IsEnabled = EffortBox.IsEnabled = AccessBox.IsEnabled = false; // WinUI 3 panels have no IsEnabled
             TakeButton.Visibility = Visibility.Collapsed;
+            AgentActionsButton.Visibility = Visibility.Collapsed;
             BusyRing.IsActive = false;
             // Force the empty sync: the cleared state may equal the tracked
             // state while blocks still show the old session.
@@ -249,7 +250,8 @@ public sealed partial class ConversationPane : UserControl
             UpdateHint();
             return;
         }
-        PaneTitle.Text = _selected.Title;
+        AgentActionsButton.Visibility = _selected.IsAgent ? Visibility.Visible : Visibility.Collapsed;
+        PaneTitle.Text = _selected.Title + (_selected.IsAgent ? " 🕵️" : "");
         // Adopt the home draft only into an untouched tail; never over typing.
         // Stored drafts use \n; the draft box uses \r, so normalize on adopt.
         var homeDraft = _selected.LocalSessionID is { } localId
@@ -313,6 +315,37 @@ public sealed partial class ConversationPane : UserControl
         RefreshSettings();
     }
 
+
+    private bool _agentActionBusy;
+    private void OnAgentActionsOpening(object sender, object e)
+    {
+        if (sender is not MenuFlyout menu) return;
+        menu.Items.Clear();
+        if (_selected is not { IsAgent: true } selected) return;
+        var local = selected.LocalSessionID is { } id ? _host.Store.Sessions.FirstOrDefault(s => s.Id == id) : null;
+        var online = local is not null || selected.GlobalID is { } gid && !_host.Devices.RemoteOffline.Contains(gid);
+        var setup = new MenuFlyoutItem { Text = "Agent Setup / Loop…", IsEnabled = online };
+        setup.Click += async (_, _) => await _host.OpenAgentSetup(selected);
+        menu.Items.Add(setup);
+        var run = new MenuFlyoutItem { Text = "Run once", IsEnabled = online && !_agentActionBusy && !SelectedBusy() };
+        run.Click += async (_, _) =>
+        {
+            if (_agentActionBusy) return;
+            _agentActionBusy = true;
+            try { await _host.RunAgentOnce(selected); }
+            catch { await _host.AgentNotice("Could not run the agent. Check the home connection before retrying."); }
+            finally { _agentActionBusy = false; }
+        };
+        menu.Items.Add(run);
+        var board = new MenuFlyoutItem { Text = "Scoreboard", IsEnabled = local?.Agent is not null || BannerStack.Children.OfType<Expander>().Any() };
+        board.Click += (_, _) =>
+        {
+            if (local is not null) _host.ShowAgentScoreboard(local);
+            else if (BannerStack.Children.OfType<Expander>().FirstOrDefault() is { } expander)
+            { expander.IsExpanded = true; BannerScroller.ChangeView(null, 0, null); }
+        };
+        menu.Items.Add(board);
+    }
 
     private bool SelectedBusy()
     {
@@ -755,6 +788,12 @@ public sealed partial class ConversationPane : UserControl
             Margin = new Thickness(0, 2, 0, 0),
             Foreground = new SolidColorBrush(isUser ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray),
         };
+        if (_selected?.LocalSessionID is { } localID)
+        {
+            var message = _host.Store.Sessions.FirstOrDefault(s => s.Id == localID)?.Messages
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text)).ElementAtOrDefault(number - 1);
+            if (message?.CreatedAt is { } date) ToolTipService.SetToolTip(chip, "Recorded " + date.ToLocalTime().ToString("G"));
+        }
         Grid.SetColumn(chip, 0);
         grid.Children.Add(chip);
         var body = new StackPanel { Spacing = 8 };
@@ -769,7 +808,13 @@ public sealed partial class ConversationPane : UserControl
         var blocks = isUser
             ? new List<MdBlock> { new MdText(flat, new List<MdRun>()) }
             : MarkdownBlocks.Parse(flat);
-        foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
+        if (SwitchboardPresentation.Summary(flat) is { } summary)
+        {
+            var row = new TextBlock { Text = summary, FontSize = 16, MaxLines = 1, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = new SolidColorBrush(Microsoft.UI.Colors.DarkOrange) };
+            ToolTipService.SetToolTip(row, line.Text);
+            body.Children.Add(row);
+        }
+        else foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
         if (body.Children.Count == 0) body.Children.Add(new RichTextBlock { FontSize = 16 });
         // Inline response images (Mac message.images parity): the caption
         // already renders as text above; each managed file draws bounded
@@ -1417,11 +1462,6 @@ public sealed partial class ConversationPane : UserControl
         BannerStack.Children.Clear();
         if (isAgent && _selected is { } selected)
         {
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-            var setup = new Button { Content = "Agent Setup / Loop" }; setup.Click += async (_, _) => await _host.OpenAgentSetup(selected); controls.Children.Add(setup);
-            var run = new Button { Content = "Run once" }; run.Click += async (_, _) => { run.IsEnabled = false; try { await _host.RunAgentOnce(selected); } finally { run.IsEnabled = true; } }; controls.Children.Add(run);
-            if (local is not null) { var show = new Button { Content = "Scoreboard" }; show.Click += (_, _) => _host.ShowAgentScoreboard(local); controls.Children.Add(show); }
-            BannerStack.Children.Add(controls);
             var attention = local?.Agent?.Attention ?? widget?.Attention ?? "";
             if (attention.Length > 0) BannerStack.Children.Add(new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Gold), Child = new TextBlock { Text = "⚠ " + attention, Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black), TextWrapping = TextWrapping.Wrap, Padding = new Thickness(8) } });
             if (widget is not null)
@@ -1689,11 +1729,12 @@ public sealed partial class ConversationPane : UserControl
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var preview = new TextBlock
             {
-                Text = text.Replace("\r", " ").Replace("\n", " "),
+                Text = SwitchboardPresentation.Summary(text, queued: true) ?? text.Replace("\r", " ").Replace("\n", " "),
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            ToolTipService.SetToolTip(preview, text);
             Grid.SetColumn(preview, 0);
             row.Children.Add(preview);
             var injectingThis = queueBusy && queueRecord?.Payload.Action == "inject" && queueRecord.Payload.PendingID == id;

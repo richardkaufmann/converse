@@ -2228,6 +2228,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(dir); }
 }
 
+await SwitchboardSupervisionChecks.Run(Check, JoinPair);
 await AgentChecks.Run(Check, JoinPair);
 
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
