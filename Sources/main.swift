@@ -1634,6 +1634,7 @@ struct ScrollingConversation: NSViewRepresentable {
         let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         var rendering = false
         var draftChanged: ((String) -> Void)?
+        var resolveSessionName: (String) -> String? = { DeviceSyncService.shared.switchboardDisplayName($0) }
         init(_ session: Session) { self.session = session }
         func submissionHandler(_ text: ConversationTextView, action: @escaping () -> Void) -> () -> Void {
             { [weak self, weak text] in
@@ -1750,7 +1751,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
-                let trafficSummary = TranscriptStyle.trafficSummary(visible, resolveName: DeviceSyncService.shared.switchboardDisplayName)
+                let trafficSummary = TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
                 if let summary = trafficSummary {
                     let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                     body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
@@ -1809,7 +1810,13 @@ struct ScrollingConversation: NSViewRepresentable {
             // Layout preceding unchanged messages remains valid while an
             // assistant streams. Replacing the entire storage invalidates
             // every paragraph, even when only the final block changed.
-            let prefix = min(unchangedPrefix, document.length, current.length)
+            var prefix = min(unchangedPrefix, document.length, current.length)
+            // A directory refresh can change an earlier traffic label without
+            // changing its stored message. Never reuse offsets unless the
+            // actual rendered prefix still matches the new document.
+            if prefix > 0 && current.substring(to: prefix) != (document.string as NSString).substring(to: prefix) {
+                prefix = 0
+            }
             lastReplacementStart = prefix
             if prefix > 0 {
                 text.textStorage?.replaceCharacters(in: NSRange(location: prefix, length: current.length - prefix), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
@@ -2375,6 +2382,19 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     performanceSession.messages.append(Message(role: "activity", text: "hidden tool status"))
     performanceCoordinator.render(performanceText)
     check(performanceCoordinator.historyBuildCount == 2, "Hidden tool activity does not invalidate the rendered transcript")
+    let renamedSession = Session(entry: performanceSession.entry)
+    renamedSession.messages = [Message(role: "assistant", text: "```converse\n{\"command\":\"tell\",\"to\":\"" + UUID().uuidString + "\",\"text\":\"Review\"}\n```"), Message(role: "assistant", text: "Previous response")]
+    let renamedText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    let renamedCoordinator = ScrollingConversation.Coordinator(renamedSession)
+    renamedCoordinator.resolveSessionName = { _ in "A formerly long session name" }
+    renamedCoordinator.render(renamedText)
+    renamedCoordinator.resolveSessionName = { _ in "Muse" }
+    renamedSession.messages.append(Message(role: "user", text: "Let's get Linux up and into the group"))
+    renamedCoordinator.render(renamedText)
+    let cleanText = ConversationTextView(frame: renamedText.frame)
+    let cleanCoordinator = ScrollingConversation.Coordinator(renamedSession)
+    cleanCoordinator.resolveSessionName = { _ in "Muse" }; cleanCoordinator.render(cleanText)
+    check(renamedText.string == cleanText.string && renamedText.string.contains("Let's get Linux up and into the group"), "An earlier resolved name change cannot leak history into or truncate the next prompt")
     var following = TranscriptFollowState()
     following.scroll(nearBottom: false, now: 10); following.outputArrived()
     check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output for at least five idle seconds")

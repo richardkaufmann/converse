@@ -162,6 +162,8 @@ Catalogs come from the installed CLI and selected login, rather than a fixed lis
 
 **Claude’s Don’t ask denies actions needing approval. Bypass permissions is the separate mode for skipping permission checks.** Converse passes the selected mode to every turn, including resumed turns. CLI/organization restrictions still apply. Claude and Codex run headlessly here, so terminal approval dialogs are not embedded. Muse’s host supplies native approval choices. Claude/Codex model, effort and access menus can return to CLI defaults.
 
+For a session running on another device, including a headless Linux home, use the **⋯ Session settings** menu in its pane. **Model**, **Effort**, and **Restrictions** remain reachable in narrow panes on Mac, iPad, and Windows. Choose **Custom model…** to enter a provider model ID when the home has no catalog. Changes are sent to and saved by the home; Codex and Claude use them on the next turn. The viewer must hold the session’s display lease.
+
 Sources checked against the installed CLI help and schemas: [Claude permission modes](https://code.claude.com/docs/en/permission-modes), [Codex command reference](https://learn.chatgpt.com/docs/developer-commands), and Muse’s offline MSP schema (`muse schema generate-json-schema`). Muse’s reported effort variants and profile availability take precedence over its broader CLI vocabulary.
 
 ## Accounts

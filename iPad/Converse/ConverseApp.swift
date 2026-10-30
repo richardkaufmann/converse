@@ -167,6 +167,8 @@ struct PadPane: View {
     @State private var scoreboardExpanded = false
     @State private var agentActionBusy = false
     @State private var agentActionError: String?
+    @State private var editingModel = false
+    @State private var customModel = ""
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
     var body: some View {
         VStack(spacing: 0) {
@@ -284,6 +286,14 @@ struct PadPane: View {
                 Button(snapshot?.busy == true ? "Queue" : "Send") { model.send(id) }.buttonStyle(.borderedProminent).disabled(!model.canSend(id))
             }.padding(8).disabled(!model.canControl(id))
         }.background(Color(uiColor: .systemBackground)).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .alert("Set model on home", isPresented: $editingModel) {
+                TextField("Model ID", text: $customModel).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Cancel", role: .cancel) { }
+                Button("Save") {
+                    let value = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model", model: value.isEmpty ? nil : value))
+                }.disabled(!model.canControl(id))
+            } message: { Text("Enter the provider's model ID. Leave blank for the CLI default. Applies on the home device to the next turn.") }
             .onChange(of: photo) { _, value in
                 guard let value else { return }
                 let destination = id
@@ -317,16 +327,46 @@ struct PadPane: View {
     }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
         HStack(spacing: 8) {
-            if let state = snapshot.compaction {
-                Menu { Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(!model.canControl(id) || state.phase != "available") } label: { Image(systemName: "ellipsis.circle") }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) { remoteSettings(snapshot) }.fixedSize()
             }
-            Menu(snapshot.model.isEmpty ? "Model" : snapshot.model) {
-                ForEach(snapshot.modelOptions) { choice in Button(choice.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model", model: choice.id, modelProvider: choice.provider, modelProfile: choice.profile)) } }
-            }
-            Menu(snapshot.effort.isEmpty ? "Effort" : snapshot.effort) { ForEach(snapshot.effortOptions, id: \.self) { value in Button(value) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "effort", effort: value)) } } }
-            Menu(snapshot.access.isEmpty ? "Access" : snapshot.access) { ForEach(snapshot.accessOptions) { value in Button(value.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access", access: value.id)) } } }
+            Menu {
+                remoteSettings(snapshot)
+                if let state = snapshot.compaction {
+                    Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(state.phase != "available")
+                }
+            } label: { Image(systemName: "ellipsis.circle") }
+                .fixedSize().accessibilityLabel("Session settings")
         }.font(.caption).disabled(!model.canControl(id))
     }
+    @ViewBuilder func remoteSettings(_ snapshot: DeviceTranscriptPayload) -> some View {
+        Menu(snapshot.model.isEmpty ? "Model: CLI default" : snapshot.model) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model")) }
+            }
+            ForEach(snapshot.modelOptions) { option in
+                Button(option.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model", model: option.id, modelProvider: option.provider, modelProfile: option.profile)) }
+            }
+            Button("Custom model…") { customModel = snapshot.model; editingModel = true }
+        }
+        Menu(snapshot.effort.isEmpty ? "Effort: CLI default" : "Effort: " + snapshot.effort) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "effort")) }
+            }
+            ForEach(snapshot.effortOptions, id: \.self) { value in
+                Button(value) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "effort", effort: value)) }
+            }
+        }
+        Menu(snapshot.access.isEmpty ? "Restrictions: CLI default" : snapshot.access) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access")) }
+            }
+            ForEach(snapshot.accessOptions) { option in
+                Button(option.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access", access: option.id)) }
+            }
+        }
+    }
+
 }
 
 

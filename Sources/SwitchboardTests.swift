@@ -138,8 +138,15 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         settings.turnLimit = 3; settings.enabled = false
         let configured = request("agent.configure", target: agentID, settings: settings)
         check(configured?.outcome == "completed" && Set(agent.agent?.watchedParticipants ?? []) == Set(settings.watched), "Group devices configure an agent's allowed participants and budget on its home (" + (configured?.detail ?? "no response") + ")")
+        let pendingInspection = request("inspect", target: gid)
+        check(pendingInspection?.evidence?.messages.contains { $0.text.contains("Cross-device hello") } == false, "Queued incoming traffic is not duplicated in submitted history or agent evidence")
+        // Advance this paused fixture through the submission boundary without
+        // invoking a real provider; inspection should then expose the prompt.
+        let submitted = target.pending.removeFirst()
+        target.messages.append(Message(role: "user", text: submitted.text))
         let inspection = request("inspect", target: gid)
         check(inspection?.evidence?.globalID == gid && inspection?.evidence?.messages.contains { $0.text.contains("Cross-device hello") } == true && inspection?.evidence?.messages.contains { $0.text.contains("Unsent human draft") } == false && a.remoteLeases.isEmpty, "Agent evidence snapshots include allowed submitted history without drafts or a display lease")
+        target.pending.append(submitted) // Restore the reciprocal-queue fixture for the later recovery check.
         settings.watched = [DeviceGlobalID(home: String(repeating: "f", count: 64), session: source.id).string]
         check(request("agent.configure", target: agentID, settings: settings)?.outcome == "rejected" && agent.agent?.turnLimit == 3, "Remote agent configuration refuses targets outside the current group")
         agent.queuePaused = true

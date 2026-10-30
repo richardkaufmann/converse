@@ -643,6 +643,36 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
+    private void OnSessionSettingsOpening(object sender, object e)
+    {
+        if (sender is not MenuFlyout menu) return;
+        menu.Items.Clear();
+        foreach (var (label, kind, box) in new[] { ("Model", "model", ModelBox), ("Effort", "effort", EffortBox), ("Restrictions", "access", AccessBox) })
+        {
+            var sub = new MenuFlyoutSubItem { Text = label, IsEnabled = box.IsEnabled };
+            foreach (var option in (box.ItemsSource as List<SettingItem>) ?? new())
+            {
+                var item = new MenuFlyoutItem { Text = option.Label };
+                item.Click += (_, _) => ApplySetting(kind, option.Id.Length == 0 ? null : option.Id);
+                sub.Items.Add(item);
+            }
+            if (kind == "model")
+            {
+                var custom = new MenuFlyoutItem { Text = "Custom model…" };
+                custom.Click += async (_, _) =>
+                {
+                    var selected = _selected;
+                    var input = new TextBox { Text = ModelBox.Text == CliDefault ? "" : ModelBox.Text, PlaceholderText = "Model ID (blank uses CLI default)" };
+                    var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Set model", Content = input, PrimaryButtonText = "Save", CloseButtonText = "Cancel" };
+                    if (await dialog.ShowAsync() == ContentDialogResult.Primary && ReferenceEquals(selected, _selected))
+                        ApplySetting("model", string.IsNullOrWhiteSpace(input.Text) ? null : input.Text.Trim());
+                };
+                sub.Items.Add(custom);
+            }
+            menu.Items.Add(sub);
+        }
+    }
+
     private void ApplySetting(string kind, string? value)
     {
         if (_selected?.LocalSessionID is { } localId)

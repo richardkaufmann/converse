@@ -162,6 +162,8 @@ struct RemotePane: View {
     @State private var scoreboardExpanded = false
     @State private var agentActionBusy = false
     @State private var agentActionError: String?
+    @State private var editingModel = false
+    @State private var customModel = ""
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
@@ -302,17 +304,24 @@ struct RemotePane: View {
                 }
             Divider()
             if let transcript {
-                HStack(spacing: 10) {
-                    Text(transcript.status).lineLimit(1)
-                    if let state = transcript.compaction {
-                        Menu { Button("Compact context") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "compact")) }.disabled(state.phase != "available" || !hasLease || offline) } label: { Image(systemName: "ellipsis.circle") }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(transcript.status).lineLimit(1)
+                        if let account = transcript.accountName { Text(account).lineLimit(1) }
+                        Spacer(minLength: 0)
+                        Menu {
+                            remoteSettings(transcript)
+                            if let state = transcript.compaction {
+                                Button("Compact context") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "compact")) }.disabled(state.phase != "available")
+                            }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                            .fixedSize().accessibilityLabel("Session settings").help("Model, effort and restrictions on the home device")
                     }
-                    if let account = transcript.accountName { Text(account).foregroundStyle(.secondary).lineLimit(1) }
-                    Spacer(minLength: 0)
-                    Menu(transcript.model) { ForEach(transcript.modelOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model", model: option.id, modelProvider: option.provider, modelProfile: option.profile)) } } }.menuStyle(.borderlessButton).fixedSize()
-                    Menu(transcript.effort) { ForEach(transcript.effortOptions, id: \.self) { effort in Button(effort) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "effort", effort: effort)) } } }.menuStyle(.borderlessButton).fixedSize()
-                    Menu(transcript.access) { ForEach(transcript.accessOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access", access: option.id)) } } }.menuStyle(.borderlessButton).fixedSize()
-                }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(!hasLease)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) { remoteSettings(transcript) }.fixedSize()
+                    }
+                }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(!hasLease || offline)
+
             }
             if !composer.blobHashes.isEmpty {
                 Text(composer.blobHashes.allSatisfy { service.blobReady[$0] == true } ? "Attachments stored on home. Ready to send." : "Uploading attachments to home… Send waits for home storage.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading)
@@ -321,6 +330,14 @@ struct RemotePane: View {
                 Text(service.lastOutcome).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).padding(.horizontal, 10).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading)
             }
         }.background(Color(nsColor: .textBackgroundColor)).frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
+            .alert("Set model on home", isPresented: $editingModel) {
+                TextField("Model ID", text: $customModel)
+                Button("Cancel", role: .cancel) { }
+                Button("Save") {
+                    let value = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model", model: value.isEmpty ? nil : value))
+                }.disabled(!hasLease || offline)
+            } message: { Text("Enter the provider's model ID. Leave blank for the CLI default. Applies on the home device to the next turn.") }
             .onChange(of: service.remoteLeases[globalID]) { _, _ in hydrate(force: true); syncEditor() }
             .onChange(of: service.remoteTranscripts[globalID]?.draftVersion) { _, _ in hydrate() }
             .onChange(of: service.remoteTranscripts[globalID]?.globalID) { _, _ in hydrate() }
@@ -339,6 +356,33 @@ struct RemotePane: View {
                     composer.sentText = ""; composer.sentHashes = []; composer.sentCommandID = nil
                 }
             }
+    }
+    @ViewBuilder func remoteSettings(_ snapshot: DeviceTranscriptPayload) -> some View {
+        Menu(snapshot.model.isEmpty ? "Model: CLI default" : snapshot.model) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model")) }
+            }
+            ForEach(snapshot.modelOptions) { option in
+                Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model", model: option.id, modelProvider: option.provider, modelProfile: option.profile)) }
+            }
+            Button("Custom model…") { customModel = snapshot.model; editingModel = true }
+        }
+        Menu(snapshot.effort.isEmpty ? "Effort: CLI default" : "Effort: " + snapshot.effort) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "effort")) }
+            }
+            ForEach(snapshot.effortOptions, id: \.self) { value in
+                Button(value) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "effort", effort: value)) }
+            }
+        }
+        Menu(snapshot.access.isEmpty ? "Restrictions: CLI default" : snapshot.access) {
+            if snapshot.engine != "muse" {
+            Button("CLI default") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access")) }
+            }
+            ForEach(snapshot.accessOptions) { option in
+                Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access", access: option.id)) }
+            }
+        }
     }
     func runAgentOnce() {
         guard !agentActionBusy, let global = DeviceGlobalID(globalID) else { return }

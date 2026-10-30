@@ -857,9 +857,18 @@ extension DeviceSyncService {
         case "rename":
             // Same path as local rename: title didSet updates identity sidecar.
             if let text = command.text, !text.isEmpty { session.title = text; store.save() }
-        case "model": if let model = command.model { store.changeSetting(session, .model(MuseModelChoice(id: model, label: model, provider: command.modelProvider ?? session.entry.engine, profile: command.modelProfile, efforts: session.availableEfforts))); asyncSetting = session.changingSetting }
-        case "effort": if let effort = command.effort { store.changeSetting(session, .effort(effort)); asyncSetting = session.changingSetting }
-        case "access": if let access = command.access { store.changeSetting(session, .access(access)); asyncSetting = session.changingSetting }
+        case "model":
+            if let model = command.model { store.changeSetting(session, .model(MuseModelChoice(id: model, label: model, provider: command.modelProvider ?? session.entry.engine, profile: command.modelProfile, efforts: session.availableEfforts))); asyncSetting = session.changingSetting }
+            else if session.entry.engine != "muse" { store.clearOverride(session, field: "model") }
+            else { failure = "Choose a model from Muse's catalog." }
+        case "effort":
+            if let effort = command.effort { store.changeSetting(session, .effort(effort)); asyncSetting = session.changingSetting }
+            else if session.entry.engine != "muse" { store.clearOverride(session, field: "effort") }
+            else { failure = "Choose an effort supported by the Muse model." }
+        case "access":
+            if let access = command.access { store.changeSetting(session, .access(access)); asyncSetting = session.changingSetting }
+            else if session.entry.engine != "muse" { store.clearOverride(session, field: "access") }
+            else { failure = "Choose a Muse permission profile." }
         case "answer":
             if let request = session.requests.first(where: { $0.id == command.requestID }) {
                 if let answersJSON = command.answersJSON, let answers = (try? JSONSerialization.jsonObject(with: answersJSON)) as? [[String: Any]] {
