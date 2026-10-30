@@ -50,6 +50,7 @@ final class TailTextView: UITextView {
         container.widthTracksTextView = true; layout.addTextContainer(container)
         let view = TailTextView(frame: .zero, textContainer: container)
         layout.allowsNonContiguousLayout = false
+        view.pasteConfiguration = UIPasteConfiguration(acceptableTypeIdentifiers: [UTType.text.identifier, UTType.image.identifier])
         return view
     }
     override func layoutSubviews() {
@@ -143,6 +144,19 @@ final class TailTextView: UITextView {
             if !text.isEmpty { insertText(text) }; return
         }
         super.replace(range, withText: text)
+    }
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) {
+            guard isEditable else { return false }
+            // Menu/keyboard validation must accept image-only clipboards without
+            // reading their contents before the user actually chooses Paste.
+            if UIPasteboard.general.hasImages { return true }
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+    override func canPaste(_ itemProviders: [NSItemProvider]) -> Bool {
+        guard isEditable else { return false }
+        return itemProviders.contains { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) } || super.canPaste(itemProviders)
     }
     override func paste(_ sender: Any?) {
         guard isEditable else { return }

@@ -199,7 +199,7 @@ struct SidebarSession: View {
                 Text(session.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).layoutPriority(-1)
             if showsModel {
-                Text(session.toolStatus.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(width: 105, alignment: .leading)
+                ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
             }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
@@ -209,7 +209,7 @@ struct SidebarSession: View {
                 }
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored.")
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
-        }.padding(.horizontal, 4).padding(.vertical, 3)
+        }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .foregroundStyle(workspace.showsParkedApproval(session) ? Color.black : Color.primary)
             .contentShape(Rectangle())

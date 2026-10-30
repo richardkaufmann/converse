@@ -104,11 +104,11 @@ struct PadRoot: View {
                     if let group = service.currentGroup { Text(group.name + " group").font(.title2.weight(.semibold)).foregroundStyle(Color.accentColor).padding(.top, 6).help("Devices sharing sessions in " + group.name) }
                     ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                         if home.online {
-                        HStack { Text(home.deviceName).fontWeight(.semibold).lineLimit(1).help("Online: sessions run on " + home.deviceName); Text("remote").font(.caption).foregroundStyle(.secondary)
+                        HStack { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green).lineLimit(1).help("Online: sessions run on " + home.deviceName); Text("remote").font(.caption).foregroundStyle(.secondary)
                             if service.canHostAgent(home.deviceID) { Button { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("Create agent on " + home.deviceName) }
                         }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
-                        ForEach(home.rows) { row in
+                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
                             let pane = model.state.placements.firstIndex(of: row.globalID)
                             let attention = !(row.attention ?? "").isEmpty || (row.status.hasPrefix("Waiting") && pane == nil)
                             HStack(spacing: 3) {
@@ -131,7 +131,7 @@ struct PadRoot: View {
                                 }
                                 .accessibilityElement(children: .contain)
                         }
-                        } else { Text(home.deviceName).fontWeight(.semibold).foregroundStyle(Color.primary.opacity(0.3)).help("Offline. Sessions reappear when this device reconnects.").padding(.top, 10) }
+                        } else { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(0.4)).help("Offline. Sessions reappear when this device reconnects.").padding(.top, 10) }
                     }
                     if service.homes.isEmpty { Text("Join a Converse group to see its devices and sessions.").font(.callout).foregroundStyle(.secondary).padding(10) }
                 }.padding(.horizontal, 5)

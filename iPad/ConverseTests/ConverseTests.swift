@@ -12,6 +12,31 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testClosedHomeSessionDisappearsFromIPadAndRejectsLateSnapshots() throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "a", count: 64), sid = UUID()
+        let id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        let row = DeviceSidebarRow(globalID: id, sessionID: sid, title: "Closing", assistant: "Muse", engine: "muse", model: "m", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+        func sidebar(_ sequence: UInt64, _ rows: [DeviceSidebarRow]) throws {
+            let payload = DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: sequence, rows: rows)
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: sequence, payload: try JSONEncoder().encode(payload)))
+        }
+        try sidebar(10, [row])
+        model.state.placements[0] = id; model.state.drafts[id] = PadDraft(text: "Keep unsent words", dirty: true)
+        service.remoteLeases[id] = 4
+        let snapshot = DeviceTranscriptPayload(globalID: id, homeSeq: 11, epoch: 4, messages: [], offset: 0, total: 0, draft: "", draftVersion: 0, busy: false, status: "Ready")
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "transcript.snapshot", sessionID: id, epoch: 4, payload: try JSONEncoder().encode(snapshot)))
+        try sidebar(12, [])
+        XCTAssertNil(model.state.placements[0]); XCTAssertNil(service.remoteLeases[id]); XCTAssertNil(service.remoteTranscripts[id])
+        XCTAssertEqual(model.draft(id).text, "Keep unsent words", "Closing a remote pane retains recoverable local typing")
+        XCTAssertNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "send", text: "Too late")))
+        try sidebar(10, [row])
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "transcript.snapshot", sessionID: id, epoch: 4, payload: try JSONEncoder().encode(snapshot)))
+        XCTAssertTrue(service.homes[home]?.rows.isEmpty == true); XCTAssertNil(service.remoteTranscripts[id])
+        XCTAssertNil(PadModel(service: service).state.placements[0], "Closed placement stays gone after scene restoration")
+    }
     func testConverseGroupsAdmissionAgainstMacHome() async throws {
         guard let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with the group-aware Mac fixture") }
         let service = try service(); try service.enableGroupsForTesting()
@@ -280,11 +305,15 @@ final class ConverseTests: XCTestCase {
         let view = TailTextView.native(); view.delegate = coordinator
         parent.update(view, coordinator: coordinator)
         let before = view.textStorage.string
-        view.paste(nil)
+        XCTAssertFalse(UIPasteboard.general.hasStrings)
+        XCTAssertTrue(view.canPerformAction(#selector(UIResponderStandardEditActions.paste(_:)), withSender: nil), "Image-only clipboard enables context-menu and Command-V Paste")
+        XCTAssertTrue(UIApplication.shared.sendAction(#selector(UIResponderStandardEditActions.paste(_:)), to: view, from: nil, for: nil))
         let pasted = try XCTUnwrap(attached.flatMap(UIImage.init(data:)))
         XCTAssertEqual(pasted.cgImage?.width, image.cgImage?.width)
         XCTAssertEqual(pasted.cgImage?.height, image.cgImage?.height)
         XCTAssertEqual(view.textStorage.string, before)
+        view.isEditable = false
+        XCTAssertFalse(view.canPerformAction(#selector(UIResponderStandardEditActions.paste(_:)), withSender: nil), "A displaced viewer cannot paste")
     }
     func testSystemPasteProviderPreservesImageAndDraft() async throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 19, height: 13)).image { c in UIColor.green.setFill(); c.fill(CGRect(x: 0, y: 0, width: 19, height: 13)) }
@@ -297,6 +326,8 @@ final class ConverseTests: XCTestCase {
         let coordinator = PadTranscript.Coordinator(parent)
         let view = TailTextView.native(); view.delegate = coordinator
         parent.update(view, coordinator: coordinator)
+        XCTAssertTrue(view.canPaste([provider]))
+        XCTAssertTrue(view.pasteConfiguration?.acceptableTypeIdentifiers.contains(UTType.image.identifier) == true)
         view.paste(itemProviders: [provider])
         try await eventually("System paste provider attaches asynchronously") { attached != nil }
         let result = try XCTUnwrap(attached.flatMap(UIImage.init(data:)))

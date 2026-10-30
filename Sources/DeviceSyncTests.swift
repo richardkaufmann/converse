@@ -356,14 +356,20 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         try homeBlob(.blobChunk, retryBytes, done: true)
         let recoveredBlobAcks = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.blobAck.rawValue }.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) } }
         check(recoveredBlobAcks.last?.outcome == "stored", "Home abandons interrupted image prefixes before a negotiated full resend")
+        captured = []
         session.queuePaused = true
         let teachingID = UUID(), previousQueueCount = session.pending.count
         let teachingPayload = try JSONEncoder().encode(DeviceCommandPayload(action: "teachSwitchboard"))
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: teachingID, epoch: 0, payload: teachingPayload))
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: teachingID, epoch: 0, payload: teachingPayload))
         check(session.switchboardEnabled && session.pending.count == previousQueueCount + 1 && session.queuePaused, "Remote teaching queues instructions exactly once without taking a display lease or resuming a paused queue")
+        _ = try capturedEnvelopes()
         session.busy = false
         Store.shared.deleteSession(session)
+        captured = []
+        home.homeSessionClosed(session.id)
+        let closedFrames = try capturedEnvelopes()
+        check(closedFrames.contains { $0.kind == DeviceMessageKind.leaseStolen.rawValue && $0.sessionID == globalString } && !peer.leasedSessions.contains(session.id), "Closing a home session immediately displaces its remote viewer using existing wire semantics")
     } catch { check(false, "Service harness failed: " + error.localizedDescription) }
     // Viewer-service harness: grant, snapshot adoption, stale seq, ack binding.
     do {

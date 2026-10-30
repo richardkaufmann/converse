@@ -878,6 +878,7 @@ final class Store: ObservableObject {
         s.identityChanged = nil
         s.pending = []; stop(s)
         sessions.removeAll { $0.id == s.id }
+        DeviceSyncService.shared.homeSessionClosed(s.id)
         AppDelegate.shared?.sessionWasDeleted(s)
         save()
     }
@@ -1887,39 +1888,32 @@ struct RootView: View {
                 HStack(spacing: 6) {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    if sidebar.size.width >= PaneSizing.modelColumnThreshold { Text("Model").frame(width: 105, alignment: .leading) }
+                    Image(systemName: "sparkles").frame(width: 24).help("Assistant provider; hover over an icon for the model")
                     Text("Placement").frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if let group = devices.currentGroup {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(group.name + " group").font(.system(size: 17, weight: .semibold)).foregroundStyle(Color.accentColor)
-                                    .help("Converse group: " + group.name + ". These devices share sessions; choose a pane number to bring a session here.")
-                                Text((devices.identity?.deviceName ?? "This Mac") + " · this device").fontWeight(.semibold)
-                                    .help("This Mac. Sessions below run here, even when displayed on another group device.")
-                            }.padding(.horizontal, 4)
+                            Text(group.name + " group").font(.system(size: 17, weight: .semibold)).foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 4).help("Converse group: " + group.name + ". Choose a pane number to bring a session here.")
                         }
-                        ForEach(store.assistantFamilies, id: \.self) { engine in
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 6) {
-                                    Text(AssistantFamily.name(engine)).fontWeight(store.sessions.contains { $0.entry.engine == engine } ? .bold : .regular).help(AssistantFamily.name(engine) + " sessions on this device. Use + to create a session.")
-                                    Spacer()
-                                    Button { state.sessionSetup = SessionSetupRequest(engine: engine) } label: { Image(systemName: "plus") }
-                                        .buttonStyle(.plain).help("New " + AssistantFamily.name(engine) + " session")
-                                }.padding(.horizontal, 4).contextMenu {
-                                    Button("New session…") { state.sessionSetup = SessionSetupRequest(engine: engine) }
-                                    Button("Settings…") { state.settings = true }
-                                }
-                                ForEach(store.sessions.filter { $0.entry.engine == engine }) { session in
-                                    SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
-                                }
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack {
+                                Text((devices.identity?.deviceName ?? "This Mac") + " • this device").fontWeight(.bold).foregroundStyle(Color.green)
+                                    .help("Sessions run on this Mac, even when displayed elsewhere.")
+                                Spacer()
+                                Menu {
+                                    ForEach(store.assistantFamilies, id: \.self) { engine in
+                                        Button("New " + AssistantFamily.name(engine) + " session…") { state.sessionSetup = SessionSetupRequest(engine: engine) }
+                                    }
+                                    Button("New agent…") { AgentWindows.shared.create() }
+                                } label: { Image(systemName: "plus") }.menuStyle(.borderlessButton).fixedSize().help("Create a session on this device")
+                            }.padding(.horizontal, 4).frame(height: 28)
+                            ForEach(store.sessions.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { session in
+                                SidebarSession(session: session, workspace: workspace, state: state)
                             }
-                        }
-                        ForEach(store.sessions.filter { $0.agent != nil }) { session in
-                            SidebarSession(session: session, workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
-                        }
-                        DeviceSidebarSection(workspace: workspace, state: state, showsModel: sidebar.size.width >= PaneSizing.modelColumnThreshold)
+                        }.padding(.bottom, 8)
+                        DeviceSidebarSection(workspace: workspace, state: state)
                     }.padding(.top, 6)
                 }
                 Button("New agent…") { AgentWindows.shared.create() }.buttonStyle(.plain).padding(.vertical, 4)

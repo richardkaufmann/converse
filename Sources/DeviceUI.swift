@@ -80,24 +80,24 @@ struct DeviceSidebarSection: View {
     var body: some View {
         let homes = service.homes.values.sorted { $0.deviceName < $1.deviceName }
         if service.currentGroup != nil && !homes.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 8) {
                 ForEach(homes, id: \.deviceID) { home in
-                    if home.online {
+                    VStack(alignment: .leading, spacing: 0) {
                         HStack(spacing: 6) {
-                            Text(home.deviceName).fontWeight(.semibold).lineLimit(1).help(home.deviceName + " is online. Its sessions run there; choose 1, 2 or 3 to display one here.")
-                            Text("remote").font(.caption).foregroundStyle(.secondary).help("Sessions run on this other device in your group.")
-                        }.padding(.horizontal, 4)
-                        ForEach(home.rows) { row in
-                            RemoteSidebarRow(row: row, homeName: home.deviceName, online: true, showsModel: showsModel,
-                                             localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
-                                             park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
-                                             assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
+                            Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(home.online ? 1 : 0.4)).lineLimit(1)
+                            if home.online { Text("remote").font(.caption).foregroundStyle(.secondary) }
+                        }.padding(.horizontal, 4).frame(height: 28)
+                            .help(home.online ? "Sessions run on " + home.deviceName + ". Choose 1, 2 or 3 to display one here." : "Offline. Sessions reappear when this device reconnects.")
+                        if home.online {
+                            ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                                RemoteSidebarRow(row: row, homeName: home.deviceName, online: true, showsModel: showsModel,
+                                                 localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                                 park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
+                                                 assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
+                            }
+                            if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.leading, 16).frame(height: 30) }
                         }
-                        if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
-                    } else {
-                        Text(home.deviceName).fontWeight(.semibold).foregroundStyle(Color.primary.opacity(0.3))
-                            .lineLimit(1).padding(.horizontal, 4).help("Remote device offline. Sessions reappear when it reconnects.")
-                    }
+                    }.padding(.bottom, 8)
                 }
             }
         }
@@ -128,7 +128,7 @@ struct RemoteSidebarRow: View {
             ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
             Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
+            if showsModel { ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model) }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
@@ -139,7 +139,7 @@ struct RemoteSidebarRow: View {
                 PaneButton(label: "X", selected: false) {}.disabled(true).opacity(0.3)
                     .help("Close this session on its home device")
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online)
-        }.padding(.horizontal, 4).padding(.vertical, 3)
+        }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onHover { hover.setHovered($0) }

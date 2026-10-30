@@ -691,6 +691,28 @@ extension DeviceSyncService {
         }
     }
     #endif
+    #if os(macOS)
+    func homeSessionClosed(_ sessionID: UUID) {
+        guard let home = identity?.deviceID else { return }
+        if let holder = leases?.holder(session: sessionID) {
+            leases?.release(session: sessionID, device: holder.device, epoch: holder.epoch)
+        }
+        let globalID = DeviceGlobalID(home: home, session: sessionID).string
+        for peer in peers.values where peer.trustedReady && !peer.controlOnly {
+            peer.leasedSessions.remove(sessionID)
+            // Existing displacement semantics also clear older viewers promptly.
+            sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseStolen.rawValue, boot: boot, sessionID: globalID))
+        }
+        publishSidebarIfChanged()
+    }
+    #endif
+    private func discardRemoteDisplay(_ id: String) {
+        forgetDisplay(id)
+        pendingTakes.removeValue(forKey: id)
+        remoteLeases.removeValue(forKey: id); leaseBoots.removeValue(forKey: id)
+        remoteTranscripts.removeValue(forKey: id); remoteOffline.remove(id)
+        parkViewer(id)
+    }
     private func sidebarPayload() -> DeviceSidebarPayload {
         let home = identity?.deviceID ?? ""
         #if os(macOS)
@@ -910,6 +932,12 @@ extension DeviceSyncService {
                 if let last = lastSeqByHome[peerHome], seq <= last { return }
                 lastSeqByHome[peerHome] = seq
             }
+            if envelope.kind == DeviceMessageKind.sidebarSnapshot.rawValue {
+                let present = Set(payload.rows.map(\.globalID))
+                let known = Set((homes[peerHome]?.rows ?? []).map(\.globalID))
+                    .union(remoteLeases.keys).union(remoteTranscripts.keys).union(pendingTakes.keys).union(resumeEpochs.keys)
+                for id in known where DeviceGlobalID(id)?.home == peerHome && !present.contains(id) { discardRemoteDisplay(id) }
+            }
             homes[peerHome] = RemoteHomeState(deviceID: peerHome, deviceName: payload.homeDeviceName, online: true, rows: payload.rows, lastSeen: Date())
             for row in payload.rows { remoteOffline.remove(row.globalID) }
             if let encoded = try? JSONEncoder().encode(homes.values.map { DeviceSidebarPayload(homeDeviceID: $0.deviceID, homeDeviceName: $0.deviceName, homeSeq: 0, rows: $0.rows) }) { stateStore?.saveSidebarCache(encoded) }
@@ -961,11 +989,7 @@ extension DeviceSyncService {
             }
         case DeviceMessageKind.leaseStolen.rawValue, DeviceMessageKind.leaseDenied.rawValue:
             if let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome {
-                forgetDisplay(idString)
-                pendingTakes.removeValue(forKey: idString)
-                remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString)
-                remoteTranscripts.removeValue(forKey: idString)
-                parkViewer(idString)
+                discardRemoteDisplay(idString)
                 lastOutcome = "Display moved to another device."
             }
         case DeviceMessageKind.transcriptSnapshot.rawValue, DeviceMessageKind.transcriptTail.rawValue:
