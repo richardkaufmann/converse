@@ -138,6 +138,12 @@ public sealed partial class DeviceSyncService
         var previous = _store.ParticipantReceipts.FirstOrDefault(r => r.Id == id);
         if (previous is not null) return Task.FromResult(previous.Origin == origin && previous.Hash == hash ? previous.Response : Result("rejected", "Operation ID belongs to another request."));
         if (_store.ParticipantReceipts.Count >= 100000) return Task.FromResult(Result("rejected", "Home operation journal is full."));
+        // Admission closes new work only: replayed receipts above are
+        // returned unchanged, and already-accepted queued work still runs.
+        // Agent creation, settings changes, runs, and widget requests are
+        // new work and are refused while the home drains for an update.
+        if (!AcceptingWork && request.Action is "agent.create" or "agent.configure" or "agent.run" or "agent.widget")
+            return Task.FromResult(Result("rejected", "This home is draining for an update. Nothing was created or queued."));
         var old = session?.Agent is null ? null : JsonSerializer.SerializeToUtf8Bytes(session.Agent);
         var oldQueuePaused = session?.QueuePaused;
         var pending = session?.Pending.ToList(); ChatSession? created = null; bool run = false, widget = false;

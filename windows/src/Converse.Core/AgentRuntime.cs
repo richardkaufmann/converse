@@ -66,7 +66,7 @@ public sealed class AgentRuntime
     }
     public void Tick(DateTime now)
     {
-        if (_stopping) return;
+        if (_stopping || !_devices.AcceptingWork) return;
         foreach (var session in _store.Sessions.Where(s => s.Agent?.CanSchedule == true && !s.Busy && !s.QueuePaused && s.Pending.Count == 0).ToArray())
         {
             var config = session.Agent!;

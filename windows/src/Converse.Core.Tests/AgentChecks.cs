@@ -75,6 +75,17 @@ static class AgentChecks
             check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and scoreboard survive archive reload");
             var created = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Created remotely");
             check(created.Outcome == "completed" && store.Sessions.Any(s => s.Title == "Created remotely" && s.Agent is not null), "Viewer creates a paused agent on the selected home");
+            home.SetAcceptingWork(false);
+            var closedCreated = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Must not create during drain");
+            check(closedCreated.Outcome != "completed" && !store.Sessions.Any(s => s.Title == "Must not create during drain"),
+                "Closed admission rejects remote agent creation");
+            agent.QueuePaused = true;
+            var queuedBefore = agent.Pending.Count;
+            var closedRun = await viewer.RequestParticipantAsync(home.DeviceId, "agent.run", target);
+            check(closedRun.Outcome != "completed" && agent.Pending.Count == queuedBefore,
+                "Closed admission rejects remote agent runs before queueing");
+            agent.Pending.Clear(); agent.QueuePaused = false;
+            home.SetAcceptingWork(true);
             await viewer.LeaveGroupAsync();
             var refused = await viewer.RequestParticipantAsync(home.DeviceId, "agent.run", target);
             check(refused.Outcome == "rejected" && calls == 2, "Leaving group immediately fences remote agent control");

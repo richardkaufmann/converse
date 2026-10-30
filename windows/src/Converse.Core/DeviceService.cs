@@ -1256,6 +1256,18 @@ public sealed partial class DeviceSyncService : IDisposable
         { Kind = DeviceKind.GroupReview, Payload = DeviceJson.Encode(request) });
     }
 
+    // Atomic approval: the stored review must still be the exact one the
+    // human compared before this call. No await runs between the check and
+    // the approval body below, so a replaced review cannot slip through.
+    public async Task<bool> TryApproveGroupReviewAsync(Guid expectedRequestID, string expectedCode)
+    {
+        var stored = GroupReview;
+        if (stored is null || stored.Request.Id != expectedRequestID || stored.Code != expectedCode)
+            return false;
+        await ApproveGroupReviewAsync();
+        return true;
+    }
+
     public async Task ApproveGroupReviewAsync()
     {
         // Approval always follows a human-reviewed code, even when the

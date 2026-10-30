@@ -456,8 +456,8 @@ public sealed class LinuxDeploymentManager
         LinuxDeployment deployment,
         LinuxPairingBinding shownBinding,
         Func<IReadOnlyList<GroupJoinRequest>> sponsorRequests,
-        Func<GroupJoinRequest, Task<string?>> sponsorCodeAsync,
-        Func<Task> approveSponsorAsync,
+        Func<GroupJoinRequest, Task<string?>> sponsorReviewAsync,
+        Func<GroupJoinRequest, LinuxPairingBinding, string, Task<bool>> approveSponsorAsync,
         CancellationToken cancellationToken = default)
     {
         static LinuxManagerResult<LinuxPairingBinding> Changed(
@@ -535,11 +535,24 @@ public sealed class LinuxDeploymentManager
             binding = bound.Value;
         }
 
-        var sponsorCode = await sponsorCodeAsync(candidate);
+        var sponsorCode = await sponsorReviewAsync(candidate);
         if (string.IsNullOrEmpty(sponsorCode) || sponsorCode != fresh.VerificationCode)
             return Changed("pairing_binding_mismatch",
                 "The sponsor code does not match the Linux code. Pairing stopped.", binding);
 
+        // Revalidate after the asynchronous review, before touching Linux.
+        var revalidation = await RevalidatePairingAsync(
+            deployment, binding, candidate.Id, fresh.VerificationCodeFingerprint!,
+            sponsorRequests, cancellationToken);
+        if (revalidation.Stale is not null)
+            return Changed(revalidation.Stale == "expired" ? "pairing_expired" : "pairing_changed",
+                revalidation.Stale == "expired"
+                    ? "That pairing expired while reviewing. Start the join again."
+                    : "The pairing changed while reviewing. Compare the new code and choose Pair again.",
+                revalidation.Binding ?? binding);
+        binding = revalidation.Binding!;
+
+        var confirmedCode = binding.VerificationCode;
         var confirmed = await ConfirmJoinAsync(
             deployment, binding, Guid.NewGuid(), cancellationToken);
         if (!confirmed.Success || confirmed.Value is null) return confirmed;
@@ -557,13 +570,25 @@ public sealed class LinuxDeploymentManager
             return Changed("pairing_not_observed",
                 "Linux confirmation was not observed, so the sponsor was not approved.", binding);
 
-        if (sponsorRequests().Count(request => request.Id == candidate.Id) != 1 &&
-            binding.State != "completed")
+        // Revalidate after the confirmation awaits, then approve atomically
+        // against the exact reviewed request and code.
+        var finalCode = await sponsorReviewAsync(candidate);
+        var finalBinding = await JoinStatusAsync(
+            deployment, binding.PairingID, binding.RequestCorrelationID, cancellationToken);
+        var live = sponsorRequests().Where(request => request.Id == candidate.Id).ToList();
+        if (finalBinding.Value is null ||
+            finalBinding.Value.VerificationCodeFingerprint != confirmed.Value.VerificationCodeFingerprint ||
+            live.Count != 1 || live[0].ExpiresAt <= DeviceTrustStore.AppleNow() + 15 ||
+            string.IsNullOrEmpty(finalCode) || finalCode != confirmedCode)
             return Changed("pairing_changed",
-                "The sponsor request changed after Linux confirmed. Pairing stopped.", binding);
-        await approveSponsorAsync();
+                "The pairing changed after Linux confirmed. Pairing stopped.",
+                finalBinding.Value ?? binding);
+        if (!await approveSponsorAsync(candidate, finalBinding.Value, finalCode))
+            return Changed("pairing_changed",
+                "The sponsor review changed before approval. Pairing stopped.",
+                finalBinding.Value);
         return new LinuxManagerResult<LinuxPairingBinding>(
-            true, "admin_response", "", binding, confirmed.OperationID);
+            true, "admin_response", "", finalBinding.Value, confirmed.OperationID);
     }
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> ConfirmJoinAsync(
@@ -936,6 +961,33 @@ public sealed class LinuxDeploymentManager
             deployment.Ssh.LastVerifiedAt = LinuxManagerTime.Now();
         }
         RegistryStore.Upsert(deployment);
+    }
+
+    private async Task<(LinuxPairingBinding? Binding, string? Stale)> RevalidatePairingAsync(
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid nativeRequestID,
+        string expectedFingerprint,
+        Func<IReadOnlyList<GroupJoinRequest>> sponsorRequests,
+        CancellationToken cancellationToken)
+    {
+        var status = await JoinStatusAsync(
+            deployment, binding.PairingID, binding.RequestCorrelationID, cancellationToken);
+        if (!status.Success || status.Value is null) return (null, "changed");
+        var current = status.Value;
+        var live = sponsorRequests().Where(request => request.Id == nativeRequestID).ToList();
+        if (current.VerificationCodeFingerprint != expectedFingerprint ||
+            current.NativeRequestID != nativeRequestID ||
+            current.SponsorConnectionInstanceID != binding.SponsorConnectionInstanceID ||
+            current.State is not ("awaiting_user" or "connecting") ||
+            live.Count != 1 ||
+            live[0].ExpiresAt <= DeviceTrustStore.AppleNow() + 15)
+        {
+            var expired =
+                (!DateTimeOffset.TryParse(current.ExpiresAt, out var until) ||
+                 until <= DateTimeOffset.UtcNow.AddSeconds(15)) ||
+                (live.Count == 1 && live[0].ExpiresAt <= DeviceTrustStore.AppleNow() + 15);
+            return (current, expired ? "expired" : "changed");
+        }
+        return (current, null);
     }
 
     private async Task<LinuxManagerResult<LinuxPairingBinding>> PairingCallAsync(

@@ -303,7 +303,8 @@ public sealed partial class MainWindow
                         return _devices.GroupReview?.Request.Id == request.Id
                             ? _devices.GroupReview.Code : null;
                     },
-                    async () => await _devices.ApproveGroupReviewAsync());
+                    async (request, binding, code) =>
+                        await _devices.TryApproveGroupReviewAsync(request.Id, code));
                 _linuxJoinBinding = result.Value ?? _linuxJoinBinding;
                 RenderLinuxJoinBinding();
                 SetLinuxMessage(result.Success
@@ -400,6 +401,11 @@ public sealed partial class MainWindow
             {
                 if (!await BindLinuxReviewRequesterAsync()) return;
                 await ConfirmLocalJoinPromptAsync(_linuxReviewBinding);
+                if (_devices.GroupReview?.Request.Id != _linuxReviewBinding.PairingID)
+                {
+                    SetLinuxMessage("The local review changed. Review the Linux request again before approving.");
+                    return;
+                }
                 var result = await LinuxManager.ApproveRequestAsync(
                     _linuxSelected, _linuxReviewBinding);
                 SetLinuxMessage(result.Success ? "Request approved on Linux." : result.Message);

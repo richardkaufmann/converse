@@ -800,7 +800,7 @@ try
             deployment, MakeBinding(),
             () => new List<GroupJoinRequest> { nativeRequest },
             _ => Task.FromResult<string?>(code),
-            () => { order.Add("sponsor.approve"); return Task.CompletedTask; });
+            (_, _, _) => { order.Add("sponsor.approve"); return Task.FromResult(true); });
         checks.That(paired.Success &&
                     order.IndexOf("pairing.join.confirm") >= 0 &&
                     order.IndexOf("pairing.join.confirm") < order.IndexOf("sponsor.approve"),
@@ -810,9 +810,25 @@ try
             deployment, MakeBinding(),
             () => new List<GroupJoinRequest> { nativeRequest, nativeRequest },
             _ => Task.FromResult<string?>(code),
-            () => Task.CompletedTask);
+            (_, _, _) => Task.FromResult(false));
         checks.That(!ambiguous.Success && ambiguous.Classification == "pairing_ambiguous",
             "Pair stops when sponsor requests are ambiguous");
+
+        boundNative = null;
+        nativeRequest.ExpiresAt = DeviceTrustStore.AppleNow() + 180;
+        order.Clear();
+        var expiredDuringReview = await manager.PairJoinAsync(
+            deployment, MakeBinding(),
+            () => new List<GroupJoinRequest> { nativeRequest },
+            _ =>
+            {
+                nativeRequest.ExpiresAt = DeviceTrustStore.AppleNow() - 1;
+                return Task.FromResult<string?>(code);
+            },
+            (_, _, _) => Task.FromResult(false));
+        checks.That(!expiredDuringReview.Success &&
+                    !order.Contains("pairing.join.confirm"),
+            "Pair rechecks native expiry after asynchronous review before confirmation");
     }
 
     // Real host and Unix-socket admin path.
