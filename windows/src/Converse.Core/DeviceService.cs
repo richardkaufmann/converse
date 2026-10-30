@@ -1636,7 +1636,8 @@ public sealed partial class DeviceSyncService : IDisposable
                 "This home is draining for an update. Nothing was submitted.", envelope.Epoch);
             return;
         }
-        if (!TryBeginExternalWork())
+        var startsWork = command.Action is "submit" or "inject" or "injectAll" or "resumeQueue";
+        if (startsWork && !TryBeginExternalWork())
         {
             _commands.MarkFailed(commandId);
             await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
@@ -1729,7 +1730,7 @@ public sealed partial class DeviceSyncService : IDisposable
         await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
         await SendTranscriptAsync(peer, session);
         }
-        finally { EndExternalWork(); }
+        finally { if (startsWork) EndExternalWork(); }
     }
 
     // ---- Dispatch ----

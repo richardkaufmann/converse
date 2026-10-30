@@ -268,6 +268,16 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+        home.SetAcceptingWork(false);
+        var drainRename = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed during drain" });
+        Check(drainRename is not null && await Until(() => homeSession.Title == "Renamed during drain" && viewer.Unresolved(gid).Count == 0), "Drain still applies non-work commands such as rename");
+        var drainSubmit = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "submit", Text = "must not submit during drain" });
+        Check(drainSubmit is not null && await Until(() =>
+            homeSession.Pending.Count == 0 &&
+            viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == drainSubmit)?.Outcome == "failed"),
+            "Drain refuses new submit work without queueing");
+        if (drainSubmit is not null) viewer.DiscardOutbox(drainSubmit.Value);
+        home.SetAcceptingWork(true);
         homeSession.Title = "Renamed on home while viewed remotely";
         homeSession.Draft = "keep this draft";
         homeStore.Save();
