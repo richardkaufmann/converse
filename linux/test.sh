@@ -14,4 +14,5 @@ else
 fi
 
 "$dotnet_bin" run --project linux/tests/Converse.Linux.Contract.Tests -c Release -- "$repo_root"
+"$dotnet_bin" run --project linux/tests/Converse.Linux.Tests -c Release
 "$dotnet_bin" run --project windows/src/Converse.Core.Tests -c Release

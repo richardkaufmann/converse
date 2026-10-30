@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Converse.Linux</AssemblyName>
+    <RootNamespace>Converse.Linux</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Version>0.5.34</Version>
+    <InformationalVersion>0.5.34+59</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <ProjectReference Include="../../../windows/src/Converse.Core/Converse.Core.csproj" />
+    <InternalsVisibleTo Include="Converse.Linux.Tests" />
+  </ItemGroup>
+</Project>

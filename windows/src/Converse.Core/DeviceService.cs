@@ -37,8 +37,10 @@ public sealed class DeviceTrustStore
     public List<TrustedDevice> Records { get { lock (_gate) return _records.ToList(); } }
     public List<TrustedDevice> Devices { get { lock (_gate) return _records.Where(d => d.Removed != true).ToList(); } }
     private static readonly JsonSerializerOptions ReadOptions = new() { PropertyNameCaseInsensitive = true };
-    public DeviceTrustStore(string folder)
+    private readonly ulong _generationFloor;
+    public DeviceTrustStore(string folder, ulong nextGenerationFloor = 0)
     {
+        _generationFloor = nextGenerationFloor > 0 ? nextGenerationFloor - 1 : 0;
         Directory.CreateDirectory(folder);
         _file = Path.Combine(folder, "devices.json");
         if (File.Exists(_file))
@@ -54,10 +56,15 @@ public sealed class DeviceTrustStore
     }
     private ulong NextGeneration()
     {
-        var highest = _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max();
+        var highest = Math.Max(_generationFloor,
+            _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max());
         if (highest >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
         return highest + 1;
     }
+
+    public ulong NextGenerationFloor =>
+        Math.Max(_generationFloor,
+            Records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max()) + 1;
     public static double AppleNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200;
     public static string BoundedName(string name)
     {
@@ -274,8 +281,30 @@ public sealed partial class DeviceSyncService : IDisposable
     public int ListeningPort { get; private set; }
     public event Action? Changed;
     public event Action<string>? RemoteViewDisplaced;
+    public event Action<Guid, string, ulong>? DisplayLeaseGranted;
+    public event Action<Guid, string, ulong>? DisplayLeaseReleased;
+    public bool AcceptingWork { get; private set; } = true;
     public Func<string, bool>? IsViewerPlaced { get; set; }
     public Func<PairingPrompt, Task<bool>>? PairingConfirmation { get; set; }
+
+    public void SetAcceptingWork(bool accepting)
+    {
+        if (AcceptingWork == accepting) return;
+        AcceptingWork = accepting;
+        Changed?.Invoke();
+    }
+
+    public DeviceSyncCounterSnapshot SyncCounterSnapshot()
+    {
+        var snapshot = _syncCounters.Snapshot();
+        return snapshot with
+        {
+            NextLeaseEpoch = Math.Max(snapshot.NextLeaseEpoch, (1UL << 48) + 1),
+        };
+    }
+
+    public IReadOnlyList<DeviceCommandRecord> CommandReceipts =>
+        _commands.Records.Values.OrderBy(record => record.UpdatedAt).ToList();
 
     // Converse Groups state, mirroring Swift DeviceTransport.
     public ConverseGroupStore GroupStore { get; }
@@ -311,7 +340,8 @@ public sealed partial class DeviceSyncService : IDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _shutdown;
 
-    public DeviceSyncService(string folder, SessionStore store, string? deviceName = null)
+    public DeviceSyncService(string folder, SessionStore store, string? deviceName = null,
+        DeviceRecoveryFloors? recoveryFloors = null)
     {
         _folder = folder;
         _store = store;
@@ -323,12 +353,14 @@ public sealed partial class DeviceSyncService : IDisposable
         _staticPrivate = File.Exists(keyFile) ? File.ReadAllBytes(keyFile) : CreateKeyFile(keyFile);
         DeviceId = DeviceBlob.DeviceIdForPublicKey(X25519.PublicKeyFromPrivate(_staticPrivate));
         DeviceName = deviceName ?? Environment.MachineName;
-        Trust = new DeviceTrustStore(folder);
+        Trust = new DeviceTrustStore(folder, recoveryFloors?.NextMembershipGeneration ?? 0);
         _commands = new DeviceCommandStore(folder);
+        if (recoveryFloors is not null) _commands.SeedIfMissing(recoveryFloors.CommandReceipts);
         _outbox = new DeviceOutboxStore(folder);
-        _syncCounters = new DeviceSyncCounters(folder);
+        _syncCounters = new DeviceSyncCounters(folder, recoveryFloors);
         _leases = new DeviceLeaseManager(initialEpochs: _syncCounters.Epochs,
-            persistEpochs: _syncCounters.SaveEpochs, initialEpoch: 1UL << 48);
+            persistEpochs: _syncCounters.SaveEpochs,
+            initialEpoch: Math.Max(1UL << 48, _syncCounters.LeaseEpochFloor));
         GroupStore = new ConverseGroupStore(folder);
         KnownGroups = GroupStore.Groups.ToList();
         InitializeGroups();
@@ -489,6 +521,15 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         var id = Guid.NewGuid();
         await ConnectAsync(id, host, port, joiningGroupID, joiningGroupID is not null);
+    }
+
+    // Headless setup needs the connection's peer ID so an admin client can
+    // track the exact pairing prompt it displays and confirms.
+    public async Task<Guid> BeginGroupJoinAsync(string host, int port, string groupID)
+    {
+        var id = Guid.NewGuid();
+        await ConnectAsync(id, host, port, groupID, wantsJoin: true);
+        return id;
     }
 
     internal async Task ConnectAsync(Guid id, string host, int port, string? joiningGroupID, bool wantsJoin, bool userInitiated = true)
@@ -1496,6 +1537,15 @@ public sealed partial class DeviceSyncService : IDisposable
             await SendAckAsync(peer, commandId, envelope.SessionID, "failed", "Unknown action.", envelope.Epoch);
             return;
         }
+        // Drain closes only work-starting actions. Stop, answers, queue
+        // management and settings remain available so active work can finish.
+        if (!AcceptingWork && command.Action is "submit" or "inject" or "injectAll" or "resumeQueue")
+        {
+            _commands.MarkFailed(commandId);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
+                "This home is draining for an update. Nothing was submitted.", envelope.Epoch);
+            return;
+        }
         if (command.Action == "submit")
         {
             var missing = command.BlobHashes.Where(h => !_blobPaths.TryGetValue(h, out var path) || !File.Exists(path)).ToList();
@@ -1681,6 +1731,7 @@ public sealed partial class DeviceSyncService : IDisposable
                             });
                         }
                     peer.LeasedSessions.Add(leased.Id);
+                    DisplayLeaseGranted?.Invoke(leased.Id, peerHome, result.Epoch);
                     PublishSidebars();
                     Changed?.Invoke();
                     await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseGranted, Boot = _boot, SessionID = envelope.SessionID, Epoch = result.Epoch });
@@ -1694,7 +1745,10 @@ public sealed partial class DeviceSyncService : IDisposable
             case DeviceKind.LeaseRelease:
                 if (HomeSession(envelope) is { } released && envelope.Epoch is { } relEpoch)
                 {
+                    var wasHolder = _leases.Holder(released.Id) is { } holder
+                        && holder.Device == peerHome && holder.Epoch == relEpoch;
                     _leases.Release(released.Id, peerHome, relEpoch);
+                    if (wasHolder) DisplayLeaseReleased?.Invoke(released.Id, peerHome, relEpoch);
                     peer.LeasedSessions.Remove(released.Id);
                     PublishSidebars();
                     Changed?.Invoke();
@@ -2030,6 +2084,7 @@ public sealed partial class DeviceSyncService : IDisposable
         if (holder?.Device == DeviceId) return true;
         var result = _leases.Acquire(sessionId, DeviceId);
         if (!result.Granted) { LastOutcome = "Could not record local display fence."; return false; }
+        DisplayLeaseGranted?.Invoke(sessionId, DeviceId, result.Epoch);
         foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == result.Displaced).ToArray())
         {
             old.LeasedSessions.Remove(sessionId);
