@@ -291,16 +291,23 @@ public sealed partial class MainWindow
         confirmJoin.Click += async (_, _) =>
         {
             if (_linuxSelected is null || _linuxJoinBinding is null) return;
-            await RunLinuxAsync("Confirming Linux pairing", async () =>
+            await RunLinuxAsync("Pairing Linux with this group", async () =>
             {
-                if (!await BindLinuxJoinNativeRequestAsync()) return;
-                if (!await ApproveSponsorSideJoinAsync()) return;
-                var result = await LinuxManager.ConfirmJoinAsync(
-                    _linuxSelected, _linuxJoinBinding);
+                var result = await LinuxManager.PairJoinAsync(
+                    _linuxSelected, _linuxJoinBinding,
+                    () => _devices.GroupRequests.ToList(),
+                    async request =>
+                    {
+                        if (_devices.GroupReview?.Request.Id != request.Id)
+                            await _devices.ReviewGroupRequestAsync(request);
+                        return _devices.GroupReview?.Request.Id == request.Id
+                            ? _devices.GroupReview.Code : null;
+                    },
+                    async () => await _devices.ApproveGroupReviewAsync());
                 _linuxJoinBinding = result.Value ?? _linuxJoinBinding;
                 RenderLinuxJoinBinding();
                 SetLinuxMessage(result.Success
-                    ? "Paired on both sides. Refresh join until it completes."
+                    ? "Both sides approved. Refresh join until it completes."
                     : result.Message);
             });
         };
@@ -392,9 +399,9 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Approving Linux group request", async () =>
             {
                 if (!await BindLinuxReviewRequesterAsync()) return;
+                await ConfirmLocalJoinPromptAsync(_linuxReviewBinding);
                 var result = await LinuxManager.ApproveRequestAsync(
                     _linuxSelected, _linuxReviewBinding);
-                if (result.Success) await ConfirmLocalJoinPromptAsync(_linuxReviewBinding);
                 SetLinuxMessage(result.Success ? "Request approved on Linux." : result.Message);
             });
         };
@@ -652,69 +659,31 @@ public sealed partial class MainWindow
         if (_linuxSelected is not null) _ = RefreshLinuxStatusAsync();
     }
 
-    private async Task<bool> BindLinuxJoinNativeRequestAsync()
-    {
-        if (_linuxSelected is null || _linuxJoinBinding is null) return false;
-        if (_linuxJoinBinding.NativeRequestID is not null) return true;
-        var request = _devices.GroupRequests.FirstOrDefault(item =>
-            item.RequesterID == _linuxJoinBinding.RequesterDeviceID &&
-            item.SponsorID == _devices.DeviceId &&
-            item.GroupID == _linuxJoinBinding.GroupID);
-        if (request is null)
-        {
-            SetLinuxMessage("This PC has not received the Linux join request yet. Refresh join, then Pair.");
-            return false;
-        }
-        _linuxJoinBinding.NativeRequestID = request.Id;
-        _linuxJoinBinding.SponsorConnectionInstanceID = request.Id;
-        var bound = await LinuxManager.BindPeerConnectionAsync(
-            _linuxSelected, _linuxJoinBinding, Guid.NewGuid());
-        if (!bound.Success)
-        {
-            SetLinuxMessage(bound.Message);
-            return false;
-        }
-        _linuxJoinBinding = bound.Value!;
-        return true;
-    }
-
-    private async Task<bool> ApproveSponsorSideJoinAsync()
-    {
-        if (_linuxJoinBinding?.NativeRequestID is not { } nativeID) return false;
-        var request = _devices.GroupRequests.FirstOrDefault(item => item.Id == nativeID);
-        if (request is null)
-        {
-            SetLinuxMessage("The sponsor-side request is no longer live on this PC.");
-            return false;
-        }
-        if (_devices.GroupReview?.Request.Id != nativeID)
-            await _devices.ReviewGroupRequestAsync(request);
-        var review = _devices.GroupReview;
-        if (review?.Request.Id != nativeID ||
-            (_linuxJoinBinding.VerificationCode is not null &&
-             review.Code != _linuxJoinBinding.VerificationCode))
-        {
-            SetLinuxMessage("The sponsor-side code does not match the Linux code. Pairing stopped.");
-            return false;
-        }
-        await _devices.ApproveGroupReviewAsync();
-        return true;
-    }
-
     private async Task<bool> BindLinuxReviewRequesterAsync()
     {
         if (_linuxSelected is null || _linuxReviewBinding is null) return false;
         if (_linuxReviewBinding.RequesterConnectionInstanceID is not null) return true;
-        var prompt = _devices.GroupPairingPrompts.FirstOrDefault(item =>
+        var prompts = _devices.GroupPairingPrompts.Where(item =>
             _linuxReviewBinding.VerificationCode is not null &&
-            item.Code == _linuxReviewBinding.VerificationCode);
-        if (prompt is null) return true;
-        _linuxReviewBinding.RequesterConnectionInstanceID = prompt.PeerId;
+            item.Code == _linuxReviewBinding.VerificationCode).ToList();
+        if (prompts.Count == 0) return true;
+        if (prompts.Select(item => item.PeerId).Distinct().Count() != 1)
+        {
+            SetLinuxMessage("More than one local join prompt matches. Pairing stopped.");
+            return false;
+        }
+        _linuxReviewBinding.RequesterConnectionInstanceID = prompts[0].PeerId;
         var bound = await LinuxManager.BindPeerConnectionAsync(
             _linuxSelected, _linuxReviewBinding, Guid.NewGuid());
         if (!bound.Success)
         {
             SetLinuxMessage(bound.Message);
+            return false;
+        }
+        if (bound.Value!.VerificationCodeFingerprint !=
+            _linuxReviewBinding.VerificationCodeFingerprint)
+        {
+            SetLinuxMessage("The pairing changed while binding. Review the new code and Pair again.");
             return false;
         }
         _linuxReviewBinding = bound.Value!;
@@ -723,10 +692,11 @@ public sealed partial class MainWindow
 
     private async Task ConfirmLocalJoinPromptAsync(LinuxPairingBinding binding)
     {
-        var prompt = _devices.GroupPairingPrompts.FirstOrDefault(item =>
-            item.PeerId == binding.RequesterConnectionInstanceID ||
-            (binding.VerificationCode is not null && item.Code == binding.VerificationCode));
-        if (prompt is not null) await _devices.ConfirmPairing(prompt.PeerId);
+        var peerIDs = _devices.GroupPairingPrompts
+            .Where(item => item.PeerId == binding.RequesterConnectionInstanceID ||
+                (binding.VerificationCode is not null && item.Code == binding.VerificationCode))
+            .Select(item => item.PeerId).Distinct().ToList();
+        if (peerIDs.Count == 1) await _devices.ConfirmPairing(peerIDs[0]);
     }
 
     private async Task RunLinuxAsync(string label, Func<Task> action)

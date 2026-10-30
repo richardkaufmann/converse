@@ -449,6 +449,123 @@ public sealed class LinuxDeploymentManager
         PairingCallAsync(deployment, "pairing.bindPeerConnection",
             PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
+    // One-click same-manager pairing: refresh both snapshots, require a
+    // unique exact match, confirm the Linux joiner first, observe that
+    // confirmation, and only then approve on the sponsor side.
+    public async Task<LinuxManagerResult<LinuxPairingBinding>> PairJoinAsync(
+        LinuxDeployment deployment,
+        LinuxPairingBinding shownBinding,
+        Func<IReadOnlyList<GroupJoinRequest>> sponsorRequests,
+        Func<GroupJoinRequest, Task<string?>> sponsorCodeAsync,
+        Func<Task> approveSponsorAsync,
+        CancellationToken cancellationToken = default)
+    {
+        static LinuxManagerResult<LinuxPairingBinding> Changed(
+            string classification, string message, LinuxPairingBinding value) =>
+            new(false, classification, message, value);
+
+        var freshResult = await JoinStatusAsync(
+            deployment, shownBinding.PairingID, shownBinding.RequestCorrelationID,
+            cancellationToken);
+        if (!freshResult.Success || freshResult.Value is null) return freshResult;
+        var fresh = freshResult.Value;
+
+        var shownChanged =
+            fresh.PairingID != shownBinding.PairingID ||
+            fresh.RequestCorrelationID != shownBinding.RequestCorrelationID ||
+            fresh.Role != shownBinding.Role ||
+            fresh.LinuxDeviceID != shownBinding.LinuxDeviceID ||
+            fresh.RequesterDeviceID != shownBinding.RequesterDeviceID ||
+            fresh.SponsorDeviceID != shownBinding.SponsorDeviceID ||
+            fresh.LinuxPublicKeyFingerprint != shownBinding.LinuxPublicKeyFingerprint ||
+            fresh.RequesterPublicKeyFingerprint != shownBinding.RequesterPublicKeyFingerprint ||
+            fresh.SponsorPublicKeyFingerprint != shownBinding.SponsorPublicKeyFingerprint ||
+            fresh.GroupID != shownBinding.GroupID ||
+            fresh.GroupName != shownBinding.GroupName ||
+            fresh.RequesterConnectionInstanceID != shownBinding.RequesterConnectionInstanceID ||
+            fresh.ExpiresAt != shownBinding.ExpiresAt ||
+            fresh.VerificationCode != shownBinding.VerificationCode ||
+            fresh.VerificationCodeFingerprint != shownBinding.VerificationCodeFingerprint ||
+            (shownBinding.NativeRequestID is not null &&
+             fresh.NativeRequestID != shownBinding.NativeRequestID) ||
+            (shownBinding.SponsorConnectionInstanceID is not null &&
+             fresh.SponsorConnectionInstanceID != shownBinding.SponsorConnectionInstanceID);
+        if (shownChanged)
+            return Changed("pairing_changed",
+                "The pairing changed since it was shown. Compare the new code and choose Pair again.", fresh);
+        if (string.IsNullOrEmpty(fresh.VerificationCode) ||
+            string.IsNullOrEmpty(fresh.VerificationCodeFingerprint))
+            return Changed("pairing_not_ready",
+                "The verification code is not ready yet. Refresh join, then Pair.", fresh);
+        if (!DateTimeOffset.TryParse(fresh.ExpiresAt, out var expiresAt) ||
+            expiresAt <= DateTimeOffset.UtcNow.AddSeconds(15))
+            return Changed("pairing_expired",
+                "That pairing expires too soon. Start the join again.", fresh);
+
+        var candidates = sponsorRequests().Where(request =>
+            request.RequesterID == fresh.RequesterDeviceID &&
+            request.SponsorID == fresh.SponsorDeviceID &&
+            request.GroupID == fresh.GroupID).ToList();
+        if (candidates.Count != 1)
+            return Changed(candidates.Count == 0 ? "pairing_not_found" : "pairing_ambiguous",
+                candidates.Count == 0
+                    ? "This device has not received a matching join request yet."
+                    : "More than one matching join request is live. Pairing stopped.", fresh);
+        var candidate = candidates[0];
+        if (fresh.NativeRequestID is { } boundNative && boundNative != candidate.Id)
+            return Changed("pairing_changed",
+                "The sponsor connection changed. Compare the new code and choose Pair again.", fresh);
+        if (candidate.ExpiresAt <= DeviceTrustStore.AppleNow() + 15)
+            return Changed("pairing_expired",
+                "That join request expires too soon. Start the join again.", fresh);
+
+        var binding = fresh;
+        if (binding.NativeRequestID is null)
+        {
+            binding.NativeRequestID = candidate.Id;
+            binding.SponsorConnectionInstanceID = candidate.Id;
+            var bound = await BindPeerConnectionAsync(
+                deployment, binding, Guid.NewGuid(), cancellationToken);
+            if (!bound.Success || bound.Value is null) return bound;
+            if (bound.Value.NativeRequestID != candidate.Id ||
+                bound.Value.VerificationCodeFingerprint != fresh.VerificationCodeFingerprint)
+                return Changed("pairing_changed",
+                    "The pairing changed while binding the sponsor connection. Choose Pair again.",
+                    bound.Value);
+            binding = bound.Value;
+        }
+
+        var sponsorCode = await sponsorCodeAsync(candidate);
+        if (string.IsNullOrEmpty(sponsorCode) || sponsorCode != fresh.VerificationCode)
+            return Changed("pairing_binding_mismatch",
+                "The sponsor code does not match the Linux code. Pairing stopped.", binding);
+
+        var confirmed = await ConfirmJoinAsync(
+            deployment, binding, Guid.NewGuid(), cancellationToken);
+        if (!confirmed.Success || confirmed.Value is null) return confirmed;
+        binding = confirmed.Value;
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            if (binding.State is "awaiting_peer" or "completed") break;
+            await Task.Delay(200, cancellationToken);
+            var observed = await JoinStatusAsync(
+                deployment, binding.PairingID, binding.RequestCorrelationID, cancellationToken);
+            if (observed.Value is not null) binding = observed.Value;
+            if (binding.State is "awaiting_peer" or "completed") break;
+        }
+        if (binding.State is not ("awaiting_peer" or "completed"))
+            return Changed("pairing_not_observed",
+                "Linux confirmation was not observed, so the sponsor was not approved.", binding);
+
+        if (sponsorRequests().Count(request => request.Id == candidate.Id) != 1 &&
+            binding.State != "completed")
+            return Changed("pairing_changed",
+                "The sponsor request changed after Linux confirmed. Pairing stopped.", binding);
+        await approveSponsorAsync();
+        return new LinuxManagerResult<LinuxPairingBinding>(
+            true, "admin_response", "", binding, confirmed.OperationID);
+    }
+
     public Task<LinuxManagerResult<LinuxPairingBinding>> ConfirmJoinAsync(
         LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
         CancellationToken cancellationToken = default) =>

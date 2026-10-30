@@ -1,9 +1,17 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Converse.Core;
 
 namespace Converse.Linux;
+
+internal sealed class AppliedSecretOperation
+{
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("commitment")] public string Commitment { get; set; } = "";
+    [JsonPropertyName("metadata")] public SecretMetadata Metadata { get; set; } = new();
+}
 
 internal sealed class LinuxSecretStore
 {
@@ -54,7 +62,8 @@ internal sealed class LinuxSecretStore
     }
 
     public async Task<SecretMetadata> SetAsync(
-        string secretID, string kind, string value, CancellationToken cancellationToken = default)
+        string secretID, string kind, string value, CancellationToken cancellationToken = default,
+        Guid? operationID = null, string? commitment = null)
     {
         return await _executor.RunAsync(() =>
         {
@@ -95,12 +104,15 @@ internal sealed class LinuxSecretStore
             item.PendingRestart = false;
             item.UpdatedAt = LinuxTime.Now();
             WriteMetadata(metadata);
+            if (operationID is { } appliedID && commitment is not null)
+                WriteApplied(appliedID, commitment, item);
             return Clone(item);
         }, cancellationToken);
     }
 
     public async Task<SecretMetadata?> DeleteAsync(
-        string secretID, CancellationToken cancellationToken = default)
+        string secretID, CancellationToken cancellationToken = default,
+        Guid? operationID = null, string? commitment = null)
     {
         return await _executor.RunAsync(() =>
         {
@@ -120,9 +132,25 @@ internal sealed class LinuxSecretStore
             item.PendingRestart = false;
             item.UpdatedAt = LinuxTime.Now();
             WriteMetadata(metadata);
+            if (operationID is { } appliedID && commitment is not null)
+                WriteApplied(appliedID, commitment, item);
             return Clone(item);
         }, cancellationToken);
     }
+
+    public async Task<AppliedSecretOperation?> AppliedForOperationAsync(
+        Guid operationID, CancellationToken cancellationToken = default) =>
+        await _executor.RunAsync(() =>
+        {
+            var applied = ReadApplied().FirstOrDefault(
+                entry => entry.OperationID == operationID);
+            return applied is null ? null : new AppliedSecretOperation
+            {
+                OperationID = applied.OperationID,
+                Commitment = applied.Commitment,
+                Metadata = Clone(applied.Metadata),
+            };
+        }, cancellationToken);
 
     public async Task<string> CommitmentAsync(
         string action, string secretID, string? kind, ReadOnlyMemory<byte> value,
@@ -171,6 +199,31 @@ internal sealed class LinuxSecretStore
             return File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8) : null;
         }
         catch { return null; }
+    }
+
+    private string AppliedFile =>
+        Path.Combine(_paths.SecretsDirectory, "applied-operations.json");
+
+    private List<AppliedSecretOperation> ReadApplied()
+    {
+        if (!File.Exists(AppliedFile)) return new List<AppliedSecretOperation>();
+        return JsonSerializer.Deserialize<List<AppliedSecretOperation>>(
+            File.ReadAllBytes(AppliedFile), DurableJson.Options)
+            ?? new List<AppliedSecretOperation>();
+    }
+
+    private void WriteApplied(Guid operationID, string commitment, SecretMetadata metadata)
+    {
+        var applied = ReadApplied();
+        applied.RemoveAll(entry => entry.OperationID == operationID);
+        applied.Add(new AppliedSecretOperation
+        {
+            OperationID = operationID,
+            Commitment = commitment,
+            Metadata = Clone(metadata),
+        });
+        DurableJson.Write(AppliedFile, applied);
+        LinuxFileModes.File600(AppliedFile);
     }
 
     private string ValuePath(string secretID) =>

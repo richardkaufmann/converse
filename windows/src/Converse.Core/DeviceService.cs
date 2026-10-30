@@ -466,6 +466,25 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public IReadOnlyList<DeviceOutboxRecord> Outbox => _outbox.Records;
 
+    public sealed record DeviceWorkSnapshot(
+        int ActiveTurns, int QueuedPrompts, int PendingOutbox, int BlobTransfers)
+    {
+        public int Total => ActiveTurns + QueuedPrompts + PendingOutbox + BlobTransfers;
+        public bool Idle => Total == 0;
+    }
+
+    public DeviceWorkSnapshot WorkSnapshot()
+    {
+        int blobTransfers;
+        lock (_blobAcks) { blobTransfers = _blobAcks.Count; }
+        lock (_blobDownloads) { blobTransfers += _blobDownloads.Count; }
+        return new DeviceWorkSnapshot(
+            _store.Sessions.Count(session => session.Busy),
+            _store.Sessions.Sum(session => session.Pending.Count),
+            _outbox.Records.Count(record => record.Outcome == "pending"),
+            blobTransfers + _staged.Count);
+    }
+
     // Tests disable discovery AND bind loopback so they neither advertise
     // phantom groups nor open a LAN listener that asks for firewall access.
     public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = false, bool loopbackOnly = true)

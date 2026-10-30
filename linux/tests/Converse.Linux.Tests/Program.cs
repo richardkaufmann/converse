@@ -399,6 +399,16 @@ try
         }
         await StageBundleAsync();
 
+        runtime.ExtraWorkCount = 2;
+        var queuedOperationID = Guid.NewGuid();
+        await manager.ActivateAsync(
+            queuedOperationID, "activate-queued", bundle.Manifest.ReleaseID, 0);
+        if (manager.ActivationTask is not null) await manager.ActivationTask;
+        checks.That((await ledger.SnapshotAsync()).UpdateEpisode?.Phase == "aborted" &&
+                    paths.LinkedReleaseID() == "1.0.0-1-linux-test",
+            "Drain waits for accepted queued and transfer work, not only busy turns");
+        runtime.ExtraWorkCount = 0;
+
         runtime.ActiveTurnCount = 1;
         var drainOperationID = Guid.NewGuid();
         var drainOperation = await manager.ActivateAsync(
@@ -702,6 +712,109 @@ try
             "Manager sends secrets only as the dedicated secret-stdin raw tail");
     }
 
+    // One-click pairing order: fresh unique binding, Linux confirms first.
+    {
+        var linuxID = new string('a', 64);
+        var sponsorID = new string('b', 64);
+        var groupID = Guid.NewGuid();
+        var pairingID = Guid.NewGuid();
+        var correlationID = Guid.NewGuid();
+        var requesterConn = Guid.NewGuid();
+        var code = "0000 1111 2222 3333 4444 5555 6666 7777";
+        var fingerprint = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(code.Replace(" ", "")))).ToLowerInvariant();
+        LinuxPairingBinding MakeBinding(string state = "awaiting_user", Guid? native = null) => new()
+        {
+            PairingID = pairingID,
+            RequestCorrelationID = correlationID,
+            NativeRequestID = native,
+            Role = "joiner",
+            State = state,
+            LinuxDeviceID = linuxID,
+            RequesterDeviceID = linuxID,
+            SponsorDeviceID = sponsorID,
+            PeerName = "Sponsor PC",
+            LinuxPublicKeyFingerprint = linuxID,
+            RequesterPublicKeyFingerprint = linuxID,
+            SponsorPublicKeyFingerprint = sponsorID,
+            GroupID = groupID.ToString("D"),
+            GroupName = "Test Group",
+            RequesterConnectionInstanceID = requesterConn,
+            SponsorConnectionInstanceID = native,
+            VerificationCode = state == "awaiting_user" ? code : null,
+            VerificationCodeFingerprint = fingerprint,
+            ExpiresAt = "2999-01-01T00:00:00Z",
+            CreatedAt = "2026-10-30T16:00:00Z",
+            UpdatedAt = "2026-10-30T16:00:00Z",
+        };
+        var order = new List<string>();
+        Guid? boundNative = null;
+        var fake = new FakeLinuxProcessRunner
+        {
+            Handler = request =>
+            {
+                var requestJson = System.Text.Json.Nodes.JsonNode.Parse(
+                    request.StandardInput ?? "{}")!.AsObject();
+                var operation = requestJson["operation"]?.GetValue<string>() ?? "";
+                order.Add(operation);
+                var binding = operation switch
+                {
+                    "pairing.join.status" => MakeBinding(native: boundNative),
+                    "pairing.bindPeerConnection" => MakeBinding(
+                        native: Guid.Parse(requestJson["payload"]!["binding"]!["nativeRequestID"]!
+                            .GetValue<string>())),
+                    "pairing.join.confirm" => MakeBinding("awaiting_peer", boundNative),
+                    _ => MakeBinding(),
+                };
+                if (operation == "pairing.bindPeerConnection") boundNative = binding.NativeRequestID;
+                var response = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["adminApiVersion"] = 1,
+                    ["requestID"] = requestJson["requestID"]?.GetValue<string>(),
+                    ["ok"] = true,
+                    ["result"] = System.Text.Json.Nodes.JsonNode.Parse(
+                        JsonSerializer.Serialize(binding)),
+                    ["operation"] = null,
+                    ["error"] = null,
+                };
+                return new LinuxProcessResult(0, response.ToJsonString() + "\n", "");
+            },
+        };
+        var manager = new LinuxDeploymentManager(
+            new LinuxDeploymentRegistryStore(TempHome()), fake);
+        var deployment = new LinuxDeployment
+        {
+            Ssh = new LinuxDeploymentSsh { Destination = "linux-home" },
+            Converse = new LinuxDeploymentConverse { DeviceID = linuxID },
+        };
+        var nativeRequest = new GroupJoinRequest
+        {
+            Id = Guid.NewGuid(),
+            GroupID = groupID.ToString("D"),
+            RequesterID = linuxID,
+            RequesterName = "Linux",
+            SponsorID = sponsorID,
+            ExpiresAt = DeviceTrustStore.AppleNow() + 180,
+        };
+        var paired = await manager.PairJoinAsync(
+            deployment, MakeBinding(),
+            () => new List<GroupJoinRequest> { nativeRequest },
+            _ => Task.FromResult<string?>(code),
+            () => { order.Add("sponsor.approve"); return Task.CompletedTask; });
+        checks.That(paired.Success &&
+                    order.IndexOf("pairing.join.confirm") >= 0 &&
+                    order.IndexOf("pairing.join.confirm") < order.IndexOf("sponsor.approve"),
+            "Pair confirms Linux first, observes it, then approves the sponsor");
+
+        var ambiguous = await manager.PairJoinAsync(
+            deployment, MakeBinding(),
+            () => new List<GroupJoinRequest> { nativeRequest, nativeRequest },
+            _ => Task.FromResult<string?>(code),
+            () => Task.CompletedTask);
+        checks.That(!ambiguous.Success && ambiguous.Classification == "pairing_ambiguous",
+            "Pair stops when sponsor requests are ambiguous");
+    }
+
     // Real host and Unix-socket admin path.
     {
         var paths = new LinuxPaths(TempHome());
@@ -772,6 +885,45 @@ try
                         secretReplay.Receipt?.StoredVersion == secret.Receipt?.StoredVersion,
                 "Secret set returns metadata without echoing the value and replays idempotently");
 
+            // Re-review regressions: receipts are operation-bound, and an
+            // uncertain rotation that never reached the backend cannot be
+            // reconciled merely because an older value is configured.
+            var rotatedBytes = Encoding.UTF8.GetBytes("TEST_SECRET_ROTATED");
+            await host.DispatchSecretForTestsAsync(
+                SecretHeader("set", rotatedBytes, Guid.NewGuid()), rotatedBytes);
+            var oldReplay = await host.DispatchSecretForTestsAsync(
+                SecretHeader("set", secretBytes, secretOperationID), secretBytes);
+            checks.That(oldReplay.Receipt?.StoredVersion == secret.Receipt?.StoredVersion,
+                "Completed secret replay preserves its original receipt after rotation");
+
+            var flags = System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance;
+            var secretStore = (LinuxSecretStore)typeof(LinuxHost)
+                .GetField("_secrets", flags)!.GetValue(host)!;
+            var hostLedger = (RecoveryLedgerStore)typeof(LinuxHost)
+                .GetField("_ledger", flags)!.GetValue(host)!;
+            var pendingBytes = Encoding.UTF8.GetBytes("TEST_SECRET_NEVER_APPLIED");
+            var pendingID = Guid.NewGuid();
+            var pendingHeader = SecretHeader("set", pendingBytes, pendingID);
+            var pendingCommitment = await secretStore.CommitmentAsync(
+                "secret.set", pendingHeader.SecretID, pendingHeader.Kind, pendingBytes);
+            using var pendingHashDoc = JsonDocument.Parse(JsonSerializer.Serialize(
+                new Dictionary<string, object?>
+                {
+                    ["action"] = pendingHeader.Action,
+                    ["commitment"] = pendingCommitment,
+                    ["expectedDeviceID"] = pendingHeader.ExpectedDeviceID,
+                    ["kind"] = pendingHeader.Kind,
+                    ["secretID"] = pendingHeader.SecretID,
+                    ["valueByteCount"] = pendingHeader.ValueByteCount,
+                }));
+            await hostLedger.BeginOperationAsync(pendingID, "secret.set",
+                AdminJson.PayloadHash(pendingHashDoc.RootElement), null, "uncertain");
+            var pendingReplay = await host.DispatchSecretForTestsAsync(pendingHeader, pendingBytes);
+            checks.That(!pendingReplay.Ok &&
+                        secretStore.Read("meta") == Encoding.UTF8.GetString(rotatedBytes),
+                "Uncertain unapplied rotation cannot complete from an older configured key");
+
             var groupOperationID = Guid.NewGuid();
             var group = await AdminClient.SendAsync(paths, Request(
                 "group.create", JsonSerializer.Serialize(new Dictionary<string, object>
@@ -816,6 +968,25 @@ try
                         createdResult.GlobalID == host.DeviceID + "/" + sessionID.ToString("D") &&
                         afterCreateStatus?.Work.SessionCount == 1,
                 "session.create is idempotent for its manager-generated session ID");
+
+            host.SetAcceptingWork(false);
+            var admissionField = typeof(LinuxHost).GetField("_admission", flags)!;
+            var previousAdmission = admissionField.GetValue(host);
+            admissionField.SetValue(host, Enum.Parse(admissionField.FieldType, "Probation"));
+            var probationSessionID = Guid.NewGuid();
+            var probationPayload = SessionPayload().Replace(
+                sessionID.ToString("D"), probationSessionID.ToString("D"));
+            var probationCreate = await AdminClient.SendAsync(paths, Request(
+                "session.create", probationPayload, host.DeviceID, Guid.NewGuid()));
+            var probationSecretBytes = Encoding.UTF8.GetBytes("TEST_SECRET_PROBATION");
+            var probationSecret = await host.DispatchSecretForTestsAsync(
+                SecretHeader("set", probationSecretBytes, Guid.NewGuid()), probationSecretBytes);
+            checks.That(probationCreate is { Ok: false } &&
+                        probationCreate.Error?.Retryable == true &&
+                        !probationSecret.Ok && probationSecret.Error?.Retryable == true,
+                "Probation rejects ordinary admin and secret work as retryable");
+            admissionField.SetValue(host, previousAdmission);
+            host.SetAcceptingWork(true);
 
             var badBinding = await AdminClient.SendAsync(paths, Request(
                 "pairing.join.confirm",
@@ -953,6 +1124,8 @@ sealed class FakeLinuxProcessRunner : ILinuxProcessRunner
 sealed class FakeUpdateRuntime : ILinuxUpdateRuntime
 {
     public int ActiveTurnCount { get; set; }
+    public int ExtraWorkCount { get; set; }
+    public int OutstandingWorkCount => ActiveTurnCount + ExtraWorkCount;
     public bool FabricStarted { get; private set; }
     public bool Accepting { get; private set; } = true;
     public List<string> Restarts { get; } = new();

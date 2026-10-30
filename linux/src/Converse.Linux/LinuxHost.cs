@@ -82,6 +82,30 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
     public bool FabricStarted { get; private set; }
     public int ActiveTurnCount => _store?.Sessions.Count(session => session.Busy) ?? 0;
 
+    public int OutstandingWorkCount => _devices?.WorkSnapshot().Total ?? ActiveTurnCount;
+
+    private static readonly HashSet<string> OrdinaryMutations = new(StringComparer.Ordinal)
+    {
+        "group.create", "pairing.join.begin", "pairing.bindPeerConnection",
+        "pairing.join.confirm", "pairing.join.cancel", "pairing.request.review",
+        "pairing.request.approve", "pairing.request.reject",
+        "update.stage.begin", "update.stage.verify", "session.create",
+    };
+
+    private async Task<bool> OrdinaryWorkClosedAsync(CancellationToken cancellationToken)
+    {
+        if (_admission != StartupAdmission.Open) return true;
+        if (_devices is not null && !_devices.AcceptingWork) return true;
+        if (_ledger.IsInitialized)
+        {
+            var ledger = await _ledger.SnapshotAsync(cancellationToken);
+            if (ledger.UpdateEpisode?.Phase is
+                "draining_old_release" or "activating_new_release" or "probation_new_release")
+                return true;
+        }
+        return false;
+    }
+
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         await StartAsync(cancellationToken);
@@ -540,6 +564,9 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
                 !string.Equals(header.ExpectedDeviceID, _devices.DeviceId, StringComparison.Ordinal))
                 return SecretResponse.Failure(header.RequestID, "identity_mismatch",
                     "The Linux Converse identity does not match this deployment.");
+            if (await OrdinaryWorkClosedAsync(cancellationToken))
+                return SecretResponse.Failure(header.RequestID, "daemon_unavailable",
+                    "The Linux home is not accepting new work right now.", retryable: true);
 
             string? text = null;
             if (header.Action == "set")
@@ -584,16 +611,20 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
                     header.OperationID, kind, requestHash, null, "running", cancellationToken);
                 if (existing is not null)
                 {
-                    var metadata = await _secrets.GetAsync(header.SecretID, cancellationToken);
-                    if (operation.IsTerminal && operation.State == "completed" && metadata is not null)
-                        return SecretResponse.Success(header.RequestID, ToReceipt(header.OperationID, metadata));
-                    if (operation.State == "uncertain" && metadata is not null &&
-                        metadata.Configured == (header.Action == "set"))
+                    var applied = await _secrets.AppliedForOperationAsync(
+                        header.OperationID, cancellationToken);
+                    if (operation.IsTerminal && operation.State == "completed" &&
+                        applied is not null && applied.Commitment == commitment)
+                        return SecretResponse.Success(
+                            header.RequestID, ToReceipt(header.OperationID, applied.Metadata));
+                    if (operation.State == "uncertain" && applied is not null &&
+                        applied.Commitment == commitment)
                     {
                         await _ledger.TransitionOperationAsync(
                             header.OperationID, "completed", "reconciled",
                             resultRef: header.SecretID, cancellationToken: cancellationToken);
-                        return SecretResponse.Success(header.RequestID, ToReceipt(header.OperationID, metadata));
+                        return SecretResponse.Success(
+                            header.RequestID, ToReceipt(header.OperationID, applied.Metadata));
                     }
                     return SecretResponse.Failure(header.RequestID, "internal_error",
                         "That secret operation was already recorded; check its state instead of replaying it.",
@@ -611,11 +642,13 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
                 if (header.Action == "set")
                 {
                     metadata = await _secrets.SetAsync(
-                        header.SecretID, header.Kind!, text!, cancellationToken);
+                        header.SecretID, header.Kind!, text!, cancellationToken,
+                        header.OperationID, commitment);
                 }
                 else
                 {
-                    metadata = await _secrets.DeleteAsync(header.SecretID, cancellationToken);
+                    metadata = await _secrets.DeleteAsync(
+                        header.SecretID, cancellationToken, header.OperationID, commitment);
                     if (metadata is null)
                     {
                         await _ledger.TransitionOperationAsync(
@@ -709,6 +742,12 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
             return AdminResponse.Failure(
                 request.RequestID, "recovery_required",
                 "The Linux home is closed until its recovery state is resolved.");
+
+        if (OrdinaryMutations.Contains(request.Operation) &&
+            await OrdinaryWorkClosedAsync(cancellationToken))
+            return AdminResponse.Failure(
+                request.RequestID, "admission_closed",
+                "The Linux home is not accepting new work right now.", retryable: true);
 
         try
         {

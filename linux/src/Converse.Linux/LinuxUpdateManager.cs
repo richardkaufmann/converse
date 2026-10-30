@@ -13,7 +13,7 @@ internal enum StartupAdmission
 
 internal interface ILinuxUpdateRuntime
 {
-    int ActiveTurnCount { get; }
+    int OutstandingWorkCount { get; }
     bool FabricStarted { get; }
     void SetAcceptingWork(bool accepting);
     Task StartFabricAsync(CancellationToken cancellationToken);
@@ -308,7 +308,9 @@ internal sealed class LinuxUpdateManager
         Guid operationID, UpdateEpisode episode, int drainTimeoutSeconds)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(drainTimeoutSeconds);
-        while (_runtime.ActiveTurnCount > 0 && DateTimeOffset.UtcNow < deadline)
+        // Admission was closed before this task started, so the snapshot
+        // can only shrink; the final idle check below runs under _gate.
+        while (_runtime.OutstandingWorkCount > 0 && DateTimeOffset.UtcNow < deadline)
             await Task.Delay(100);
 
         var restart = false;
@@ -319,7 +321,7 @@ internal sealed class LinuxUpdateManager
             if (ledger.UpdateEpisode?.EpisodeID != episode.EpisodeID ||
                 ledger.UpdateEpisode.Phase != "draining_old_release") return;
 
-            if (_runtime.ActiveTurnCount > 0)
+            if (_runtime.OutstandingWorkCount > 0)
             {
                 var aborted = episode.Clone();
                 aborted.Phase = "aborted";
