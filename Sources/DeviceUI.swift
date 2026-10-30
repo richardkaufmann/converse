@@ -127,7 +127,7 @@ struct RemoteSidebarRow: View {
             }
             ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
-            Text(row.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            SessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if showsModel { ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model) }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
@@ -171,7 +171,7 @@ struct RemotePane: View {
             HStack(spacing: 8) {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
-                Text(transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session").font(.system(size: 15, weight: .medium)).lineLimit(1)
+                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent").font(.system(size: 15, weight: .medium))
                 Text("on home Mac").font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")

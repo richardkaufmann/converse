@@ -625,7 +625,9 @@ final class Store: ObservableObject {
         case "turn/completed":
             let terminal = params["terminal"] as? String ?? "unknown"
             let error = params["error"] as? [String: Any]
-            finishMuse(s, status: terminal == "completed" ? "Ready" : terminal.capitalized, notice: error?["message"] as? String ?? params["reason"] as? String)
+            let reason = error?["message"] as? String ?? params["reason"] as? String
+            let notice = terminal == "completed" ? reason : "Muse turn \(terminal)." + (reason.map { " " + $0 } ?? "")
+            finishMuse(s, status: terminal == "completed" ? "Ready" : terminal.capitalized, notice: notice)
         case "session/statusChanged":
             let attention = params["attention"] as? [String] ?? []
             if attention.contains("inputPending") { s.status = "Waiting for your answer" }
@@ -672,7 +674,9 @@ final class Store: ObservableObject {
                 }
                 if let value = item["text"] as? String { updateMuseText(value, append: false, itemID: itemID, session: s) }
             } else if item["kind"] as? String == "toolCall", method == "item/completed", item["status"] as? String == "failed" {
-                s.messages.append(Message(role: "notice", text: item["failureReason"] as? String ?? "Tool failed"))
+                // A failed tool attempt can be recovered by the model. Only
+                // turn/completed decides whether the conversation turn failed.
+                activity("Muse tool \(item["tool"] as? String ?? "call") failed: \(item["failureReason"] as? String ?? "No reason reported")", session: s)
             }
         case "item/delta":
             if (params["field"] as? String ?? "text") == "text", let itemID = params["itemId"] as? String, let delta = params["delta"] as? String { updateMuseText(delta, append: true, itemID: itemID, session: s) }
@@ -1018,7 +1022,7 @@ final class Store: ObservableObject {
             else if kind.contains("tool"), let raw = payload["text"] as? String,
                     let data = raw.data(using: .utf8), let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                     let code = result["exit_code"] as? Int, code != 0 {
-                s.messages.append(Message(role: "notice", text: Store.visibleText(raw)))
+                activity("Muse tool exited with status \(code): " + Store.visibleText(raw), session: s)
             }
             else if kind.contains("failed") || kind.contains("approval") {
                 let description = payload["reason"] as? String ?? payload["text"] as? String ?? payload["tool_name"] as? String

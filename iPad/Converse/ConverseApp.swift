@@ -114,7 +114,7 @@ struct PadRoot: View {
                             HStack(spacing: 3) {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
-                                Text(row.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                                PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
@@ -159,7 +159,7 @@ struct PadPane: View {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
-                Text(snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session").font(.title3).lineLimit(1)
+                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3)
                 Spacer()
                 if service.remoteRow(globalID: id)?.participantKind == "agent" {
                     Button("Agent Setup / Loop") { agentSetup = true }
@@ -317,6 +317,17 @@ private struct PadProviderLogo: View {
                     Text(String(label.prefix(1))).font(.system(size: 14, weight: .bold))
                 }
             }.frame(width: 20, height: 20).foregroundStyle(color).accessibilityLabel(label)
+        }
+    }
+}
+
+struct PadSessionName: View {
+    let title: String
+    let isAgent: Bool
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(title).lineLimit(1).truncationMode(.tail)
+            if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
         }
     }
 }

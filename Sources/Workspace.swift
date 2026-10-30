@@ -196,7 +196,7 @@ struct SidebarSession: View {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
             Button { AppDelegate.shared.select(session, state: state) } label: {
-                Text(session.title).lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                SessionName(title: session.title, isAgent: session.agent != nil).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).layoutPriority(-1)
             if showsModel {
                 ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
@@ -302,12 +302,25 @@ struct SessionPane: View {
             HStack(spacing: 8) {
                 Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 ProviderLogo(engine: session.entry.engine)
-                Text(session.title).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                SessionName(title: session.title, isAgent: session.agent != nil).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             Conversation(session: session).id(session.id)
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// Keep the agent marker visible even when a long title is truncated. This is
+// decoration only: stored titles, routing names, and rename fields stay intact.
+struct SessionName: View {
+    let title: String
+    let isAgent: Bool
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(title).lineLimit(1).truncationMode(.tail)
+            if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
+        }
     }
 }

@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 func providerSelfTests(_ check: (Bool, String) -> Void) {
+    museToolFailureSelfTests(check)
     compactionSelfTests(check)
     accountUsageSelfTests(check)
     responseImageSelfTests(check)
@@ -381,6 +382,27 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     check(archive.accounts == nil, "Archives predating account support remain readable")
     let q = ProviderCommand.script(entry: Entry(name: "Test", command: "codex", directory: "~", engine: "codex", accountDirectory: "/tmp/path ' $(literal)"), arguments: ["--", "$(literal)"])
     check(q.contains("export CODEX_HOME='/tmp/path '\\'' $(literal)'") && q.contains("'$(literal)'"), "Account paths and prompts are shell quoted without expansion")
+}
+
+func museToolFailureSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-tool-failure-" + UUID().uuidString)
+    let store = Store(folder: root)
+    defer { store.pendingSave?.cancel(); try? FileManager.default.removeItem(at: root) }
+    let session = store.create(Entry(name: "Muse tool failure fixture", command: "unused", directory: root.path, engine: "muse"))
+    let responseID = UUID()
+    session.messages = [Message(id: responseID, role: "assistant", text: "")]
+    session.busy = true
+    for code in [1, 134, 2, 2] {
+        store.consumeMuse("item/completed", ["item": ["kind": "toolCall", "itemId": UUID().uuidString, "tool": "shell", "status": "failed", "failureReason": "process exited with status \(code)"]], session: session, responseID: responseID)
+    }
+    check(session.busy && session.messages.filter { $0.role == "activity" }.count == 4 && session.messages.allSatisfy { $0.role != "notice" }, "Failed Muse tool attempts stay in diagnostic activity without failing or cluttering the running turn")
+    check(session.messages.last?.text == "Muse tool shell failed: process exited with status 2", "Muse tool diagnostics retain the provider failure reason and tool name")
+    store.consumeMuse("item/completed", ["item": ["kind": "agentMessage", "itemId": "answer", "text": "Recovered and finished."]], session: session, responseID: responseID)
+    store.consumeMuse("turn/completed", ["terminal": "completed"], session: session, responseID: responseID)
+    check(!session.busy && session.status == "Ready" && session.messages.contains { $0.role == "assistant" && $0.text == "Recovered and finished." } && session.messages.allSatisfy { $0.role != "notice" }, "A successful Muse turn after tool failures keeps its answer without a false session error")
+    session.busy = true
+    store.consumeMuse("turn/completed", ["terminal": "failed", "error": ["message": "Provider unavailable"]], session: session, responseID: responseID)
+    check(!session.busy && session.status == "Failed" && session.messages.last?.role == "notice" && session.messages.last?.text == "Muse turn failed. Provider unavailable", "A real Muse turn failure remains visible and explicitly identifies the failed turn")
 }
 
 func compactionSelfTests(_ check: (Bool, String) -> Void) {
