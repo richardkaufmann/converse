@@ -59,8 +59,18 @@ struct PadRoot: View {
                         ContentUnavailableView {
                             Label("Your conversations, here", systemImage: "bubble.left.and.bubble.right")
                         } description: {
-                            Text("Join a Converse group, then tap 1, 2 or 3 beside a session. Models and logins stay on its home computer.")
-                        } actions: { Button("Converse Groups") { model.connectShown = true }.buttonStyle(.borderedProminent) }
+                            if service.currentGroup != nil {
+                                Text("Take a session here by tapping 1, 2, or 3 beside its name in the sidebar.")
+                            } else {
+                                Text("Join a Converse group, then tap 1, 2 or 3 beside a session. Models and logins stay on its home computer.")
+                            }
+                        } actions: {
+                            if service.currentGroup == nil {
+                                Button("Converse Groups") { model.connectShown = true }.buttonStyle(.borderedProminent)
+                            } else if model.state.sidebarHidden {
+                                Button("Show sessions") { model.state.sidebarHidden = false; model.persist() }.buttonStyle(.borderedProminent)
+                            }
+                        }
                     } else if geometry.size.width - (model.state.sidebarHidden ? 0 : width) >= CGFloat(assigned.count) * 360 {
                         HStack(spacing: 0) {
                             ForEach(assigned, id: \.self) { pane in
@@ -115,6 +125,7 @@ struct PadRoot: View {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
                                 PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading)
+                                PadProviderLogo(engine: row.engine).frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
@@ -305,7 +316,7 @@ enum PadLayout {
 private struct PadProviderLogo: View {
     let engine: String
     var body: some View {
-        let key = engine.lowercased()
+        let key = engine.lowercased() == "agent" ? "muse" : engine.lowercased()
         let provider = ["muse": "meta", "claude": "anthropic", "codex": "openai"][key] ?? key
         let label = ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI"][key] ?? engine.capitalized
         let color: Color = key == "muse" ? Color(red: 4/255, green: 103/255, blue: 223/255) : key == "claude" ? Color(red: 217/255, green: 119/255, blue: 87/255) : .primary

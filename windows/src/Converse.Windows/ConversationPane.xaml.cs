@@ -206,7 +206,7 @@ public sealed partial class ConversationPane : UserControl
         ProviderMark.Visibility = key.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         var (asset, label) = key switch
         {
-            "muse" => ("meta", "Meta"), "claude" => ("anthropic", "Anthropic"),
+            "agent" or "muse" => ("meta", "Meta"), "claude" => ("anthropic", "Anthropic"),
             "codex" => (ActualTheme == ElementTheme.Dark ? "openai-dark" : "openai", "OpenAI"),
             _ => ("", engine ?? "")
         };
@@ -249,7 +249,7 @@ public sealed partial class ConversationPane : UserControl
             UpdateHint();
             return;
         }
-        PaneTitle.Text = _selected.Title;
+        PaneTitle.Text = _selected.Title + (_selected.IsAgent ? " 🕵️" : "");
         // Adopt the home draft only into an untouched tail; never over typing.
         // Stored drafts use \n; the draft box uses \r, so normalize on adopt.
         var homeDraft = _selected.LocalSessionID is { } localId

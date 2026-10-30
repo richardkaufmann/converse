@@ -19,7 +19,7 @@ public sealed record SidebarHeader(string Key, string Title, string Status, bool
     public bool HasStatus => Status.Length > 0;
     public Windows.UI.Text.FontWeight Weight => Offline ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.SemiBold;
 }
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false, string Engine = "", string Model = "", bool IsAgent = false) : SidebarItem(Key);
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -558,7 +558,8 @@ public sealed partial class MainWindow : Window
                 PActive: _placements.PaneOf("local:" + session.Id) is null,
                 In1: _placements.KeyIn(1) == "local:" + session.Id,
                 In2: _placements.KeyIn(2) == "local:" + session.Id,
-                In3: _placements.KeyIn(3) == "local:" + session.Id));
+                In3: _placements.KeyIn(3) == "local:" + session.Id,
+                Engine: session.Entry.Engine, Model: session.Choices.Model ?? "", IsAgent: session.Agent is not null));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
@@ -573,13 +574,14 @@ public sealed partial class MainWindow : Window
                     PActive: _placements.PaneOf("remote:" + row.GlobalID) is null,
                     In1: _placements.KeyIn(1) == "remote:" + row.GlobalID,
                     In2: _placements.KeyIn(2) == "remote:" + row.GlobalID,
-                    In3: _placements.KeyIn(3) == "remote:" + row.GlobalID));
+                    In3: _placements.KeyIn(3) == "remote:" + row.GlobalID,
+                    Engine: row.Engine, Model: row.Model, IsAgent: row.ParticipantKind == "agent" || row.Engine == "agent"));
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
             SidebarHeader h => h.Title + "|" + h.Status,
             SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace
-                + "|" + s.PActive + "|" + s.In1 + "|" + s.In2 + "|" + s.In3,
+                + "|" + s.PActive + "|" + s.In1 + "|" + s.In2 + "|" + s.In3 + "|" + s.Engine + "|" + s.Model + "|" + s.IsAgent,
             _ => "",
         })));
         if (signature == _sidebarSignature) return;

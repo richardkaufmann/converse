@@ -51,7 +51,9 @@ The Mac sidebar groups sessions by device, with an alphabetized, indented list u
 - Scrolling up pauses following. **Jump to latest** shows the number of new output updates and immediately returns to the tail. Following also resumes near the bottom or after five seconds without input or scrolling; it never resumes while text is selected. New output does not reset that idle period.
 - Remote drafts identify the home device and version they were restored from. If a lease refresh supplies a different draft while you have unsent edits, choose **Keep my draft** or **Use home draft**; Converse preserves your local text and images until you choose.
 
-The sidebar gutter can be dragged down to 160 points wide. A compact provider-icon column replaces model text; narrowing truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons aligned. The full model and title remain in hover details.
+On iPad, an empty display in an existing group explains how to take a session using its sidebar buttons; joining is offered only when no group is selected.
+
+The sidebar gutter can be dragged down to 160 points wide. A compact provider-icon column on Mac, iPad, and Windows identifies each session’s provider; narrowing truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons aligned. The full model and title remain in hover details.
 
 Click the **pin** to the left of **Conversation** to hide the sidebar. A small restore pin stays at the top-left of the conversation area. Click it again to restore your previous sidebar width, constrained by the space available. Each window has its own pin state. Hiding the sidebar leaves its displayed conversations and work running.
 
@@ -59,7 +61,7 @@ Click the **pin** to the left of **Conversation** to hide the sidebar. A small r
 
 Prompts and responses have a blank line between them. In light mode prompt line-number blocks have a light blue background; responses have white. In dark mode the gutter is black, with blue prompt numbers and white response numbers. JSON blobs and switchboard/tell traffic use orange.
 
-Each sidebar row shows a spinning rainbow beachball while the assistant is working (blank when idle or waiting for you), the conversation title, its provider icon, and **P 1 2 3 X**. Agent names have a **🕵️** marker on the right in Mac and iPad sidebars and pane headers; the stored name stays unchanged. Hover over the row for account email, profile, model, effort, access, state, current window/pane, usage, quota, directory, queued input, draft/attachment counts and session IDs. Identity comes from the account's CLI: Codex account metadata, Claude initialization/auth status, or Muse's non-secret auth identity fields. The observation time is included; missing identity and probe failures are stated explicitly. Hover refreshes stale metadata without submitting a model prompt.
+Each sidebar row shows a spinning rainbow beachball while the assistant is working (blank when idle or waiting for you), the conversation title, its provider icon, and **P 1 2 3 X**. Agent names have a **🕵️** marker on the right in Mac, iPad, and Windows sidebars and pane headers; the stored name stays unchanged. Hover over the row for account email, profile, model, effort, access, state, current window/pane, usage, quota, directory, queued input, draft/attachment counts and session IDs. Identity comes from the account's CLI: Codex account metadata, Claude initialization/auth status, or Muse's non-secret auth identity fields. The observation time is included; missing identity and probe failures are stated explicitly. Hover refreshes stale metadata without submitting a model prompt.
 
 - **P** parks the conversation: no right pane displays it, and active work continues.
 - **1 / 2 / 3** move it into that pane in this window. Each pane holds one conversation; its previous occupant is parked. Moving from another window vacates the original pane immediately.
@@ -230,7 +232,7 @@ Muse approval and question dialogs are supported. Approval buttons use the serve
 
 Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
 
-The downloadable release is the Mac app. An [iPad viewer/controller](iPad/README.md) is available in source; its TestFlight distribution and physical-device verification are pending. The Windows port is being developed separately.
+The downloadable release is the Mac app. The [iPad viewer/controller](iPad/README.md) is distributed through TestFlight. Windows has a separate implementation: current source includes provider icons, agent markers, guarded display restoration, and per-loop limits. Native context compaction and Discord bot execution currently require a Mac home; matching build numbers do not imply complete feature parity.
 
 See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); the vector-drawn sneaker icon is generated by [Sources/Icon.swift](Sources/Icon.swift).
 
@@ -314,7 +316,7 @@ On iPad, the system **Paste** button accepts images from other apps; **Photos** 
 
 ### Compact session context
 
-For retained Codex and Claude sessions, **Compact** appears in yellow near the lower-right of the transcript when the latest provider observation is at least 80% of its reported context window. Observations older than ten minutes, unknown limits, cumulative billing totals, and observations from before a known compaction do not trigger a recommendation. A ten-minute cooldown prevents repeated recommendations immediately after compaction. The session-actions menu also offers manual compaction without a recommendation.
+For retained Codex and Claude sessions hosted on Mac, **Compact** appears in yellow near the lower-right of the transcript when the latest provider observation is at least 80% of its reported context window. Observations older than ten minutes, unknown limits, cumulative billing totals, and observations from before a known compaction do not trigger a recommendation. A ten-minute cooldown prevents repeated recommendations immediately after compaction. The session-actions menu also offers manual compaction without a recommendation.
 
 Compaction runs at the session's home. If a turn is active, it waits for that turn to finish and runs before queued prompts; **Cancel compact** cancels that waiting request. The full displayed transcript, session identity, draft, and draft images stay intact. Provider compaction summarizes the model's working context and can omit details. Converse waits for a provider completion event; an acknowledgement alone is not success. Interrupted or unconfirmed compaction pauses queued input and is never automatically retried after restart.
 
