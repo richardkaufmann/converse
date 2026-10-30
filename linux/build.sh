@@ -41,6 +41,7 @@ rm -rf "$publish_dir"
   -p:DebugType=None \
   -p:Version="$product_version" \
   -p:InformationalVersion="$product_version+$product_build" \
+  -p:ConverseSourceCommit="$source_commit" \
   -o "$publish_dir"
 
 install -m 700 "$publish_dir/Converse.Linux" "$output/converse"

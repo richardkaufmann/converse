@@ -1128,8 +1128,24 @@ try
 
         InstallFakeRelease(paths, "1.0.0-1-linux-test");
         LinkRelease(paths, "1.0.0-1-linux-test");
-        var offline = await LinuxInstaller.BuildPreflightStatusAsync(
-            paths, ProductInfo.Load(paths));
+        var product = ProductInfo.Load(paths);
+        var versionFile = AppContext.BaseDirectory;
+        while (versionFile is not null &&
+               !File.Exists(Path.Combine(versionFile, "VERSION.json")))
+            versionFile = Directory.GetParent(versionFile)?.FullName;
+        if (versionFile is not null)
+        {
+            using var versionDocument = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(versionFile, "VERSION.json")));
+            checks.That(product.Version ==
+                            versionDocument.RootElement.GetProperty("version").GetString() &&
+                        product.Build ==
+                            versionDocument.RootElement.GetProperty("build").GetInt32() &&
+                        product.ReleaseID ==
+                            $"{product.Version}-{product.Build}-linux-{product.Architecture}",
+                "Build identity stamps VERSION into the durable product identity");
+        }
+        var offline = await LinuxInstaller.BuildPreflightStatusAsync(paths, product);
         checks.That(offline.Device.DeviceID is { Length: 64 } &&
                     offline.Device.DeviceID ==
                         (await LinuxServiceControl.OfflineIdentityAsync(paths)) &&

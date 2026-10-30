@@ -7,9 +7,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <Version>0.5.34</Version>
-    <InformationalVersion>0.5.34+59</InformationalVersion>
+    <Version>0.5.41</Version>
+    <InformationalVersion>0.5.41+66</InformationalVersion>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute" Condition="'$(ConverseSourceCommit)' != ''">
+      <_Parameter1>ConverseSourceCommit</_Parameter1>
+      <_Parameter2>$(ConverseSourceCommit)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
     <ProjectReference Include="../../../windows/src/Converse.Core/Converse.Core.csproj" />
