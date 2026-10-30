@@ -24,6 +24,7 @@ public sealed partial class ConversationPane : UserControl
     public ConversationPane()
     {
         InitializeComponent();
+        NormalizeDraftFormat();
         ActualThemeChanged += (_, _) => RenderProviderLogo();
     }
 
@@ -395,8 +396,7 @@ public sealed partial class ConversationPane : UserControl
             _notice = null;
             _noticeUtc = null;
         }
-        if (_host.Devices.LastOutcome.Length > 0) HintText.Text = _host.Devices.LastOutcome;
-        else if (_notice is not null) HintText.Text = _notice;
+        if (_notice is not null) HintText.Text = _notice;
         else
         {
             var hint = DefaultHint;
@@ -404,6 +404,7 @@ public sealed partial class ConversationPane : UserControl
                 ? _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Attachments.Count ?? 0
                 : _selected?.GlobalID is string gid ? _host.RemoteHashes.GetValueOrDefault(gid)?.Count ?? 0 : 0;
             if (attached > 0) hint += $" · {attached} image(s) attached";
+            else if (_host.Devices.LastOutcome.Length > 0) hint = _host.Devices.LastOutcome;
             HintText.Text = hint;
         }
         var hasImages = _selected?.LocalSessionID is { } lid
@@ -946,13 +947,8 @@ public sealed partial class ConversationPane : UserControl
         {
             DraftBox.Document.SetText(TextSetOptions.None, _draftText);
             var length = GetDraftText().Length;
-            if (length > 0)
-            {
-                var range = DraftBox.Document.GetRange(0, length);
-                range.CharacterFormat.ForegroundColor = Microsoft.UI.Colors.Blue;
-                range.CharacterFormat.Italic = FormatEffect.Off;
-            }
             DraftBox.Document.Selection.SetRange(length, length);
+            NormalizeDraftFormat();
         }
         finally { _draftSetting = false; }
     }
@@ -964,11 +960,7 @@ public sealed partial class ConversationPane : UserControl
         var text = GetDraftText();
         if (text == _draftText) return;
         _draftText = text;
-        // Typed text renders blue (Mac inline formatting); a programmatic
-        // format change does not retrigger TextChanged.
-        var range = DraftBox.Document.GetRange(0, text.Length);
-        range.CharacterFormat.ForegroundColor = Microsoft.UI.Colors.Blue;
-        range.CharacterFormat.Italic = FormatEffect.Off;
+        NormalizeDraftFormat();
         // Mac parity: genuine input follows the tail — typing while parked
         // brings the view (and the character just typed) on screen.
         // Programmatic sets return through _draftSetting above, so they
@@ -977,6 +969,109 @@ public sealed partial class ConversationPane : UserControl
         ScheduleDraftFlush();
     }
 
+
+    // RichEdit sizes are points; XAML uses 96-DPI logical pixels. Set both
+    // existing text and the empty insertion format (including after Send).
+    private void NormalizeDraftFormat()
+    {
+        var format = DraftBox.Document.GetDefaultCharacterFormat();
+        format.Size = (float)(DraftBox.FontSize * 72 / 96);
+        format.Name = "Segoe UI";
+        format.Bold = FormatEffect.Off;
+        format.Italic = FormatEffect.Off;
+        format.Underline = UnderlineType.None;
+        format.ForegroundColor = Microsoft.UI.Colors.Blue;
+        DraftBox.Document.SetDefaultCharacterFormat(format);
+        DraftBox.Document.GetRange(0, GetDraftText().Length).CharacterFormat = format;
+        DraftBox.Document.Selection.CharacterFormat = format;
+    }
+
+    private bool _pastePending;
+
+    private async void OnDraftPaste(object sender, TextControlPasteEventArgs e)
+    {
+        // Never let RichEdit insert an embedded OLE image: GetText would
+        // later send only its object-placeholder character to the assistant.
+        e.Handled = true;
+        if (_pastePending || _selected is null || !InputAllowed()) return;
+        var target = _selected;
+        var originalText = GetDraftText();
+        var start = DraftBox.Document.Selection.StartPosition;
+        var end = DraftBox.Document.Selection.EndPosition;
+        _pastePending = true;
+        try
+        {
+            var data = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+            if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
+            {
+                var reference = await data.GetBitmapAsync();
+                using var source = await reference.OpenReadAsync();
+                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(source);
+                using var bitmap = await decoder.GetSoftwareBitmapAsync();
+                using var output = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+                var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(
+                    Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, output);
+                encoder.SetSoftwareBitmap(bitmap);
+                await encoder.FlushAsync();
+                output.Seek(0);
+                using var reader = new Windows.Storage.Streams.DataReader(output);
+                await reader.LoadAsync(checked((uint)output.Size));
+                var bytes = new byte[checked((int)output.Size)];
+                reader.ReadBytes(bytes);
+                await AttachBytesAsync(target, bytes, "clipboard.png");
+            }
+            else if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+            {
+                foreach (var item in await data.GetStorageItemsAsync())
+                    if (item is Windows.Storage.StorageFile file &&
+                        new[] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" }.Contains(Path.GetExtension(file.Name).ToLowerInvariant()))
+                        await AttachBytesAsync(target, await File.ReadAllBytesAsync(file.Path), file.Name);
+            }
+            else if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text))
+            {
+                var text = await data.GetTextAsync();
+                // An asynchronous clipboard read must not insert into a new
+                // session, or overwrite typing/selection made while waiting.
+                if (_selected?.Key != target.Key || !InputAllowed() || GetDraftText() != originalText ||
+                    DraftBox.Document.Selection.StartPosition != start || DraftBox.Document.Selection.EndPosition != end)
+                    throw new InvalidOperationException("Draft changed while reading the clipboard. Paste again.");
+                NormalizeDraftFormat();
+                DraftBox.Document.Selection.SetText(TextSetOptions.None, Breaks(text));
+                var caret = DraftBox.Document.Selection.EndPosition;
+                DraftBox.Document.Selection.SetRange(caret, caret);
+                NormalizeDraftFormat();
+            }
+        }
+        catch (Exception error) { _notice = "Paste failed: " + error.Message; }
+        finally { _pastePending = false; _host.RequestRefresh(); }
+    }
+
+    private async Task AttachBytesAsync(SidebarSession target, byte[] bytes, string name)
+    {
+        if (_selected?.Key != target.Key || !InputAllowed())
+            throw new InvalidOperationException("Session changed. Attach the image again.");
+        if (target.LocalSessionID is { } localId)
+        {
+            var session = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)
+                ?? throw new InvalidOperationException("Session is no longer available.");
+            var dir = Path.Combine(_host.DataFolder, "Attachments", localId.ToString("D"));
+            Directory.CreateDirectory(dir);
+            var dest = Path.Combine(dir, Guid.NewGuid().ToString("N") + "-" + Path.GetFileName(name));
+            await File.WriteAllBytesAsync(dest, bytes);
+            // Keep the captured session as owner even if the user changes panes.
+            session.Attachments.Add(dest);
+            _host.Store.Save();
+        }
+        else if (target.GlobalID is { } globalId)
+        {
+            var hash = await _host.Devices.UploadBlobAsync(globalId, bytes)
+                ?? throw new InvalidOperationException("Image upload did not finish. Try again.");
+            if (!_host.RemoteHashes.TryGetValue(globalId, out var hashes))
+                _host.RemoteHashes[globalId] = hashes = new List<string>();
+            hashes.Add(hash);
+        }
+        _notice = null;
+    }
 
     private void OnDraftKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
@@ -1677,7 +1772,11 @@ public sealed partial class ConversationPane : UserControl
     private async void OnSendClick(object sender, RoutedEventArgs e)
     {
         var text = _draftText.Replace("\r", "\n");
-        if (string.IsNullOrWhiteSpace(text) || _selected is null || !InputAllowed()) return;
+        if (_pastePending || _selected is null || !InputAllowed()) return;
+        var hasImages = _selected.LocalSessionID is { } lid
+            ? _host.Store.Sessions.FirstOrDefault(s => s.Id == lid)?.Attachments.Count > 0
+            : _selected.GlobalID is { } gid && _host.RemoteHashes.GetValueOrDefault(gid)?.Count > 0;
+        if (string.IsNullOrWhiteSpace(text) && !hasImages) return;
         _notice = null;
         _noticeUtc = null;
         // The just-sent text must never come back. A debounced draft flush
@@ -1730,6 +1829,7 @@ public sealed partial class ConversationPane : UserControl
     private async void OnAttachClick(object sender, RoutedEventArgs e)
     {
         if (_selected is null || !InputAllowed()) return;
+        var target = _selected;
         try
         {
             var picker = new Windows.Storage.Pickers.FileOpenPicker();
@@ -1742,34 +1842,8 @@ public sealed partial class ConversationPane : UserControl
             InitializeWithWindow.Initialize(picker, _host.WindowHandle);
             var files = await picker.PickMultipleFilesAsync();
             if (files.Count == 0) return;
-            if (_selected.LocalSessionID is { } localId)
-            {
-                var session = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId);
-                if (session is null) return;
-                var dir = Path.Combine(_host.DataFolder, "Attachments", localId.ToString("D"));
-                Directory.CreateDirectory(dir);
-                foreach (var file in files)
-                {
-                    var dest = Path.Combine(dir, DateTime.UtcNow.Ticks + "-" + file.Name);
-                    File.Copy(file.Path, dest);
-                    session.Attachments.Add(dest);
-                }
-                _host.Store.Save();
-            }
-            else if (_selected.GlobalID is { } globalId)
-            {
-                if (!_host.RemoteHashes.TryGetValue(globalId, out var hashes))
-                {
-                    hashes = new List<string>();
-                    _host.RemoteHashes[globalId] = hashes;
-                }
-                foreach (var file in files)
-                {
-                    var hash = await _host.Devices.UploadBlobAsync(globalId, await File.ReadAllBytesAsync(file.Path));
-                    if (hash is null) break;
-                    hashes.Add(hash);
-                }
-            }
+            foreach (var file in files)
+                await AttachBytesAsync(target, await File.ReadAllBytesAsync(file.Path), file.Name);
             _notice = null;
         }
         catch (Exception error)

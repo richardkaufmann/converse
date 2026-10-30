@@ -427,12 +427,13 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public IReadOnlyList<DeviceOutboxRecord> Outbox => _outbox.Records;
 
-    // Tests run deaf and mute: without this flag the suite advertises on
-    // the real LAN and running apps list phantom test groups.
-    public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = true)
+    // Tests disable discovery AND bind loopback so they neither advertise
+    // phantom groups nor open a LAN listener that asks for firewall access.
+    public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = true, bool loopbackOnly = false)
     {
+        if (loopbackOnly && enableDiscovery) throw new ArgumentException("Loopback listeners cannot advertise on the LAN.");
         _shutdown = new CancellationTokenSource();
-        _listener = new TcpListener(IPAddress.Any, port);
+        _listener = new TcpListener(loopbackOnly ? IPAddress.Loopback : IPAddress.Any, port);
         _listener.Start();
         ListeningPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
         if (!enableDiscovery) { _ = AcceptLoopAsync(_shutdown.Token); _ = HeartbeatLoopAsync(_shutdown.Token); await Task.CompletedTask; return; }

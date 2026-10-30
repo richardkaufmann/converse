@@ -69,6 +69,7 @@
                                  PlaceholderText="Select a conversation to begin."
                                  IsSpellCheckEnabled="False" BorderThickness="0"
                                  PreviewKeyDown="OnDraftKeyDown"
+                                 Paste="OnDraftPaste"
                                  TextChanged="OnDraftTextChanged"
                                  GotFocus="OnDraftGotFocus"/>
                 </StackPanel>
