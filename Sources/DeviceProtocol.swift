@@ -1,6 +1,10 @@
 import CryptoKit
 import Foundation
 
+enum SwitchboardPolicy {
+    static let maxHops = 100
+}
+
 // Versioned wire protocol for device sync. Independent of UI and Store types
 // so later Windows and iPad clients can implement the same schema.
 enum DeviceMessageKind: String, Codable {

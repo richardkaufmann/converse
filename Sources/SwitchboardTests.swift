@@ -50,8 +50,15 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     check(restored.switchboardEnabled && restored.switchboardHandled == source.switchboardHandled, "Messaging opt-in and handled reply IDs survive persistence")
     let recipient = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(target.saved)))
     check(recipient.pending.first?.switchboardHop == 1 && recipient.queuePaused, "Received message and hop budget survive restart paused")
+    reply(block("tell", to: target.id.uuidString, text: "past old limit"), hop: 8)
+    check(target.pending.last?.switchboardHop == 9, "Switchboard continues beyond the old eight-hop limit")
+    reply(block("tell", to: target.id.uuidString, text: "last permitted delivery"), hop: 99)
+    check(target.pending.last?.switchboardHop == 100 && target.pending.last?.text.contains("hop 100/100]") == true, "Switchboard delivers and labels the hundredth hop")
     let count = target.pending.count
-    reply(block("tell", to: target.id.uuidString, text: "loop"), hop: 8)
+    reply(block("tell", to: target.id.uuidString, text: "loop"), hop: 100)
+    let directoryCount = source.pending.count
+    reply(block("list-sessions"), hop: 100)
+    check(source.pending.count == directoryCount, "Directory responses also stop at one hundred hops")
     reply(block("tell", to: source.id.uuidString, text: "self"))
     reply(block("tell", to: UUID().uuidString, text: "closed"))
     reply(block("tell", to: target.id.uuidString, text: ""))

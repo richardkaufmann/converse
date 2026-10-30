@@ -1676,7 +1676,7 @@ extension DeviceSyncService {
         guard let bytes = envelope.payload, let request = try? JSONDecoder().decode(DeviceTellPayload.self, from: bytes),
               request.groupID == group, let from = DeviceGlobalID(request.source), from.home == origin,
               let to = DeviceGlobalID(request.target), to.home == identity?.deviceID,
-              request.hop > 0, request.hop <= 8, !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              request.hop > 0, request.hop <= SwitchboardPolicy.maxHops, !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.text.utf8.count <= 32768, request.sourceTitle.utf8.count <= 1000 else { ack("rejected", "Invalid or out-of-group message. Nothing was queued."); return true }
         let hash = DeviceBlob.sha256Hex((try? DeviceCanonical.encode(request)) ?? bytes)
         if let receipt = store.groupTellReceipts.first(where: { $0.id == id }) {
@@ -1687,7 +1687,7 @@ extension DeviceSyncService {
             ack("rejected", "Target is closed or session messaging is disabled. Nothing was queued."); return true
         }
         guard store.groupTellReceipts.count < 100000 else { ack("rejected", "Home delivery journal is full. Nothing was queued."); return true }
-        let label = "[Converse message from " + request.sourceTitle + " · session " + from.string + " · delivery " + id.uuidString + " · hop " + String(request.hop) + "/8]\n" + request.text
+        let label = "[Converse message from " + request.sourceTitle + " · session " + from.string + " · delivery " + id.uuidString + " · hop " + String(request.hop) + "/" + String(SwitchboardPolicy.maxHops) + "]\n" + request.text
         let prompt = PendingPrompt(switchboardHop: request.hop, originGroupID: group, originHomeID: origin, text: label, images: [])
         let oldPending = target.pending, oldMessages = target.messages
         if request.urgent { target.pending.insert(prompt, at: 0) } else { target.pending.append(prompt) }
