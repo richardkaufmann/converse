@@ -124,3 +124,7 @@ Voice, Discord alerts, and file triggers remain Mac-home features in this releas
 Offline devices show only a dimmed device name. Every session row reserves the same P/1/2/3/X columns; remote X is disabled. Sidebar collapse/restore uses the native pushpin icon. Quit warnings count agents with enabled loops, not every saved agent.
 
 For isolated UI validation, set `CONVERSE_DATA_DIR` to a disposable directory before launching. This prevents test sessions from touching the normal archive.
+
+## Session names and pane headers
+
+Right-click a session in the sidebar and choose **Rename…**. Local sessions rename immediately. For a remote session, first take it into a pane; the home applies the rename through the existing acknowledged command flow. Rename preserves the conversation and draft. Pane headers show the provider mark beside the title. Submitted prompts omit outer blank lines for display while retaining their original stored and copied text.

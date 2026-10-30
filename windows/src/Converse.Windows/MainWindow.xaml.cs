@@ -1011,6 +1011,34 @@ public sealed partial class MainWindow : Window
     }
 
 
+    private async void OnRenameRow(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: SidebarSession row }) return;
+        var local = row.LocalSessionID is { } id ? _store.Sessions.FirstOrDefault(s => s.Id == id) : null;
+        var remote = row.GlobalID is { } gid ? _devices.Homes.Values.SelectMany(h => h.Rows).FirstOrDefault(s => s.GlobalID == gid) : null;
+        if (local is null && remote is null) return;
+        try
+        {
+            if (row.GlobalID is { } target && (!_devices.RemoteLeases.ContainsKey(target) || _devices.RemoteOffline.Contains(target)))
+            {
+                await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Take the session first", Content = "Place this remote session in a pane and choose Take here, then rename it. Its current device keeps control until you do.", CloseButtonText = "OK" }.ShowAsync();
+                return;
+            }
+            var name = new TextBox { Text = local?.Title ?? remote!.Title, MaxLength = 200, MinWidth = 320 };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(name, "Session name");
+            var dialog = new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Rename session", Content = name, PrimaryButtonText = "Rename", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
+            name.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(name.Text);
+            dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(name.Text);
+            dialog.Opened += (_, _) => { name.Focus(FocusState.Programmatic); name.SelectAll(); };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            if (local is not null) { local.Title = name.Text.Trim(); _store.Save(); }
+            else if (row.GlobalID is { } globalId)
+                await _devices.SendRemoteCommandAsync(globalId, new DeviceCommandPayload { Action = "rename", Text = name.Text.Trim() });
+            Refresh();
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine("Rename dialog: " + ex.GetType().Name); }
+    }
+
     private async void OnParkClick(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: SidebarSession row }) return;

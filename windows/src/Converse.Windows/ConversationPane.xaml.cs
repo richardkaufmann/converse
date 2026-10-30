@@ -679,7 +679,7 @@ public sealed partial class ConversationPane : UserControl
     {
         var isUser = line.Role == "user";
         var showNumbers = _host.Layout.ShowLineNumbers;
-        var grid = new Grid { ColumnSpacing = 8 };
+        var grid = new Grid { ColumnSpacing = showNumbers ? 8 : 0 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         // The message number, as a chip beside every block: prompts print
@@ -690,6 +690,7 @@ public sealed partial class ConversationPane : UserControl
             FontSize = 16,
             MinWidth = showNumbers ? 28 : 0,
             TextAlignment = TextAlignment.Right,
+            Visibility = showNumbers ? Visibility.Visible : Visibility.Collapsed,
             Margin = new Thickness(0, 2, 0, 0),
             Foreground = new SolidColorBrush(isUser ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray),
         };
@@ -699,6 +700,9 @@ public sealed partial class ConversationPane : UserControl
         Grid.SetColumn(body, 1);
         grid.Children.Add(body);
         var flat = MarkdownRuns.SanitizeLoneSurrogates(line.Text.Replace("\r\n", "\n").Replace('\r', '\n'));
+        // Outer editor blank lines are not a separate visible message row.
+        // Keep the stored/copyable prompt and all internal whitespace intact.
+        if (isUser) flat = flat.Trim('\n');
         // Prompts are never markdown (Mac parity): italic plain text on the
         // light-blue ground. Responses parse to blocks with real tables.
         var blocks = isUser
@@ -717,7 +721,7 @@ public sealed partial class ConversationPane : UserControl
         var border = new Border
         {
             Child = grid,
-            Padding = new Thickness(6),
+            Padding = new Thickness(6, 3, 6, 3),
             CornerRadius = new CornerRadius(4),
             Background = isUser
                 ? new SolidColorBrush(dark

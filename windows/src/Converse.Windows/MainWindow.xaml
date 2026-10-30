@@ -28,6 +28,8 @@
         <DataTemplate x:Key="SidebarSessionTemplate">
             <Grid Padding="18,3,4,3">
                 <Grid.ContextFlyout><MenuFlyout>
+                    <MenuFlyoutItem Text="Rename…" Tag="{Binding}" Click="OnRenameRow"/>
+                    <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Agent Setup / Loop" Tag="{Binding}" Click="OnAgentSetupRow"/>
                     <MenuFlyoutItem Text="Teach Session To Talk To Other Sessions" Tag="{Binding}" Click="OnTeachRow"/>
                 </MenuFlyout></Grid.ContextFlyout>
