@@ -65,6 +65,11 @@
                           ViewChanged="OnTranscriptScrolled"
                           PreviewKeyDown="OnTranscriptPreviewKeyDown">
                 <StackPanel x:Name="TranscriptStack" Spacing="10">
+                    <StackPanel Spacing="6">
+                    <ScrollViewer x:Name="DraftImagesScroller" Visibility="Collapsed"
+                                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                        <StackPanel x:Name="DraftImages" Orientation="Horizontal" Spacing="8"/>
+                    </ScrollViewer>
                     <RichEditBox x:Name="DraftBox" FontSize="16" Padding="0" AcceptsReturn="True"
                                  PlaceholderText="Select a conversation to begin."
                                  IsSpellCheckEnabled="False" BorderThickness="0"
@@ -72,6 +77,7 @@
                                  Paste="OnDraftPaste"
                                  TextChanged="OnDraftTextChanged"
                                  GotFocus="OnDraftGotFocus"/>
+                    </StackPanel>
                 </StackPanel>
             </ScrollViewer>
             <Button x:Name="JumpLatestButton" Content="↓ Latest" Click="OnJumpLatestClick" Visibility="Collapsed"

@@ -91,6 +91,7 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] public bool Busy { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public string Status { get; set; } = "Ready";
     [System.Text.Json.Serialization.JsonIgnore] public bool TurnFailed { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public string? RetryDetail { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool Interrupted { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal bool StreamedText { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal bool ResumeAfterInterrupt { get; set; }
@@ -132,7 +133,8 @@ public sealed class ProcessAgentRunner : IAgentRunner
             StandardErrorEncoding = new UTF8Encoding(false),
             StandardInputEncoding = new UTF8Encoding(false),
         };
-        var allArgs = arguments.Append("--").Append(prompt);
+        var streamInput = arguments.Contains("--input-format");
+        var allArgs = streamInput ? arguments : arguments.Append("--").Append(prompt);
         var resolved = CommandResolution.Resolve(session.Entry.Command)
             ?? new ResolvedCommand(session.Entry.Command, Array.Empty<string>(), session.Entry.Command);
         CommandResolution.Apply(start, resolved, allArgs);
@@ -160,13 +162,17 @@ public sealed class ProcessAgentRunner : IAgentRunner
         using var process = new Process { StartInfo = start };
         session.RunningProcess = process;
         process.Start();
-        process.StandardInput.Close();
         using var registration = cancellationToken.Register(() =>
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* already gone */ }
         });
         var outputTask = ReadLinesAsync(process.StandardOutput, onLine);
         var errorTask = ReadLinesAsync(process.StandardError, onLine);
+        try
+        {
+            if (streamInput) await process.StandardInput.WriteLineAsync(prompt.AsMemory(), cancellationToken);
+        }
+        finally { process.StandardInput.Close(); }
         await process.WaitForExitAsync(CancellationToken.None);
         await Task.WhenAll(outputTask, errorTask);
         session.RunningProcess = null;
@@ -189,6 +195,7 @@ public static class TurnArguments
         if (entry.Engine == "claude")
         {
             args.AddRange(new[] { "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages" });
+            if (images.Count > 0) args.AddRange(new[] { "--input-format", "stream-json" });
             if (session.Started || session.RemoteID is not null) { args.Add("--resume"); args.Add(session.RemoteID ?? session.Id.ToString("D")); }
             else { args.Add("--session-id"); args.Add(session.Id.ToString("D")); }
             if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
@@ -654,6 +661,7 @@ public sealed class SessionStore
         session.Interrupted = false;
         session.ResumeAfterInterrupt = false;
         session.TurnFailed = false;
+        session.RetryDetail = null;
         session.StreamedText = false;
         session.ClaudeTextBlockPending = false;
         session.ClaudeStreamSeparators.Clear();
@@ -673,7 +681,8 @@ public sealed class SessionStore
         var exit = -1;
         try
         {
-            exit = await _runner.RunAsync(session, args, ImageGuidance.WithGuidance(prompt),
+            var input = await ProviderInput.CreateAsync(session.Entry.Engine, ImageGuidance.WithGuidance(prompt), images);
+            exit = await _runner.RunAsync(session, args, input,
                 line => Consume(line, session, response), session.TurnCancellation.Token);
         }
         catch (Exception error)
@@ -688,6 +697,9 @@ public sealed class SessionStore
             try { Directory.Delete(finalDirectory, recursive: true); } catch { /* temp cleanup best effort */ }
         }
         session.Busy = false;
+        if (session.RetryDetail is not null && exit != 0 && !session.Interrupted)
+            session.Messages.Add(new ChatMessage { Role = "notice", Text = "Could not reconnect. Your prompt and partial reply are kept. Try again when the connection recovers.\n" + session.RetryDetail });
+        session.RetryDetail = null;
         var success = exit == 0 && !session.TurnFailed;
         session.Status = session.Interrupted ? "Interrupted" : success ? "Ready" : "Failed · exit " + exit;
         if (exit == 0) session.Started = true;
@@ -719,6 +731,21 @@ public sealed class SessionStore
     public void Consume(string line, ChatSession session, ChatMessage response)
     {
         if (string.IsNullOrEmpty(line)) return;
+        if (ProviderRetry.Detail(line) is { } retry)
+        {
+            session.RetryDetail = retry;
+            session.Status = ProviderRetry.Status(session.Entry.Engine);
+            Changed?.Invoke();
+            TranscriptAdvanced?.Invoke(session);
+            return;
+        }
+        if (session.RetryDetail is not null)
+        {
+            session.RetryDetail = null;
+            session.Status = "Working…";
+            Changed?.Invoke();
+            TranscriptAdvanced?.Invoke(session);
+        }
         JsonDocument? doc;
         try { doc = JsonDocument.Parse(line); }
         catch { session.Messages.Add(new ChatMessage { Role = "activity", Text = line }); return; }
@@ -848,8 +875,9 @@ public sealed class SessionStore
             }
             if (type is "error" or "turn.failed")
             {
+                if (!session.TurnFailed)
+                    session.Messages.Add(new ChatMessage { Role = "notice", Text = GetString(obj, "message") ?? (obj.TryGetProperty("error", out var failure) ? GetString(failure, "message") : null) ?? "Command failed" });
                 session.TurnFailed = true;
-                session.Messages.Add(new ChatMessage { Role = "notice", Text = GetString(obj, "message") ?? "Command failed" });
             }
         }
         if (text is null) return;

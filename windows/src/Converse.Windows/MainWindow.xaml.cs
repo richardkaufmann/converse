@@ -133,6 +133,13 @@ public sealed partial class MainWindow : Window
         // PairingConfirmation callback stays for headless tests only.)
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
+        _devices.RemoteViewDisplaced += globalId => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_devices.RemoteLeases.ContainsKey(globalId)) return; // already taken again
+            _placements.Park("remote:" + globalId);
+            _placements.Save(_dataFolder);
+            Refresh();
+        });
         if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(enableDiscovery: true, loopbackOnly: false);
         _help = LoadHelp();
         Title = "Converse" + (_help is null ? " (dev)" : " " + _help.AppVersion
@@ -592,7 +599,7 @@ public sealed partial class MainWindow : Window
     // sidebar assigns into focus); the 1/2/3 buttons target a pane
     // explicitly. Headers and empty rows are not placeable: the highlight
     // snaps back to the focused pane's row.
-    private void OnSidebarSelection(object sender, SelectionChangedEventArgs e)
+    private async void OnSidebarSelection(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSelection) return;
         var item = Sidebar.SelectedItem as SidebarItem;
@@ -607,11 +614,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         var pane = _focusedPane >= 1 ? _focusedPane : 1;
-        _placements.Assign(session.Key, pane);
-        _placements.Save(_dataFolder);
-        _focusedPane = pane;
-        Refresh();
-        _panes[pane - 1].FocusDraft();
+        await PlaceSessionAsync(session, pane);
     }
 
 
@@ -1060,6 +1063,15 @@ public sealed partial class MainWindow : Window
         if (sender is not Button { Tag: SidebarSession row, Content: string label }) return;
         if (label is not ("1" or "2" or "3")) return;
         var pane = label[0] - '0';
+        await PlaceSessionAsync(row, pane);
+    }
+
+    private async Task PlaceSessionAsync(SidebarSession row, int pane)
+    {
+        if (row.LocalSessionID is { } local && !await _devices.AcquireLocalAsync(local)) return;
+        var displaced = _placements.KeyIn(pane);
+        if (displaced is not null && displaced != row.Key && displaced.StartsWith("remote:", StringComparison.Ordinal))
+            await _devices.ReleaseRemoteAsync(displaced["remote:".Length..]);
         _placements.Assign(row.Key, pane);
         _placements.Save(_dataFolder);
         _focusedPane = pane;

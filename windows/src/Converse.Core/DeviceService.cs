@@ -271,6 +271,7 @@ public sealed partial class DeviceSyncService : IDisposable
     public string LastOutcome { get; private set; } = "";
     public int ListeningPort { get; private set; }
     public event Action? Changed;
+    public event Action<string>? RemoteViewDisplaced;
     public Func<PairingPrompt, Task<bool>>? PairingConfirmation { get; set; }
 
     // Converse Groups state, mirroring Swift DeviceTransport.
@@ -1693,6 +1694,7 @@ public sealed partial class DeviceSyncService : IDisposable
                     _pendingTakes.Remove(stolenId);
                     RemoteLeases.Remove(stolenId);
                     RemoteTranscripts.Remove(stolenId);
+                    RemoteViewDisplaced?.Invoke(stolenId);
                     Changed?.Invoke();
                 }
                 break;
@@ -1961,6 +1963,29 @@ public sealed partial class DeviceSyncService : IDisposable
     // display lease is held by another device (one active display each).
     public (string Device, ulong Epoch)? DisplayHolder(Guid sessionId) => _leases.Holder(sessionId);
 
+    // Clicking a home pane number is a take, just like a remote lease.acquire.
+    // Fence the old holder before exposing the local editor, then park its view.
+    public async Task<bool> AcquireLocalAsync(Guid sessionId)
+    {
+        if (!_store.Sessions.Any(s => s.Id == sessionId)) return false;
+        var holder = _leases.Holder(sessionId);
+        if (holder is null || holder.Value.Device == DeviceId) return true;
+        var result = _leases.Acquire(sessionId, DeviceId);
+        if (!result.Granted) { LastOutcome = "Could not record local display fence."; return false; }
+        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == result.Displaced).ToArray())
+        {
+            old.LeasedSessions.Remove(sessionId);
+            await SendEnvelopeAsync(old, new DeviceEnvelope
+            {
+                Kind = DeviceKind.LeaseStolen, Boot = _boot,
+                SessionID = new DeviceGlobalID(DeviceId, sessionId).ToString(), Epoch = result.Epoch,
+            });
+        }
+        PublishSidebars();
+        Changed?.Invoke();
+        return true;
+    }
+
     // Mac parity: page earlier messages ahead of the retained transcript.
     public async Task RequestEarlierAsync(string globalId)
     {
@@ -2018,6 +2043,11 @@ public sealed partial class DeviceSyncService : IDisposable
         { LastOutcome = "Take the session again before attaching."; return null; }
         if (data.Length > DeviceBlob.MaxBlob) { LastOutcome = "Attachment exceeds the 25 MB limit."; return null; }
         var hash = DeviceBlob.Sha256Hex(data);
+        // Preserve a local preview of an outgoing remote attachment, too.
+        var previewPath = Path.Combine(_folder, "device-blobs", hash);
+        Directory.CreateDirectory(Path.GetDirectoryName(previewPath)!);
+        await File.WriteAllBytesAsync(previewPath, data);
+        _blobPaths[hash] = previewPath;
         TaskCompletionSource<bool> waiter;
         lock (_blobAcks) { waiter = new TaskCompletionSource<bool>(); _blobAcks[hash] = waiter; }
         await SendEnvelopeAsync(peer, new DeviceEnvelope

@@ -391,6 +391,7 @@ public sealed partial class ConversationPane : UserControl
 
     private void UpdateHint()
     {
+        RefreshDraftImages();
         if (_noticeUtc is { } stamp && (DateTime.UtcNow - stamp).TotalSeconds > 30)
         {
             _notice = null;
@@ -411,6 +412,51 @@ public sealed partial class ConversationPane : UserControl
             ? _host.Store.Sessions.FirstOrDefault(s => s.Id == lid)?.Attachments.Count > 0
             : _selected?.GlobalID is string g && _host.RemoteHashes.GetValueOrDefault(g)?.Count > 0;
         ClearImagesButton.Visibility = hasImages ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private string _draftImagesKey = "";
+    private void RefreshDraftImages()
+    {
+        var target = _selected;
+        var local = target?.LocalSessionID is { } id ? _host.Store.Sessions.FirstOrDefault(s => s.Id == id) : null;
+        var images = local is not null ? local.Attachments.ToArray()
+            : target?.GlobalID is { } gid ? _host.RemoteHashes.GetValueOrDefault(gid)?.ToArray() ?? Array.Empty<string>()
+            : Array.Empty<string>();
+        var key = target?.Key + "|" + string.Join("|", images) + "|" + InputAllowed();
+        if (key == _draftImagesKey) return;
+        _draftImagesKey = key;
+        DraftImages.Children.Clear();
+        DraftImagesScroller.Visibility = images.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var item in images)
+        {
+            var path = local is not null ? item : _host.Devices.BlobPath(item);
+            var tile = new Grid { Width = 144, Height = 104 };
+            if (path is not null && TryMakeImage(path) is Image preview)
+            {
+                preview.Width = 144; preview.Height = 104;
+                tile.Children.Add(preview);
+            }
+            else tile.Children.Add(new TextBlock { Text = "Image attached", VerticalAlignment = VerticalAlignment.Center });
+            var remove = new Button
+            {
+                Content = "×", Width = 28, Height = 28, Padding = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+                Background = new SolidColorBrush(Microsoft.UI.Colors.White),
+                Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black), IsEnabled = InputAllowed(),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Remove attached image");
+            ToolTipService.SetToolTip(remove, "Remove image");
+            remove.Click += (_, _) =>
+            {
+                if (_selected?.Key != target?.Key || !InputAllowed()) return;
+                if (local is not null) { local.Attachments.Remove(item); _host.Store.Save(); }
+                else if (target?.GlobalID is { } global) _host.RemoteHashes.GetValueOrDefault(global)?.Remove(item);
+                UpdateHint();
+                DraftBox.Focus(FocusState.Programmatic);
+            };
+            tile.Children.Add(remove);
+            DraftImages.Children.Add(tile);
+        }
     }
 
 
@@ -569,7 +615,7 @@ public sealed partial class ConversationPane : UserControl
 
     // ---- Block transcript renderer (Mac parity) ----
     // History renders as per-message blocks in TranscriptStack; the last
-    // child is always the DraftBox. A streaming tick re-renders only the
+    // child is always the persistent draft (images plus DraftBox). A streaming tick re-renders only the
     // final block and appends new ones; anything else (session switch,
     // paging, cap change) swaps the blocks wholesale. Blocks are cheap
     // visual elements — no transcript document is ever mutated, which

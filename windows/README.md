@@ -151,3 +151,19 @@ font (12 points in RichEdit). Check typing into an empty draft, copying an
 italic transcript passage into the draft, pasting a screenshot, continuing
 to type, and clearing images. A screenshot must create an actual PNG in
 Attachments and leave no object-placeholder character in the draft.
+
+## Attachment previews, reconnects, and taking a session
+
+Attached draft images appear as thumbnails with an individual remove button.
+Claude image turns send the actual image content through structured stdin;
+folder access alone is not image delivery. Codex and Muse retain their image
+arguments and submission paths. Remote uploads keep a local preview cache.
+
+Provider reconnect attempts update a temporary waiting status rather than
+adding numbered transcript messages. The next provider output clears it;
+terminal errors remain visible. A retry does not itself fail the turn.
+
+Clicking 1, 2, or 3 takes a session into that pane on the clicking device,
+including reclaiming a locally hosted session from a remote viewer. The old
+viewer parks immediately; it need not press Park first. Moving a different
+remote session out of the destination pane releases that old display lease.

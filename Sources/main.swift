@@ -101,6 +101,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var needsSignIn = false
     @Published var busy = false
     @Published var status = "Ready"
+    var retryDetail: String?
     @Published var toolStatus = ToolStatus()
     var remoteID: String? { didSet { if remoteID != oldValue { identityChanged?() } } }
     var started: Bool
@@ -426,7 +427,7 @@ final class Store: ObservableObject {
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
             s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it with Configure and retry this conversation.")); return
         }
-        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.settingNotice = ""
+        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.retryDetail = nil; s.settingNotice = ""
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
         let images = s.attachments
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
@@ -506,6 +507,8 @@ final class Store: ObservableObject {
             let finalReply = finalDirectory.flatMap { try? String(contentsOf: $0.appendingPathComponent("answer.txt"), encoding: .utf8) }
             if let finalDirectory { try? FileManager.default.removeItem(at: finalDirectory) }
             DispatchQueue.main.async {
+                let retryFailure = s.retryDetail
+                s.retryDetail = nil
                 s.busy = false; s.process = nil
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
@@ -524,7 +527,10 @@ final class Store: ObservableObject {
                     let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")
                     if AccountLogin.requiresSignIn(output) { s.needsSignIn = true }
                 }
-                if p.terminationStatus != 0 && !s.interrupted { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. For authentication, use Sign in… or /login to choose a login or authenticate in Terminal. Interactive terminal approval prompts are not supported in this version.")) }
+                if p.terminationStatus != 0 && !s.interrupted, let retryFailure {
+                    s.messages.append(Message(role: "notice", text: "Could not reconnect. Your prompt and partial reply are kept. Try again when the connection recovers.\n" + retryFailure))
+                }
+                if p.terminationStatus != 0 && !s.interrupted && retryFailure == nil && !s.turnFailed { s.messages.append(Message(role: "notice", text: "The command exited with status \(p.terminationStatus). See the activity messages above. For authentication, use Sign in… or /login to choose a login or authenticate in Terminal. Interactive terminal approval prompts are not supported in this version.")) }
                 self.save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }; self.objectWillChange.send()
                 self.finishQueue(s, success: p.terminationStatus == 0 && !s.turnFailed)
             }
@@ -961,6 +967,12 @@ final class Store: ObservableObject {
     }
     func consume(_ line: String, session s: Session, responseID: UUID) {
         guard !line.isEmpty else { return }
+        if let retry = ProviderRetry.detail(line) {
+            s.retryDetail = retry
+            s.status = ProviderRetry.status(s.entry.engine)
+            saveSoon(); objectWillChange.send(); return
+        }
+        if s.retryDetail != nil { s.retryDetail = nil; s.status = "Working…" }
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
@@ -1030,7 +1042,9 @@ final class Store: ObservableObject {
                 if item["type"] as? String == "agent_message" { text = item["text"] as? String }
                 else if let command = item["command"] as? String { activity(command, session: s) }
             }
-            if type == "error" || type == "turn.failed" { s.turnFailed = true; s.messages.append(Message(role: "notice", text: obj["message"] as? String ?? String(describing: obj["error"] ?? "Command failed"))) }
+            if type == "error" || type == "turn.failed" {
+                if !s.turnFailed { s.messages.append(Message(role: "notice", text: obj["message"] as? String ?? String(describing: obj["error"] ?? "Command failed"))) }; s.turnFailed = true
+            }
         }
         if let raw = text, let i = s.messages.firstIndex(where: { $0.id == responseID }) {
             let visible = Store.visibleText(raw)
@@ -2433,6 +2447,21 @@ func selfTest() {
     check(pagedText.messageLabels.map(\.number) == [51, 52], "Home numbering-only updates refresh cached native history")
     let legacyWire = try! JSONDecoder().decode(DeviceWireMessage.self, from: Data(("{\"id\":\"" + UUID().uuidString + "\",\"role\":\"assistant\",\"text\":\"old home\",\"imageHashes\":[]}").utf8))
     check(legacyWire.messageNumber == nil && (try? JSONDecoder().decode(DeviceWireMessage.self, from: JSONEncoder().encode(pagedB)))?.messageNumber == 42, "Optional message ordinals round-trip while old wire messages still decode")
+    let retrySession = Session(entry: Entry(name: "Codex", command: "codex", directory: NSTemporaryDirectory(), engine: "codex"))
+    let retryResponse = Message(role: "assistant", text: "Partial")
+    retrySession.messages = [retryResponse]
+    for attempt in 1...5 {
+        store.consume("{\"type\":\"error\",\"message\":\"Reconnecting... \(attempt)/5 (stream disconnected)\"}", session: retrySession, responseID: retryResponse.id)
+    }
+    check(retrySession.messages.count == 1 && !retrySession.turnFailed && retrySession.status.hasPrefix("Waiting for OpenAI"), "Reconnect attempts replace one temporary status without polluting history or failing the turn")
+    store.consume(#"{"type":"item.completed","item":{"type":"agent_message","text":"Recovered"}}"#, session: retrySession, responseID: retryResponse.id)
+    check(retrySession.retryDetail == nil && retrySession.status == "Working…" && retrySession.messages[0].text.contains("Recovered"), "Next output clears retry state and preserves the partial reply")
+    store.consume("Reconnecting... 1/5 (stream disconnected)", session: retrySession, responseID: retryResponse.id)
+    check(retrySession.messages.count == 1, "Raw stderr retries do not become transcript lines")
+    store.consume(#"{"type":"error","willRetry":false,"message":"Connection lost permanently"}"#, session: retrySession, responseID: retryResponse.id)
+    check(retrySession.retryDetail == nil && retrySession.turnFailed && retrySession.messages.last?.text == "Connection lost permanently", "Terminal provider failure stays visible")
+    check(ProviderRetry.detail(#"{"type":"assistant","message":"Reconnecting... 1/5"}"#) == nil && ProviderRetry.detail("A tool printed Reconnecting... 1/5") == nil, "Retry matcher preserves ordinary content")
+    check(ProviderRetry.detail(#"{"type":"system","subtype":"api_retry"}"#) != nil && ProviderRetry.status("claude").contains("Claude"), "Claude retry events get a provider-specific waiting status")
     let timed = Session(entry: entry)
     timed.messages = [Message(id: r, role: "assistant", text: "")]
     store.consume("muse: workspace root: /somewhere", session: timed, responseID: r)

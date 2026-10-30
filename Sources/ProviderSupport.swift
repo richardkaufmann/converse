@@ -369,3 +369,22 @@ struct PendingMessagesView: View {
         }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
     }
 }
+
+// Retry telemetry is transient UI state, never conversation history or a failed
+// turn. Keep terminal errors visible; only explicit retry events are classified.
+enum ProviderRetry {
+    static func status(_ engine: String) -> String {
+        "Waiting for " + (engine == "codex" ? "OpenAI" : engine == "claude" ? "Claude" : "Muse") + "… reconnecting"
+    }
+    static func detail(_ line: String) -> String? {
+        var message = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            guard let type = obj["type"] as? String, type == "error" || type == "system" else { return nil }
+            if obj["subtype"] as? String == "api_retry" { return "Provider is retrying the request." }
+            if obj["willRetry"] as? Bool == false { return nil }
+            message = obj["message"] as? String ?? ""
+            if obj["willRetry"] as? Bool == true { return message }
+        }
+        return message.range(of: #"^Reconnecting(?:\.\.\.|…)\s*\d+/\d+(?:\s|$)"#, options: [.regularExpression, .caseInsensitive]) != nil ? message : nil
+    }
+}

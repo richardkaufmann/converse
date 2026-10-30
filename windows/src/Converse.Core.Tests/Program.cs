@@ -9,6 +9,11 @@ if (args.FirstOrDefault() == "--emit-utf8")
     Console.OpenStandardOutput().Write([0xE2, 0x80, 0x93, 0x0A]);
     return 0;
 }
+if (args.FirstOrDefault() == "--echo-stdin")
+{
+    Console.Write(await Console.In.ReadToEndAsync());
+    return 0;
+}
 var failures = 0;
 var failedLabels = new List<string>();
 void Check(bool ok, string label)
@@ -352,6 +357,24 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Takeover holder advances to the new viewer at its granted epoch");
         Check(await UntilTakeover(() => holderSeenByUI == b.DeviceId),
             "Takeover refreshes the home UI with the new display holder");
+        string? displacedView = null;
+        b.RemoteViewDisplaced += value => displacedView = value;
+        var remoteEpoch = b.RemoteLeases[gid];
+        Check(await home.AcquireLocalAsync(session.Id) && await UntilTakeover(() =>
+            !b.RemoteLeases.ContainsKey(gid) && !b.RemoteTranscripts.ContainsKey(gid) && displacedView == gid)
+            && home.DisplayHolder(session.Id) is { } localHolder && localHolder.Device == home.DeviceId && localHolder.Epoch > remoteEpoch,
+            "Home take immediately fences and parks the remote viewer without requiring remote Park");
+        Check(session.Draft == "takeover draft" && holderSeenByUI == home.DeviceId,
+            "Home take preserves the shared draft and refreshes home placement authority");
+        var localEpoch = home.DisplayHolder(session.Id)!.Value.Epoch;
+        Check(await home.AcquireLocalAsync(session.Id) && home.DisplayHolder(session.Id)?.Epoch == localEpoch,
+            "Repeated home pane clicks keep the same local display fence");
+        await b.ReleaseRemoteAsync(gid);
+        Check(home.DisplayHolder(session.Id)?.Device == home.DeviceId,
+            "Parked viewer release cannot release the home's new display fence");
+        await b.AcquireRemoteAsync(gid);
+        Check(await UntilTakeover(() => b.RemoteTranscripts.ContainsKey(gid) && home.DisplayHolder(session.Id)?.Device == b.DeviceId),
+            "Remote viewer can take the session back again after a home take");
         await b.ReleaseRemoteAsync(gid);
         Check(await UntilTakeover(() => home.DisplayHolder(session.Id) is null && holderSeenByUI is null),
             "Display holder clears and refreshes the home UI on release");
@@ -794,9 +817,10 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } t
             && t.Offset == 0 && t.Messages.Count == 250 && t.Messages.First().Text == "m0"),
             "Earlier page merges ahead to the full 250 messages");
-        var png = Utf8("fake-png-bytes");
+        var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV9sAAAAASUVORK5CYII=");
         var hash = await viewer.UploadBlobAsync(gid, png);
         Check(hash == DeviceBlob.Sha256Hex(png), "Blob upload returns the content hash");
+        Check(viewer.BlobPath(hash!) is { } previewPath && File.ReadAllBytes(previewPath).SequenceEqual(png), "Remote draft upload retains exact local preview bytes");
         var attached = await viewer.SendRemoteCommandAsync(gid,
             new DeviceCommandPayload { Action = "submit", Text = "with image", BlobHashes = new[] { hash! } });
         Check(attached is not null && await Until(() =>
@@ -2066,6 +2090,73 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             new[] { "--emit-utf8" }, "ignored", lines.Add, CancellationToken.None);
         Check(exit == 0 && lines.Count == 1 && lines[0] == "–",
             "Runner decodes multibyte UTF-8 CLI output exactly");
+    }
+    finally { Cleanup(dir); }
+}
+
+// Pin the actual process boundary: rich image bytes on stdin, no image argv.
+{
+    var dir = Directory.CreateTempSubdirectory("converse-images-").FullName;
+    try
+    {
+        var path = Path.Combine(dir, "extensionless-remote-blob");
+        var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV9sAAAAASUVORK5CYII=");
+        await File.WriteAllBytesAsync(path, png);
+        var capture = new FakeRunner();
+        var store = new SessionStore(dir, capture);
+        var session = store.Create(store.Entries.First(e => e.Engine == "claude"));
+        session.Busy = true; session.Draft = "Queued image"; session.Attachments.Add(path);
+        store.Submit(session);
+        session.Busy = false; store.RunNext(session);
+        var sentDeadline = DateTime.UtcNow.AddSeconds(3);
+        while (capture.Prompts.Count == 0 && DateTime.UtcNow < sentDeadline) await Task.Delay(10);
+        Check(capture.Prompts.Count == 1 && capture.Prompts[0].Contains("image/png") && session.Messages.Any(m => m.Role == "user" && m.Images.Count == 1),
+            "Queued Claude image reaches the runner as rich content while remaining in transcript history");
+        var input = await ProviderInput.CreateAsync("claude", "What is this? – \nsecond line", new[] { path, path });
+        using var json = System.Text.Json.JsonDocument.Parse(input);
+        var blocks = json.RootElement.GetProperty("message").GetProperty("content");
+        Check(blocks.GetArrayLength() == 3 && blocks[0].GetProperty("text").GetString()!.Contains("second line")
+            && blocks[1].GetProperty("source").GetProperty("media_type").GetString() == "image/png"
+            && Convert.FromBase64String(blocks[1].GetProperty("source").GetProperty("data").GetString()!).SequenceEqual(png),
+            "Claude prompt contains real image bytes and text, including extensionless remote blobs");
+        var turnArgs = TurnArguments.For(session, new[] { path });
+        Check(turnArgs.Contains("--input-format") && turnArgs.Contains("stream-json"), "Claude image turns enable structured stdin");
+        session.Started = true; session.RemoteID = "existing-session";
+        Check(TurnArguments.For(session, new[] { path }).Contains("existing-session"), "Image turns preserve Claude resume identity");
+        Check(!TurnArguments.For(session, Array.Empty<string>()).Contains("--input-format")
+            && await ProviderInput.CreateAsync("codex", "plain", new[] { path }) == "plain", "Text turns and Codex image arguments stay compatible");
+        session.Entry.Command = Environment.ProcessPath!;
+        var lines = new List<string>();
+        var exit = await new ProcessAgentRunner().RunAsync(session, new[] { "--echo-stdin", "--input-format", "stream-json" }, input, lines.Add, CancellationToken.None);
+        Check(exit == 0 && lines.Count == 1 && lines[0] == input, "Real process receives complete UTF-8 multimodal JSON through stdin");
+        await File.WriteAllTextAsync(path, "not an image");
+        var refused = false;
+        try { await ProviderInput.CreateAsync("claude", "prompt", new[] { path }); } catch (InvalidOperationException) { refused = true; }
+        Check(refused, "Invalid image fails explicitly instead of silently sending text only");
+    }
+    finally { Cleanup(dir); }
+}
+{
+    var dir = Directory.CreateTempSubdirectory("converse-retry-").FullName;
+    try
+    {
+        var store = new SessionStore(dir, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        var response = new ChatMessage { Role = "assistant", Text = "Partial reply" };
+        session.Messages.Add(response);
+        var before = session.Messages.Count;
+        for (var attempt = 1; attempt <= 5; attempt++) store.Consume(System.Text.Json.JsonSerializer.Serialize(new { type = "error", message = $"Reconnecting... {attempt}/5 (stream disconnected)" }), session, response);
+        Check(session.Messages.Count == before && !session.TurnFailed && session.Status.StartsWith("Waiting for OpenAI"), "Five reconnects produce one temporary status and do not fail the turn");
+        store.Consume("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Recovered\"}}", session, response);
+        Check(session.RetryDetail is null && session.Status == "Working…" && response.Text.Contains("Recovered"), "Next provider output clears waiting status and preserves partial response");
+        store.Consume("Reconnecting... 1/5 (stream disconnected)", session, response);
+        Check(session.Messages.Count == before, "Raw stderr reconnect lines are transient too");
+        store.Consume("{\"type\":\"error\",\"willRetry\":false,\"message\":\"Connection lost permanently\"}", session, response);
+        Check(session.RetryDetail is null && session.TurnFailed && session.Messages.Last().Text.Contains("permanently"), "Terminal connection errors remain visible and fail the turn");
+        Check(ProviderRetry.Detail("{\"type\":\"assistant\",\"message\":\"Reconnecting... 1/5\"}") is null
+            && ProviderRetry.Detail("A tool printed Reconnecting... 1/5") is null, "Retry classification does not hide assistant content or unrelated diagnostics");
+        Check(ProviderRetry.Detail("{\"type\":\"system\",\"subtype\":\"api_retry\"}") is not null
+            && ProviderRetry.Status("claude").Contains("Claude"), "Claude retry telemetry uses provider-specific waiting status");
     }
     finally { Cleanup(dir); }
 }
