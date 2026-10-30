@@ -1,0 +1,19 @@
+{
+  "adminApiVersion": 1,
+  "requestID": "00000000-0000-4000-8000-000000000903",
+  "operation": "session.create",
+  "expectedDeviceID": "1111111111111111111111111111111111111111111111111111111111111111",
+  "operationID": "00000000-0000-4000-8000-000000000904",
+  "payload": {
+    "sessionID": "00000000-0000-4000-8000-000000000905",
+    "engine": "codex",
+    "title": "Linux build",
+    "entryID": null,
+    "entryName": "Codex",
+    "workingDirectory": "/home/richard/src",
+    "model": null,
+    "effort": null,
+    "access": null,
+    "messagingEnabled": false
+  }
+}

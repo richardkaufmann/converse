@@ -6,14 +6,23 @@
   "required": [
     "bindingVersion",
     "pairingID",
+    "requestCorrelationID",
+    "nativeRequestID",
     "role",
     "state",
     "linuxDeviceID",
-    "peerDeviceID",
+    "requesterDeviceID",
+    "sponsorDeviceID",
     "peerName",
+    "linuxPublicKeyFingerprint",
+    "requesterPublicKeyFingerprint",
+    "sponsorPublicKeyFingerprint",
     "groupID",
     "groupName",
+    "requesterConnectionInstanceID",
+    "sponsorConnectionInstanceID",
     "verificationCode",
+    "verificationCodeFingerprint",
     "expiresAt",
     "createdAt",
     "updatedAt"
@@ -21,6 +30,8 @@
   "properties": {
     "bindingVersion": { "const": 1 },
     "pairingID": { "$ref": "#/$defs/uuid" },
+    "requestCorrelationID": { "$ref": "#/$defs/uuid" },
+    "nativeRequestID": { "$ref": "#/$defs/nullableUuid" },
     "role": { "enum": ["joiner", "reviewer"] },
     "state": {
       "enum": [
@@ -35,8 +46,12 @@
       ]
     },
     "linuxDeviceID": { "$ref": "#/$defs/deviceID" },
-    "peerDeviceID": { "$ref": "#/$defs/deviceID" },
+    "requesterDeviceID": { "$ref": "#/$defs/deviceID" },
+    "sponsorDeviceID": { "$ref": "#/$defs/deviceID" },
     "peerName": { "type": "string", "maxLength": 200 },
+    "linuxPublicKeyFingerprint": { "$ref": "#/$defs/deviceID" },
+    "requesterPublicKeyFingerprint": { "$ref": "#/$defs/deviceID" },
+    "sponsorPublicKeyFingerprint": { "$ref": "#/$defs/deviceID" },
     "groupID": { "$ref": "#/$defs/uuid" },
     "groupName": {
       "anyOf": [
@@ -44,6 +59,8 @@
         { "type": "null" }
       ]
     },
+    "requesterConnectionInstanceID": { "$ref": "#/$defs/nullableUuid" },
+    "sponsorConnectionInstanceID": { "$ref": "#/$defs/nullableUuid" },
     "verificationCode": {
       "anyOf": [
         {
@@ -53,12 +70,13 @@
         { "type": "null" }
       ]
     },
-    "expiresAt": {
+    "verificationCodeFingerprint": {
       "anyOf": [
-        { "type": "string", "format": "date-time" },
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         { "type": "null" }
       ]
     },
+    "expiresAt": { "type": "string", "format": "date-time" },
     "createdAt": { "type": "string", "format": "date-time" },
     "updatedAt": { "type": "string", "format": "date-time" }
   },
@@ -79,6 +97,12 @@
     "uuid": {
       "type": "string",
       "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "nullableUuid": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
     },
     "deviceID": {
       "type": "string",

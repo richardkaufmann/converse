@@ -1,0 +1,33 @@
+{
+  "adminApiVersion": 1,
+  "requestID": "00000000-0000-4000-8000-000000000906",
+  "operation": "pairing.join.confirm",
+  "expectedDeviceID": "1111111111111111111111111111111111111111111111111111111111111111",
+  "operationID": "00000000-0000-4000-8000-000000000907",
+  "payload": {
+    "binding": {
+      "bindingVersion": 1,
+      "pairingID": "00000000-0000-4000-8000-000000000401",
+      "requestCorrelationID": "00000000-0000-4000-8000-000000000410",
+      "nativeRequestID": "00000000-0000-4000-8000-000000000411",
+      "role": "joiner",
+      "state": "awaiting_user",
+      "linuxDeviceID": "1111111111111111111111111111111111111111111111111111111111111111",
+      "requesterDeviceID": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sponsorDeviceID": "2222222222222222222222222222222222222222222222222222222222222222",
+      "peerName": "Sponsor Mac",
+      "linuxPublicKeyFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "requesterPublicKeyFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sponsorPublicKeyFingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+      "groupID": "00000000-0000-4000-8000-000000000101",
+      "groupName": "Converse Group",
+      "requesterConnectionInstanceID": "00000000-0000-4000-8000-000000000412",
+      "sponsorConnectionInstanceID": "00000000-0000-4000-8000-000000000411",
+      "verificationCode": null,
+      "verificationCodeFingerprint": "84e0c0eafaa95a34c293f278ac52e45ce537bab5e752a00e6959a13ae103b65a",
+      "expiresAt": "2026-10-30T16:03:00Z",
+      "createdAt": "2026-10-30T16:00:00Z",
+      "updatedAt": "2026-10-30T16:00:30Z"
+    }
+  }
+}

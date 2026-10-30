@@ -35,13 +35,25 @@
       "required": [
         "deviceProtocolVersion",
         "adminApiVersion",
-        "stateSchemaVersion",
+        "stateSchemaCompatibility",
         "recoveryLedgerVersion"
       ],
       "properties": {
         "deviceProtocolVersion": { "const": 1 },
         "adminApiVersion": { "const": 1 },
-        "stateSchemaVersion": { "type": "integer", "minimum": 1 },
+        "stateSchemaCompatibility": {
+          "type": "object",
+          "required": [
+            "minimumReadableStateSchemaVersion",
+            "maximumReadableStateSchemaVersion",
+            "writableStateSchemaVersion"
+          ],
+          "properties": {
+            "minimumReadableStateSchemaVersion": { "type": "integer", "minimum": 1 },
+            "maximumReadableStateSchemaVersion": { "type": "integer", "minimum": 1 },
+            "writableStateSchemaVersion": { "type": "integer", "minimum": 1 }
+          }
+        },
         "recoveryLedgerVersion": { "const": 1 }
       }
     },

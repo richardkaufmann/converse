@@ -134,7 +134,12 @@ CreatedBundle CreateBundle(
         {
             DeviceProtocolVersion = 1,
             AdminApiVersion = 1,
-            StateSchemaVersion = 1,
+            StateSchemaCompatibility = new ReleaseStateCompatibility
+            {
+                MinimumReadableStateSchemaVersion = 1,
+                MaximumReadableStateSchemaVersion = 1,
+                WritableStateSchemaVersion = 1,
+            },
             RecoveryLedgerVersion = 1,
         },
         Artifact = new ReleaseArtifact
@@ -615,9 +620,9 @@ try
                 }
                 if (request.FileName == "scp") return new LinuxProcessResult(0, "", "");
                 var remote = request.Arguments.LastOrDefault() ?? "";
-                if (remote == LinuxSshCommands.BootstrapPreflight)
+                if (remote.Contains("preflight", StringComparison.Ordinal))
                     return new LinuxProcessResult(0, StatusJson(null) + "\n", "");
-                if (remote == LinuxSshCommands.BootstrapInstall)
+                if (remote.Contains("install-self", StringComparison.Ordinal))
                     return new LinuxProcessResult(0, installStatus + "\n", "");
                 if (remote == LinuxSshCommands.AdminRequest)
                 {
@@ -650,9 +655,51 @@ try
             .Select(request => request.Arguments.Last())
             .ToList();
         checks.That(result.Success && result.Value?.Converse.DeviceID == deviceID &&
-                    remoteCommands.All(command => LinuxSshCommands.FixedRemoteCommands.Contains(command)) &&
+                    remoteCommands.All(LinuxSshCommands.IsFixedRemoteCommand) &&
+                    fake.Requests.Any(request => request.FileName == "scp" &&
+                        request.Arguments.Last().Contains(".converse-bootstrap/", StringComparison.Ordinal)) &&
+                    result.Value?.Installation.OperationID is not null &&
+                    result.Value?.Installation.StagingToken is { Length: >= 32 } &&
+                    manager.RegistryStore.Provisionals.Count == 0 &&
                     manager.Deployments.Count == 1,
             "Fake-SSH bootstrap uses only fixed remote commands and saves the deployment");
+
+        byte[]? secretInput = null;
+        fake.Handler = request =>
+        {
+            secretInput = request.StandardInputBytes;
+            var headerLine = Encoding.UTF8.GetString(secretInput ?? Array.Empty<byte>())
+                .Split('\n')[0];
+            var header = System.Text.Json.Nodes.JsonNode.Parse(headerLine)!.AsObject();
+            var response = new System.Text.Json.Nodes.JsonObject
+            {
+                ["secretApiVersion"] = 1,
+                ["requestID"] = header["requestID"]?.GetValue<string>(),
+                ["ok"] = true,
+                ["receipt"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["operationID"] = header["operationID"]?.GetValue<string>(),
+                    ["secretID"] = "agent.meta.api-key",
+                    ["kind"] = "provider_api_key",
+                    ["backend"] = "linux-file-0600",
+                    ["configured"] = true,
+                    ["storedVersion"] = 3,
+                    ["effectiveVersion"] = 3,
+                    ["pendingRestart"] = false,
+                    ["updatedAt"] = "2026-10-30T16:00:00Z",
+                },
+                ["error"] = null,
+            };
+            return new LinuxProcessResult(0, response.ToJsonString() + "\n", "");
+        };
+        var secretDeployment = manager.Deployments.Single();
+        var secretResult = await manager.SetSecretAsync(
+            secretDeployment, "agent.meta.api-key", "provider_api_key", "fake-secret-value");
+        var secretText = Encoding.UTF8.GetString(secretInput ?? Array.Empty<byte>());
+        checks.That(secretResult.Success && secretResult.Value?.StoredVersion == 3 &&
+                    secretText.EndsWith("fake-secret-value", StringComparison.Ordinal) &&
+                    !secretText.Split('\n')[0].Contains("fake-secret-value", StringComparison.Ordinal),
+            "Manager sends secrets only as the dedicated secret-stdin raw tail");
     }
 
     // Real host and Unix-socket admin path.
@@ -695,26 +742,114 @@ try
                 "Admin API rejects a mismatched expected Converse identity");
 
             const string sentinel = "TEST_SECRET_SENTINEL_DO_NOT_LOG";
-            var secret = await AdminClient.SendAsync(paths, Request(
-                "secret.set",
-                JsonSerializer.Serialize(new Dictionary<string, object>
-                {
-                    ["secretID"] = "agent.meta.api-key",
-                    ["kind"] = "provider_api_key",
-                    ["value"] = sentinel,
-                })));
-            var secretJson = secret is null ? "" : AdminJson.Serialize(secret);
-            checks.That(secret is { Ok: true } && !secretJson.Contains(sentinel, StringComparison.Ordinal),
-                "Secret set returns metadata without echoing the value");
+            var genericSecret = await AdminClient.SendAsync(paths, Request(
+                "secret.set", "{}", host.DeviceID, Guid.NewGuid()));
+            checks.That(genericSecret is { Ok: false } &&
+                        genericSecret.Error?.Code == "invalid_request",
+                "Generic admin JSON rejects secret operations");
 
+            var secretBytes = Encoding.UTF8.GetBytes(sentinel);
+            var secretOperationID = Guid.NewGuid();
+            SecretRequestHeader SecretHeader(string action, byte[] bytes, Guid operationID) => new()
+            {
+                SecretApiVersion = 1,
+                RequestID = Guid.NewGuid(),
+                OperationID = operationID,
+                ExpectedDeviceID = host.DeviceID,
+                Action = action,
+                SecretID = "agent.meta.api-key",
+                Kind = action == "set" ? "provider_api_key" : null,
+                ValueByteCount = bytes.Length,
+                ValueSHA256 = action == "set"
+                    ? Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() : null,
+            };
+            var secret = await host.DispatchSecretForTestsAsync(
+                SecretHeader("set", secretBytes, secretOperationID), secretBytes);
+            var secretJson = AdminJson.Serialize(secret);
+            var secretReplay = await host.DispatchSecretForTestsAsync(
+                SecretHeader("set", secretBytes, secretOperationID), secretBytes);
+            checks.That(secret is { Ok: true } && !secretJson.Contains(sentinel, StringComparison.Ordinal) &&
+                        secretReplay.Receipt?.StoredVersion == secret.Receipt?.StoredVersion,
+                "Secret set returns metadata without echoing the value and replays idempotently");
+
+            var groupOperationID = Guid.NewGuid();
             var group = await AdminClient.SendAsync(paths, Request(
                 "group.create", JsonSerializer.Serialize(new Dictionary<string, object>
                 {
                     ["name"] = "Linux Test Group",
-                })));
+                }), host.DeviceID, groupOperationID));
+            var groupReplay = await AdminClient.SendAsync(paths, Request(
+                "group.create", JsonSerializer.Serialize(new Dictionary<string, object>
+                {
+                    ["name"] = "Linux Test Group",
+                }), host.DeviceID, groupOperationID));
             var groupStatus = group?.Result?.Deserialize<LinuxStatus>(AdminJson.Options);
-            checks.That(group is { Ok: true } && groupStatus?.Fabric.GroupName == "Linux Test Group",
-                "Admin API can create a Linux-home group");
+            checks.That(group is { Ok: true } && groupReplay is { Ok: true } &&
+                        groupStatus?.Fabric.GroupName == "Linux Test Group" &&
+                        group.Operation?.State == "completed",
+                "Admin API can create a Linux-home group with a durable operation");
+
+            var sessionID = Guid.NewGuid();
+            var sessionOperationID = Guid.NewGuid();
+            string SessionPayload() => JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["sessionID"] = sessionID.ToString("D"),
+                ["engine"] = "codex",
+                ["title"] = "Linux build",
+                ["entryID"] = null,
+                ["entryName"] = "Codex",
+                ["workingDirectory"] = "/home/richard/src",
+                ["model"] = null,
+                ["effort"] = null,
+                ["access"] = null,
+                ["messagingEnabled"] = false,
+            });
+            var created = await AdminClient.SendAsync(paths, Request(
+                "session.create", SessionPayload(), host.DeviceID, sessionOperationID));
+            var createdReplay = await AdminClient.SendAsync(paths, Request(
+                "session.create", SessionPayload(), host.DeviceID, sessionOperationID));
+            var createdResult = created?.Result?.Deserialize<SessionCreateResult>(AdminJson.Options);
+            var afterCreate = await AdminClient.SendAsync(paths, Request("status.get"));
+            var afterCreateStatus = afterCreate?.Result?.Deserialize<LinuxStatus>(AdminJson.Options);
+            checks.That(created is { Ok: true } && createdReplay is { Ok: true } &&
+                        createdResult?.SessionID == sessionID &&
+                        createdResult.GlobalID == host.DeviceID + "/" + sessionID.ToString("D") &&
+                        afterCreateStatus?.Work.SessionCount == 1,
+                "session.create is idempotent for its manager-generated session ID");
+
+            var badBinding = await AdminClient.SendAsync(paths, Request(
+                "pairing.join.confirm",
+                JsonSerializer.Serialize(new Dictionary<string, object>
+                {
+                    ["binding"] = new Dictionary<string, object?>
+                    {
+                        ["bindingVersion"] = 1,
+                        ["pairingID"] = Guid.NewGuid().ToString("D"),
+                        ["requestCorrelationID"] = Guid.NewGuid().ToString("D"),
+                        ["nativeRequestID"] = null,
+                        ["role"] = "joiner",
+                        ["state"] = "awaiting_user",
+                        ["linuxDeviceID"] = host.DeviceID,
+                        ["requesterDeviceID"] = host.DeviceID,
+                        ["sponsorDeviceID"] = new string('b', 64),
+                        ["peerName"] = "Sponsor",
+                        ["linuxPublicKeyFingerprint"] = host.DeviceID,
+                        ["requesterPublicKeyFingerprint"] = host.DeviceID,
+                        ["sponsorPublicKeyFingerprint"] = new string('b', 64),
+                        ["groupID"] = Guid.NewGuid().ToString("D"),
+                        ["groupName"] = null,
+                        ["requesterConnectionInstanceID"] = null,
+                        ["sponsorConnectionInstanceID"] = null,
+                        ["verificationCode"] = null,
+                        ["verificationCodeFingerprint"] = new string('c', 64),
+                        ["expiresAt"] = "2026-10-30T16:03:00Z",
+                        ["createdAt"] = "2026-10-30T16:00:00Z",
+                        ["updatedAt"] = "2026-10-30T16:00:00Z",
+                    },
+                }), host.DeviceID, Guid.NewGuid()));
+            checks.That(badBinding is { Ok: false } &&
+                        badBinding.Error?.Code is "pairing_not_found" or "pairing_binding_mismatch",
+                "Pairing confirm requires a live exact binding");
 
             var missing = await AdminClient.SendAsync(paths, Request(
                 "operation.get",
@@ -725,13 +860,11 @@ try
             checks.That(missing is { Ok: false } && missing.Error?.Code == "operation_not_found",
                 "Unknown durable operations fail honestly");
 
-            var deleted = await AdminClient.SendAsync(paths, Request(
-                "secret.delete",
-                JsonSerializer.Serialize(new Dictionary<string, object>
-                {
-                    ["secretID"] = "agent.meta.api-key",
-                })));
-            checks.That(deleted is { Ok: true }, "Secret delete removes the configured value");
+            var deleted = await host.DispatchSecretForTestsAsync(
+                SecretHeader("delete", Array.Empty<byte>(), Guid.NewGuid()),
+                Array.Empty<byte>());
+            checks.That(deleted is { Ok: true } && deleted.Receipt?.Configured == false,
+                "Secret delete removes the configured value");
 
             var processLine = AdminJson.Serialize(
                 Request("status.get", expectedDeviceID: host.DeviceID));
@@ -756,6 +889,17 @@ try
         checks.That(unavailable.ExitCode == 70 &&
                     unavailableResponse?.Error?.Code == "daemon_unavailable",
             "Cross-process admin-request reports an unavailable daemon with exit 70");
+
+        InstallFakeRelease(paths, "1.0.0-1-linux-test");
+        LinkRelease(paths, "1.0.0-1-linux-test");
+        var offline = await LinuxInstaller.BuildPreflightStatusAsync(
+            paths, ProductInfo.Load(paths));
+        checks.That(offline.Device.DeviceID is { Length: 64 } &&
+                    offline.Device.DeviceID ==
+                        (await LinuxServiceControl.OfflineIdentityAsync(paths)) &&
+                    offline.Runtime.ProcessState == "stopped" &&
+                    offline.Runtime.Admission == "closed_stopped",
+            "Offline status derives identity without starting the daemon");
     }
 }
 finally

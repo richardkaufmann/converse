@@ -19,6 +19,7 @@ public sealed partial class MainWindow
     private LinuxStatusSnapshot? _linuxStatus;
     private LinuxPairingBinding? _linuxJoinBinding;
     private LinuxPairingBinding? _linuxReviewBinding;
+    private List<LinuxPairingBinding> _linuxRequestBindings = new();
     private Guid? _linuxOperationID;
     private string _linuxMessage = "";
     private string? _linuxTrustDestination;
@@ -268,7 +269,7 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Starting Linux group join", async () =>
             {
                 var result = await LinuxManager.BeginJoinAsync(
-                    _linuxSelected, _devices.DeviceId,
+                    _linuxSelected, _devices.DeviceId, _devices.DeviceId,
                     _linuxSponsorHostBox.Text.Trim(), port, _devices.CurrentGroup.Id);
                 _linuxJoinBinding = result.Value;
                 RenderLinuxJoinBinding();
@@ -292,12 +293,14 @@ public sealed partial class MainWindow
             if (_linuxSelected is null || _linuxJoinBinding is null) return;
             await RunLinuxAsync("Confirming Linux pairing", async () =>
             {
+                if (!await BindLinuxJoinNativeRequestAsync()) return;
+                if (!await ApproveSponsorSideJoinAsync()) return;
                 var result = await LinuxManager.ConfirmJoinAsync(
-                    _linuxSelected, _linuxJoinBinding.PairingID);
-                _linuxJoinBinding = result.Value;
+                    _linuxSelected, _linuxJoinBinding);
+                _linuxJoinBinding = result.Value ?? _linuxJoinBinding;
                 RenderLinuxJoinBinding();
                 SetLinuxMessage(result.Success
-                    ? "Linux side paired. Finish the sponsor-side Pair in Converse Groups if needed."
+                    ? "Paired on both sides. Refresh join until it completes."
                     : result.Message);
             });
         };
@@ -308,7 +311,8 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Refreshing Linux join", async () =>
             {
                 var result = await LinuxManager.JoinStatusAsync(
-                    _linuxSelected, _linuxJoinBinding.PairingID);
+                    _linuxSelected, _linuxJoinBinding.PairingID,
+                    _linuxJoinBinding.RequestCorrelationID);
                 _linuxJoinBinding = result.Value;
                 RenderLinuxJoinBinding();
                 if (result.Value?.State == "completed") await RefreshLinuxStatusAsync();
@@ -321,7 +325,7 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Cancelling Linux join", async () =>
             {
                 var result = await LinuxManager.CancelJoinAsync(
-                    _linuxSelected, _linuxJoinBinding.PairingID);
+                    _linuxSelected, _linuxJoinBinding);
                 _linuxJoinBinding = result.Value;
                 RenderLinuxJoinBinding();
             });
@@ -344,6 +348,7 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Listing Linux group requests", async () =>
             {
                 var result = await LinuxManager.ListPairingRequestsAsync(_linuxSelected);
+                _linuxRequestBindings = result.Value ?? new List<LinuxPairingBinding>();
                 _linuxRequestsBox.Items.Clear();
                 foreach (var request in result.Value ?? [])
                 {
@@ -363,9 +368,12 @@ public sealed partial class MainWindow
             if (_linuxSelected is null ||
                 _linuxRequestsBox.SelectedItem is not SettingItem item ||
                 !Guid.TryParse(item.Id, out var pairingID)) return;
+            var listed = _linuxRequestBindings.FirstOrDefault(
+                binding => binding.PairingID == pairingID);
+            if (listed is null) { SetLinuxMessage("List requests again before reviewing."); return; }
             await RunLinuxAsync("Reviewing Linux group request", async () =>
             {
-                var result = await LinuxManager.ReviewRequestAsync(_linuxSelected, pairingID);
+                var result = await LinuxManager.ReviewRequestAsync(_linuxSelected, listed);
                 _linuxReviewBinding = result.Value;
                 if (_linuxReviewCodeBlock is not null)
                 {
@@ -383,8 +391,10 @@ public sealed partial class MainWindow
             if (_linuxSelected is null || _linuxReviewBinding is null) return;
             await RunLinuxAsync("Approving Linux group request", async () =>
             {
+                if (!await BindLinuxReviewRequesterAsync()) return;
                 var result = await LinuxManager.ApproveRequestAsync(
-                    _linuxSelected, _linuxReviewBinding.PairingID);
+                    _linuxSelected, _linuxReviewBinding);
+                if (result.Success) await ConfirmLocalJoinPromptAsync(_linuxReviewBinding);
                 SetLinuxMessage(result.Success ? "Request approved on Linux." : result.Message);
             });
         };
@@ -395,7 +405,7 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Rejecting Linux group request", async () =>
             {
                 var result = await LinuxManager.RejectRequestAsync(
-                    _linuxSelected, _linuxReviewBinding.PairingID);
+                    _linuxSelected, _linuxReviewBinding);
                 SetLinuxMessage(result.Success ? "Request rejected on Linux." : result.Message);
             });
         };
@@ -578,6 +588,49 @@ public sealed partial class MainWindow
             SetLinuxMessage("Use the terminal to install/sign in to provider CLIs on Linux. Converse does not read that terminal.");
         };
         panel.Children.Add(Row(setSecret, deleteSecret, restart, providerTerminal));
+        var startService = ActionButton("Start daemon");
+        startService.Click += async (_, _) =>
+        {
+            if (_linuxSelected is null) return;
+            await RunLinuxAsync("Starting Linux daemon", async () =>
+            {
+                var result = await LinuxManager.StartServiceAsync(_linuxSelected, Guid.NewGuid());
+                SetLinuxMessage(result.Success ? "Linux daemon start requested." : result.Message);
+            });
+        };
+        var stopService = ActionButton("Stop daemon");
+        stopService.Click += async (_, _) =>
+        {
+            if (_linuxSelected is null) return;
+            await RunLinuxAsync("Stopping Linux daemon", async () =>
+            {
+                var result = await LinuxManager.StopServiceAsync(_linuxSelected, Guid.NewGuid());
+                SetLinuxMessage(result.Success ? "Linux daemon stopped." : result.Message);
+            });
+        };
+        panel.Children.Add(Row(startService, stopService));
+
+        panel.Children.Add(Header("New Linux session"));
+        var sessionTitleBox = new TextBox { Header = "Session title", Text = "Linux session" };
+        var sessionEngineBox = new TextBox { Header = "Engine (claude, codex, muse, or agent)", Text = "codex" };
+        panel.Children.Add(sessionTitleBox);
+        panel.Children.Add(sessionEngineBox);
+        var createSession = ActionButton("Create session on Linux");
+        createSession.Click += async (_, _) =>
+        {
+            if (_linuxSelected is null) return;
+            await RunLinuxAsync("Creating Linux session", async () =>
+            {
+                var result = await LinuxManager.CreateSessionAsync(_linuxSelected,
+                    new LinuxSessionCreateInput(Guid.NewGuid(),
+                        sessionEngineBox.Text.Trim(), sessionTitleBox.Text.Trim()));
+                SetLinuxMessage(result.Success
+                    ? $"Created {result.Value?.GlobalID}. Take it from the sidebar."
+                    : result.Message);
+                if (result.Success) await RefreshLinuxStatusAsync();
+            });
+        };
+        panel.Children.Add(createSession);
 
         _linuxMessageBlock = Note(_linuxMessage);
         panel.Children.Add(_linuxMessageBlock);
@@ -597,6 +650,83 @@ public sealed partial class MainWindow
         RenderLinuxDetails();
         _linuxWindow.Activate();
         if (_linuxSelected is not null) _ = RefreshLinuxStatusAsync();
+    }
+
+    private async Task<bool> BindLinuxJoinNativeRequestAsync()
+    {
+        if (_linuxSelected is null || _linuxJoinBinding is null) return false;
+        if (_linuxJoinBinding.NativeRequestID is not null) return true;
+        var request = _devices.GroupRequests.FirstOrDefault(item =>
+            item.RequesterID == _linuxJoinBinding.RequesterDeviceID &&
+            item.SponsorID == _devices.DeviceId &&
+            item.GroupID == _linuxJoinBinding.GroupID);
+        if (request is null)
+        {
+            SetLinuxMessage("This PC has not received the Linux join request yet. Refresh join, then Pair.");
+            return false;
+        }
+        _linuxJoinBinding.NativeRequestID = request.Id;
+        _linuxJoinBinding.SponsorConnectionInstanceID = request.Id;
+        var bound = await LinuxManager.BindPeerConnectionAsync(
+            _linuxSelected, _linuxJoinBinding, Guid.NewGuid());
+        if (!bound.Success)
+        {
+            SetLinuxMessage(bound.Message);
+            return false;
+        }
+        _linuxJoinBinding = bound.Value!;
+        return true;
+    }
+
+    private async Task<bool> ApproveSponsorSideJoinAsync()
+    {
+        if (_linuxJoinBinding?.NativeRequestID is not { } nativeID) return false;
+        var request = _devices.GroupRequests.FirstOrDefault(item => item.Id == nativeID);
+        if (request is null)
+        {
+            SetLinuxMessage("The sponsor-side request is no longer live on this PC.");
+            return false;
+        }
+        if (_devices.GroupReview?.Request.Id != nativeID)
+            await _devices.ReviewGroupRequestAsync(request);
+        var review = _devices.GroupReview;
+        if (review?.Request.Id != nativeID ||
+            (_linuxJoinBinding.VerificationCode is not null &&
+             review.Code != _linuxJoinBinding.VerificationCode))
+        {
+            SetLinuxMessage("The sponsor-side code does not match the Linux code. Pairing stopped.");
+            return false;
+        }
+        await _devices.ApproveGroupReviewAsync();
+        return true;
+    }
+
+    private async Task<bool> BindLinuxReviewRequesterAsync()
+    {
+        if (_linuxSelected is null || _linuxReviewBinding is null) return false;
+        if (_linuxReviewBinding.RequesterConnectionInstanceID is not null) return true;
+        var prompt = _devices.GroupPairingPrompts.FirstOrDefault(item =>
+            _linuxReviewBinding.VerificationCode is not null &&
+            item.Code == _linuxReviewBinding.VerificationCode);
+        if (prompt is null) return true;
+        _linuxReviewBinding.RequesterConnectionInstanceID = prompt.PeerId;
+        var bound = await LinuxManager.BindPeerConnectionAsync(
+            _linuxSelected, _linuxReviewBinding, Guid.NewGuid());
+        if (!bound.Success)
+        {
+            SetLinuxMessage(bound.Message);
+            return false;
+        }
+        _linuxReviewBinding = bound.Value!;
+        return true;
+    }
+
+    private async Task ConfirmLocalJoinPromptAsync(LinuxPairingBinding binding)
+    {
+        var prompt = _devices.GroupPairingPrompts.FirstOrDefault(item =>
+            item.PeerId == binding.RequesterConnectionInstanceID ||
+            (binding.VerificationCode is not null && item.Code == binding.VerificationCode));
+        if (prompt is not null) await _devices.ConfirmPairing(prompt.PeerId);
     }
 
     private async Task RunLinuxAsync(string label, Func<Task> action)
@@ -683,7 +813,7 @@ public sealed partial class MainWindow
                   + $"Release {status.CurrentReleaseID ?? "unknown"}"
                   + (status.StagedReleaseID is null ? "" : $" · staged {status.StagedReleaseID}")
                   + (status.UpdatePhase is null ? "" : $" · update {status.UpdatePhase}")
-                  + $"\nSupervisor {status.Supervisor} · configured secrets: "
+                  + $"\nSupervisor {status.Supervisor} · desired running {status.DesiredRunning} · configured secrets: "
                   + (status.ConfiguredSecrets.Count == 0
                       ? "none" : string.Join(", ", status.ConfiguredSecrets)));
     }

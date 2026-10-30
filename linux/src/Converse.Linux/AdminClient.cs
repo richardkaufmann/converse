@@ -44,6 +44,59 @@ internal static class AdminClient
         catch { return 70; }
     }
 
+    public static async Task<int> RunSecretAsync(LinuxPaths paths)
+    {
+        Guid requestID = Guid.Empty;
+        byte[] input;
+        try
+        {
+            await using var stdin = Console.OpenStandardInput();
+            using var buffer = new MemoryStream();
+            await stdin.CopyToAsync(buffer);
+            if (buffer.Length is 0 or > 96 * 1024) return 64;
+            input = buffer.ToArray();
+            var newline = Array.IndexOf(input, (byte)'\n');
+            if (newline < 0) return 64;
+            using var header = JsonDocument.Parse(Encoding.UTF8.GetString(input, 0, newline));
+            if (header.RootElement.TryGetProperty("requestID", out var id))
+                Guid.TryParse(id.GetString(), out requestID);
+        }
+        catch { return 64; }
+
+        string? responseLine = null;
+        try
+        {
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            await socket.ConnectAsync(
+                new UnixDomainSocketEndPoint(paths.SecretSocketPath), cancellation.Token);
+            await using var stream = new NetworkStream(socket, ownsSocket: true);
+            await stream.WriteAsync(input, cancellation.Token);
+            socket.Shutdown(SocketShutdown.Send);
+            responseLine = await LinuxHost.ReadOneLineAsync(
+                stream, 1024 * 1024, cancellation.Token);
+        }
+        catch { /* Response below. */ }
+
+        if (responseLine is null)
+        {
+            Console.WriteLine(AdminJson.Serialize(SecretResponse.Failure(
+                requestID, "daemon_unavailable",
+                "The Converse daemon is not accepting local secret requests.", retryable: true)));
+            return 70;
+        }
+        Console.WriteLine(responseLine);
+        try
+        {
+            using var document = JsonDocument.Parse(responseLine);
+            var code = document.RootElement.GetProperty("error").ValueKind == JsonValueKind.Object
+                ? document.RootElement.GetProperty("error").GetProperty("code").GetString()
+                : null;
+            return code == "daemon_unavailable" ? 70 : 0;
+        }
+        catch { return 70; }
+    }
+
     public static async Task<AdminResponse?> SendAsync(
         LinuxPaths paths, AdminRequest request, TimeSpan? timeout = null)
     {

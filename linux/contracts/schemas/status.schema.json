@@ -60,14 +60,15 @@
     },
     "runtime": {
       "type": "object",
-      "required": ["processState", "supervisor", "startedAt", "admission"],
+      "required": ["processState", "supervisor", "desiredRunning", "startedAt", "admission"],
       "properties": {
         "processState": {
-          "enum": ["not_installed", "starting", "running", "stopping", "recovery_required"]
+          "enum": ["not_installed", "starting", "running", "stopping", "stopped", "recovery_required"]
         },
         "supervisor": {
           "enum": ["none", "systemd-user", "cron-fallback", "manual-test"]
         },
+        "desiredRunning": { "type": "boolean" },
         "startedAt": {
           "anyOf": [
             { "type": "string", "format": "date-time" },
@@ -80,7 +81,8 @@
             "closed_draining",
             "closed_probation",
             "closed_recovery",
-            "closed_not_installed"
+            "closed_not_installed",
+            "closed_stopped"
           ]
         }
       }
@@ -231,7 +233,16 @@
     },
     "secretMetadata": {
       "type": "object",
-      "required": ["secretID", "kind", "configured", "updatedAt"],
+      "required": [
+        "secretID",
+        "kind",
+        "backend",
+        "configured",
+        "storedVersion",
+        "effectiveVersion",
+        "pendingRestart",
+        "updatedAt"
+      ],
       "properties": {
         "secretID": {
           "type": "string",
@@ -240,7 +251,13 @@
         "kind": {
           "enum": ["provider_api_key", "webhook_url", "oauth_token", "other"]
         },
+        "backend": {
+          "enum": ["linux-file-0600", "macos-keychain", "windows-password-vault", "unavailable"]
+        },
         "configured": { "type": "boolean" },
+        "storedVersion": { "type": "integer", "minimum": 0 },
+        "effectiveVersion": { "type": "integer", "minimum": 0 },
+        "pendingRestart": { "type": "boolean" },
         "updatedAt": {
           "anyOf": [
             { "type": "string", "format": "date-time" },

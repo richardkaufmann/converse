@@ -514,7 +514,8 @@ internal sealed class LinuxUpdateManager
                      operation.Kind == "update.activate" && !operation.IsTerminal))
         {
             await _ledger.TransitionOperationAsync(
-                operation.OperationID, state, resultCode, episodeID, cancellationToken);
+                operation.OperationID, state, resultCode, episodeID,
+                cancellationToken: cancellationToken);
         }
     }
 

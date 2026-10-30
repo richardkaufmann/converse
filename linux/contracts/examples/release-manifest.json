@@ -10,7 +10,11 @@
   "protocols": {
     "deviceProtocolVersion": 1,
     "adminApiVersion": 1,
-    "stateSchemaVersion": 1,
+    "stateSchemaCompatibility": {
+      "minimumReadableStateSchemaVersion": 1,
+      "maximumReadableStateSchemaVersion": 1,
+      "writableStateSchemaVersion": 1
+    },
     "recoveryLedgerVersion": 1
   },
   "artifact": {

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Converse.Core;
@@ -40,6 +41,10 @@ internal sealed class LinuxSecretStore
                     byID[id] = metadata;
                 }
                 metadata.Configured = true;
+                if (metadata.StoredVersion == 0) metadata.StoredVersion = 1;
+                metadata.EffectiveVersion = metadata.StoredVersion;
+                metadata.PendingRestart = false;
+                metadata.Backend = "linux-file-0600";
                 metadata.UpdatedAt ??= LinuxTime.Format(File.GetLastWriteTimeUtc(file));
             }
             foreach (var metadata in byID.Values)
@@ -83,7 +88,11 @@ internal sealed class LinuxSecretStore
                 metadata.Add(item);
             }
             item.Kind = kind;
+            item.Backend = "linux-file-0600";
             item.Configured = true;
+            item.StoredVersion = checked(Math.Max(1, item.StoredVersion + 1));
+            item.EffectiveVersion = item.StoredVersion;
+            item.PendingRestart = false;
             item.UpdatedAt = LinuxTime.Now();
             WriteMetadata(metadata);
             return Clone(item);
@@ -104,12 +113,54 @@ internal sealed class LinuxSecretStore
             DurableJson.TrySyncDirectory(_paths.SecretsDirectory);
             item ??= new SecretMetadata { SecretID = secretID };
             if (!metadata.Contains(item)) metadata.Add(item);
+            item.Backend = "linux-file-0600";
             item.Configured = false;
+            item.StoredVersion = checked(Math.Max(1, item.StoredVersion + 1));
+            item.EffectiveVersion = item.StoredVersion;
+            item.PendingRestart = false;
             item.UpdatedAt = LinuxTime.Now();
             WriteMetadata(metadata);
             return Clone(item);
         }, cancellationToken);
     }
+
+    public async Task<string> CommitmentAsync(
+        string action, string secretID, string? kind, ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken = default)
+    {
+        return await _executor.RunAsync(() =>
+        {
+            LinuxFileModes.Directory700(_paths.SecretsDirectory);
+            var keyPath = Path.Combine(_paths.SecretsDirectory, ".receipt-key");
+            byte[] key;
+            if (File.Exists(keyPath))
+            {
+                key = File.ReadAllBytes(keyPath);
+                if (key.Length != 32) throw new InvalidDataException("The secret receipt key is invalid.");
+            }
+            else
+            {
+                key = RandomNumberGenerator.GetBytes(32);
+                var temporary = keyPath + $".{Guid.NewGuid():N}.tmp";
+                File.WriteAllBytes(temporary, key);
+                LinuxFileModes.File600(temporary);
+                File.Move(temporary, keyPath, overwrite: false);
+                LinuxFileModes.File600(keyPath);
+            }
+            using var hmac = new HMACSHA256(key);
+            var prefix = Encoding.UTF8.GetBytes(
+                $"{action}\0{secretID}\0{kind ?? ""}\0{value.Length}\0");
+            hmac.TransformBlock(prefix, 0, prefix.Length, null, 0);
+            var bytes = value.ToArray();
+            hmac.TransformFinalBlock(bytes, 0, bytes.Length);
+            return Convert.ToHexString(hmac.Hash!).ToLowerInvariant();
+        }, cancellationToken);
+    }
+
+    public async Task<SecretMetadata?> GetAsync(
+        string secretID, CancellationToken cancellationToken = default) =>
+        (await ListAsync(cancellationToken))
+            .FirstOrDefault(item => item.SecretID == secretID);
 
     public string? Read(string name)
     {
@@ -143,7 +194,11 @@ internal sealed class LinuxSecretStore
     {
         SecretID = item.SecretID,
         Kind = item.Kind,
+        Backend = item.Backend,
         Configured = item.Configured,
+        StoredVersion = item.StoredVersion,
+        EffectiveVersion = item.EffectiveVersion,
+        PendingRestart = item.PendingRestart,
         UpdatedAt = item.UpdatedAt,
     };
 }

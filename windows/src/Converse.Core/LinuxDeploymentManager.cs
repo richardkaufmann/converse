@@ -20,10 +20,11 @@ public sealed class LinuxDeploymentManager
     private static readonly Regex UploadToken = new("^[A-Za-z0-9-]{32,64}$", RegexOptions.Compiled);
     private static readonly HashSet<string> MutatingOperations = new(StringComparer.Ordinal)
     {
-        "group.create", "pairing.join.begin", "pairing.join.confirm", "pairing.join.cancel",
+        "group.create", "pairing.join.begin", "pairing.bindPeerConnection",
+        "pairing.join.confirm", "pairing.join.cancel", "pairing.request.review",
         "pairing.request.approve", "pairing.request.reject", "update.stage.begin",
         "update.stage.verify", "update.activate", "update.healthCommit", "update.rollback",
-        "service.restart", "secret.set", "secret.delete",
+        "session.create", "service.start", "service.stop", "service.restart",
     };
 
     private readonly ILinuxProcessRunner _runner;
@@ -112,7 +113,8 @@ public sealed class LinuxDeploymentManager
         JsonObject? payload = null,
         string? expectedDeviceID = null,
         Guid? operationID = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? remoteCommand = null)
     {
         LinuxSshCommands.ValidateDestination(destination);
         var requestID = Guid.NewGuid();
@@ -126,7 +128,8 @@ public sealed class LinuxDeploymentManager
             ["payload"] = payload ?? new JsonObject(),
         };
         var mayHaveBeenAccepted = MutatingOperations.Contains(operation);
-        var argv = LinuxSshCommands.AutomatedSsh(destination, LinuxSshCommands.AdminRequest);
+        var argv = LinuxSshCommands.AutomatedSsh(
+            destination, remoteCommand ?? LinuxSshCommands.AdminRequest);
         var process = await _runner.RunAsync(new LinuxProcessRequest(
             argv[0], argv.Skip(1).ToArray(), request.ToJsonString() + "\n", mayHaveBeenAccepted),
             cancellationToken);
@@ -161,10 +164,24 @@ public sealed class LinuxDeploymentManager
         string operation,
         JsonObject? payload = null,
         Guid? operationID = null,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        string? remoteCommand = null) =>
         AdminAsync(
             deployment.Ssh.Destination, operation, payload,
-            deployment.Converse.DeviceID, operationID, cancellationToken);
+            deployment.Converse.DeviceID, operationID, cancellationToken, remoteCommand);
+
+    public async Task<LinuxManagerResult<LinuxStatusSnapshot>> OfflineStatusAsync(
+        LinuxDeployment deployment, CancellationToken cancellationToken = default)
+    {
+        var process = await RemoteCommandAsync(
+            deployment.Ssh.Destination, LinuxSshCommands.OfflineStatus, cancellationToken);
+        if (process.ExitCode != 0) return ProcessFailure<LinuxStatusSnapshot>(process);
+        var status = ParseStatusLine(process.StandardOutput);
+        return status is null
+            ? new LinuxManagerResult<LinuxStatusSnapshot>(
+                false, "ssh_protocol_error", "Offline status did not return a valid status.")
+            : new LinuxManagerResult<LinuxStatusSnapshot>(true, "offline_status", "", status);
+    }
 
     public async Task<LinuxManagerResult<LinuxStatusSnapshot>> GetStatusAsync(
         LinuxDeployment deployment, bool save = true,
@@ -214,6 +231,22 @@ public sealed class LinuxDeploymentManager
             return new LinuxManagerResult<LinuxDeployment>(
                 false, "invalid_request", "Choose the published Linux converse executable first.");
 
+        var bootstrapHash = await HashFileAsync(bootstrapExecutable, cancellationToken);
+        var bootstrapSize = new FileInfo(bootstrapExecutable).Length;
+        var provisional = RegistryStore.Provisionals.FirstOrDefault(item =>
+                item.Destination == destination && item.BootstrapSHA256 == bootstrapHash &&
+                item.Stage != "failed")
+            ?? RegistryStore.SaveProvisional(new LinuxProvisionalDeployment
+            {
+                StagingToken = LinuxSshCommands.NewBootstrapToken(),
+                DisplayName = string.IsNullOrWhiteSpace(displayName)
+                    ? "Linux Home" : displayName.Trim(),
+                Destination = destination,
+                BootstrapSHA256 = bootstrapHash,
+                BootstrapSize = bootstrapSize,
+            });
+        var token = provisional.StagingToken;
+
         progress?.Invoke("Verifying the installed SSH host key…");
         var hostKey = await VerifyInstalledHostKeyAsync(destination, cancellationToken);
         if (hostKey is null)
@@ -227,23 +260,31 @@ public sealed class LinuxDeploymentManager
             return new LinuxManagerResult<LinuxDeployment>(
                 false, "ssh_not_found", "OpenSSH configuration could not be read.");
 
-        progress?.Invoke("Reserving the bootstrap path…");
-        var locked = await RemoteCommandAsync(
-            destination, LinuxSshCommands.BootstrapLock, cancellationToken);
-        if (locked.ExitCode != 0)
-            return ProcessFailure<LinuxDeployment>(locked, "Another bootstrap may be in progress, or a stale bootstrap lock needs explicit cleanup.");
+        provisional.HostKeyFingerprintSHA256 = hostKey.FingerprintSHA256;
+        RegistryStore.SaveProvisional(provisional);
+        RegistryStore.SetProvisionalStage(provisional.OperationID, "host_key_verified");
 
-        var installed = false;
-        try
+        progress?.Invoke("Reserving the bootstrap path…");
+        if (provisional.Stage is "created" or "host_key_pending" or "host_key_verified")
+        {
+            var staged = await RemoteCommandAsync(
+                destination, LinuxSshCommands.BootstrapCreateStaging(token), cancellationToken);
+            if (staged.ExitCode != 0)
+                return ProcessFailure<LinuxDeployment>(staged, "The operation-owned bootstrap staging directory could not be created.");
+            RegistryStore.SetProvisionalStage(provisional.OperationID, "staged");
+        }
+
         {
             progress?.Invoke("Uploading the Linux executable…");
             var uploaded = await ScpAsync(
-                bootstrapExecutable, destination, ".converse-bootstrap.bin", cancellationToken);
+                bootstrapExecutable, destination,
+                LinuxSshCommands.BootstrapRemoteTarget(token), cancellationToken);
             if (uploaded.ExitCode != 0) return ProcessFailure<LinuxDeployment>(uploaded);
+            RegistryStore.SetProvisionalStage(provisional.OperationID, "uploaded");
 
             progress?.Invoke("Running strict preflight…");
             var preflightProcess = await RemoteCommandAsync(
-                destination, LinuxSshCommands.BootstrapPreflight, cancellationToken);
+                destination, LinuxSshCommands.BootstrapPreflight(token), cancellationToken);
             if (preflightProcess.ExitCode != 0)
                 return ProcessFailure<LinuxDeployment>(preflightProcess);
             var preflight = ParseStatusLine(preflightProcess.StandardOutput);
@@ -253,18 +294,33 @@ public sealed class LinuxDeploymentManager
                     false, "ssh_protocol_error", "Bootstrap preflight did not return a valid status.");
             }
 
+            RegistryStore.SetProvisionalStage(provisional.OperationID, "preflight_passed");
             progress?.Invoke("Installing the Linux home…");
+            RegistryStore.SetProvisionalStage(provisional.OperationID, "install_requested");
+            var bootstrapRequest = new JsonObject
+            {
+                ["operationID"] = provisional.OperationID.ToString("D"),
+                ["stagingToken"] = token,
+            }.ToJsonString() + "\n";
             var installProcess = await RemoteCommandAsync(
-                destination, LinuxSshCommands.BootstrapInstall, cancellationToken);
-            if (installProcess.ExitCode != 0)
-                return ProcessFailure<LinuxDeployment>(installProcess);
-            var installStatus = ParseStatusLine(installProcess.StandardOutput);
+                destination, LinuxSshCommands.BootstrapInstall(token), cancellationToken,
+                bootstrapRequest, requestMayHaveBeenAccepted: true);
+            var installStatus = installProcess.ExitCode == 0
+                ? ParseStatusLine(installProcess.StandardOutput) : null;
             if (installStatus?.DeviceID is null)
             {
-                return new LinuxManagerResult<LinuxDeployment>(
-                    false, "ssh_protocol_error", "Installation did not return a Converse identity.");
+                RegistryStore.SetProvisionalStage(provisional.OperationID, "uncertain");
+                var receipt = await ReadBootstrapReceiptAsync(
+                    destination, provisional, CancellationToken.None);
+                var recovered = receipt is not null
+                    ? await StrictStatusAsync(destination, CancellationToken.None) : null;
+                if (receipt is null || recovered?.Value?.DeviceID != receipt.DeviceID)
+                    return ProcessFailure<LinuxDeployment>(installProcess,
+                        "Installation outcome is uncertain. Retry Install to resume the same bootstrap operation; do not start over.");
+                installStatus = recovered!.Value!;
             }
-            installed = true;
+            RegistryStore.SetProvisionalStage(
+                provisional.OperationID, "installed", installStatus.DeviceID);
 
             progress?.Invoke("Checking the running daemon…");
             LinuxStatusSnapshot status = installStatus;
@@ -312,51 +368,98 @@ public sealed class LinuxDeploymentManager
                 LastStatusAt = LinuxManagerTime.Now(),
                 Capabilities = status.Capabilities,
             };
+            deployment.Installation = new LinuxDeploymentInstallation
+            {
+                OperationID = provisional.OperationID,
+                StagingToken = token,
+                CompletedAt = LinuxManagerTime.Now(),
+            };
+            RegistryStore.SetProvisionalStage(provisional.OperationID, "admin_verified");
             RegistryStore.Upsert(deployment);
-            return new LinuxManagerResult<LinuxDeployment>(true, "admin_response", "", deployment);
-        }
-        finally
-        {
-            // If install-self was accepted, protocol errors are not safe proof
-            // that deleting the bootstrap binary/lock is appropriate. Only a
-            // completed deployment record above reaches this path with
-            // installed=true; earlier failures also need their lock removed
-            // before another attempt. Cleanup itself is best-effort.
+            RegistryStore.RemoveProvisional(provisional.OperationID);
             try
             {
                 await RemoteCommandAsync(
-                    destination, LinuxSshCommands.BootstrapCleanup, CancellationToken.None);
+                    destination, LinuxSshCommands.BootstrapCleanup(token), CancellationToken.None);
             }
-            catch { /* The next attempt reports a stale lock explicitly. */ }
-            _ = installed;
+            catch { /* Only this operation's staging directory is left behind. */ }
+            return new LinuxManagerResult<LinuxDeployment>(
+                true, "admin_response", "", deployment, provisional.OperationID);
         }
     }
 
+    public async Task<LinuxBootstrapReceipt?> ReadBootstrapReceiptAsync(
+        string destination, LinuxProvisionalDeployment provisional,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new JsonObject
+        {
+            ["operationID"] = provisional.OperationID.ToString("D"),
+            ["stagingToken"] = provisional.StagingToken,
+        }.ToJsonString() + "\n";
+        var process = await RemoteCommandAsync(
+            destination, LinuxSshCommands.BootstrapReceipt, cancellationToken, request);
+        if (process.ExitCode != 0) return null;
+        var line = process.StandardOutput.Trim();
+        if (line.Length == 0 || line.Contains('\n')) return null;
+        try
+        {
+            var receipt = JsonSerializer.Deserialize<LinuxBootstrapReceipt>(line);
+            return receipt is not null && receipt.ReceiptVersion == 1 &&
+                receipt.OperationID == provisional.OperationID &&
+                receipt.StagingToken == provisional.StagingToken
+                ? receipt : null;
+        }
+        catch { return null; }
+    }
+
     public async Task<LinuxManagerResult<LinuxPairingBinding>> BeginJoinAsync(
-        LinuxDeployment deployment, string sponsorDeviceID, string sponsorHost, int sponsorPort,
-        string groupID, CancellationToken cancellationToken = default)
+        LinuxDeployment deployment, string sponsorDeviceID, string sponsorPublicKeyFingerprint,
+        string sponsorHost, int sponsorPort,
+        string groupID, Guid? requestCorrelationID = null, Guid? operationID = null,
+        CancellationToken cancellationToken = default)
     {
         var payload = new JsonObject
         {
+            ["requestCorrelationID"] = (requestCorrelationID ?? Guid.NewGuid()).ToString("D"),
             ["sponsorDeviceID"] = sponsorDeviceID,
+            ["sponsorPublicKeyFingerprint"] = sponsorPublicKeyFingerprint,
             ["sponsorEndpoint"] = new JsonObject { ["host"] = sponsorHost, ["port"] = sponsorPort },
             ["groupID"] = groupID,
         };
         return await PairingCallAsync(
-            deployment, "pairing.join.begin", payload, cancellationToken);
+            deployment, "pairing.join.begin", payload, operationID ?? Guid.NewGuid(), cancellationToken);
     }
 
-    public Task<LinuxManagerResult<LinuxPairingBinding>> JoinStatusAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.join.status", PairingPayload(pairingID), cancellationToken);
+    public async Task<LinuxManagerResult<LinuxPairingBinding>> JoinStatusAsync(
+        LinuxDeployment deployment, Guid pairingID, Guid requestCorrelationID,
+        CancellationToken cancellationToken = default)
+    {
+        var call = await AdminAsync(deployment, "pairing.join.status", new JsonObject
+        {
+            ["pairingID"] = pairingID.ToString("D"),
+            ["requestCorrelationID"] = requestCorrelationID.ToString("D"),
+        }, cancellationToken: cancellationToken);
+        return PairingResult(call, null);
+    }
+
+    public Task<LinuxManagerResult<LinuxPairingBinding>> BindPeerConnectionAsync(
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.bindPeerConnection",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> ConfirmJoinAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.join.confirm", PairingPayload(pairingID), cancellationToken);
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.join.confirm",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> CancelJoinAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.join.cancel", PairingPayload(pairingID), cancellationToken);
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.join.cancel",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public async Task<LinuxManagerResult<List<LinuxPairingBinding>>> ListPairingRequestsAsync(
         LinuxDeployment deployment, CancellationToken cancellationToken = default)
@@ -378,27 +481,35 @@ public sealed class LinuxDeploymentManager
     }
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> ReviewRequestAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.request.review", PairingPayload(pairingID), cancellationToken);
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.request.review",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> ApproveRequestAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.request.approve", PairingPayload(pairingID), cancellationToken);
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.request.approve",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public Task<LinuxManagerResult<LinuxPairingBinding>> RejectRequestAsync(
-        LinuxDeployment deployment, Guid pairingID, CancellationToken cancellationToken = default) =>
-        PairingCallAsync(deployment, "pairing.request.reject", PairingPayload(pairingID), cancellationToken);
+        LinuxDeployment deployment, LinuxPairingBinding binding, Guid? operationID = null,
+        CancellationToken cancellationToken = default) =>
+        PairingCallAsync(deployment, "pairing.request.reject",
+            PairingPayload(binding), operationID ?? Guid.NewGuid(), cancellationToken);
 
     public async Task<LinuxManagerResult<LinuxStatusSnapshot>> CreateGroupAsync(
         LinuxDeployment deployment, string name, CancellationToken cancellationToken = default)
     {
+        var operationID = Guid.NewGuid();
         var call = await AdminAsync(
             deployment, "group.create",
-            new JsonObject { ["name"] = name }, cancellationToken: cancellationToken);
+            new JsonObject { ["name"] = name }, operationID, cancellationToken);
         if (!call.Success) return Failure<LinuxStatusSnapshot>(call);
         var status = LinuxStatusSnapshot.Parse(call.Response!.Result);
         await SaveStatusAsync(deployment, status, cancellationToken);
-        return new LinuxManagerResult<LinuxStatusSnapshot>(true, call.Classification, "", status);
+        return new LinuxManagerResult<LinuxStatusSnapshot>(
+            true, call.Classification, "", status, operationID);
     }
 
     public async Task<LinuxManagerResult<Guid>> StageUpdateAsync(
@@ -422,7 +533,7 @@ public sealed class LinuxDeploymentManager
             ["releaseID"] = releaseID,
             ["bundleSHA256"] = hash,
             ["bundleSize"] = file.Length,
-        }, cancellationToken: cancellationToken);
+        }, Guid.NewGuid(), cancellationToken);
         if (!begin.Success) return Failure<Guid>(begin);
 
         var result = begin.Response!.Result as JsonObject;
@@ -441,7 +552,7 @@ public sealed class LinuxDeploymentManager
         var verify = await AdminAsync(deployment, "update.stage.verify", new JsonObject
         {
             ["uploadID"] = uploadID.ToString("D"),
-        }, cancellationToken: cancellationToken);
+        }, Guid.NewGuid(), cancellationToken);
         if (!verify.Success) return Failure<Guid>(verify);
         return new LinuxManagerResult<Guid>(true, verify.Classification, "", uploadID);
     }
@@ -516,31 +627,138 @@ public sealed class LinuxDeploymentManager
         return OperationResult(call, operationID.Value);
     }
 
-    public async Task<LinuxManagerResult<bool>> SetSecretAsync(
-        LinuxDeployment deployment, string secretID, string kind, string value,
+    public async Task<LinuxManagerResult<LinuxAdminOperation>> StartServiceAsync(
+        LinuxDeployment deployment, Guid? operationID = null,
         CancellationToken cancellationToken = default)
     {
-        var call = await AdminAsync(deployment, "secret.set", new JsonObject
-        {
-            ["secretID"] = secretID,
-            ["kind"] = kind,
-            ["value"] = value,
-        }, cancellationToken: cancellationToken);
-        return call.Success
-            ? new LinuxManagerResult<bool>(true, call.Classification, "", true)
-            : Failure<bool>(call);
+        operationID ??= Guid.NewGuid();
+        var call = await AdminAsync(
+            deployment, "service.start", new JsonObject(), operationID, cancellationToken,
+            LinuxSshCommands.ServiceStart);
+        return OperationResult(call, operationID.Value);
     }
 
-    public async Task<LinuxManagerResult<bool>> DeleteSecretAsync(
-        LinuxDeployment deployment, string secretID, CancellationToken cancellationToken = default)
+    public async Task<LinuxManagerResult<LinuxAdminOperation>> StopServiceAsync(
+        LinuxDeployment deployment, Guid? operationID = null,
+        CancellationToken cancellationToken = default)
     {
-        var call = await AdminAsync(deployment, "secret.delete", new JsonObject
+        operationID ??= Guid.NewGuid();
+        var call = await AdminAsync(
+            deployment, "service.stop", new JsonObject(), operationID, cancellationToken,
+            LinuxSshCommands.ServiceStop);
+        return OperationResult(call, operationID.Value);
+    }
+
+    public async Task<LinuxManagerResult<LinuxSessionCreateResult>> CreateSessionAsync(
+        LinuxDeployment deployment, LinuxSessionCreateInput input, Guid? operationID = null,
+        CancellationToken cancellationToken = default)
+    {
+        operationID ??= Guid.NewGuid();
+        var payload = new JsonObject
         {
+            ["sessionID"] = input.SessionID.ToString("D"),
+            ["engine"] = input.Engine,
+            ["title"] = input.Title,
+            ["entryID"] = input.EntryID?.ToString("D"),
+            ["entryName"] = input.EntryName,
+            ["workingDirectory"] = input.WorkingDirectory,
+            ["model"] = input.Model,
+            ["effort"] = input.Effort,
+            ["access"] = input.Access,
+            ["messagingEnabled"] = input.MessagingEnabled,
+        };
+        var call = await AdminAsync(
+            deployment, "session.create", payload, operationID, cancellationToken);
+        if (!call.Success) return Failure<LinuxSessionCreateResult>(call);
+        try
+        {
+            var result = JsonSerializer.Deserialize<LinuxSessionCreateResult>(
+                call.Response!.Result!.ToJsonString())!;
+            return new LinuxManagerResult<LinuxSessionCreateResult>(
+                true, call.Classification, "", result, operationID);
+        }
+        catch (Exception error)
+        {
+            return new LinuxManagerResult<LinuxSessionCreateResult>(
+                false, "ssh_protocol_error", error.Message, null, operationID);
+        }
+    }
+
+    public async Task<LinuxSecretCallResult> SecretAsync(
+        LinuxDeployment deployment, string action, string secretID, string? kind,
+        byte[] value, Guid? operationID = null, CancellationToken cancellationToken = default)
+    {
+        LinuxSshCommands.ValidateDestination(deployment.Ssh.Destination);
+        operationID ??= Guid.NewGuid();
+        var requestID = Guid.NewGuid();
+        var header = new JsonObject
+        {
+            ["secretApiVersion"] = 1,
+            ["requestID"] = requestID.ToString("D"),
+            ["operationID"] = operationID.Value.ToString("D"),
+            ["expectedDeviceID"] = deployment.Converse.DeviceID,
+            ["action"] = action,
             ["secretID"] = secretID,
-        }, cancellationToken: cancellationToken);
-        return call.Success
-            ? new LinuxManagerResult<bool>(true, call.Classification, "", true)
-            : Failure<bool>(call);
+            ["kind"] = kind,
+            ["valueByteCount"] = value.Length,
+            ["valueSHA256"] = action == "set"
+                ? Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant() : null,
+        };
+        var headerBytes = Encoding.UTF8.GetBytes(header.ToJsonString() + "\n");
+        var input = new byte[headerBytes.Length + value.Length];
+        headerBytes.CopyTo(input, 0);
+        value.CopyTo(input, headerBytes.Length);
+        var argv = LinuxSshCommands.AutomatedSsh(
+            deployment.Ssh.Destination, LinuxSshCommands.SecretStdin);
+        var process = await _runner.RunAsync(new LinuxProcessRequest(
+            argv[0], argv.Skip(1).ToArray(), null,
+            RequestMayHaveBeenAccepted: true, StandardInputBytes: input), cancellationToken);
+        if (process.ExecutableMissing)
+            return new LinuxSecretCallResult("ssh_not_found", null, process, operationID);
+        if (process.ExitCode == 255)
+            return new LinuxSecretCallResult(
+                LinuxSshCommands.Classify(process, requestMayHaveBeenAccepted: true),
+                null, process, operationID);
+        LinuxSecretResponse? response = null;
+        var line = process.StandardOutput.Trim();
+        if (line.Length > 0 && !line.Contains('\n'))
+        {
+            try { response = JsonSerializer.Deserialize<LinuxSecretResponse>(line); }
+            catch { /* Protocol error below. */ }
+        }
+        if (response is null || response.SecretApiVersion != 1 || response.RequestID != requestID)
+        {
+            return new LinuxSecretCallResult(
+                process.ExitCode != 0 ? "ssh_disconnected_uncertain" : "ssh_protocol_error",
+                null, process, operationID);
+        }
+        return new LinuxSecretCallResult("secret_response", response, process, operationID);
+    }
+
+    public async Task<LinuxManagerResult<LinuxSecretReceipt>> SetSecretAsync(
+        LinuxDeployment deployment, string secretID, string kind, string value,
+        Guid? operationID = null, CancellationToken cancellationToken = default)
+    {
+        var call = await SecretAsync(deployment, "set", secretID, kind,
+            Encoding.UTF8.GetBytes(value), operationID, cancellationToken);
+        return call.Success && call.Response?.Receipt is { } receipt
+            ? new LinuxManagerResult<LinuxSecretReceipt>(
+                true, call.Classification, "", receipt, call.OperationID)
+            : new LinuxManagerResult<LinuxSecretReceipt>(
+                false, call.Classification, call.Message, null, call.OperationID);
+    }
+
+    public async Task<LinuxManagerResult<LinuxSecretReceipt>> DeleteSecretAsync(
+        LinuxDeployment deployment, string secretID, Guid? operationID = null,
+        CancellationToken cancellationToken = default)
+    {
+        var call = await SecretAsync(deployment, "delete", secretID, null,
+            Array.Empty<byte>(), operationID, cancellationToken);
+        return call.Success && call.Response?.Receipt is { } receipt
+            ? new LinuxManagerResult<LinuxSecretReceipt>(
+                true, call.Classification, "", receipt, call.OperationID)
+            : new LinuxManagerResult<LinuxSecretReceipt>(
+                false, call.Classification, call.Message, null, call.OperationID);
     }
 
     public static bool ValidateUploadPath(string? stateRoot, string? uploadPath)
@@ -605,25 +823,33 @@ public sealed class LinuxDeploymentManager
 
     private async Task<LinuxManagerResult<LinuxPairingBinding>> PairingCallAsync(
         LinuxDeployment deployment, string operation, JsonObject payload,
-        CancellationToken cancellationToken)
+        Guid operationID, CancellationToken cancellationToken)
     {
-        var call = await AdminAsync(deployment, operation, payload, cancellationToken: cancellationToken);
+        var call = await AdminAsync(
+            deployment, operation, payload, operationID, cancellationToken);
+        return PairingResult(call, operationID);
+    }
+
+    private static LinuxManagerResult<LinuxPairingBinding> PairingResult(
+        LinuxAdminCallResult call, Guid? operationID)
+    {
         if (!call.Success) return Failure<LinuxPairingBinding>(call);
         try
         {
             var binding = JsonSerializer.Deserialize<LinuxPairingBinding>(
                 call.Response!.Result!.ToJsonString())!;
-            return new LinuxManagerResult<LinuxPairingBinding>(true, call.Classification, "", binding);
+            return new LinuxManagerResult<LinuxPairingBinding>(
+                true, call.Classification, "", binding, operationID);
         }
         catch (Exception error)
         {
             return new LinuxManagerResult<LinuxPairingBinding>(
-                false, "ssh_protocol_error", error.Message);
+                false, "ssh_protocol_error", error.Message, null, operationID);
         }
     }
 
-    private static JsonObject PairingPayload(Guid pairingID) =>
-        new() { ["pairingID"] = pairingID.ToString("D") };
+    private static JsonObject PairingPayload(LinuxPairingBinding binding) =>
+        new() { ["binding"] = JsonSerializer.SerializeToNode(binding) };
 
     private static LinuxManagerResult<LinuxAdminOperation> OperationResult(
         LinuxAdminCallResult call, Guid operationID)
@@ -637,11 +863,13 @@ public sealed class LinuxDeploymentManager
     }
 
     private async Task<LinuxProcessResult> RemoteCommandAsync(
-        string destination, string fixedRemoteCommand, CancellationToken cancellationToken)
+        string destination, string fixedRemoteCommand, CancellationToken cancellationToken,
+        string? standardInput = null, bool requestMayHaveBeenAccepted = false)
     {
         var argv = LinuxSshCommands.AutomatedSsh(destination, fixedRemoteCommand);
         return await _runner.RunAsync(
-            new LinuxProcessRequest(argv[0], argv.Skip(1).ToArray()), cancellationToken);
+            new LinuxProcessRequest(argv[0], argv.Skip(1).ToArray(),
+                standardInput, requestMayHaveBeenAccepted), cancellationToken);
     }
 
     private async Task<LinuxProcessResult> ScpAsync(

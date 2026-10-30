@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -9,6 +10,7 @@ var contracts = Path.Combine(root, "linux", "contracts");
 var schemasDir = Path.Combine(contracts, "schemas");
 var examplesDir = Path.Combine(contracts, "examples");
 var fakeSshDir = Path.Combine(contracts, "fake-ssh");
+var invalidDir = Path.Combine(contracts, "invalid");
 var validator = new SchemaValidator();
 
 string[] expectedSchemas =
@@ -20,6 +22,8 @@ string[] expectedSchemas =
     "pairing-binding.schema.json",
     "recovery-ledger.schema.json",
     "release-manifest.schema.json",
+    "secret-request.schema.json",
+    "secret-response.schema.json",
     "status.schema.json",
 ];
 
@@ -49,8 +53,27 @@ void ValidateExample(string example, string schema)
     checks.That(errors.Count == 0, $"{example} validates against {schema}", string.Join("; ", errors));
 }
 
+bool CounterWithinBound(JsonElement value) =>
+    value.ValueKind == JsonValueKind.String &&
+    ulong.TryParse(value.GetString(), out var parsed) && parsed <= (1UL << 53);
+
+ulong Counter(JsonElement value) => ulong.Parse(value.GetString()!);
+
+bool ValidStateRange(JsonElement manifest)
+{
+    var compatibility = manifest.GetProperty("protocols").GetProperty("stateSchemaCompatibility");
+    var minimum = compatibility.GetProperty("minimumReadableStateSchemaVersion").GetInt32();
+    var maximum = compatibility.GetProperty("maximumReadableStateSchemaVersion").GetInt32();
+    var writable = compatibility.GetProperty("writableStateSchemaVersion").GetInt32();
+    return minimum <= writable && writable <= maximum;
+}
+
 ValidateExample("admin-request-status.json", "admin-request.schema.json");
 ValidateExample("admin-request-update-activate.json", "admin-request.schema.json");
+ValidateExample("admin-request-pairing-confirm.json", "admin-request.schema.json");
+ValidateExample("admin-request-session-create.json", "admin-request.schema.json");
+ValidateExample("secret-request-header.json", "secret-request.schema.json");
+ValidateExample("secret-response.json", "secret-response.schema.json");
 ValidateExample("admin-response-operation.json", "admin-response.schema.json");
 ValidateExample("status.json", "status.schema.json");
 ValidateExample("operation.json", "operation.schema.json");
@@ -69,8 +92,12 @@ checks.That(
     "probation remains admission-closed until explicit resolution");
 checks.That(
     status.GetProperty("secrets").EnumerateArray().All(secret =>
-        !secret.TryGetProperty("value", out _) && !secret.TryGetProperty("fingerprint", out _)),
-    "status exposes secret metadata only");
+        !secret.TryGetProperty("value", out _) && !secret.TryGetProperty("fingerprint", out _) &&
+        secret.GetProperty("backend").GetString() == "linux-file-0600" &&
+        secret.GetProperty("storedVersion").GetInt32() == 0 &&
+        secret.GetProperty("effectiveVersion").GetInt32() == 0 &&
+        !secret.GetProperty("pendingRestart").GetBoolean()),
+    "status exposes versioned secret metadata only");
 
 using var ledgerDoc = ReadJson(Path.Combine(examplesDir, "recovery-ledger.json"));
 var ledger = ledgerDoc.RootElement;
@@ -87,9 +114,9 @@ checks.That(
 var restoration = ledger.GetProperty("displayRestorations")[0];
 checks.That(
     restoration.GetProperty("lastAuthorizedOwnerDeviceID").GetString()?.Length == 64 &&
-    restoration.GetProperty("takeGeneration").GetInt64() > 0 &&
-    restoration.GetProperty("lastExecutionEpoch").GetInt64() <
-    ledger.GetProperty("counterFloors").GetProperty("nextLeaseEpoch").GetInt64(),
+    Counter(restoration.GetProperty("takeGeneration")) > 0 &&
+    Counter(restoration.GetProperty("lastExecutionEpoch")) <
+    Counter(ledger.GetProperty("counterFloors").GetProperty("nextLeaseEpoch")),
     "display restoration is separated from fresh execution epochs");
 checks.That(
     ledger.GetProperty("membership").GetProperty("removedDeviceIDs").GetArrayLength() == 1 &&
@@ -112,11 +139,54 @@ checks.That(
     registryRemote.GetProperty("stateRoot").GetString() ==
     statusFilesystem.GetProperty("stateRoot").GetString(),
     "deployment registry roots bind to daemon-reported filesystem status");
+var provisional = registryDoc.RootElement.GetProperty("provisionalDeployments")[0];
+checks.That(
+    provisional.GetProperty("operationID").GetString()?.Length == 36 &&
+    provisional.GetProperty("stagingToken").GetString()?.Length == 32 &&
+    provisional.GetProperty("stage").GetString() == "uploaded",
+    "deployment registry preserves provisional bootstrap operation ownership");
 
 using var pairingDoc = ReadJson(Path.Combine(examplesDir, "pairing-binding.json"));
 var code = pairingDoc.RootElement.GetProperty("verificationCode").GetString() ?? "";
 checks.That(code.Split(' ').Length == 8 && code.Replace(" ", "").Length == 32,
     "pairing example retains all eight verification-code groups");
+var pairing = pairingDoc.RootElement;
+var codeFingerprint = Convert.ToHexString(
+    SHA256.HashData(Encoding.ASCII.GetBytes(code.Replace(" ", "")))).ToLowerInvariant();
+checks.That(
+    pairing.GetProperty("verificationCodeFingerprint").GetString() == codeFingerprint &&
+    pairing.GetProperty("requesterConnectionInstanceID").GetString()?.Length == 36 &&
+    pairing.GetProperty("sponsorConnectionInstanceID").GetString() ==
+        pairing.GetProperty("nativeRequestID").GetString() &&
+    pairing.GetProperty("linuxPublicKeyFingerprint").GetString() ==
+        pairing.GetProperty("linuxDeviceID").GetString() &&
+    pairing.GetProperty("sponsorPublicKeyFingerprint").GetString() ==
+        pairing.GetProperty("sponsorDeviceID").GetString() &&
+    pairing.GetProperty("expiresAt").ValueKind == JsonValueKind.String,
+    "pairing binding carries request, key, connection, code-fingerprint, and expiry identity");
+
+using var manifestDoc = ReadJson(Path.Combine(examplesDir, "release-manifest.json"));
+checks.That(ValidStateRange(manifestDoc.RootElement),
+    "release manifest example has a coherent readable/writable state range");
+using var invalidManifest = ReadJson(Path.Combine(invalidDir, "release-manifest-state-range.json"));
+checks.That(!ValidStateRange(invalidManifest.RootElement),
+    "negative fixture rejects an impossible release state range");
+using var numericCounter = ReadJson(Path.Combine(invalidDir, "recovery-ledger-counter-number.json"));
+checks.That(validator.ValidateFile(
+        numericCounter.RootElement,
+        Path.Combine(schemasDir, "recovery-ledger.schema.json")).Count > 0,
+    "negative fixture rejects numeric recovery counters");
+using var overflowCounter = ReadJson(Path.Combine(invalidDir, "recovery-ledger-counter-overflow.json"));
+checks.That(
+    !CounterWithinBound(overflowCounter.RootElement.GetProperty("sequence")) &&
+    !CounterWithinBound(overflowCounter.RootElement
+        .GetProperty("counterFloors").GetProperty("nextHomeSeq")),
+    "negative fixture rejects counters above the 2^53 bound");
+checks.That(
+    CounterWithinBound(ledger.GetProperty("membership")
+        .GetProperty("generationFloors")
+        .GetProperty("3333333333333333333333333333333333333333333333333333333333333333")),
+    "recovery ledger example preserves the exact 2^53 high-water mark");
 
 string[] expectedCases =
 [
@@ -125,6 +195,8 @@ string[] expectedCases =
     "disconnect-after-accept",
     "host-key-changed",
     "identity-mismatch",
+    "offline-status-stopped",
+    "secret-stdin-ok",
     "status-ok",
     "trust-captured-auth-expected",
 ];
@@ -179,10 +251,49 @@ foreach (var caseName in expectedCases)
     {
         checks.That(testCase.GetProperty("automation").GetString() == "manual_gate_required",
             "host-key trust transcript is explicitly not fake-automation proof");
-        checks.That(argv.Contains("StrictHostKeyChecking=ask") && argv.Contains("RequestTTY=no") &&
+        checks.That(argv.Contains("BatchMode=no") && argv.Contains("StrictHostKeyChecking=ask") &&
+                    argv.Contains("RequestTTY=no") &&
                     argv[^1] == "true" && testCase.GetProperty("exitCode").GetInt32() == 255 &&
                     classification == "trust_captured_verify_then_strict_preflight",
             "trust-only expected auth failure leads to strict preflight");
+        continue;
+    }
+
+    if (caseName == "secret-stdin-ok")
+    {
+        checks.That(argv[..^1].SequenceEqual(automatedArgv[..^1]) &&
+                    argv[^1] == "exec \"$HOME/.local/bin/converse\" secret-stdin",
+            "secret fixture uses the dedicated secret-stdin remote command");
+        var stdinBytes = File.ReadAllBytes(Path.Combine(caseDir, "stdin.bin"));
+        var newline = Array.IndexOf(stdinBytes, (byte)'\n');
+        using var header = JsonDocument.Parse(Encoding.UTF8.GetString(stdinBytes, 0, newline));
+        var headerErrors = validator.ValidateFile(
+            header.RootElement, Path.Combine(schemasDir, "secret-request.schema.json"));
+        var raw = stdinBytes[(newline + 1)..];
+        var rawHash = Convert.ToHexString(SHA256.HashData(raw)).ToLowerInvariant();
+        using var secretResponse = JsonDocument.Parse(stdout);
+        var secretErrors = validator.ValidateFile(
+            secretResponse.RootElement, Path.Combine(schemasDir, "secret-response.schema.json"));
+        checks.That(headerErrors.Count == 0 && secretErrors.Count == 0 &&
+                    raw.Length == header.RootElement.GetProperty("valueByteCount").GetInt32() &&
+                    rawHash == header.RootElement.GetProperty("valueSHA256").GetString() &&
+                    !stdout.Contains("fixture-secret-value", StringComparison.Ordinal),
+            "secret fixture separates its header/raw value and returns only a metadata receipt");
+        continue;
+    }
+
+    if (caseName == "offline-status-stopped")
+    {
+        checks.That(argv[..^1].SequenceEqual(automatedArgv[..^1]) &&
+                    argv[^1] == "exec \"$HOME/.local/bin/converse\" offline-status",
+            "offline fixture uses the fixed offline-status remote command");
+        using var offline = JsonDocument.Parse(stdout);
+        var offlineErrors = validator.ValidateFile(
+            offline.RootElement, Path.Combine(schemasDir, "status.schema.json"));
+        checks.That(offlineErrors.Count == 0 &&
+                    offline.RootElement.GetProperty("runtime").GetProperty("processState").GetString() == "stopped" &&
+                    !offline.RootElement.GetProperty("runtime").GetProperty("desiredRunning").GetBoolean(),
+            "offline status identifies a stopped daemon without a live socket");
         continue;
     }
 

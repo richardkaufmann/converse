@@ -1,9 +1,29 @@
 using System.Diagnostics;
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Converse.Core;
 
 namespace Converse.Linux;
+
+internal sealed class BootstrapInstallRequest
+{
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("stagingToken")] public string StagingToken { get; set; } = "";
+}
+
+internal sealed class BootstrapReceipt
+{
+    [JsonPropertyName("receiptVersion")] public int ReceiptVersion { get; set; } = 1;
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("stagingToken")] public string StagingToken { get; set; } = "";
+    [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
+    [JsonPropertyName("releaseID")] public string ReleaseID { get; set; } = "";
+    [JsonPropertyName("sourceSHA256")] public string SourceSHA256 { get; set; } = "";
+    [JsonPropertyName("supervisor")] public string Supervisor { get; set; } = "";
+    [JsonPropertyName("completedAt")] public string CompletedAt { get; set; } = "";
+}
 
 internal static class LinuxInstaller
 {
@@ -59,10 +79,11 @@ internal static class LinuxInstaller
             },
             Runtime = new StatusRuntime
             {
-                ProcessState = !installed ? "not_installed" : "recovery_required",
+                ProcessState = !installed ? "not_installed" : recovery ? "recovery_required" : "stopped",
                 Supervisor = updateState.Supervisor,
+                DesiredRunning = paths.DesiredRunning,
                 StartedAt = null,
-                Admission = !installed ? "closed_not_installed" : "closed_recovery",
+                Admission = !installed ? "closed_not_installed" : recovery ? "closed_recovery" : "closed_stopped",
             },
             Filesystem = new StatusFilesystem
             {
@@ -83,8 +104,8 @@ internal static class LinuxInstaller
             Secrets = await secrets.ListAsync(),
             Capabilities =
             [
-                "linux-home-v1", "admin-v1", "fabric-membership-v1",
-                "converse-groups-v1", "agent-host-v1",
+                "linux-home-v1", "admin-v1", "offline-status-v1", "secret-stdin-v1",
+                "fabric-membership-v1", "converse-groups-v1", "agent-host-v1",
             ],
         };
     }
@@ -93,20 +114,43 @@ internal static class LinuxInstaller
         LinuxPaths paths,
         ProductInfo product,
         string? sourceOverride = null,
-        string? supervisorOverride = null)
+        string? supervisorOverride = null,
+        BootstrapInstallRequest? bootstrap = null)
     {
         paths.EnsurePrivateDirectories();
         var source = ResolveSource(sourceOverride);
+        var sourceHash = ReleaseBundleVerifier.HashFile(source);
         var releaseID = Environment.GetEnvironmentVariable("CONVERSE_RELEASE_ID");
         if (string.IsNullOrWhiteSpace(releaseID))
             releaseID = $"{product.Version}-{product.Build}-linux-{product.Architecture}";
+
+        if (bootstrap is not null)
+        {
+            if (bootstrap.OperationID == Guid.Empty ||
+                !LinuxPaths.IsValidBootstrapToken(bootstrap.StagingToken))
+                throw new InvalidDataException("The bootstrap operation request is invalid.");
+            var existingReceipt = ReadReceipt(paths, bootstrap.StagingToken);
+            if (existingReceipt is not null)
+            {
+                if (existingReceipt.OperationID != bootstrap.OperationID ||
+                    existingReceipt.SourceSHA256 != sourceHash ||
+                    existingReceipt.ReleaseID != releaseID ||
+                    !File.Exists(paths.ReleaseExecutable(existingReceipt.ReleaseID)))
+                    throw new InvalidOperationException(
+                        "The bootstrap staging token belongs to a different installation.");
+                return await AdminClient.TryStatusAsync(paths)
+                    ?? await BuildPreflightStatusAsync(paths, product);
+            }
+        }
+
         InstallExecutable(paths, product, source, releaseID);
 
         string deviceID;
+        string supervisor;
         using (var executor = new SerializedStateExecutor())
         {
             var store = new SessionStore(paths.DataRoot);
-            using var devices = new DeviceSyncService(paths.DataRoot, store, Environment.MachineName);
+            var devices = new DeviceSyncService(paths.DataRoot, store, Environment.MachineName);
             deviceID = devices.DeviceId;
             paths.ProtectIdentity();
             var ledger = new RecoveryLedgerStore(paths, executor);
@@ -117,10 +161,41 @@ internal static class LinuxInstaller
                 devices.Trust.Records,
                 devices.GroupStore.Groups,
                 devices.CommandReceipts);
+            if (bootstrap is not null)
+            {
+                var requestHash = Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(
+                        $"bootstrap.install\0{deviceID}\0{bootstrap.StagingToken}\0{sourceHash}")))
+                    .ToLowerInvariant();
+                await ledger.BeginOperationAsync(
+                    bootstrap.OperationID, "bootstrap.install", requestHash,
+                    null, "running");
+            }
+            devices.Dispose();
+
+            supervisor = await InstallSupervisorAsync(paths, supervisorOverride);
+            paths.WriteDesiredRunning(true);
+            WriteUpdateState(paths, releaseID, supervisor);
+            if (bootstrap is not null)
+            {
+                var receipt = new BootstrapReceipt
+                {
+                    OperationID = bootstrap.OperationID,
+                    StagingToken = bootstrap.StagingToken,
+                    DeviceID = deviceID,
+                    ReleaseID = releaseID,
+                    SourceSHA256 = sourceHash,
+                    Supervisor = supervisor,
+                    CompletedAt = LinuxTime.Now(),
+                };
+                LinuxFileModes.Directory700(paths.BootstrapReceiptsDirectory);
+                DurableJson.Write(paths.BootstrapReceiptFile(bootstrap.StagingToken), receipt);
+                LinuxFileModes.File600(paths.BootstrapReceiptFile(bootstrap.StagingToken));
+                await ledger.TransitionOperationAsync(
+                    bootstrap.OperationID, "completed", "installed", resultRef: deviceID);
+            }
         }
 
-        var supervisor = await InstallSupervisorAsync(paths, supervisorOverride);
-        WriteUpdateState(paths, releaseID, supervisor);
         if (supervisor is "systemd-user" or "cron-fallback")
         {
             for (var attempt = 0; attempt < 30; attempt++)
@@ -131,6 +206,18 @@ internal static class LinuxInstaller
             }
         }
         return await BuildPreflightStatusAsync(paths, product);
+    }
+
+    public static BootstrapReceipt? ReadReceipt(LinuxPaths paths, string stagingToken)
+    {
+        var file = paths.BootstrapReceiptFile(stagingToken);
+        if (!File.Exists(file)) return null;
+        var receipt = JsonSerializer.Deserialize<BootstrapReceipt>(
+            File.ReadAllBytes(file), DurableJson.Options);
+        return receipt is not null && receipt.ReceiptVersion == 1 &&
+            receipt.StagingToken == stagingToken
+            ? receipt
+            : throw new InvalidDataException("The bootstrap receipt is invalid.");
     }
 
     internal static string ResolveSource(string? sourceOverride = null)
@@ -257,6 +344,7 @@ internal static class LinuxInstaller
             RestartSec=2
             UMask=0077
             Environment=CONVERSE_LINUX_SUPERVISOR=systemd-user
+            Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
             [Install]
             WantedBy=default.target
@@ -282,6 +370,7 @@ internal static class LinuxInstaller
             .ToList();
         while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[^1])) lines.RemoveAt(lines.Count - 1);
         lines.Add("@reboot \"$HOME/.local/bin/converse\" supervise >/dev/null 2>&1 # Converse Linux home");
+        lines.Add("* * * * * \"$HOME/.local/bin/converse\" supervise >/dev/null 2>&1 # Converse Linux home");
         var updated = await RunAsync("crontab", ["-"], string.Join("\n", lines) + "\n");
         if (updated.ExitCode != 0)
             throw new InvalidOperationException("crontab install failed: " + Bound(updated.Stderr));

@@ -3,13 +3,18 @@
   "$id": "urn:converse:linux:deployment-registry:v1",
   "title": "Converse manager-local Linux deployment registry v1",
   "type": "object",
-  "required": ["registryVersion", "deployments"],
+  "required": ["registryVersion", "deployments", "provisionalDeployments"],
   "properties": {
     "registryVersion": { "const": 1 },
     "deployments": {
       "type": "array",
       "maxItems": 128,
       "items": { "$ref": "#/$defs/deployment" }
+    },
+    "provisionalDeployments": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/provisionalDeployment" }
     }
   },
   "$defs": {
@@ -33,6 +38,98 @@
         { "type": "null" }
       ]
     },
+    "stagingToken": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]{32,64}$"
+    },
+    "nullableStagingToken": {
+      "anyOf": [
+        { "$ref": "#/$defs/stagingToken" },
+        { "type": "null" }
+      ]
+    },
+    "hostKeyFingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9+/]{43}$"
+    },
+    "nullableHostKeyFingerprint": {
+      "anyOf": [
+        { "$ref": "#/$defs/hostKeyFingerprint" },
+        { "type": "null" }
+      ]
+    },
+    "nullableUuid": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "provisionalDeployment": {
+      "type": "object",
+      "required": [
+        "operationID",
+        "stagingToken",
+        "stage",
+        "displayName",
+        "destination",
+        "hostKeyFingerprintSHA256",
+        "bootstrapSHA256",
+        "bootstrapSize",
+        "releaseID",
+        "deviceID",
+        "createdAt",
+        "updatedAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "operationID": { "$ref": "#/$defs/uuid" },
+        "stagingToken": { "$ref": "#/$defs/stagingToken" },
+        "stage": {
+          "enum": [
+            "created",
+            "host_key_pending",
+            "host_key_verified",
+            "staged",
+            "uploaded",
+            "preflight_passed",
+            "install_requested",
+            "installed",
+            "admin_verified",
+            "cleanup_pending",
+            "uncertain",
+            "failed"
+          ]
+        },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "destination": { "$ref": "#/$defs/destination" },
+        "hostKeyFingerprintSHA256": { "$ref": "#/$defs/nullableHostKeyFingerprint" },
+        "bootstrapSHA256": {
+          "anyOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "bootstrapSize": { "type": "integer", "minimum": 0 },
+        "releaseID": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "deviceID": {
+          "anyOf": [
+            { "$ref": "#/$defs/deviceID" },
+            { "type": "null" }
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "deployment": {
       "type": "object",
       "required": [
@@ -41,6 +138,7 @@
         "ssh",
         "remote",
         "converse",
+        "installation",
         "createdAt",
         "updatedAt"
       ],
@@ -142,6 +240,15 @@
                 "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
               }
             }
+          }
+        },
+        "installation": {
+          "type": "object",
+          "required": ["operationID", "stagingToken", "completedAt"],
+          "properties": {
+            "operationID": { "$ref": "#/$defs/nullableUuid" },
+            "stagingToken": { "$ref": "#/$defs/nullableStagingToken" },
+            "completedAt": { "$ref": "#/$defs/nullableDateTime" }
           }
         },
         "createdAt": { "type": "string", "format": "date-time" },

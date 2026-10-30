@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Converse.Linux;
 
@@ -22,6 +23,12 @@ internal sealed class LinuxPaths
     public string SecretsDirectory { get; }
     public string SecretsMetadataFile { get; }
     public string SocketPath { get; }
+    public string SecretSocketPath { get; }
+    public string DesiredRunningFile { get; }
+    public string SupervisorLockFile { get; }
+    public string SupervisorPidFile { get; }
+    public string BootstrapRoot { get; }
+    public string BootstrapReceiptsDirectory { get; }
     public string LockFile { get; }
     public string SystemdUserDirectory { get; }
     public string SystemdUnitFile { get; }
@@ -52,6 +59,11 @@ internal sealed class LinuxPaths
         UpdateStateFile = Path.Combine(StateRoot, "update-state.json");
         SecretsDirectory = Path.Combine(ConfigRoot, "secrets");
         SecretsMetadataFile = Path.Combine(SecretsDirectory, "metadata.json");
+        DesiredRunningFile = Path.Combine(StateRoot, "desired-running");
+        SupervisorLockFile = Path.Combine(StateRoot, "supervisor.lock");
+        SupervisorPidFile = Path.Combine(StateRoot, "supervisor.pid");
+        BootstrapRoot = Path.Combine(Home, ".converse-bootstrap");
+        BootstrapReceiptsDirectory = Path.Combine(StateRoot, "bootstrap-receipts");
         LockFile = Path.Combine(StateRoot, "converse.lock");
         SystemdUserDirectory = Path.Combine(configHome, "systemd", "user");
         SystemdUnitFile = Path.Combine(SystemdUserDirectory, "converse.service");
@@ -61,6 +73,7 @@ internal sealed class LinuxPaths
             ? Path.Combine(runtime, "converse")
             : Path.Combine(StateRoot, "run");
         SocketPath = Path.Combine(RuntimeDirectory, "admin.sock");
+        SecretSocketPath = Path.Combine(RuntimeDirectory, "secrets.sock");
     }
 
     public static LinuxPaths FromEnvironment() =>
@@ -72,6 +85,48 @@ internal sealed class LinuxPaths
         return !string.IsNullOrWhiteSpace(value) && Path.IsPathFullyQualified(value)
             ? value
             : Path.Combine(Home, fallbackRelative);
+    }
+
+    public static bool IsValidBootstrapToken(string token) =>
+        Regex.IsMatch(token, "^[A-Za-z0-9-]{32,64}$");
+
+    public string BootstrapStagingDirectory(string token)
+    {
+        if (!IsValidBootstrapToken(token)) throw new InvalidDataException("Invalid bootstrap staging token.");
+        return Path.Combine(BootstrapRoot, token);
+    }
+
+    public string BootstrapExecutable(string token) =>
+        Path.Combine(BootstrapStagingDirectory(token), "converse");
+
+    public string BootstrapReceiptFile(string token)
+    {
+        if (!IsValidBootstrapToken(token)) throw new InvalidDataException("Invalid bootstrap staging token.");
+        return Path.Combine(BootstrapReceiptsDirectory, token + ".json");
+    }
+
+    public bool DesiredRunning
+    {
+        get
+        {
+            try
+            {
+                return !File.Exists(DesiredRunningFile) ||
+                    !string.Equals(File.ReadAllText(DesiredRunningFile).Trim(), "false", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return true; }
+        }
+    }
+
+    public void WriteDesiredRunning(bool desired)
+    {
+        LinuxFileModes.Directory700(StateRoot);
+        var temporary = DesiredRunningFile + $".{Guid.NewGuid():N}.tmp";
+        File.WriteAllText(temporary, desired ? "true\n" : "false\n");
+        LinuxFileModes.File600(temporary);
+        File.Move(temporary, DesiredRunningFile, overwrite: true);
+        LinuxFileModes.File600(DesiredRunningFile);
+        DurableJson.TrySyncDirectory(StateRoot);
     }
 
     public string ReleaseDirectory(string releaseID)
@@ -107,7 +162,7 @@ internal sealed class LinuxPaths
                  {
                      ConfigRoot, DataRoot, StateRoot, RuntimeDirectory, InstallRoot,
                      ReleasesRoot, BinDirectory, IncomingDirectory, LedgerDirectory,
-                     SecretsDirectory,
+                     SecretsDirectory, BootstrapRoot, BootstrapReceiptsDirectory,
                  })
             LinuxFileModes.Directory700(directory);
     }

@@ -1,13 +1,13 @@
 {
   "ledgerVersion": 1,
   "deviceID": "1111111111111111111111111111111111111111111111111111111111111111",
-  "sequence": 42,
+  "sequence": "42",
   "updatedAt": "2026-10-30T16:02:00Z",
   "counterFloors": {
-    "nextBoot": 8,
-    "nextHomeSeq": 1024,
-    "nextLeaseEpoch": 77,
-    "nextMembershipGeneration": 12
+    "nextBoot": "8",
+    "nextHomeSeq": "4503599627370495",
+    "nextLeaseEpoch": "281474976710657",
+    "nextMembershipGeneration": "12"
   },
   "commandReceipts": [
     {
@@ -24,19 +24,21 @@
     {
       "operationID": "00000000-0000-4000-8000-000000000201",
       "kind": "update.activate",
+      "deviceID": "1111111111111111111111111111111111111111111111111111111111111111",
       "state": "probation_new_release",
       "requestSHA256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "episodeID": "00000000-0000-4000-8000-000000000301",
       "createdAt": "2026-10-30T16:00:00Z",
       "updatedAt": "2026-10-30T16:02:00Z",
       "terminalAt": null,
-      "resultCode": null
+      "resultCode": null,
+      "resultRef": "1.0.0-2-linux-x64"
     }
   ],
   "membership": {
     "generationFloors": {
-      "2222222222222222222222222222222222222222222222222222222222222222": 4,
-      "3333333333333333333333333333333333333333333333333333333333333333": 9
+      "2222222222222222222222222222222222222222222222222222222222222222": "4",
+      "3333333333333333333333333333333333333333333333333333333333333333": "9007199254740992"
     },
     "removedDeviceIDs": [
       "3333333333333333333333333333333333333333333333333333333333333333"
@@ -49,8 +51,8 @@
     {
       "sessionGlobalID": "1111111111111111111111111111111111111111111111111111111111111111/00000000-0000-4000-8000-000000000701",
       "lastAuthorizedOwnerDeviceID": "2222222222222222222222222222222222222222222222222222222222222222",
-      "takeGeneration": 5,
-      "lastExecutionEpoch": 76,
+      "takeGeneration": "5",
+      "lastExecutionEpoch": "281474976710656",
       "restorationEligible": true,
       "updatedAt": "2026-10-30T15:58:00Z"
     }

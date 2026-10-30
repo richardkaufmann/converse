@@ -1,5 +1,22 @@
 {
   "registryVersion": 1,
+  "provisionalDeployments": [
+    {
+      "operationID": "00000000-0000-4000-8000-000000000502",
+      "stagingToken": "0123456789abcdef0123456789abcdef",
+      "stage": "uploaded",
+      "displayName": "Linux Home (installing)",
+      "destination": "linux-home-2",
+      "hostKeyFingerprintSHA256": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "bootstrapSHA256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "bootstrapSize": 76000000,
+      "releaseID": "1.0.0-2-linux-x64",
+      "deviceID": null,
+      "createdAt": "2026-10-30T15:45:00Z",
+      "updatedAt": "2026-10-30T15:46:00Z",
+      "expiresAt": "2026-10-31T15:45:00Z"
+    }
+  ],
   "deployments": [
     {
       "deploymentID": "00000000-0000-4000-8000-000000000501",
@@ -28,6 +45,11 @@
           "fabric-membership-v1",
           "converse-groups-v1"
         ]
+      },
+      "installation": {
+        "operationID": "00000000-0000-4000-8000-000000000503",
+        "stagingToken": "fedcba9876543210fedcba9876543210",
+        "completedAt": "2026-10-30T15:50:00Z"
       },
       "createdAt": "2026-10-30T15:50:00Z",
       "updatedAt": "2026-10-30T16:04:00Z"

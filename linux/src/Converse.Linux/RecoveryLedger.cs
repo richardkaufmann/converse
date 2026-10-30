@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Converse.Core;
@@ -12,7 +13,8 @@ internal sealed class RecoveryLedger
 {
     [JsonPropertyName("ledgerVersion")] public int LedgerVersion { get; set; } = 1;
     [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
-    [JsonPropertyName("sequence")] public ulong Sequence { get; set; }
+    [JsonPropertyName("sequence"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong Sequence { get; set; }
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = "";
     [JsonPropertyName("counterFloors")] public LedgerCounterFloors CounterFloors { get; set; } = new();
     [JsonPropertyName("commandReceipts")] public List<LedgerCommandReceipt> CommandReceipts { get; set; } = new();
@@ -25,10 +27,14 @@ internal sealed class RecoveryLedger
 
 internal sealed class LedgerCounterFloors
 {
-    [JsonPropertyName("nextBoot")] public ulong NextBoot { get; set; } = 1;
-    [JsonPropertyName("nextHomeSeq")] public ulong NextHomeSeq { get; set; } = 1;
-    [JsonPropertyName("nextLeaseEpoch")] public ulong NextLeaseEpoch { get; set; } = (1UL << 48) + 1;
-    [JsonPropertyName("nextMembershipGeneration")] public ulong NextMembershipGeneration { get; set; } = 1;
+    [JsonPropertyName("nextBoot"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong NextBoot { get; set; } = 1;
+    [JsonPropertyName("nextHomeSeq"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong NextHomeSeq { get; set; } = 1;
+    [JsonPropertyName("nextLeaseEpoch"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong NextLeaseEpoch { get; set; } = (1UL << 48) + 1;
+    [JsonPropertyName("nextMembershipGeneration"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong NextMembershipGeneration { get; set; } = 1;
 }
 
 internal sealed class LedgerCommandReceipt
@@ -46,6 +52,7 @@ internal sealed class LedgerOperation
 {
     [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
     [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+    [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
     [JsonPropertyName("state")] public string State { get; set; } = "accepted";
     [JsonPropertyName("requestSHA256")] public string RequestSHA256 { get; set; } = "";
     [JsonPropertyName("episodeID")] public Guid? EpisodeID { get; set; }
@@ -53,6 +60,7 @@ internal sealed class LedgerOperation
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = "";
     [JsonPropertyName("terminalAt")] public string? TerminalAt { get; set; }
     [JsonPropertyName("resultCode")] public string? ResultCode { get; set; }
+    [JsonPropertyName("resultRef")] public string? ResultRef { get; set; }
 
     public bool IsTerminal => State is "completed" or "aborted" or "failed";
     public LedgerOperation Clone() => (LedgerOperation)MemberwiseClone();
@@ -60,7 +68,8 @@ internal sealed class LedgerOperation
 
 internal sealed class LedgerMembership
 {
-    [JsonPropertyName("generationFloors")] public Dictionary<string, ulong> GenerationFloors { get; set; } = new();
+    [JsonPropertyName("generationFloors"), JsonConverter(typeof(BoundedCounterDictionaryConverter))]
+    public Dictionary<string, ulong> GenerationFloors { get; set; } = new();
     [JsonPropertyName("removedDeviceIDs")] public List<string> RemovedDeviceIDs { get; set; } = new();
 }
 
@@ -68,10 +77,71 @@ internal sealed class LedgerDisplayRestoration
 {
     [JsonPropertyName("sessionGlobalID")] public string SessionGlobalID { get; set; } = "";
     [JsonPropertyName("lastAuthorizedOwnerDeviceID")] public string? LastAuthorizedOwnerDeviceID { get; set; }
-    [JsonPropertyName("takeGeneration")] public ulong TakeGeneration { get; set; }
-    [JsonPropertyName("lastExecutionEpoch")] public ulong LastExecutionEpoch { get; set; }
+    [JsonPropertyName("takeGeneration"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong TakeGeneration { get; set; }
+    [JsonPropertyName("lastExecutionEpoch"), JsonConverter(typeof(BoundedCounterConverter))]
+    public ulong LastExecutionEpoch { get; set; }
     [JsonPropertyName("restorationEligible")] public bool RestorationEligible { get; set; }
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = "";
+}
+
+internal sealed class BoundedCounterConverter : JsonConverter<ulong>
+{
+    public const ulong Maximum = 1UL << 53;
+
+    public static ulong Parse(string text)
+    {
+        if (!ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ||
+            value > Maximum || text != value.ToString(CultureInfo.InvariantCulture))
+            throw new JsonException("Recovery counter is outside the bounded decimal-string range.");
+        return value;
+    }
+
+    public override ulong Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String) return Parse(reader.GetString() ?? "");
+        if (reader.TokenType == JsonTokenType.Number && reader.TryGetUInt64(out var number) && number <= Maximum)
+            return number; // Pre-freeze migration only; writes always use strings.
+        throw new JsonException("Recovery counter must be a bounded decimal string.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, ulong value, JsonSerializerOptions options)
+    {
+        if (value > Maximum) throw new InvalidOperationException("Recovery counter overflow.");
+        writer.WriteStringValue(value.ToString(CultureInfo.InvariantCulture));
+    }
+}
+
+internal sealed class BoundedCounterDictionaryConverter : JsonConverter<Dictionary<string, ulong>>
+{
+    public override Dictionary<string, ulong> Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartObject) throw new JsonException("Expected counter object.");
+        var result = new Dictionary<string, ulong>(StringComparer.Ordinal);
+        var converter = new BoundedCounterConverter();
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndObject) return result;
+            var key = reader.GetString() ?? throw new JsonException("Missing counter key.");
+            if (!reader.Read()) throw new JsonException("Missing counter value.");
+            result[key] = converter.Read(ref reader, typeof(ulong), options);
+        }
+        throw new JsonException("Unterminated counter object.");
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer, Dictionary<string, ulong> value, JsonSerializerOptions options)
+    {
+        var converter = new BoundedCounterConverter();
+        writer.WriteStartObject();
+        foreach (var (key, counter) in value.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        {
+            writer.WritePropertyName(key);
+            converter.Write(writer, counter, options);
+        }
+        writer.WriteEndObject();
+    }
 }
 
 internal sealed class RecoveryLedgerStore
@@ -151,7 +221,9 @@ internal sealed class RecoveryLedgerStore
             var existing = ledger.Operations.FirstOrDefault(operation => operation.OperationID == operationID);
             if (existing is not null)
             {
-                if (existing.Kind != kind || existing.RequestSHA256 != requestHash)
+                if (existing.DeviceID.Length == 0) existing.DeviceID = ledger.DeviceID;
+                if (existing.Kind != kind || existing.DeviceID != ledger.DeviceID ||
+                    existing.RequestSHA256 != requestHash)
                     throw new OperationConflictException(
                         "The operation ID was already used for a different request.");
                 return existing.Clone();
@@ -161,6 +233,7 @@ internal sealed class RecoveryLedgerStore
             {
                 OperationID = operationID,
                 Kind = kind,
+                DeviceID = ledger.DeviceID,
                 State = initialState,
                 RequestSHA256 = requestHash,
                 EpisodeID = episodeID,
@@ -186,6 +259,7 @@ internal sealed class RecoveryLedgerStore
         string state,
         string? resultCode = null,
         Guid? episodeID = null,
+        string? resultRef = null,
         CancellationToken cancellationToken = default)
     {
         await _executor.RunAsync(() =>
@@ -196,9 +270,37 @@ internal sealed class RecoveryLedgerStore
             operation.State = state;
             operation.UpdatedAt = LinuxTime.Now();
             operation.ResultCode = resultCode;
+            if (resultRef is not null) operation.ResultRef = resultRef;
             if (episodeID is not null) operation.EpisodeID = episodeID;
             operation.TerminalAt = operation.IsTerminal ? operation.UpdatedAt : null;
             Save();
+        }, cancellationToken);
+    }
+
+    public async Task MarkAbandonedOperationsUncertainAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _executor.RunAsync(() =>
+        {
+            var ledger = RequireLedger();
+            var changed = false;
+            foreach (var operation in ledger.Operations)
+            {
+                if (operation.DeviceID.Length == 0)
+                {
+                    operation.DeviceID = ledger.DeviceID;
+                    changed = true;
+                }
+                if (operation.IsTerminal || operation.State == "uncertain" ||
+                    operation.Kind.StartsWith("update.", StringComparison.Ordinal) ||
+                    operation.Kind == "service.restart") continue;
+                operation.State = "uncertain";
+                operation.ResultCode = "abandoned_at_restart";
+                operation.UpdatedAt = LinuxTime.Now();
+                operation.TerminalAt = null;
+                changed = true;
+            }
+            if (changed) Save();
         }, cancellationToken);
     }
 
@@ -344,6 +446,8 @@ internal sealed class RecoveryLedgerStore
     private void Save()
     {
         var ledger = RequireLedger();
+        if (ledger.Sequence >= BoundedCounterConverter.Maximum)
+            throw new RecoveryRequiredException("The recovery ledger sequence is exhausted.");
         ledger.Sequence = checked(ledger.Sequence + 1);
         ledger.UpdatedAt = LinuxTime.Now();
         LinuxFileModes.Directory700(_paths.LedgerDirectory);

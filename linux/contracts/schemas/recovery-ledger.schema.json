@@ -19,7 +19,7 @@
   "properties": {
     "ledgerVersion": { "const": 1 },
     "deviceID": { "$ref": "#/$defs/deviceID" },
-    "sequence": { "type": "integer", "minimum": 0 },
+    "sequence": { "$ref": "#/$defs/counter" },
     "updatedAt": { "type": "string", "format": "date-time" },
     "counterFloors": {
       "type": "object",
@@ -85,7 +85,12 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "counter": { "type": "integer", "minimum": 0 },
+    "counter": {
+      "description": "Bounded unsigned decimal high-water mark, 0 through 9007199254740992 (2^53), encoded as a string for exact cross-language JSON handling.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "maxLength": 16
+    },
     "globalSessionID": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -129,24 +134,43 @@
       "required": [
         "operationID",
         "kind",
+        "deviceID",
         "state",
         "requestSHA256",
         "episodeID",
         "createdAt",
         "updatedAt",
         "terminalAt",
-        "resultCode"
+        "resultCode",
+        "resultRef"
       ],
       "properties": {
         "operationID": { "$ref": "#/$defs/uuid" },
         "kind": {
           "enum": [
+            "bootstrap.install",
+            "group.create",
+            "pairing.join.begin",
+            "pairing.bindPeerConnection",
+            "pairing.join.confirm",
+            "pairing.join.cancel",
+            "pairing.request.review",
+            "pairing.request.approve",
+            "pairing.request.reject",
+            "update.stage.begin",
+            "update.stage.verify",
             "update.activate",
             "update.healthCommit",
             "update.rollback",
-            "service.restart"
+            "session.create",
+            "service.start",
+            "service.stop",
+            "service.restart",
+            "secret.set",
+            "secret.delete"
           ]
         },
+        "deviceID": { "$ref": "#/$defs/deviceID" },
         "state": {
           "enum": [
             "accepted",
@@ -173,6 +197,13 @@
         "resultCode": {
           "anyOf": [
             { "type": "string", "maxLength": 120 },
+            { "type": "null" }
+          ]
+        },
+        "resultRef": {
+          "description": "Nonsecret stable reference to the created/resulting object, such as a session global ID, group ID, upload ID, or secret ID.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 300 },
             { "type": "null" }
           ]
         }

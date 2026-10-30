@@ -82,7 +82,10 @@
             "recovery_required",
             "secret_not_found",
             "pairing_not_found",
+            "pairing_binding_mismatch",
             "pairing_expired",
+            "unsupported_supervisor",
+            "service_control_failed",
             "internal_error"
           ]
         },

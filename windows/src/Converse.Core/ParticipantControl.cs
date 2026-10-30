@@ -19,6 +19,7 @@ public sealed class ParticipantReceipt
 
 public sealed partial class DeviceSyncService
 {
+    public const int SwitchboardMaxHops = 100;
     private List<ParticipantIntent> _participantIntents = new();
     private readonly Dictionary<Guid, TaskCompletionSource<DeviceParticipantResponse>> _participantWaiting = new();
     private void LoadParticipants()
@@ -89,7 +90,7 @@ public sealed partial class DeviceSyncService
             var request = DeviceJson.Decode<DeviceTellPayload>(bytes);
             var from = DeviceGlobalID.Parse(request.Source); var target = DeviceGlobalID.Parse(request.Target);
             var response = new DeviceAckPayload { Outcome = "rejected", Detail = "Invalid, disabled, or out-of-group target." };
-            if (request.GroupID == group.Id && from?.Home == hello.DeviceID && target?.Home == DeviceId && request.Hop is > 0 and <= 8 && System.Text.Encoding.UTF8.GetByteCount(request.Text) is > 0 and <= 32768 && request.SourceTitle.Length <= 1000)
+            if (request.GroupID == group.Id && from?.Home == hello.DeviceID && target?.Home == DeviceId && request.Hop is > 0 and <= SwitchboardMaxHops && System.Text.Encoding.UTF8.GetByteCount(request.Text) is > 0 and <= 32768 && request.SourceTitle.Length <= 1000)
             {
                 var session = _store.Sessions.FirstOrDefault(s => s.Id == target.Value.Session && s.MessagingEnabled);
                 var hash = DeviceBlob.Sha256Hex(bytes);
@@ -97,7 +98,7 @@ public sealed partial class DeviceSyncService
                 if (prior is not null) response = new() { Outcome = prior.Origin == hello.DeviceID && prior.Hash == hash ? "queued" : "rejected", Detail = "Previously recorded delivery; nothing queued twice." };
                 else if (session is not null && _store.ParticipantReceipts.Count < 100000)
                 {
-                    var prompt = new PendingPrompt { Text = $"[Converse message from {request.SourceTitle} · session {request.Source} · delivery {id} · hop {request.Hop}/8]\n{request.Text}", Autonomous = true, OriginGroupID = group.Id, OriginHomeID = hello.DeviceID, Hop = request.Hop };
+                    var prompt = new PendingPrompt { Text = $"[Converse message from {request.SourceTitle} · session {request.Source} · delivery {id} · hop {request.Hop}/{SwitchboardMaxHops}]\n{request.Text}", Autonomous = true, OriginGroupID = group.Id, OriginHomeID = hello.DeviceID, Hop = request.Hop };
                     session.Pending.Add(prompt);
                     var receipt = new ParticipantReceipt { Id = id, Origin = hello.DeviceID, Hash = hash };
                     _store.ParticipantReceipts.Add(receipt);
@@ -174,13 +175,13 @@ public sealed partial class DeviceSyncService
     }
     public async Task SendAgentTellAsync(ChatSession source, string target, string text)
     {
-        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= 8 || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
+        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
         var id = Guid.NewGuid(); var hop = source.ActiveHop + 1;
         if (to.Home == DeviceId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == to.Session && s.MessagingEnabled);
             if (session is null) return;
-            session.Pending.Add(new PendingPrompt { Text = $"[Converse message from {source.Title} · session {new DeviceGlobalID(DeviceId, source.Id)} · delivery {id} · hop {hop}/8]\n{text}", Autonomous = true, Hop = hop });
+            session.Pending.Add(new PendingPrompt { Text = $"[Converse message from {source.Title} · session {new DeviceGlobalID(DeviceId, source.Id)} · delivery {id} · hop {hop}/{SwitchboardMaxHops}]\n{text}", Autonomous = true, Hop = hop });
             _store.Save(); _store.RunNext(session); return;
         }
         if (!IsParticipantAllowed(to.Home, CurrentGroup?.Id) || PeerForHome(to.Home) is not { } peer || peer.Hello?.Capabilities.Contains("participant-control-v1") != true || Homes.GetValueOrDefault(to.Home)?.Rows.Any(r => r.GlobalID == target && r.MessagingEnabled == true) != true) return;
@@ -211,7 +212,7 @@ public sealed partial class DeviceSyncService
         try
         {
             if (!source.MessagingEnabled) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
-            if (source.ActiveHop >= 8) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
+            if (source.ActiveHop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
             var action = command["command"]?.GetValue<string>();
             if (action is "list-sessions" or "sessions")
             {

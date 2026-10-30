@@ -17,6 +17,7 @@
   "runtime": {
     "processState": "running",
     "supervisor": "systemd-user",
+    "desiredRunning": true,
     "startedAt": "2026-10-30T15:55:00Z",
     "admission": "closed_probation"
   },
@@ -58,7 +59,11 @@
     {
       "secretID": "agent.meta.api-key",
       "kind": "provider_api_key",
+      "backend": "linux-file-0600",
       "configured": false,
+      "storedVersion": 0,
+      "effectiveVersion": 0,
+      "pendingRestart": false,
       "updatedAt": null
     }
   ],

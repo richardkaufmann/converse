@@ -21,6 +21,24 @@ internal static class AdminJson
         return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
     }
 
+    public static string RequestHash(AdminRequest request)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("expectedDeviceID");
+            if (request.ExpectedDeviceID is null) writer.WriteNullValue();
+            else writer.WriteStringValue(request.ExpectedDeviceID);
+            writer.WritePropertyName("operation");
+            writer.WriteStringValue(request.Operation);
+            writer.WritePropertyName("payload");
+            WriteCanonical(writer, request.Payload);
+            writer.WriteEndObject();
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
     private static void WriteCanonical(Utf8JsonWriter writer, JsonElement value)
     {
         switch (value.ValueKind)
@@ -156,6 +174,7 @@ internal sealed class StatusRuntime
 {
     [JsonPropertyName("processState")] public string ProcessState { get; set; } = "starting";
     [JsonPropertyName("supervisor")] public string Supervisor { get; set; } = "none";
+    [JsonPropertyName("desiredRunning")] public bool DesiredRunning { get; set; } = true;
     [JsonPropertyName("startedAt")] public string? StartedAt { get; set; }
     [JsonPropertyName("admission")] public string Admission { get; set; } = "closed_recovery";
 }
@@ -211,7 +230,11 @@ internal sealed class SecretMetadata
 {
     [JsonPropertyName("secretID")] public string SecretID { get; set; } = "";
     [JsonPropertyName("kind")] public string Kind { get; set; } = "other";
+    [JsonPropertyName("backend")] public string Backend { get; set; } = "linux-file-0600";
     [JsonPropertyName("configured")] public bool Configured { get; set; }
+    [JsonPropertyName("storedVersion")] public long StoredVersion { get; set; }
+    [JsonPropertyName("effectiveVersion")] public long EffectiveVersion { get; set; }
+    [JsonPropertyName("pendingRestart")] public bool PendingRestart { get; set; }
     [JsonPropertyName("updatedAt")] public string? UpdatedAt { get; set; }
 }
 
@@ -219,15 +242,24 @@ internal sealed class PairingBinding
 {
     [JsonPropertyName("bindingVersion")] public int BindingVersion { get; set; } = 1;
     [JsonPropertyName("pairingID")] public Guid PairingID { get; set; }
+    [JsonPropertyName("requestCorrelationID")] public Guid RequestCorrelationID { get; set; }
+    [JsonPropertyName("nativeRequestID")] public Guid? NativeRequestID { get; set; }
     [JsonPropertyName("role")] public string Role { get; set; } = "";
     [JsonPropertyName("state")] public string State { get; set; } = "";
     [JsonPropertyName("linuxDeviceID")] public string LinuxDeviceID { get; set; } = "";
-    [JsonPropertyName("peerDeviceID")] public string PeerDeviceID { get; set; } = "";
+    [JsonPropertyName("requesterDeviceID")] public string RequesterDeviceID { get; set; } = "";
+    [JsonPropertyName("sponsorDeviceID")] public string SponsorDeviceID { get; set; } = "";
     [JsonPropertyName("peerName")] public string PeerName { get; set; } = "";
+    [JsonPropertyName("linuxPublicKeyFingerprint")] public string LinuxPublicKeyFingerprint { get; set; } = "";
+    [JsonPropertyName("requesterPublicKeyFingerprint")] public string RequesterPublicKeyFingerprint { get; set; } = "";
+    [JsonPropertyName("sponsorPublicKeyFingerprint")] public string SponsorPublicKeyFingerprint { get; set; } = "";
     [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
     [JsonPropertyName("groupName")] public string? GroupName { get; set; }
+    [JsonPropertyName("requesterConnectionInstanceID")] public Guid? RequesterConnectionInstanceID { get; set; }
+    [JsonPropertyName("sponsorConnectionInstanceID")] public Guid? SponsorConnectionInstanceID { get; set; }
     [JsonPropertyName("verificationCode")] public string? VerificationCode { get; set; }
-    [JsonPropertyName("expiresAt")] public string? ExpiresAt { get; set; }
+    [JsonPropertyName("verificationCodeFingerprint")] public string? VerificationCodeFingerprint { get; set; }
+    [JsonPropertyName("expiresAt")] public string ExpiresAt { get; set; } = "";
     [JsonPropertyName("createdAt")] public string CreatedAt { get; set; } = "";
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = "";
 }
@@ -235,6 +267,72 @@ internal sealed class PairingBinding
 internal sealed class PairingListResult
 {
     [JsonPropertyName("requests")] public List<PairingBinding> Requests { get; set; } = new();
+}
+
+internal sealed class SecretRequestHeader
+{
+    [JsonPropertyName("secretApiVersion")] public int SecretApiVersion { get; set; }
+    [JsonPropertyName("requestID")] public Guid RequestID { get; set; }
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("expectedDeviceID")] public string? ExpectedDeviceID { get; set; }
+    [JsonPropertyName("action")] public string Action { get; set; } = "";
+    [JsonPropertyName("secretID")] public string SecretID { get; set; } = "";
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    [JsonPropertyName("valueByteCount")] public int ValueByteCount { get; set; }
+    [JsonPropertyName("valueSHA256")] public string? ValueSHA256 { get; set; }
+}
+
+internal sealed class SecretResponse
+{
+    [JsonPropertyName("secretApiVersion")] public int SecretApiVersion { get; set; } = 1;
+    [JsonPropertyName("requestID")] public Guid RequestID { get; set; }
+    [JsonPropertyName("ok")] public bool Ok { get; set; }
+    [JsonPropertyName("receipt")] public SecretReceipt? Receipt { get; set; }
+    [JsonPropertyName("error")] public AdminError? Error { get; set; }
+
+    public static SecretResponse Success(Guid requestID, SecretReceipt receipt) => new()
+    {
+        RequestID = requestID,
+        Ok = true,
+        Receipt = receipt,
+        Error = null,
+    };
+
+    public static SecretResponse Failure(
+        Guid requestID, string code, string message, bool retryable = false, bool uncertain = false) => new()
+    {
+        RequestID = requestID,
+        Ok = false,
+        Receipt = null,
+        Error = new AdminError
+        {
+            Code = code,
+            Message = message,
+            Retryable = retryable,
+            Uncertain = uncertain,
+        },
+    };
+}
+
+internal sealed class SecretReceipt
+{
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("secretID")] public string SecretID { get; set; } = "";
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "other";
+    [JsonPropertyName("backend")] public string Backend { get; set; } = "linux-file-0600";
+    [JsonPropertyName("configured")] public bool Configured { get; set; }
+    [JsonPropertyName("storedVersion")] public long StoredVersion { get; set; }
+    [JsonPropertyName("effectiveVersion")] public long EffectiveVersion { get; set; }
+    [JsonPropertyName("pendingRestart")] public bool PendingRestart { get; set; }
+    [JsonPropertyName("updatedAt")] public string? UpdatedAt { get; set; }
+}
+
+internal sealed class SessionCreateResult
+{
+    [JsonPropertyName("sessionID")] public Guid SessionID { get; set; }
+    [JsonPropertyName("globalID")] public string GlobalID { get; set; } = "";
+    [JsonPropertyName("title")] public string Title { get; set; } = "";
+    [JsonPropertyName("engine")] public string Engine { get; set; } = "";
 }
 
 internal sealed class ReleaseManifest
@@ -255,8 +353,24 @@ internal sealed class ReleaseProtocols
 {
     [JsonPropertyName("deviceProtocolVersion")] public int DeviceProtocolVersion { get; set; }
     [JsonPropertyName("adminApiVersion")] public int AdminApiVersion { get; set; }
-    [JsonPropertyName("stateSchemaVersion")] public int StateSchemaVersion { get; set; }
+    [JsonPropertyName("stateSchemaCompatibility")] public ReleaseStateCompatibility StateSchemaCompatibility { get; set; } = new();
     [JsonPropertyName("recoveryLedgerVersion")] public int RecoveryLedgerVersion { get; set; }
+}
+
+internal sealed class ReleaseStateCompatibility
+{
+    [JsonPropertyName("minimumReadableStateSchemaVersion")] public int MinimumReadableStateSchemaVersion { get; set; }
+    [JsonPropertyName("maximumReadableStateSchemaVersion")] public int MaximumReadableStateSchemaVersion { get; set; }
+    [JsonPropertyName("writableStateSchemaVersion")] public int WritableStateSchemaVersion { get; set; }
+
+    public bool IsCoherent =>
+        MinimumReadableStateSchemaVersion >= 1 &&
+        MinimumReadableStateSchemaVersion <= WritableStateSchemaVersion &&
+        WritableStateSchemaVersion <= MaximumReadableStateSchemaVersion;
+
+    public bool CanRead(int version) =>
+        IsCoherent && version >= MinimumReadableStateSchemaVersion &&
+        version <= MaximumReadableStateSchemaVersion;
 }
 
 internal sealed class ReleaseArtifact

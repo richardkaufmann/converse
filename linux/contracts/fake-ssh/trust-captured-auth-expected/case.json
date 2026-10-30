@@ -7,6 +7,7 @@
   "executable": "ssh",
   "argv": [
     "ssh",
+    "-o", "BatchMode=no",
     "-o", "StrictHostKeyChecking=ask",
     "-o", "RequestTTY=no",
     "-o", "PreferredAuthentications=none",

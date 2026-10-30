@@ -20,10 +20,26 @@
     "operationID": { "$ref": "#/$defs/uuid" },
     "kind": {
       "enum": [
+        "bootstrap.install",
+        "group.create",
+        "pairing.join.begin",
+        "pairing.bindPeerConnection",
+        "pairing.join.confirm",
+        "pairing.join.cancel",
+        "pairing.request.review",
+        "pairing.request.approve",
+        "pairing.request.reject",
+        "update.stage.begin",
+        "update.stage.verify",
         "update.activate",
         "update.healthCommit",
         "update.rollback",
-        "service.restart"
+        "session.create",
+        "service.start",
+        "service.stop",
+        "service.restart",
+        "secret.set",
+        "secret.delete"
       ]
     },
     "state": {

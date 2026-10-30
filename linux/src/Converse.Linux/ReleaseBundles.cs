@@ -131,7 +131,7 @@ internal sealed class ReleaseBundleVerifier
             manifest.SourceCommit.Length != 40 || !manifest.SourceCommit.All(Uri.IsHexDigit) ||
             manifest.Protocols.DeviceProtocolVersion != ProductInfo.DeviceProtocolVersion ||
             manifest.Protocols.AdminApiVersion != ProductInfo.AdminApiVersion ||
-            manifest.Protocols.StateSchemaVersion != ProductInfo.StateSchemaVersion ||
+            !manifest.Protocols.StateSchemaCompatibility.CanRead(ProductInfo.StateSchemaVersion) ||
             manifest.Protocols.RecoveryLedgerVersion != ProductInfo.RecoveryLedgerVersion ||
             manifest.Artifact.FileName != "converse" ||
             manifest.Artifact.OperatingSystem != "linux" ||

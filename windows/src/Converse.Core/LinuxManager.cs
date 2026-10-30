@@ -16,6 +16,33 @@ public sealed class LinuxDeploymentRegistryFile
 {
     [JsonPropertyName("registryVersion")] public int RegistryVersion { get; set; } = 1;
     [JsonPropertyName("deployments")] public List<LinuxDeployment> Deployments { get; set; } = new();
+    [JsonPropertyName("provisionalDeployments")]
+    public List<LinuxProvisionalDeployment> ProvisionalDeployments { get; set; } = new();
+}
+
+public sealed class LinuxProvisionalDeployment
+{
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; } = Guid.NewGuid();
+    [JsonPropertyName("stagingToken")] public string StagingToken { get; set; } = "";
+    [JsonPropertyName("stage")] public string Stage { get; set; } = "created";
+    [JsonPropertyName("displayName")] public string DisplayName { get; set; } = "Linux Home";
+    [JsonPropertyName("destination")] public string Destination { get; set; } = "";
+    [JsonPropertyName("hostKeyFingerprintSHA256")] public string? HostKeyFingerprintSHA256 { get; set; }
+    [JsonPropertyName("bootstrapSHA256")] public string? BootstrapSHA256 { get; set; }
+    [JsonPropertyName("bootstrapSize")] public long BootstrapSize { get; set; }
+    [JsonPropertyName("releaseID")] public string? ReleaseID { get; set; }
+    [JsonPropertyName("deviceID")] public string? DeviceID { get; set; }
+    [JsonPropertyName("createdAt")] public string CreatedAt { get; set; } = LinuxManagerTime.Now();
+    [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = LinuxManagerTime.Now();
+    [JsonPropertyName("expiresAt")] public string ExpiresAt { get; set; } =
+        LinuxManagerTime.Format(DateTimeOffset.UtcNow.AddHours(24));
+}
+
+public sealed class LinuxDeploymentInstallation
+{
+    [JsonPropertyName("operationID")] public Guid? OperationID { get; set; }
+    [JsonPropertyName("stagingToken")] public string? StagingToken { get; set; }
+    [JsonPropertyName("completedAt")] public string? CompletedAt { get; set; }
 }
 
 public sealed class LinuxDeployment
@@ -25,6 +52,7 @@ public sealed class LinuxDeployment
     [JsonPropertyName("ssh")] public LinuxDeploymentSsh Ssh { get; set; } = new();
     [JsonPropertyName("remote")] public LinuxDeploymentRemote Remote { get; set; } = new();
     [JsonPropertyName("converse")] public LinuxDeploymentConverse Converse { get; set; } = new();
+    [JsonPropertyName("installation")] public LinuxDeploymentInstallation Installation { get; set; } = new();
     [JsonPropertyName("createdAt")] public string CreatedAt { get; set; } = LinuxManagerTime.Now();
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = LinuxManagerTime.Now();
 }
@@ -57,8 +85,10 @@ public sealed class LinuxDeploymentConverse
 
 internal static class LinuxManagerTime
 {
-    public static string Now() =>
-        DateTimeOffset.UtcNow.UtcDateTime.ToString(
+    public static string Now() => Format(DateTimeOffset.UtcNow);
+
+    public static string Format(DateTimeOffset value) =>
+        value.UtcDateTime.ToString(
             "yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 }
 
@@ -114,6 +144,7 @@ public sealed class LinuxDeploymentRegistryStore
             existing.Ssh = deployment.Ssh;
             existing.Remote = deployment.Remote;
             existing.Converse = deployment.Converse;
+            existing.Installation = deployment.Installation;
             existing.CreatedAt = created;
         }
         existing.UpdatedAt = LinuxManagerTime.Now();
@@ -126,13 +157,58 @@ public sealed class LinuxDeploymentRegistryStore
         Registry.Deployments.RemoveAll(item => item.DeploymentID == deploymentID);
         Save();
     }
+
+    public IReadOnlyList<LinuxProvisionalDeployment> Provisionals =>
+        Registry.ProvisionalDeployments;
+
+    public LinuxProvisionalDeployment SaveProvisional(LinuxProvisionalDeployment provisional)
+    {
+        var existing = Registry.ProvisionalDeployments.FirstOrDefault(
+            item => item.OperationID == provisional.OperationID);
+        if (existing is null) Registry.ProvisionalDeployments.Add(provisional);
+        else if (!ReferenceEquals(existing, provisional))
+        {
+            existing.StagingToken = provisional.StagingToken;
+            existing.Stage = provisional.Stage;
+            existing.DisplayName = provisional.DisplayName;
+            existing.Destination = provisional.Destination;
+            existing.HostKeyFingerprintSHA256 = provisional.HostKeyFingerprintSHA256;
+            existing.BootstrapSHA256 = provisional.BootstrapSHA256;
+            existing.BootstrapSize = provisional.BootstrapSize;
+            existing.ReleaseID = provisional.ReleaseID;
+            existing.DeviceID = provisional.DeviceID;
+            existing.ExpiresAt = provisional.ExpiresAt;
+            provisional = existing;
+        }
+        provisional.UpdatedAt = LinuxManagerTime.Now();
+        Save();
+        return provisional;
+    }
+
+    public void SetProvisionalStage(Guid operationID, string stage, string? deviceID = null)
+    {
+        var provisional = Registry.ProvisionalDeployments.FirstOrDefault(
+            item => item.OperationID == operationID);
+        if (provisional is null) return;
+        provisional.Stage = stage;
+        if (deviceID is not null) provisional.DeviceID = deviceID;
+        provisional.UpdatedAt = LinuxManagerTime.Now();
+        Save();
+    }
+
+    public void RemoveProvisional(Guid operationID)
+    {
+        Registry.ProvisionalDeployments.RemoveAll(item => item.OperationID == operationID);
+        Save();
+    }
 }
 
 public sealed record LinuxProcessRequest(
     string FileName,
     IReadOnlyList<string> Arguments,
     string? StandardInput = null,
-    bool RequestMayHaveBeenAccepted = false);
+    bool RequestMayHaveBeenAccepted = false,
+    byte[]? StandardInputBytes = null);
 
 public sealed record LinuxProcessResult(
     int ExitCode,
@@ -181,7 +257,10 @@ public sealed class SystemLinuxProcessRunner : ILinuxProcessRunner
         {
             var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-            if (request.StandardInput is not null)
+            if (request.StandardInputBytes is not null)
+                await process.StandardInput.BaseStream.WriteAsync(
+                    request.StandardInputBytes, cancellationToken);
+            else if (request.StandardInput is not null)
                 await process.StandardInput.WriteAsync(request.StandardInput.AsMemory(), cancellationToken);
             process.StandardInput.Close();
             await process.WaitForExitAsync(cancellationToken);
@@ -203,19 +282,70 @@ public sealed record LinuxHostKeyInfo(string FingerprintSHA256, string KeyType);
 public static class LinuxSshCommands
 {
     public const string TrustProbe = "true";
-    public const string BootstrapLock = "mkdir \"$HOME/.converse-bootstrap.lock\"";
-    public const string BootstrapPreflight =
-        "chmod 700 \"$HOME/.converse-bootstrap.bin\" && exec \"$HOME/.converse-bootstrap.bin\" preflight";
-    public const string BootstrapInstall = "exec \"$HOME/.converse-bootstrap.bin\" install-self";
-    public const string BootstrapCleanup =
-        "rm -f \"$HOME/.converse-bootstrap.bin\"; rmdir \"$HOME/.converse-bootstrap.lock\"";
+    public const string BootstrapReceipt = "exec \"$HOME/.local/bin/converse\" bootstrap-receipt";
     public const string AdminRequest = "exec \"$HOME/.local/bin/converse\" admin-request";
+    public const string SecretStdin = "exec \"$HOME/.local/bin/converse\" secret-stdin";
+    public const string OfflineStatus = "exec \"$HOME/.local/bin/converse\" offline-status";
+    public const string ServiceStart = "exec \"$HOME/.local/bin/converse\" service-start";
+    public const string ServiceStop = "exec \"$HOME/.local/bin/converse\" service-stop";
+
+    private static readonly Regex TokenPattern = new("^[A-Za-z0-9-]{32,64}$", RegexOptions.Compiled);
 
     public static readonly IReadOnlyList<string> FixedRemoteCommands =
     [
-        TrustProbe, BootstrapLock, BootstrapPreflight, BootstrapInstall,
-        BootstrapCleanup, AdminRequest,
+        TrustProbe, BootstrapReceipt, AdminRequest, SecretStdin,
+        OfflineStatus, ServiceStart, ServiceStop,
     ];
+
+    public static string NewBootstrapToken() => Guid.NewGuid().ToString("N");
+
+    public static void ValidateBootstrapToken(string token)
+    {
+        if (!TokenPattern.IsMatch(token))
+            throw new ArgumentException("Invalid bootstrap staging token.");
+    }
+
+    public static string BootstrapCreateStaging(string token)
+    {
+        ValidateBootstrapToken(token);
+        return $"mkdir -p \"$HOME/.converse-bootstrap\" && mkdir \"$HOME/.converse-bootstrap/{token}\"";
+    }
+
+    public static string BootstrapPreflight(string token)
+    {
+        ValidateBootstrapToken(token);
+        return $"chmod 700 \"$HOME/.converse-bootstrap/{token}/converse\" && exec \"$HOME/.converse-bootstrap/{token}/converse\" preflight";
+    }
+
+    public static string BootstrapInstall(string token)
+    {
+        ValidateBootstrapToken(token);
+        return $"exec \"$HOME/.converse-bootstrap/{token}/converse\" install-self";
+    }
+
+    public static string BootstrapCleanup(string token)
+    {
+        ValidateBootstrapToken(token);
+        return $"rm -rf \"$HOME/.converse-bootstrap/{token}\"";
+    }
+
+    public static string BootstrapRemoteTarget(string token)
+    {
+        ValidateBootstrapToken(token);
+        return $".converse-bootstrap/{token}/converse";
+    }
+
+    public static bool IsFixedRemoteCommand(string command)
+    {
+        if (FixedRemoteCommands.Contains(command)) return true;
+        var match = Regex.Match(command, "\\.converse-bootstrap/([A-Za-z0-9-]{32,64})");
+        if (!match.Success) return false;
+        var token = match.Groups[1].Value;
+        return command == BootstrapCreateStaging(token) ||
+            command == BootstrapPreflight(token) ||
+            command == BootstrapInstall(token) ||
+            command == BootstrapCleanup(token);
+    }
 
     public static void ValidateDestination(string destination)
     {
@@ -229,7 +359,7 @@ public static class LinuxSshCommands
     public static string[] AutomatedSsh(string destination, string fixedRemoteCommand)
     {
         ValidateDestination(destination);
-        if (!FixedRemoteCommands.Contains(fixedRemoteCommand))
+        if (!IsFixedRemoteCommand(fixedRemoteCommand))
             throw new ArgumentException("Remote command is not in the Linux allowlist.");
         return
         [
@@ -276,6 +406,7 @@ public static class LinuxSshCommands
         return
         [
             "ssh",
+            "-o", "BatchMode=no",
             "-o", "StrictHostKeyChecking=ask",
             "-o", "RequestTTY=no",
             "-o", "PreferredAuthentications=none",
@@ -302,7 +433,8 @@ public static class LinuxSshCommands
     {
         if (result.ExecutableMissing) return "ssh_not_found";
         var stderr = result.StandardError;
-        if (trustOnly && result.StandardOutput.Contains("Permanently added", StringComparison.Ordinal) &&
+        if (trustOnly &&
+            (result.StandardOutput + stderr).Contains("Permanently added", StringComparison.Ordinal) &&
             stderr.Contains("Permission denied", StringComparison.Ordinal))
             return "trust_captured_verify_then_strict_preflight";
         if (result.ExitCode == 255)
@@ -381,6 +513,7 @@ public sealed class LinuxStatusSnapshot
     public string DeviceName { get; init; } = "";
     public string ProcessState { get; init; } = "";
     public string Supervisor { get; init; } = "none";
+    public bool DesiredRunning { get; init; } = true;
     public string Admission { get; init; } = "";
     public string? InstallRoot { get; init; }
     public string? StateRoot { get; init; }
@@ -419,6 +552,7 @@ public sealed class LinuxStatusSnapshot
             DeviceName = Text(device, "name") ?? "",
             ProcessState = Text(runtime, "processState") ?? "",
             Supervisor = Text(runtime, "supervisor") ?? "none",
+            DesiredRunning = runtime?["desiredRunning"]?.GetValueKind() != JsonValueKind.False,
             Admission = Text(runtime, "admission") ?? "",
             InstallRoot = Text(filesystem, "installRoot"),
             StateRoot = Text(filesystem, "stateRoot"),
@@ -458,17 +592,103 @@ public sealed class LinuxStatusSnapshot
 
 public sealed class LinuxPairingBinding
 {
-    [JsonPropertyName("bindingVersion")] public int BindingVersion { get; set; }
+    [JsonPropertyName("bindingVersion")] public int BindingVersion { get; set; } = 1;
     [JsonPropertyName("pairingID")] public Guid PairingID { get; set; }
+    [JsonPropertyName("requestCorrelationID")] public Guid RequestCorrelationID { get; set; }
+    [JsonPropertyName("nativeRequestID")] public Guid? NativeRequestID { get; set; }
     [JsonPropertyName("role")] public string Role { get; set; } = "";
     [JsonPropertyName("state")] public string State { get; set; } = "";
     [JsonPropertyName("linuxDeviceID")] public string LinuxDeviceID { get; set; } = "";
-    [JsonPropertyName("peerDeviceID")] public string PeerDeviceID { get; set; } = "";
+    [JsonPropertyName("requesterDeviceID")] public string RequesterDeviceID { get; set; } = "";
+    [JsonPropertyName("sponsorDeviceID")] public string SponsorDeviceID { get; set; } = "";
     [JsonPropertyName("peerName")] public string PeerName { get; set; } = "";
+    [JsonPropertyName("linuxPublicKeyFingerprint")] public string LinuxPublicKeyFingerprint { get; set; } = "";
+    [JsonPropertyName("requesterPublicKeyFingerprint")] public string RequesterPublicKeyFingerprint { get; set; } = "";
+    [JsonPropertyName("sponsorPublicKeyFingerprint")] public string SponsorPublicKeyFingerprint { get; set; } = "";
     [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
     [JsonPropertyName("groupName")] public string? GroupName { get; set; }
+    [JsonPropertyName("requesterConnectionInstanceID")] public Guid? RequesterConnectionInstanceID { get; set; }
+    [JsonPropertyName("sponsorConnectionInstanceID")] public Guid? SponsorConnectionInstanceID { get; set; }
     [JsonPropertyName("verificationCode")] public string? VerificationCode { get; set; }
+    [JsonPropertyName("verificationCodeFingerprint")] public string? VerificationCodeFingerprint { get; set; }
     [JsonPropertyName("expiresAt")] public string? ExpiresAt { get; set; }
     [JsonPropertyName("createdAt")] public string CreatedAt { get; set; } = "";
     [JsonPropertyName("updatedAt")] public string UpdatedAt { get; set; } = "";
+
+    [JsonIgnore]
+    public string PeerDeviceID => Role == "joiner" ? SponsorDeviceID : RequesterDeviceID;
+}
+
+public sealed class LinuxSecretReceipt
+{
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("secretID")] public string SecretID { get; set; } = "";
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "other";
+    [JsonPropertyName("backend")] public string Backend { get; set; } = "";
+    [JsonPropertyName("configured")] public bool Configured { get; set; }
+    [JsonPropertyName("storedVersion")] public long StoredVersion { get; set; }
+    [JsonPropertyName("effectiveVersion")] public long EffectiveVersion { get; set; }
+    [JsonPropertyName("pendingRestart")] public bool PendingRestart { get; set; }
+    [JsonPropertyName("updatedAt")] public string? UpdatedAt { get; set; }
+}
+
+public sealed class LinuxSecretResponse
+{
+    [JsonPropertyName("secretApiVersion")] public int SecretApiVersion { get; set; }
+    [JsonPropertyName("requestID")] public Guid RequestID { get; set; }
+    [JsonPropertyName("ok")] public bool Ok { get; set; }
+    [JsonPropertyName("receipt")] public LinuxSecretReceipt? Receipt { get; set; }
+    [JsonPropertyName("error")] public LinuxAdminError? Error { get; set; }
+}
+
+public sealed record LinuxSecretCallResult(
+    string Classification,
+    LinuxSecretResponse? Response,
+    LinuxProcessResult Process,
+    Guid? OperationID = null)
+{
+    public bool Success => Response?.Ok == true;
+    public string Message => Response?.Error?.Message ??
+        (Classification switch
+        {
+            "ssh_not_found" => "OpenSSH was not found.",
+            "ssh_host_key_changed" => "The SSH host key changed. Setup stopped.",
+            "ssh_auth_failed" => "SSH key or agent authentication failed.",
+            "ssh_unreachable" => "The Linux computer could not be reached over SSH.",
+            "ssh_disconnected_uncertain" => "SSH disconnected after the secret request may have been accepted. Check the operation instead of resending with a new ID.",
+            "ssh_protocol_error" => "The Linux secret response was not valid.",
+            _ => Process.StandardError.Trim(),
+        });
+}
+
+public sealed record LinuxSessionCreateInput(
+    Guid SessionID,
+    string Engine,
+    string? Title = null,
+    Guid? EntryID = null,
+    string? EntryName = null,
+    string? WorkingDirectory = null,
+    string? Model = null,
+    string? Effort = null,
+    string? Access = null,
+    bool MessagingEnabled = false);
+
+public sealed class LinuxSessionCreateResult
+{
+    [JsonPropertyName("sessionID")] public Guid SessionID { get; set; }
+    [JsonPropertyName("globalID")] public string GlobalID { get; set; } = "";
+    [JsonPropertyName("title")] public string Title { get; set; } = "";
+    [JsonPropertyName("engine")] public string Engine { get; set; } = "";
+}
+
+public sealed class LinuxBootstrapReceipt
+{
+    [JsonPropertyName("receiptVersion")] public int ReceiptVersion { get; set; }
+    [JsonPropertyName("operationID")] public Guid OperationID { get; set; }
+    [JsonPropertyName("stagingToken")] public string StagingToken { get; set; } = "";
+    [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
+    [JsonPropertyName("releaseID")] public string ReleaseID { get; set; } = "";
+    [JsonPropertyName("sourceSHA256")] public string SourceSHA256 { get; set; } = "";
+    [JsonPropertyName("supervisor")] public string Supervisor { get; set; } = "";
+    [JsonPropertyName("completedAt")] public string CompletedAt { get; set; } = "";
 }
