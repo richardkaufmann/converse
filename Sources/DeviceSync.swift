@@ -34,6 +34,15 @@ final class DeviceLeaseManager {
         leases[session] = DeviceLease(device: device, epoch: epoch, expiresAt: now().addingTimeInterval(ttl))
         return (true, epoch, displaced)
     }
+    // A remembered display may return only if no newer take occurred, even if
+    // that newer holder has since disconnected. Epochs survive home restarts.
+    func resume(session: UUID, device: String, expectedEpoch: UInt64) -> (granted: Bool, epoch: UInt64, displaced: String?) {
+        guard epochs[session] == expectedEpoch,
+              holder(session: session).map({ $0.device == device }) ?? true else {
+            return (false, epochs[session] ?? 0, nil)
+        }
+        return acquire(session: session, device: device)
+    }
     func heartbeat(session: UUID, device: String, epoch: UInt64) -> Bool {
         guard validate(session: session, device: device, epoch: epoch) else { return false }
         leases[session]?.expiresAt = now().addingTimeInterval(ttl); return true
@@ -46,10 +55,10 @@ final class DeviceLeaseManager {
         if lease.expiresAt <= now() { leases.removeValue(forKey: session); return false }
         return lease.device == device && lease.epoch == epoch
     }
-    func sweepExpired() -> [(session: UUID, device: String)] {
+    func sweepExpired() -> [(session: UUID, device: String, epoch: UInt64)] {
         let expired = leases.filter { $0.value.expiresAt <= now() }
         for key in expired.keys { leases.removeValue(forKey: key) }
-        return expired.map { (session: $0.key, device: $0.value.device) }
+        return expired.map { (session: $0.key, device: $0.value.device, epoch: $0.value.epoch) }
     }
     func holder(session: UUID) -> DeviceLease? {
         guard let lease = leases[session], lease.expiresAt > now() else { return nil }

@@ -183,7 +183,7 @@ final class PadModel: ObservableObject {
         for id in state.drafts.keys { flush(id) }; persist(); service.suspendViewer(); hydratedEpochs = [:]
         if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
     }
-    func foreground() { service.resumeViewer() } // No acquire: never steals on foreground.
+    func foreground() { service.resumeViewer() } // Saved displays resume conditionally after the home reconnects.
 }
 
 enum PadImage {

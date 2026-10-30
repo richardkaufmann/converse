@@ -51,7 +51,7 @@ struct AgentSetupView: View {
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
                         AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
-                        Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
+                        Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art with Muse Image (at most once per hour or mood change)", isOn: $settings.generateArt)
@@ -64,8 +64,9 @@ struct AgentSetupView: View {
                         Toggle("Allow Discord channel alerts", isOn: $settings.discord)
                         Toggle("Anyone in this channel may @mention this agent", isOn: Binding(get: { settings.discordMentions == true }, set: { settings.discordMentions = $0 }))
                         if settings.discordMentions == true {
+                            Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                             Toggle("Default agent for this channel", isOn: Binding(get: { settings.discordDefault == true }, set: { settings.discordDefault = $0 }))
-                            Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request uses one automatic turn and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
+                            Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request gets a fresh activation limit and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
                         }
                         Text("Sessions this agent may read and message · select explicitly").font(.headline)
                         ScrollView {
@@ -157,6 +158,7 @@ struct AgentSetupView: View {
             if current.discordMentions != settings.discordMentions || current.discordChannelID != channel {
                 current.discordMentionSince = settings.discordMentions == true ? Date() : nil
             }
+            current.discordShareScoreboard = settings.discordShareScoreboard
             current.discordMentions = settings.discordMentions; current.discordDefault = settings.discordDefault
             current.discordChannelID = channel; current.discordRead = settings.discordRead
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
@@ -164,6 +166,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             session.agent = current; session.toolStatus.model = current.model
+            if current.enabled && session.pending.isEmpty { session.queuePaused = false }
             Store.shared.save(); close()
         } catch { self.error = error.localizedDescription }
     }
@@ -189,7 +192,7 @@ struct AgentControls: View {
             }
             ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
                 Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
-                Text("\(session.agent?.remainingRuns ?? 0) automatic runs left").font(.caption).foregroundStyle(.secondary)
+                Text("\(session.agent?.turnLimit ?? 0) maximum turns per loop").font(.caption).foregroundStyle(.secondary)
                 if session.agent?.discordMentions == true {
                     TimelineView(.periodic(from: .now, by: 5)) { _ in
                         Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
@@ -197,8 +200,8 @@ struct AgentControls: View {
                 }
                 Button("Loop…") { loopSettings = true }
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
-                Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.remainingRuns ?? 0) == 0)
-                    .help("Check now using one automatic run; this does not enable the periodic loop")
+                Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
+                    .help("Check now with a fresh per-activation limit; this does not enable the periodic loop")
                 Button(conversation.owns(session) ? "Stop talking" : "Start talking!") {
                     if conversation.owns(session) { conversation.stop() }
                     else { dictating = false; voice.cancel(); conversation.start(session, store: .shared) }
@@ -280,7 +283,8 @@ struct AgentLoopOptions: View {
             Text(session.busy ? "Thinking now. Changing the loop does not stop this run." : "Idle. You can still talk to this agent while its loop is off.").font(.callout).foregroundStyle(.secondary)
             Toggle("Automatic loop", isOn: $enabled)
             AgentScheduleEditor(seconds: Binding(get: { minutes * 60 }, set: { minutes = $0 / 60 }), text: $scheduleText, zone: $scheduleTimeZone)
-            Stepper("Automatic turns remaining: \(turns)", value: $turns, in: 0...1000)
+            Stepper("Maximum turns per loop: \(turns)", value: $turns, in: 1...1000)
+            Text("A fresh ceiling for each activation. Checks currently use one model response; future scheduled checks are not spent.").font(.caption).foregroundStyle(.secondary)
             Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
             Text("Run once refreshes the scoreboard immediately. Artwork keeps its mood-change / hourly limit. Loops run while Converse is open on this agent’s home. Errors pause the loop.").font(.caption).foregroundStyle(.secondary)
             if session.queuePaused && !session.pending.isEmpty { Text("Held messages require Resume queue before the loop can continue.").font(.caption).foregroundStyle(.orange) }
@@ -295,7 +299,7 @@ struct AgentLoopOptions: View {
     }
     private func reload() {
         let config = session.agent ?? AgentConfig()
-        enabled = config.enabled; minutes = config.intervalSeconds / 60; scheduleText = config.scheduleText; scheduleTimeZone = config.scheduleTimeZone; turns = config.remainingRuns; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
+        enabled = config.enabled; minutes = config.intervalSeconds / 60; scheduleText = config.scheduleText; scheduleTimeZone = config.scheduleTimeZone; turns = config.turnLimit; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
     }
     private func save() -> Bool {
         do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, scheduleText: scheduleText, scheduleTimeZone: scheduleTimeZone, expectedRevision: revision); return true }
@@ -520,7 +524,7 @@ struct RemoteAgentSetupView: View {
                 TextField("Optional repository · owner/name", text: $settings.repository)
                 TextField("Model", text: $settings.model)
                 AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
-                Stepper("Autonomous runs remaining: \(settings.remainingRuns)", value: $settings.remainingRuns, in: 0...1000)
+                Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
                 Toggle("Generate status art", isOn: $settings.generateArt)
                 Toggle("Speak on the home", isOn: $settings.speak)

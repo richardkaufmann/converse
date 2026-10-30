@@ -98,7 +98,7 @@ public sealed partial class MainWindow
             var previewButton = new Button { Content = "Preview schedule" }; panel.Children.Add(previewButton);
             void ReadSchedule() { settings.IntervalSeconds = seconds.Value * 60; settings.ScheduleText = schedule.Text; settings.ScheduleTimeZone = zone.Text; }
             previewButton.Click += (_, _) => { try { ReadSchedule(); var rule = AgentSchedule.Compile(settings); var now = DateTime.UtcNow; var times = new List<string>(); for (var n = 0; n < 3 && rule.Next(now) is { } next; n++) { times.Add(next.ToLocalTime().ToString("g")); now = next; } preview.Text = string.Join(" · ", times) + " (this device's time)"; } catch (Exception ex) { preview.Text = ex.Message; } };
-            var runs = new NumberBox { Header = "Automatic runs remaining", Value = settings.RemainingRuns, Minimum = 0, Maximum = 1000 }; panel.Children.Add(runs);
+            var runs = new NumberBox { Header = "Maximum turns per loop", Value = settings.TurnLimit, Minimum = 1, Maximum = 1000 }; panel.Children.Add(runs);
             var cadence = new NumberBox { Header = "Refresh scoreboard every N loops", Value = settings.ScoreboardEveryLoops ?? 1, Minimum = 1, Maximum = 1000 }; panel.Children.Add(cadence);
             var art = new CheckBox { Content = "Generate mood art", IsChecked = settings.GenerateArt }; panel.Children.Add(art);
             panel.Children.Add(new TextBlock { Text = "Sessions this agent may read and message · select explicitly", TextWrapping = TextWrapping.Wrap });
@@ -123,7 +123,7 @@ public sealed partial class MainWindow
                     ReadSchedule(); AgentSchedule.Compile(settings);
                     if (!double.IsFinite(runs.Value) || !double.IsFinite(cadence.Value)) throw new ArgumentException("Enter a run allowance and scoreboard interval.");
                     settings.Model = model.Text; settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
-                    settings.RemainingRuns = checked((int)runs.Value); settings.ScoreboardEveryLoops = checked((int)cadence.Value); settings.GenerateArt = art.IsChecked == true;
+                    settings.TurnLimit = checked((int)runs.Value); settings.ScoreboardEveryLoops = checked((int)cadence.Value); settings.GenerateArt = art.IsChecked == true;
                     // Preserve selected IDs temporarily absent from the current directory.
                     settings.Watched = settings.Watched.Except(scope.Select(s => s.Id)).Concat(scope.Where(s => s.Box.IsChecked == true).Select(s => s.Id)).Distinct().ToList();
                     if (local?.Agent is { } config)

@@ -11,6 +11,7 @@ struct DiscordMentionRequest: Codable, Equatable {
     var state = "queued"
     var reply: String? = nil
     var receipt: String? = nil
+    var imageHash: String? = nil
 }
 struct DiscordMentionJournal: Codable {
     var botID = ""
@@ -160,8 +161,8 @@ struct DiscordMentionJournal: Codable {
                         item.reply = "Use @Converse Agent Name: question. Available here: " + candidates.map(\.title).joined(separator: ", ")
                     } else if journal.requests.filter({ $0.state == "queued" || $0.state == "running" }).count >= 20 {
                         item.state = "ready"; item.reply = "The agent queue is full. Please try again later."
-                    } else if (target?.agent?.remainingRuns ?? 0) <= 0 {
-                        item.state = "ready"; item.reply = "This agent has no automatic turns left. Add turns in Converse, then send a new mention."
+                    } else if (target?.agent?.turnLimit ?? 0) <= 0 {
+                        item.state = "ready"; item.reply = "This agent has an invalid per-loop limit. Review Agent Setup, then send a new mention."
                     }
                     guard journal.requests.count < 4000 else { throw AgentFailure.message("Discord request journal is full; commands remain unread until room is available") }
                     journal.requests.append(item)
@@ -200,14 +201,14 @@ struct DiscordMentionJournal: Codable {
             guard !session.busy, !session.queuePaused, session.pending.isEmpty, !session.changingSetting,
                   !AgentConversation.shared.owns(session), session.agent?.jollyRequestID == nil,
                   session.agent?.discordActiveRequestID == nil else { continue }
-            guard var config = session.agent, config.remainingRuns > 0 else {
-                journal.requests[i].state = "ready"; journal.requests[i].reply = "This agent has no automatic turns left. Add turns in Converse, then send a new mention."
+            guard var config = session.agent, config.turnLimit > 0 else {
+                journal.requests[i].state = "ready"; journal.requests[i].reply = "This agent has an invalid per-loop limit. Review Agent Setup, then send a new mention."
                 try persist(store); continue
             }
             journal.requests[i].state = "running"; try persist(store)
             let previous = session.agent
-            config.settingsChanged(); config.remainingRuns -= 1
-            if config.remainingRuns == 0 { config.enabled = false }
+            config.settingsChanged()
+
             config.discordActiveRequestID = request.id; session.agent = config
             do { try store.saveChecked() } catch { session.agent = previous; throw error }
             let draft = session.draft, images = session.attachments
@@ -223,8 +224,15 @@ struct DiscordMentionJournal: Codable {
     func active(_ session: Session) -> DiscordMentionRequest? {
         journal.requests.first { $0.id == session.agent?.discordActiveRequestID && $0.sessionID == session.id && $0.state == "running" }
     }
-    func complete(_ id: String, text: String, store: Store) throws {
+    func complete(_ id: String, text: String, store: Store, image: Data? = nil) throws {
         guard let i = journal.requests.firstIndex(where: { $0.id == id && $0.state == "running" }) else { return }
+        if let image {
+            let hash = DeviceBlob.sha256Hex(image)
+            let folder = Self.file(store).deletingLastPathComponent().appendingPathComponent("Images")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try image.write(to: folder.appendingPathComponent(hash + ".png"), options: .atomic)
+            journal.requests[i].imageHash = hash
+        }
         journal.requests[i].reply = String(text.prefix(1700)); journal.requests[i].state = "ready"
         try persist(store)
         if let session = store.sessions.first(where: { $0.id == journal.requests[i].sessionID }) {
@@ -240,9 +248,24 @@ struct DiscordMentionJournal: Codable {
             do {
                 // Persist the attempt before network I/O; a timeout or crash
                 // cannot cause a duplicate public reply on the next poll.
+                var image: Data? = nil
+                var reply = request.reply ?? "Request ended without a reply."
+                if let hash = request.imageHash {
+                    if targets.first(where: { $0.id == request.sessionID })?.agent?.discordShareScoreboard != true {
+                        reply = "Scoreboard sharing was turned off before delivery. No image was sent."
+                    } else {
+                        guard hash.count == 64, hash.allSatisfy({ $0.isHexDigit }) else { throw AgentFailure.message("Invalid saved Discord image.") }
+                        let file = Self.file(store).deletingLastPathComponent().appendingPathComponent("Images/" + hash + ".png")
+                        let info = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                        guard info.isRegularFile == true, info.isSymbolicLink != true, (info.fileSize ?? Int.max) <= 8_000_000 else { throw AgentFailure.message("Saved Discord image is unavailable or too large.") }
+                        let bytes = try Data(contentsOf: file)
+                        guard bytes.count <= 8_000_000, DeviceBlob.verify(bytes, sha256Hex: hash) else { throw AgentFailure.message("Saved Discord image could not be verified.") }
+                        image = bytes
+                    }
+                }
                 journal.requests[i].state = "sending"; try persist(store)
                 let title = targets.first(where: { $0.id == request.sessionID })?.title ?? "Converse"
-                let receipt = try await runtime.discordClient.post("[" + String(title.prefix(60)) + "] " + (request.reply ?? "Request ended without a reply."), channel: request.channel, token: token, api: runtime.api, replyingTo: request.id, nonce: request.id)
+                let receipt = try await runtime.discordClient.post("[" + String(title.prefix(60)) + "] " + reply, channel: request.channel, token: token, api: runtime.api, replyingTo: request.id, nonce: request.id, image: image)
                 journal.requests[i].receipt = receipt; journal.requests[i].state = "done"
                 try persist(store)
                 lastError = ""

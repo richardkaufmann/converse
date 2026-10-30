@@ -372,12 +372,12 @@ final class Store: ObservableObject {
         guard !s.pending.isEmpty else { return }
         if var config = s.agent, let next = s.pending.first,
            ((next.switchboardHop ?? 0) > 0 || next.autonomous == true), next.agentRunReserved != true {
-            guard config.remainingRuns > 0 else {
-                s.queuePaused = true; s.agent?.attention = "Automatic run budget exhausted. Add runs in Agent Setup, then resume the queue."; save(); return
+            guard config.turnLimit > 0 else {
+                s.queuePaused = true; s.agent?.attention = "Invalid per-loop turn limit. Review Agent Setup, then resume the queue."; save(); return
             }
             let previous = s.agent
-            config.settingsChanged(); config.remainingRuns -= 1
-            if config.remainingRuns == 0 { config.enabled = false }
+            config.settingsChanged()
+
             s.agent = config; s.pending[0].agentRunReserved = true
             do { try saveChecked() }
             catch { s.agent = previous; s.pending[0].agentRunReserved = false; s.queuePaused = true; s.agent?.attention = "Could not save run budget. Agent paused."; return }
@@ -2033,6 +2033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var windows: [(NSWindow, WindowState)] = []
     var paneObserver: AnyCancellable?
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
+    private var quitting = false
     var transcriptExporter: TranscriptExportController?
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
@@ -2047,7 +2048,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             preview.requests = [MuseRequest(id: "isolated-approval-preview", kind: "approval", params: ["toolName": "Offline permission preview", "rawArgs": "Read a test file in the isolated QA folder", "availableChoices": [["choiceId": "allow-once", "label": "Allow once"], ["choiceId": "deny", "label": "Deny"]]])]
             preview.status = "Waiting for your approval"
         }
-        buildMenu(); newWindow(); NSApp.activate(ignoringOtherApps: true)
+        buildMenu()
+        let savedWindows = Workspace.shared.restore(folder: Store.shared.folder)
+        if savedWindows.isEmpty { newWindow() }
+        else { for id in savedWindows { makeWindow(WindowState(id: id)) } }
+        NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
@@ -2126,8 +2131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func showJolly() { MainActor.assumeIsolated { jollyController.show() } }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app")]) }
-    @objc func newWindow() {
-        let state = WindowState()
+    @objc func newWindow() { makeWindow(WindowState()) }
+    private func makeWindow(_ state: WindowState) {
         state.setup = windows.isEmpty && !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
@@ -2138,7 +2143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
         if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }
         windows.append((window, state)); paneLayouts[state.id] = WindowPaneLayout(window: window); window.makeKeyAndOrderFront(nil)
-        paneLayouts[state.id]?.setPaneCount(0)
+        paneLayouts[state.id]?.setPaneCount(Workspace.shared.placements.values.filter { $0.windowID == state.id }.count)
         NSApp.addWindowsItem(window, title: state.title, filename: false)
     }
     func updatePaneWidths(_ placements: [UUID: PaneLocation]) {
@@ -2225,6 +2230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         assign(session, to: state, pane: pane)
     }
     func windowWillClose(_ notification: Notification) {
+        guard !quitting else { return }
         guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
         paneLayouts.removeValue(forKey: state.id)
         DeviceSyncService.shared.releaseWindow(placements: Workspace.shared.placements, windowID: state.id)
@@ -2240,6 +2246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             alert.addButton(withTitle: "Keep Running"); alert.addButton(withTitle: warning.quitButton)
             return alert.runModal() == .alertSecondButtonReturn
         }, stopAgents: { MainActor.assumeIsolated { JollyRouter.shared.stop(store: .shared); AgentRuntime.shared.prepareForQuit() } })
+        quitting = confirmed
         return confirmed ? .terminateNow : .terminateCancel
     }
 }

@@ -232,7 +232,11 @@ struct PadPane: View {
                 Text(service.lastOutcome).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(8)
             }
             HStack {
-                PhotosPicker(selection: $photo, matching: .images) { Image(systemName: "photo") }.accessibilityLabel("Attach photo")
+                Button {
+                    if let data = UIPasteboard.general.image?.pngData() { model.attach(id, data: data) }
+                    else { model.error = "The clipboard does not contain an image. Copy an image first, or choose Photos." }
+                } label: { Image(systemName: "doc.on.clipboard") }.accessibilityLabel("Paste clipboard image")
+                PhotosPicker(selection: $photo, matching: .images) { Image(systemName: "photo") }.accessibilityLabel("Choose image from Photos")
                 Button { importing = true } label: { Image(systemName: "paperclip") }.accessibilityLabel("Attach image file")
                 if !model.draft(id).hashes.isEmpty {
                     Text("\(model.draft(id).hashes.count) images").font(.caption)
@@ -244,10 +248,15 @@ struct PadPane: View {
             }.padding(8).disabled(!model.canControl(id))
         }.background(Color(uiColor: .systemBackground)).frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: photo) { _, value in
+                guard let value else { return }
+                let destination = id
                 Task {
-                    do { if let bytes = try await value?.loadTransferable(type: Data.self) { model.attach(id, data: bytes) } }
-                    catch { model.error = error.localizedDescription }
-                    photo = nil
+                    do {
+                        if let bytes = try await value.loadTransferable(type: Data.self), photo == value, id == destination {
+                            model.attach(destination, data: bytes)
+                        }
+                    } catch { model.error = error.localizedDescription }
+                    if photo == value { photo = nil }
                 }
             }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.image]) { result in

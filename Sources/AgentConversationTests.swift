@@ -43,9 +43,9 @@ import AppKit
     talk.start(session, store: store)
     check(talk.phase == .listening && listens == 1, "Start talking opens exactly one listening turn without submitting anything")
     session.agent?.enabled = true; session.agent?.nextRunAt = .distantPast
-    let allowance = session.agent?.remainingRuns
+    let allowance = session.agent?.turnLimit
     AgentRuntime().tick(store: store)
-    check(starts == 0 && session.agent?.remainingRuns == allowance, "Automatic agent loops hold their budget while a voice conversation owns the session")
+    check(starts == 0 && session.agent?.turnLimit == allowance, "Automatic agent loops hold their budget while a voice conversation owns the session")
     talk.transcribed("How is the project?")
     let responseID = session.messages.last!.id
     check(talk.phase == .thinking && starts == 1 && listens == 1 && draftAtStart && session.draft == "keep typed draft", "Recognized voice sends one human turn with the microphone off and preserves persisted typing and images")

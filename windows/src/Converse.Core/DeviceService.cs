@@ -274,6 +274,7 @@ public sealed partial class DeviceSyncService : IDisposable
     public int ListeningPort { get; private set; }
     public event Action? Changed;
     public event Action<string>? RemoteViewDisplaced;
+    public Func<string, bool>? IsViewerPlaced { get; set; }
     public Func<PairingPrompt, Task<bool>>? PairingConfirmation { get; set; }
 
     // Converse Groups state, mirroring Swift DeviceTransport.
@@ -300,6 +301,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, TaskCompletionSource<string?>> _blobDownloads = new();
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
+    private Dictionary<string, ulong> _resumeEpochs = new();
     private readonly SemaphoreSlim _pairingQueue = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> _connecting = new();
     private readonly DeviceSyncCounters _syncCounters;
@@ -314,6 +316,8 @@ public sealed partial class DeviceSyncService : IDisposable
         _folder = folder;
         _store = store;
         Directory.CreateDirectory(folder);
+        try { _resumeEpochs = JsonSerializer.Deserialize<Dictionary<string, ulong>>(File.ReadAllText(Path.Combine(folder, "display-resume.json"))) ?? new(); }
+        catch { _resumeEpochs = new(); }
         var keyFile = Path.Combine(folder, "device-key.bin");
         // Core keeps plain test storage; the app must DPAPI-protect this file.
         _staticPrivate = File.Exists(keyFile) ? File.ReadAllBytes(keyFile) : CreateKeyFile(keyFile);
@@ -403,7 +407,7 @@ public sealed partial class DeviceSyncService : IDisposable
     // direction: dispatch and every publisher check membership first.
     private static readonly HashSet<string> SessionKinds = new(StringComparer.Ordinal)
     {
-        DeviceKind.SidebarSnapshot, DeviceKind.LeaseAcquire, DeviceKind.LeaseGranted,
+        DeviceKind.SidebarSnapshot, DeviceKind.LeaseAcquire, DeviceKind.LeaseResume, DeviceKind.LeaseExpired, DeviceKind.LeaseGranted,
         DeviceKind.LeaseDenied, DeviceKind.LeaseStolen, DeviceKind.LeaseHeartbeat,
         DeviceKind.LeaseRelease, DeviceKind.TranscriptSnapshot, DeviceKind.TranscriptRequest,
         DeviceKind.DraftPatch, DeviceKind.Command, DeviceKind.CommandQuery, DeviceKind.CommandAck,
@@ -538,7 +542,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
-        Capabilities = new[] { "sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1" },
+        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -575,11 +579,12 @@ public sealed partial class DeviceSyncService : IDisposable
                     peer.LeasedSessions.Remove(expired.Session);
                     await SendEnvelopeAsync(peer, new DeviceEnvelope
                     {
-                        Kind = DeviceKind.LeaseStolen, Boot = _boot,
-                        SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(),
+                        Kind = peer.Hello?.Capabilities.Contains("lease-resume-v1") == true ? DeviceKind.LeaseExpired : DeviceKind.LeaseStolen, Boot = _boot,
+                        SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(), Epoch = expired.Epoch,
                     });
                 }
             }
+            await RestoreAvailableDisplaysAsync();
             foreach (var (globalId, epoch) in RemoteLeases.ToList())
             {
                 var parsed = DeviceGlobalID.Parse(globalId);
@@ -1654,9 +1659,12 @@ public sealed partial class DeviceSyncService : IDisposable
                 Changed?.Invoke();
                 break;
             case DeviceKind.LeaseAcquire:
+            case DeviceKind.LeaseResume:
                 if (HomeSession(envelope) is { } leased)
                 {
-                    var result = _leases.Acquire(leased.Id, peerHome);
+                    var result = envelope.Kind == DeviceKind.LeaseResume
+                        ? _leases.Resume(leased.Id, peerHome, envelope.Epoch ?? 0)
+                        : _leases.Acquire(leased.Id, peerHome);
                     if (!result.Granted) { await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseDenied, Boot = _boot, SessionID = envelope.SessionID }); break; }
                     // Mac parity: the displaced previous holder must drop its
                     // view, or two devices show one session as live. The
@@ -1695,9 +1703,16 @@ public sealed partial class DeviceSyncService : IDisposable
             case DeviceKind.LeaseGranted:
                 if (envelope.SessionID is { } grantedId && DeviceGlobalID.Parse(grantedId)?.Home == peerHome && envelope.Epoch is { } grantEpoch)
                 {
-                    if (_pendingTakes.Remove(grantedId)) { RemoteLeases[grantedId] = grantEpoch; RemoteOffline.Remove(grantedId); }
-                    else if (RemoteLeases.TryGetValue(grantedId, out var current) && grantEpoch > current) RemoteLeases[grantedId] = grantEpoch;
+                    if (_pendingTakes.Remove(grantedId)) { RememberDisplay(grantedId, grantEpoch); RemoteLeases[grantedId] = grantEpoch; RemoteOffline.Remove(grantedId); }
+                    else if (RemoteLeases.TryGetValue(grantedId, out var current) && grantEpoch > current) { RememberDisplay(grantedId, grantEpoch); RemoteLeases[grantedId] = grantEpoch; }
                     else await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseRelease, SessionID = grantedId, Epoch = grantEpoch });
+                    Changed?.Invoke();
+                }
+                break;
+            case DeviceKind.LeaseExpired:
+                if (envelope.SessionID is { } expiredId && DeviceGlobalID.Parse(expiredId)?.Home == peerHome && envelope.Epoch is { } expiredEpoch && RemoteLeases.GetValueOrDefault(expiredId) == expiredEpoch)
+                {
+                    RemoteLeases.Remove(expiredId); RemoteOffline.Add(expiredId);
                     Changed?.Invoke();
                 }
                 break;
@@ -1705,6 +1720,7 @@ public sealed partial class DeviceSyncService : IDisposable
             case DeviceKind.LeaseDenied:
                 if (envelope.SessionID is { } stolenId && DeviceGlobalID.Parse(stolenId)?.Home == peerHome)
                 {
+                    ForgetDisplay(stolenId);
                     _pendingTakes.Remove(stolenId);
                     RemoteLeases.Remove(stolenId);
                     RemoteTranscripts.Remove(stolenId);
@@ -1902,6 +1918,32 @@ public sealed partial class DeviceSyncService : IDisposable
         _peers.Values.FirstOrDefault(p => p.TrustedReady && !p.ControlOnly && p.Hello?.DeviceID == home
             && Homes.GetValueOrDefault(home)?.Online == true && IsGroupMember(home));
 
+    private void SaveResumeEpochs()
+    {
+        try
+        {
+            var file = Path.Combine(_folder, "display-resume.json");
+            var temporary = file + ".tmp";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(_resumeEpochs));
+            File.Move(temporary, file, true);
+        }
+        catch { LastOutcome = "Could not save display restore state. Take manually after restarting."; }
+    }
+    private void RememberDisplay(string id, ulong epoch) { _resumeEpochs[id] = epoch; SaveResumeEpochs(); }
+    private void ForgetDisplay(string id) { if (_resumeEpochs.Remove(id)) SaveResumeEpochs(); }
+    public async Task RestoreAvailableDisplaysAsync()
+    {
+        foreach (var (id, epoch) in _resumeEpochs.ToList())
+        {
+            if (IsViewerPlaced?.Invoke(id) != true || RemoteLeases.ContainsKey(id) || _pendingTakes.ContainsKey(id) ||
+                DeviceGlobalID.Parse(id) is not { } global || PeerForHome(global.Home) is not { } peer ||
+                !peer.Hello!.Capabilities.Contains("lease-resume-v1")) continue;
+            RemoteTranscripts.Remove(id);
+            _pendingTakes[id] = DateTime.UtcNow;
+            await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseResume, SessionID = id, Epoch = epoch });
+        }
+    }
+
     public async Task AcquireRemoteAsync(string globalId)
     {
         var parsed = DeviceGlobalID.Parse(globalId);
@@ -1914,6 +1956,7 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public async Task ReleaseRemoteAsync(string globalId)
     {
+        ForgetDisplay(globalId);
         _pendingTakes.Remove(globalId);
         if (DeviceGlobalID.Parse(globalId) is { } parsed && RemoteLeases.TryGetValue(globalId, out var epoch) &&
             PeerForHome(parsed.Home) is { } peer)
@@ -1983,7 +2026,8 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         if (!_store.Sessions.Any(s => s.Id == sessionId)) return false;
         var holder = _leases.Holder(sessionId);
-        if (holder is null || holder.Value.Device == DeviceId) return true;
+        // A local take must fence offline viewers too, not just live holders.
+        if (holder?.Device == DeviceId) return true;
         var result = _leases.Acquire(sessionId, DeviceId);
         if (!result.Granted) { LastOutcome = "Could not record local display fence."; return false; }
         foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == result.Displaced).ToArray())

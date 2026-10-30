@@ -15,7 +15,7 @@ import Foundation
     let now = Date(), since = Date().addingTimeInterval(-30)
     for s in [a, b] {
         s.agent?.discordMentions = true; s.agent?.discordChannelID = "42"; s.agent?.discordMentionSince = since
-        s.agent?.remainingRuns = 5; s.agent?.generateArt = false; s.agent?.webSearch = false
+        s.agent?.turnLimit = 5; s.agent?.generateArt = false; s.agent?.webSearch = false
     }
     a.agent?.discordDefault = true
     check(AgentDiscordRouter.resolve("What is new?", sessions: [a, b]).0 === a, "Unqualified Discord mention selects only the configured channel default")
@@ -70,19 +70,19 @@ import Foundation
     a.agent?.watchedSessions = [b.id]
     rows = [row(id1, "question")]
     wait { await runtime.discordRouter.poll(store: store, runtime: runtime, now: now) }
-    check(runtime.discordRouter.pendingRequests.count == 1 && runtime.discordRouter.pendingRequests[0].state == "queued" && a.busy && a.agent?.remainingRuns == 5 && models == 0, "Busy Discord target queues durably without interruption or early budget spending")
+    check(runtime.discordRouter.pendingRequests.count == 1 && runtime.discordRouter.pendingRequests[0].state == "queued" && a.busy && a.agent?.turnLimit == 5 && models == 0, "Busy Discord target queues durably without interruption or early budget spending")
     check(reads == 1, "N agents in one channel share one listener read")
     wait { await runtime.discordRouter.poll(store: store, runtime: runtime, now: now) }
     check(runtime.discordRouter.pendingRequests.count == 1, "Repeated polling cannot enqueue a duplicate Discord message")
     a.busy = false; a.queuePaused = true
     wait { await runtime.discordRouter.poll(store: store, runtime: runtime, now: now) }
-    check(models == 0 && a.agent?.remainingRuns == 5, "Discord respects the user's paused queue")
+    check(models == 0 && a.agent?.turnLimit == 5, "Discord respects the user's paused queue")
     a.queuePaused = false
     store.startAgentRun = { session, responseID in runtime.run(session, store: store, responseID: responseID) }
     wait { await runtime.discordRouter.poll(store: store, runtime: runtime, now: now) }
     let end = Date().addingTimeInterval(8)
     while a.busy && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-    check(!a.busy && models == 1 && a.agent?.remainingRuns == 4 && a.draft == "PRIVATE-DRAFT-CANARY" && a.attachments == ["/private/attachment"], "Queued mention runs once, consumes one turn and preserves editable draft and attachments")
+    check(!a.busy && models == 1 && a.agent?.turnLimit == 5 && a.draft == "PRIVATE-DRAFT-CANARY" && a.attachments == ["/private/attachment"], "Queued mention runs once, preserves the per-activation limit and preserves editable draft and attachments")
     check(!modelInput.contains("PRIVATE-") && modelInput.contains("question") && b.pending.isEmpty && a.agent?.workingMemory == "PRIVATE-MEMORY-CANARY", "Public Discord turn excludes private evidence and cannot execute tell, memory or alert actions")
     wait { await runtime.discordRouter.poll(store: store, runtime: runtime, now: now) }
     check(posts.count == 1 && (posts.first?["message_reference"] as? [String: Any])?["message_id"] as? String == id1 && (posts.first?["allowed_mentions"] as? [String: Any])?["replied_user"] as? Bool == false && posts.first?["enforce_nonce"] as? Bool == true, "Discord result replies to its source message with mentions suppressed and nonce deduplication")
@@ -119,16 +119,16 @@ import Foundation
         try JSONEncoder().encode(journal).write(to: AgentDiscordRouter.file(store), options: .atomic)
     }
     do {
-        try queuedFixture(); a.agent?.remainingRuns = 0
+        try queuedFixture(); a.agent?.turnLimit = 0
         let budget = AgentRuntime(); budget.api.request = runtime.api.request; budget.keyReader = runtime.keyReader
         let beforeModels = models
         wait { await budget.discordRouter.poll(store: store, runtime: budget, now: now) }
-        check(models == beforeModels && (posts.last?["content"] as? String)?.contains("no automatic turns left") == true, "Queued mention rechecks exhausted budget before a model call")
-        a.agent?.remainingRuns = 3; a.agent?.discordMentionSince = now.addingTimeInterval(-900)
+        check(models == beforeModels && (posts.last?["content"] as? String)?.contains("invalid per-loop limit") == true, "Queued mention rechecks invalid activation limit before a model call")
+        a.agent?.turnLimit = 3; a.agent?.discordMentionSince = now.addingTimeInterval(-900)
         try queuedFixture(received: now.addingTimeInterval(-601))
         let expiry = AgentRuntime(); expiry.api.request = runtime.api.request; expiry.keyReader = runtime.keyReader
         wait { await expiry.discordRouter.poll(store: store, runtime: expiry, now: now) }
-        check(models == beforeModels && a.agent?.remainingRuns == 3 && (posts.last?["content"] as? String)?.contains("expired") == true, "Stale queued mentions expire without spending a turn")
+        check(models == beforeModels && a.agent?.turnLimit == 3 && (posts.last?["content"] as? String)?.contains("expired") == true, "Stale queued mentions expire without spending a turn")
         try queuedFixture(); a.agent?.discordMentions = false
         let revoked = AgentRuntime(); revoked.api.request = runtime.api.request; revoked.keyReader = runtime.keyReader
         let beforePosts = posts.count
@@ -141,7 +141,7 @@ import Foundation
         wait { await resumed.discordRouter.poll(store: store, runtime: resumed, now: now) }
         let end = Date().addingTimeInterval(8)
         while a.busy && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-        check(models == beforeModels + 1 && a.agent?.remainingRuns == 2, "An accepted queued mention survives restart and starts exactly once")
+        check(models == beforeModels + 1 && a.agent?.turnLimit == 3, "An accepted queued mention survives restart and starts exactly once")
         resumed.prepareForQuit()
         let beforeReads = reads
         wait { await resumed.discordRouter.poll(store: store, runtime: resumed, now: now) }
@@ -171,7 +171,7 @@ import Foundation
     isolatedStore.startAgentRun = { session, _ in if session === healthy { healthyStarts += 1 } }
     rows = [row(id1, "public question")]
     wait { await isolatedRuntime.discordRouter.poll(store: isolatedStore, runtime: isolatedRuntime, now: now) }
-    check(healthyStarts == 1 && healthy.agent?.remainingRuns == 19, "A denied channel cannot starve queued requests in another enabled channel")
+    check(healthyStarts == 1 && healthy.agent?.turnLimit == 20, "A denied channel cannot starve queued requests in another enabled channel")
     isolatedRuntime.prepareForQuit()
     runtime.prepareForQuit(); restarted.prepareForQuit(); afterFailure.prepareForQuit()
 }

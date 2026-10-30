@@ -14,6 +14,34 @@ import Foundation
     func row(_ id: String, text: String = "A complaint", bot: Bool = false) -> [String: Any] {
         ["id": id, "channel_id": "42", "content": text, "author": ["username": "Fixture", "bot": bot], "timestamp": "2026-10-30T03:00:00Z", "type": 0]
     }
+    let table = "### Report\n| Name | State |\n|---|---|\n| Steward | **Ready** |"
+    check(AgentDiscord.format(table).contains("**Name:** Steward · **State:** **Ready**") && !AgentDiscord.format(table).contains("|---|"), "Discord preserves Markdown and renders tables as readable labelled fields")
+    check(AgentDiscord.format("```\n| a | b |\n|---|---|\n```") == "```\n| a | b |\n|---|---|\n```", "Discord table conversion preserves literal fenced code")
+    do {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("discord-image-" + UUID().uuidString)
+        let store = Store(folder: root), session = store.createAgent(title: "Public scoreboard")
+        var blocked = false
+        do { _ = try AgentDiscordImage.render(session: session, store: store, kind: "scoreboard") } catch { blocked = true }
+        check(blocked, "Discord cannot share agent images without explicit per-agent opt-in")
+        session.agent?.discordShareScoreboard = true
+        session.agent?.scoreboard = AgentScoreboard(title: "Fixture", summary: "Synthetic test data", metrics: [.init(label: "Checks", value: "Passed")])
+        let png = try AgentDiscordImage.render(session: session, store: store, kind: "scoreboard")
+        try png.write(to: root.appendingPathComponent("scoreboard-fixture.png"))
+        print("Scoreboard rendering fixture: " + root.appendingPathComponent("scoreboard-fixture.png").path)
+        check(png.starts(with: [137, 80, 78, 71]) && png.count < 8_000_000, "Discord scoreboard is an actual bounded PNG")
+        let imageAPI = AgentAPI(); var imageRequest: URLRequest?
+        imageAPI.request = { request in
+            imageRequest = request
+            return (Data("{\"id\":\"90\",\"channel_id\":\"42\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        let receipt = run { try await AgentDiscordClient().post("**Test**", channel: "42", token: "synthetic", api: imageAPI, replyingTo: "80", nonce: "80", image: png) }
+        let body = imageRequest?.httpBody ?? Data(), wire = String(decoding: body, as: UTF8.self)
+        check(receipt == "90" && imageRequest?.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data;") == true && body.range(of: png) != nil && wire.contains("files[0]") && wire.contains("payload_json") && wire.contains("allowed_mentions") && wire.contains("message_reference") && wire.contains("enforce_nonce"), "Discord posts verified PNG bytes with Markdown, reply reference and duplicate/mention guards in one multipart request")
+        session.agent?.artPath = root.deletingLastPathComponent().appendingPathComponent("unapproved.png").path
+        var outside = false
+        do { _ = try AgentDiscordImage.render(session: session, store: store, kind: "art") } catch { outside = true }
+        check(outside, "Discord image selection rejects paths outside this agent's artwork folder")
+    } catch { check(false, "Discord image fixture: " + error.localizedDescription) }
     let api = AgentAPI(), client = AgentDiscordClient()
     var requests: [URLRequest] = [], marker = ""
     var missingReadback = false, status = 200

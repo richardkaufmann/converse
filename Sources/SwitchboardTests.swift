@@ -122,17 +122,17 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(reloadedIntents.participantIntents.contains { $0.id == creationID && $0.response?.target == agentID }, "Outgoing creation identity and result survive a client restart without automatic replay")
         var settings = agent.agent!.wire(home: bid)
         settings.watched = [DeviceGlobalID(home: aid, session: source.id).string, gid]
-        settings.remainingRuns = 3; settings.enabled = false
+        settings.turnLimit = 3; settings.enabled = false
         let configured = request("agent.configure", target: agentID, settings: settings)
         check(configured?.outcome == "completed" && Set(agent.agent?.watchedParticipants ?? []) == Set(settings.watched), "Group devices configure an agent's allowed participants and budget on its home (" + (configured?.detail ?? "no response") + ")")
         let inspection = request("inspect", target: gid)
         check(inspection?.evidence?.globalID == gid && inspection?.evidence?.messages.contains { $0.text.contains("Cross-device hello") } == true && inspection?.evidence?.messages.contains { $0.text.contains("Unsent human draft") } == false && a.remoteLeases.isEmpty, "Agent evidence snapshots include allowed submitted history without drafts or a display lease")
         settings.watched = [DeviceGlobalID(home: String(repeating: "f", count: 64), session: source.id).string]
-        check(request("agent.configure", target: agentID, settings: settings)?.outcome == "rejected" && agent.agent?.remainingRuns == 3, "Remote agent configuration refuses targets outside the current group")
+        check(request("agent.configure", target: agentID, settings: settings)?.outcome == "rejected" && agent.agent?.turnLimit == 3, "Remote agent configuration refuses targets outside the current group")
         agent.queuePaused = true
         let runID = UUID()
         _ = request("agent.run", target: agentID, id: runID); _ = request("agent.run", target: agentID, id: runID)
-        check(agent.pending.count == 1 && agent.agent?.remainingRuns == 2 && agent.pending.first?.agentRunReserved == true, "Remote Run once reserves one budget unit and deduplicates repeated requests")
+        check(agent.pending.count == 1 && agent.agent?.turnLimit == 3 && agent.pending.first?.agentRunReserved == true, "Remote Run once persists an activation reservation and deduplicates repeated requests")
         let before = target.pending.count
         target.switchboardEnabled = false
         _ = sa.deliverSwitchboard(from: source, to: gid, text: "Disabled after discovery", id: UUID(), hop: 1)

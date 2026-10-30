@@ -37,6 +37,13 @@ public sealed class DeviceLeaseManager
         return (true, epoch, displaced);
     }
 
+    public (bool Granted, ulong Epoch, string? Displaced) Resume(Guid session, string device, ulong expectedEpoch)
+    {
+        if (!_epochs.TryGetValue(session, out var current) || current != expectedEpoch ||
+            (Holder(session) is { } holder && holder.Device != device)) return (false, _epochs.GetValueOrDefault(session), null);
+        return Acquire(session, device);
+    }
+
     public bool Validate(Guid session, string device, ulong epoch)
     {
         if (!_leases.TryGetValue(session, out var lease)) return false;
@@ -68,10 +75,10 @@ public sealed class DeviceLeaseManager
         return (lease.Device, lease.Epoch);
     }
 
-    public List<(Guid Session, string Device)> SweepExpired()
+    public List<(Guid Session, string Device, ulong Epoch)> SweepExpired()
     {
         var expired = _leases.Where(pair => pair.Value.ExpiresAt <= _now())
-            .Select(pair => (pair.Key, pair.Value.Device)).ToList();
+            .Select(pair => (pair.Key, pair.Value.Device, pair.Value.Epoch)).ToList();
         foreach (var entry in expired) _leases.Remove(entry.Key);
         return expired;
     }

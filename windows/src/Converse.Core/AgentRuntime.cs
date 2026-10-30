@@ -15,12 +15,12 @@ public sealed class AgentConfig
     public DateTime? ArtAtUtc { get; set; }
     public string? ArtMood { get; set; }
     public int LoopsSinceScoreboard { get; set; }
-    public bool CanSchedule => Settings.Enabled && Settings.RemainingRuns > 0;
-    public string LoopStatus => !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.RemainingRuns} runs left";
+    public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
+    public string LoopStatus => !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.TurnLimit} maximum turns per loop";
     public void Apply(DeviceAgentSettings proposed)
     {
         if ((proposed.Revision ?? 0) != (Settings.Revision ?? 0)) throw new ArgumentException("Settings changed. Reload before saving.");
-        if (proposed.Objective.Length > 16000 || string.IsNullOrWhiteSpace(proposed.Model) || proposed.Model.Length > 200 || proposed.Watched.Count > 64 || proposed.Watched.Any(w => DeviceGlobalID.Parse(w) is null) || proposed.RemainingRuns is < 0 or > 1000 || proposed.ScoreboardEveryLoops is < 1 or > 1000) throw new ArgumentException("Invalid agent settings.");
+        if (proposed.Objective.Length > 16000 || string.IsNullOrWhiteSpace(proposed.Model) || proposed.Model.Length > 200 || proposed.Watched.Count > 64 || proposed.Watched.Any(w => DeviceGlobalID.Parse(w) is null) || proposed.TurnLimit is < 1 or > 1000 || proposed.ScoreboardEveryLoops is < 1 or > 1000) throw new ArgumentException("Invalid agent settings.");
         if (proposed.Repository.Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(proposed.Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) throw new ArgumentException("Repository must be blank or owner/name.");
         if (!string.IsNullOrEmpty(Settings.ScheduleText) && proposed.ScheduleText is null) throw new ArgumentException("Update this editor to preserve text schedules.");
         // These platform features are explicit rather than silently accepted.

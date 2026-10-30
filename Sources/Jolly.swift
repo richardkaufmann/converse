@@ -85,7 +85,7 @@ struct JollyRequest: Codable {
             }
             let sessions = Self.eligible(store)
             try write(["available": true, "updatedAt": now.timeIntervalSince1970, "agents": sessions.map {
-                ["id": $0.id.uuidString, "name": $0.title, "busy": $0.busy, "runsRemaining": $0.agent?.remainingRuns ?? 0] as [String: Any]
+                ["id": $0.id.uuidString, "name": $0.title, "busy": $0.busy, "maxTurnsPerLoop": $0.agent?.turnLimit ?? 0] as [String: Any]
             }], file: folder.appendingPathComponent("directory.json"))
             let files = try FileManager.default.contentsOfDirectory(at: requestFolder, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])
                 .filter { $0.pathExtension == "json" && !finished.contains($0.deletingPathExtension().lastPathComponent) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
@@ -109,12 +109,12 @@ struct JollyRequest: Codable {
                 guard !AgentConversation.shared.owns(session), !session.busy, session.pending.isEmpty, !session.queuePaused, !session.changingSetting else {
                     try answer(id, text: "Agent busy or queue paused. Nothing was injected. Try a new request when it is ready.", status: "busy", agent: session, store: store); continue
                 }
-                guard var config = session.agent, config.remainingRuns > 0 else {
-                    try answer(id, text: "Agent run budget exhausted. Add turns in Converse.", status: "budget_exhausted", agent: session, store: store); continue
+                guard var config = session.agent, config.turnLimit > 0 else {
+                    try answer(id, text: "Invalid per-loop turn limit. Review Agent Setup.", status: "budget_exhausted", agent: session, store: store); continue
                 }
                 let prior = session.agent
-                config.settingsChanged(); config.remainingRuns -= 1
-                if config.remainingRuns == 0 { config.enabled = false }
+                config.settingsChanged()
+
                 config.jollyRequestID = id; session.agent = config
                 do { try store.saveChecked() } catch { session.agent = prior; throw error }
                 let draft = session.draft, attachments = session.attachments

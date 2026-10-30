@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 // Discord REST polling adapted from KAOS Hub's channel reader. Converse owns
 // its credentials and cursors; it never loads KAOS configuration or state.
@@ -34,6 +35,29 @@ enum AgentDiscord {
         }
         return value
     }
+    // Discord supports inline Markdown, but not GFM tables. Keep wide tables
+    // readable on phones by turning each row into labelled fields.
+    static func format(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        var result: [String] = [], i = 0, fence: String? = nil
+        while i < lines.count {
+            let line = lines[i], trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let marker = String(trimmed.prefix(3))
+                if fence == marker { fence = nil } else if fence == nil { fence = marker }
+                result.append(line); i += 1; continue
+            }
+            if fence == nil && i + 1 < lines.count && line.contains("|") && MarkdownText.tableDivider(lines[i + 1]) {
+                let labels = MarkdownText.cells(line); i += 2
+                while i < lines.count && lines[i].contains("|") && !lines[i].isEmpty {
+                    let row = MarkdownText.cells(lines[i])
+                    result.append(labels.indices.map { "**" + labels[$0] + ":** " + ($0 < row.count ? row[$0] : "") }.joined(separator: " · "))
+                    i += 1
+                }
+            } else { result.append(line); i += 1 }
+        }
+        return result.joined(separator: "\n")
+    }
     static func newer(_ a: String, than b: String) -> Bool { (UInt64(a) ?? 0) > (UInt64(b) ?? 0) }
 }
 
@@ -47,7 +71,7 @@ enum AgentDiscord {
     private var retryAt: Date = .distantPast
     private var identities: [String: String] = [:]
 
-    private func call(_ path: String, token: String, api: AgentAPI, body: [String: Any]? = nil) async throws -> Any {
+    private func call(_ path: String, token: String, api: AgentAPI, body: [String: Any]? = nil, image: Data? = nil) async throws -> Any {
         guard retryAt <= Date() else { throw AgentFailure.message("Discord is rate limited. Try again after " + retryAt.formatted(date: .omitted, time: .standard) + ".") }
         guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AgentFailure.message("Add a Discord bot token in Agent Setup.") }
         var request = URLRequest(url: URL(string: "https://discord.com/api/v10/" + path)!)
@@ -57,7 +81,16 @@ enum AgentDiscord {
         if let body {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let json = try JSONSerialization.data(withJSONObject: body)
+            if let image {
+                guard image.count <= 8_000_000 else { throw AgentFailure.message("Discord image exceeds 8 MB.") }
+                let boundary = "Converse-" + UUID().uuidString
+                request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
+                var bytes = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n".utf8)
+                bytes.append(json)
+                bytes.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"scoreboard.png\"\r\nContent-Type: image/png\r\n\r\n".utf8))
+                bytes.append(image); bytes.append(Data("\r\n--\(boundary)--\r\n".utf8)); request.httpBody = bytes
+            } else { request.httpBody = json }
         }
         do {
             let (data, response) = try await api.request(request)
@@ -74,7 +107,7 @@ enum AgentDiscord {
             guard (200..<300).contains(response.statusCode) else {
                 switch response.statusCode {
                 case 401: throw AgentFailure.message("Discord rejected the bot token. Replace it in Agent Setup.")
-                case 403: throw AgentFailure.message("Discord denied channel access. Give the bot View Channel, Read Message History and, for posting, Send Messages.")
+                case 403: throw AgentFailure.message("Discord denied channel access. Give the bot View Channel, Read Message History and, for posting, Send Messages and Attach Files.")
                 case 404: throw AgentFailure.message("Discord channel or message not found. Check the channel ID and bot access.")
                 default: throw AgentFailure.message("Discord returned HTTP \(response.statusCode). No automatic repost was made.")
                 }
@@ -147,15 +180,16 @@ enum AgentDiscord {
         identities = [token: id]
         return id
     }
-    func post(_ text: String, channel: String, token: String, api: AgentAPI, replyingTo: String? = nil, nonce: String? = nil) async throws -> String {
+    func post(_ text: String, channel: String, token: String, api: AgentAPI, replyingTo: String? = nil, nonce: String? = nil, image: Data? = nil) async throws -> String {
         let channel = try AgentDiscord.channelID(channel)
-        var body: [String: Any] = ["content": String(text.prefix(1800)), "allowed_mentions": ["parse": [], "replied_user": false]]
+        var body: [String: Any] = ["content": String(AgentDiscord.format(text).prefix(1800)), "allowed_mentions": ["parse": [], "replied_user": false]]
         if let replyingTo {
             _ = try AgentDiscord.channelID(replyingTo)
             body["message_reference"] = ["message_id": replyingTo, "channel_id": channel, "fail_if_not_exists": false]
         }
         if let nonce { body["nonce"] = String(nonce.prefix(25)); body["enforce_nonce"] = true }
-        let raw = try await call("channels/\(channel)/messages", token: token, api: api, body: body)
+        if image != nil { body["attachments"] = [["id": 0, "filename": "scoreboard.png"]] }
+        let raw = try await call("channels/\(channel)/messages", token: token, api: api, body: body, image: image)
         guard let row = raw as? [String: Any], row["channel_id"] as? String == channel,
               let id = row["id"] as? String, (try? AgentDiscord.channelID(id)) != nil else {
             throw AgentFailure.message("Discord did not confirm delivery. Check the channel before retrying.")
@@ -177,5 +211,50 @@ enum AgentDiscord {
             throw AgentFailure.message("Discord accepted the test post, but channel history did not return its exact text. Reading is not verified.")
         }
         return "Discord send and channel-history read verified. The labeled test stays in the channel. Enable Message Content Intent to read ordinary human messages too."
+    }
+}
+
+// Only host-selected agent artwork and scoreboard fields can become uploads.
+// No model-supplied path, transcript, attention text, or working notes are read.
+@MainActor enum AgentDiscordImage {
+    static func render(session: Session, store: Store, kind: String) throws -> Data {
+        guard let config = session.agent, config.discordShareScoreboard == true,
+              ["art", "scoreboard"].contains(kind) else { throw AgentFailure.message("Scoreboard sharing is off in Agent Setup.") }
+        let root = store.folder.appendingPathComponent("Agents/" + session.id.uuidString).resolvingSymlinksInPath()
+        var art: NSImage?
+        if let path = config.artPath {
+            let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]))
+            if file.path.hasPrefix(root.path + "/"), size?.isRegularFile == true, (size?.fileSize ?? Int.max) <= 8_000_000 { art = NSImage(contentsOf: file) }
+        }
+        if kind == "art" && art == nil { throw AgentFailure.message("This agent has no saved mood image yet.") }
+        let width = 1200, height = kind == "art" ? 900 : (art == nil ? 640 : 1100)
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { throw AgentFailure.message("Could not render scoreboard image.") }
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = context
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: width, height: height).fill()
+        let artHeight: CGFloat = kind == "art" ? CGFloat(height) : (art == nil ? 0 : 460)
+        if let art, art.size.width > 0, art.size.height > 0 {
+            let scale = min(CGFloat(width) / art.size.width, artHeight / art.size.height)
+            let size = NSSize(width: art.size.width * scale, height: art.size.height * scale)
+            art.draw(in: NSRect(x: (CGFloat(width) - size.width) / 2, y: CGFloat(height) - artHeight + (artHeight - size.height) / 2, width: size.width, height: size.height))
+        }
+        if kind == "scoreboard" {
+            var y = CGFloat(height) - artHeight - 60
+            func label(_ text: String, size: CGFloat, height: CGFloat) {
+                let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
+                (text as NSString).draw(in: NSRect(x: 40, y: y - height, width: 1120, height: height), withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: size > 24 ? .semibold : .regular), .foregroundColor: NSColor.black, .paragraphStyle: style]); y -= height + 12
+            }
+            label(String(session.title.prefix(100)), size: 32, height: 48)
+            if let board = config.scoreboard {
+                label(board.summary, size: 23, height: 70)
+                for metric in board.metrics.prefix(6) { label(metric.label + ": " + metric.value + (metric.asOf.map { " · " + $0 } ?? ""), size: 21, height: 42) }
+                label("Observed: " + (board.observedAt?.formatted() ?? "Unknown"), size: 17, height: 30)
+            } else if let repo = config.repositorySnapshot, repo.hasMeasurements {
+                for metric in repo.metrics.prefix(6) { label(metric.0 + ": " + metric.1, size: 23, height: 48) }
+            } else { label("No measured scoreboard data yet.", size: 23, height: 50) }
+        }
+        guard let data = bitmap.representation(using: .png, properties: [:]), data.count <= 8_000_000 else { throw AgentFailure.message("Scoreboard image exceeds 8 MB.") }
+        return data
     }
 }

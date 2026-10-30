@@ -24,20 +24,31 @@ struct PadAgentPanel: View {
                     Section("Objective and success criteria") { TextEditor(text: field(\.objective)).frame(minHeight: 110) }
                     Section("Loop") {
                         Toggle("Enable automatic loop", isOn: field(\.enabled))
-                        TextField("Interval in seconds", value: field(\.intervalSeconds), format: .number).keyboardType(.decimalPad)
-                        TextField("Text schedule · optional", text: Binding(get: { settings?.scheduleText ?? "" }, set: { settings?.scheduleText = $0 }), axis: .vertical)
+                        Picker("Frequency", selection: Binding(get: { !(settings?.scheduleText ?? "").isEmpty }, set: { settings?.scheduleText = $0 ? "every 20 minutes while the US stock market is open" : "" })) {
+                            Text("Fixed interval").tag(false)
+                            Text("Text schedule").tag(true)
+                        }.pickerStyle(.segmented)
+                        if (settings?.scheduleText ?? "").isEmpty {
+                            TextField("Interval in seconds", value: field(\.intervalSeconds), format: .number).keyboardType(.decimalPad)
+                        } else {
+                        TextField("Text schedule · optional", text: Binding(get: { settings?.scheduleText ?? "" }, set: { settings?.scheduleText = $0.isEmpty ? " " : $0 }), axis: .vertical)
                         TextField("Time zone", text: Binding(get: { settings?.scheduleTimeZone ?? TimeZone.current.identifier }, set: { settings?.scheduleTimeZone = $0 }))
+                        }
                         if let settings {
-                            if let rule = try? AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) {
+                            switch Result(catching: { try AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) }) {
+                            case .success(let rule):
                                 Text(rule.description).font(.caption)
                                 Text("Next: " + rule.preview(after: Date()).map { $0.formatted(date: .abbreviated, time: .shortened) }.joined(separator: " · ")).font(.caption)
-                            } else { Text("Review the schedule. Unsupported conditions cannot be saved.").foregroundStyle(.red) }
+                            case .failure(let error): Text(error.localizedDescription).foregroundStyle(.red)
+                            }
                         }
-                        Stepper("Automatic runs remaining: \(settings?.remainingRuns ?? 0)", value: field(\.remainingRuns), in: 0...1000)
+                        Stepper("Maximum turns per loop: \(settings?.turnLimit ?? 1)", value: field(\.turnLimit), in: 1...1000)
+                        Text("The schedule repeats until paused. Each activation currently makes one model response, within this limit; it does not spend future loops.").font(.caption)
                         Stepper("Scoreboard every \(settings?.scoreboardEveryLoops ?? 1) loops", value: Binding(get: { settings?.scoreboardEveryLoops ?? 1 }, set: { settings?.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art", isOn: field(\.generateArt))
                         Toggle("Speak on home", isOn: field(\.speak))
                         Toggle("Allow Discord alerts", isOn: field(\.discord))
+                        Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings?.discordShareScoreboard == true }, set: { settings?.discordShareScoreboard = $0 }))
                     }
                     Section("Sessions this agent may read and message") {
                         ForEach(service.participantHomes, id: \.deviceID) { host in
@@ -51,21 +62,26 @@ struct PadAgentPanel: View {
                         }
                     }
                     Button("Save settings") { perform("agent.configure") }.disabled(working)
-                    Button("Run once on home") { perform("agent.run") }.disabled(working)
+                    Button("Save and run once on home") { perform("agent.configure", runAfterSave: true) }.disabled(working)
                     Button("Open scoreboard on home") { perform("agent.widget") }.disabled(working)
                     Button("Reload settings") { perform("agent.settings") }.disabled(working)
                 } else if !working { Button("Load Agent Setup") { perform("agent.settings") } }
                 if working { ProgressView("Waiting for home…") }
                 if !notice.isEmpty { Text(notice).textSelection(.enabled) }
             }.navigationTitle(target == nil ? "Create Agent" : "Agent Setup")
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(working) }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") { perform("agent.configure", dismissAfterSave: true) }.disabled(working || settings == nil)
+                    }
+                }
                 .task { if target != nil { perform("agent.settings") } }
         }
     }
     func field<T>(_ path: WritableKeyPath<DeviceAgentSettings, T>) -> Binding<T> {
         Binding(get: { settings![keyPath: path] }, set: { settings?[keyPath: path] = $0 })
     }
-    func perform(_ action: String) {
+    func perform(_ action: String, runAfterSave: Bool = false, dismissAfterSave: Bool = false) {
         guard !working else { return }
         if action == "agent.configure", let settings {
             do { _ = try AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) }
@@ -76,7 +92,10 @@ struct PadAgentPanel: View {
             let response = await service.requestParticipant(home: home, action: action, target: target, title: title, settings: action == "agent.configure" ? settings : nil)
             if let saved = response.settings { settings = saved }
             notice = response.detail; working = false
-            if action == "agent.configure", response.outcome == "completed" { perform("agent.settings") }
+            if action == "agent.configure", response.outcome == "completed" {
+                if dismissAfterSave { dismiss() }
+                else if runAfterSave { perform("agent.run") }
+            }
         }
     }
 }

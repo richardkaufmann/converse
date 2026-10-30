@@ -44,15 +44,25 @@ import Foundation
     let failureDeadline = Date().addingTimeInterval(2)
     while !voiceDone && Date() < failureDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(voiceError?.contains("401") == true && voiceError?.contains("private-error-canary") == false, "Voice API failures expose an actionable status without raw response bodies")
+    do {
+        var first = AgentActivationBudget(limit: 2)
+        try first.consume(); try first.consume()
+        do { try first.consume(); check(false, "Activation cap enforced") }
+        catch { check(first.used == 2, "One activation cannot exceed its model-turn cap") }
+        var next = AgentActivationBudget(limit: 2); try next.consume()
+        check(next.used == 1, "Next activation receives a fresh turn budget")
+        var legacy = AgentConfig(); legacy.remainingRuns = 0
+        check(legacy.turnLimit == 1 && !legacy.enabled, "Exhausted legacy archives migrate to a usable cap without silently enabling the loop")
+    } catch { check(false, "Activation budget fixture: " + error.localizedDescription) }
     let now = Date(timeIntervalSince1970: 1_000)
-    var config = AgentConfig(); config.enabled = true; config.remainingRuns = 1; config.nextRunAt = now
-    check(config.reserveRun(at: now) && config.remainingRuns == 0 && !config.enabled && !config.reserveRun(at: now), "Agent reserves its last scheduled run once and stops at the persisted cap")
+    var config = AgentConfig(); config.enabled = true; config.turnLimit = 1; config.nextRunAt = now
+    check(config.reserveRun(at: now) && config.turnLimit == 1 && config.enabled && !config.reserveRun(at: now), "Agent reserves a due loop once without exhausting future scheduled loops")
     do {
         let instant = ISO8601DateFormatter().date(from: "2026-11-27T17:50:00Z")!
-        var scheduled = AgentConfig(); scheduled.enabled = true; scheduled.remainingRuns = 3
+        var scheduled = AgentConfig(); scheduled.enabled = true; scheduled.turnLimit = 3
         scheduled.scheduleText = "every 20 minutes while the us stock market is open"; scheduled.scheduleTimeZone = "America/New_York"; scheduled.nextRunAt = instant
-        check(scheduled.reserveRun(at: instant) && !scheduled.reserveRun(at: instant) && scheduled.remainingRuns == 2, "Text schedule reserves a due run exactly once")
-        check(!scheduled.reserveRun(at: instant.addingTimeInterval(1200)) && scheduled.remainingRuns == 2, "Closed market does not spend a loop turn")
+        check(scheduled.reserveRun(at: instant) && !scheduled.reserveRun(at: instant) && scheduled.turnLimit == 3, "Text schedule reserves a due run exactly once")
+        check(!scheduled.reserveRun(at: instant.addingTimeInterval(1200)) && scheduled.turnLimit == 3, "Closed market does not spend a loop turn")
         let encoded = try JSONEncoder().encode(scheduled)
         let restored = try JSONDecoder().decode(AgentConfig.self, from: encoded)
         check(restored.scheduleText == scheduled.scheduleText && restored.nextRunAt == scheduled.nextRunAt, "Text schedule and next deadline survive persistence")
@@ -219,10 +229,10 @@ import Foundation
         while !FileManager.default.fileExists(atPath: diagnostic.path) && Date() < callbackDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         check(FileManager.default.fileExists(atPath: diagnostic.path) && quitAgent.agent?.enabled == true && !quitAgent.messages.contains { $0.text.contains("Late shutdown result") || $0.text.contains("Agent stopped.") } && quitAgent.pending.count == 1, "Late shutdown cancellation cannot apply a response, permanently pause the loop or drain queued input")
     }
-    let budgetAfterQuit = quitAgent.agent?.remainingRuns
+    let budgetAfterQuit = quitAgent.agent?.turnLimit
     quitAgent.queuePaused = false; quitAgent.pending = []
     quitRuntime.tick(store: quitStore, now: Date().addingTimeInterval(86400))
-    check(quitAgent.agent?.remainingRuns == budgetAfterQuit && quitAgent.pending.isEmpty, "Agent scheduler cannot reserve or start another loop after quit is confirmed")
+    check(quitAgent.agent?.turnLimit == budgetAfterQuit && quitAgent.pending.isEmpty, "Agent scheduler cannot reserve or start another loop after quit is confirmed")
     let notStartedRuntime = AgentRuntime()
     var startedAfterQuit = 0
     notStartedRuntime.keyReader = { _ in startedAfterQuit += 1; return "isolated-quit-test-key" }
@@ -238,19 +248,19 @@ import Foundation
     looping.queuePaused = true; looping.draft = "Unfinished human thought"
     func changeLoop(_ enabled: Bool) {
         let config = looping.agent!
-        try! loopStore.configureAgentLoop(looping, enabled: enabled, interval: config.intervalSeconds, turns: config.remainingRuns, scoreboardEvery: config.scoreboardCadence, now: now)
+        try! loopStore.configureAgentLoop(looping, enabled: enabled, interval: config.intervalSeconds, turns: config.turnLimit, scoreboardEvery: config.scoreboardCadence, now: now)
     }
     check(looping.agent?.loopStatus(at: now, busy: false, queuePaused: true, pendingCount: 0) == "Loop paused · automatic checks off", "Paused agent loop status explicitly says automatic checks are off")
     changeLoop(true)
-    check(looping.agent?.nextRunAt == now.addingTimeInterval(900) && looping.agent?.remainingRuns == 20 && !looping.queuePaused, "Resume loop schedules the first check one interval later, unblocks an empty stopped queue and does not spend a run")
+    check(looping.agent?.nextRunAt == now.addingTimeInterval(900) && looping.agent?.turnLimit == 20 && !looping.queuePaused, "Resume loop schedules the first check one interval later, unblocks an empty stopped queue and does not spend a run")
     var loopStarts = 0
     loopStore.startAgentRun = { session, _ in loopStarts += 1; session.busy = true }
     let loopRuntime = AgentRuntime()
     loopRuntime.tick(store: loopStore, now: now.addingTimeInterval(899))
-    check(loopStarts == 0 && looping.agent?.remainingRuns == 20, "Enabled loop remains idle before its advertised next check")
+    check(loopStarts == 0 && looping.agent?.turnLimit == 20, "Enabled loop remains idle before its advertised next check")
     loopRuntime.tick(store: loopStore, now: now.addingTimeInterval(900))
     RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-    check(loopStarts == 1 && looping.agent?.remainingRuns == 19 && looping.draft == "Unfinished human thought", "Due loop performs one automatic check, spends one run and preserves the human draft")
+    check(loopStarts == 1 && looping.agent?.turnLimit == 20 && looping.draft == "Unfinished human thought", "Due loop performs one automatic check, preserves its per-loop limit and preserves the human draft")
     changeLoop(false)
     check(looping.busy && looping.agent?.enabled == false && !looping.interrupted, "Pause loop stops future checks without interrupting current thinking")
     looping.busy = false; looping.queuePaused = true; looping.pending = [PendingPrompt(text: "Held by human", images: [])]
@@ -266,11 +276,11 @@ import Foundation
     var loopRevision = looping.agent?.settingsRevision ?? 0
     do {
         try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision, now: now)
-        check(looping.agent?.intervalSeconds == 120 && looping.agent?.remainingRuns == 4 && looping.agent?.scoreboardCadence == 3, "Loop popover saves interval, finite turn budget and scoreboard cadence together")
+        check(looping.agent?.intervalSeconds == 120 && looping.agent?.turnLimit == 4 && looping.agent?.scoreboardCadence == 3, "Loop popover saves interval, finite turn budget and scoreboard cadence together")
         loopRevision = looping.agent?.settingsRevision ?? 0
-        looping.agent?.settingsChanged(); looping.agent?.remainingRuns = 3
+        looping.agent?.settingsChanged(); looping.agent?.turnLimit = 3
         do { try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision); check(false, "Stale loop editor rejected") }
-        catch { check(looping.agent?.remainingRuns == 3, "A stale loop popover cannot restore a turn spent while it was open") }
+        catch { check(looping.agent?.turnLimit == 3, "A stale loop popover cannot restore a turn spent while it was open") }
     } catch { check(false, "Loop options: " + error.localizedDescription) }
     let cadenceStore = Store(folder: root.appendingPathComponent("cadence-fixture"))
     let cadenceAgent = cadenceStore.createAgent(title: "Cadence fixture")
@@ -330,18 +340,18 @@ import Foundation
     check(AgentWidgetExport.html(agent).contains("Repository data unavailable") && !AgentWidgetExport.html(agent).contains("<div class=metric>"), "Scoreboard without GitHub data gives one setup explanation instead of empty metric tiles")
     agent.agent?.snapshot?.stars = 0
     check(agent.agent?.snapshot?.hasMeasurements == true && AgentWidgetExport.html(agent).contains("<strong>0</strong>"), "Scoreboard distinguishes measured zero from missing GitHub data")
-    agent.agent?.enabled = true; agent.agent?.remainingRuns = 2; agent.agent?.nextRunAt = now
+    agent.agent?.enabled = true; agent.agent?.turnLimit = 2; agent.agent?.nextRunAt = now
     agent.draft = "User's unfinished thought"
     runtime.tick(store: store, now: now)
-    check(agent.pending.isEmpty && agent.agent?.remainingRuns == 2, "Paused agent queues prevent scheduled wakeups")
+    check(agent.pending.isEmpty && agent.agent?.turnLimit == 2, "Paused agent queues prevent scheduled wakeups")
     agent.queuePaused = false; agent.busy = true; runtime.tick(store: store, now: now)
-    check(agent.agent?.remainingRuns == 2, "Agent scheduler never overlaps a running turn")
+    check(agent.agent?.turnLimit == 2, "Agent scheduler never overlaps a running turn")
     agent.busy = false; agent.queuePaused = true; store.save()
     let reloaded = Store(folder: root).sessions.first { $0.id == agent.id }
     check(reloaded?.agent?.watchedSessions == [recipient.id] && reloaded?.draft == "User's unfinished thought", "Agent settings and editable draft survive archive reload")
 
     let stimulated = store.createAgent(title: "External stimulus fixture")
-    stimulated.agent?.fileTriggers = true; stimulated.agent?.remainingRuns = 1
+    stimulated.agent?.fileTriggers = true; stimulated.agent?.turnLimit = 1
     stimulated.draft = "A separate human draft"
     var starts = 0
     store.startAgentRun = { session, _ in starts += 1; session.busy = true }
@@ -353,20 +363,20 @@ import Foundation
     runtime.ingestFileEvents(store: store)
     check(stimulated.pending.count == 1 && stimulated.agent?.processedEvents == [event.id] && !FileManager.default.fileExists(atPath: eventFile.path), "Opt-in file events persist provenance and deduplication before consuming the input file")
     store.runNext(stimulated)
-    check(starts == 1 && stimulated.agent?.remainingRuns == 0 && stimulated.draft == "A separate human draft", "External stimuli reserve a persisted run budget before starting and preserve the human draft")
+    check(starts == 1 && stimulated.agent?.turnLimit == 1 && stimulated.draft == "A separate human draft", "External stimuli persist their reservation without spending future activations before starting and preserve the human draft")
     stimulated.busy = false
     try! JSONEncoder().encode(event).write(to: eventFile)
     runtime.ingestFileEvents(store: store)
     check(stimulated.pending.isEmpty && starts == 1, "Repeated external event IDs do not enqueue or start duplicate runs")
     store.enqueueSwitchboard(stimulated, text: "Another agent asks for work", hop: 1)
     store.runNext(stimulated)
-    check(stimulated.queuePaused && stimulated.pending.count == 1 && starts == 1 && stimulated.agent?.attention.contains("budget exhausted") == true, "Incoming agent tells cannot bypass the autonomous turn allowance")
+    check(!stimulated.queuePaused && stimulated.pending.isEmpty && starts == 2 && stimulated.agent?.turnLimit == 1, "A separate incoming request receives a fresh activation without consuming future loop checks")
     stimulated.agent?.fileTriggers = false; stimulated.pending = []
     let expired = store.createAgent(title: "Expired tick fixture")
     expired.agent?.scheduleText = "unsupported restriction"
     expired.pending = [PendingPrompt(agentRunReserved: true, agentLoopTick: true, text: "Expired tick", images: [])]
     store.runNext(expired)
-    check(expired.pending.isEmpty && !expired.busy && starts == 1, "Queued loop ticks revalidate restrictions before starting and do not block later human input")
+    check(expired.pending.isEmpty && !expired.busy && starts == 2, "Queued loop ticks revalidate restrictions before starting and do not block later human input")
     store.startAgentRun = nil
     let migrated = AgentConfig(watchedSessions: [recipient.id])
     let localHome = String(repeating: "a", count: 64), otherHome = String(repeating: "b", count: 64)
@@ -375,9 +385,9 @@ import Foundation
 
     var revisionFixture = AgentConfig()
     let staleSettings = revisionFixture.wire(home: localHome)
-    revisionFixture.settingsChanged(); revisionFixture.remainingRuns -= 1
+    revisionFixture.settingsChanged(); revisionFixture.turnLimit -= 1
     do { try revisionFixture.apply(staleSettings); check(false, "Stale settings must reject") }
-    catch { check(revisionFixture.remainingRuns == 19, "Saving a stale setup form cannot restore an autonomous run already spent") }
+    catch { check(revisionFixture.turnLimit == 19, "Saving a stale setup form cannot overwrite a changed per-loop limit") }
 
     // Real engine path, fake HTTP. No credentials, external requests or billable calls.
     runtime.keyReader = { _ in "isolated-test-key" }

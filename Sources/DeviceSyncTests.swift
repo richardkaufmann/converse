@@ -502,7 +502,35 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         try notStored(5)
         let freshFrames = try newViewerFrames()
         check(freshFrames.filter { $0.kind == DeviceMessageKind.blobChunk.rawValue }.count == 1, "A fresh display lease permits a new cached-image recovery attempt")
+        viewer.isPlaced = { $0 == gid }
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.leaseExpired.rawValue, sessionID: gid, epoch: 5))
+        viewer.restoreAvailableDisplays()
+        let resumeFrames = try newViewerFrames()
+        check(viewer.remoteLeases[gid] == nil && resumeFrames.contains { $0.kind == "lease.resume" && $0.epoch == 5 }, "Lease expiry retains the pane and requests a conditional resume, never a take")
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: "lease.granted", boot: 7, sessionID: gid, epoch: 6))
+        let savedDisplay = try JSONDecoder().decode([String: UInt64].self, from: Data(contentsOf: viewer.storageFolder.appendingPathComponent("display-resume.json")))
+        check(savedDisplay[gid] == 6 && viewer.remoteLeases[gid] == 6, "Resume grant persists the new display fence")
+        viewer.releaseRemote(globalID: gid)
+        _ = try newViewerFrames()
+        viewer.restoreAvailableDisplays()
+        check(try newViewerFrames().isEmpty, "Explicit Park cancels automatic display restoration")
+
     } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
+    do {
+        var clock = Date()
+        var saved: [UUID: UInt64] = [:]
+        let manager = DeviceLeaseManager(now: { clock }, persistEpochs: { saved = $0; return true })
+        let original = manager.acquire(session: sessionID, device: "iPad")
+        clock = clock.addingTimeInterval(20)
+        _ = manager.sweepExpired()
+        let resumed = manager.resume(session: sessionID, device: "iPad", expectedEpoch: original.epoch)
+        check(resumed.granted && resumed.epoch > original.epoch, "Idle viewer resumes with a fresh fence when nobody took it")
+        let other = manager.acquire(session: sessionID, device: "Windows")
+        manager.release(session: sessionID, device: "Windows", epoch: other.epoch)
+        check(!manager.resume(session: sessionID, device: "iPad", expectedEpoch: resumed.epoch).granted, "Resume refuses a newer take even after that viewer parks")
+        let restarted = DeviceLeaseManager(initialEpochs: saved)
+        check(!restarted.resume(session: sessionID, device: "iPad", expectedEpoch: resumed.epoch).granted && restarted.resume(session: sessionID, device: "Windows", expectedEpoch: other.epoch).granted, "Home restart preserves who may resume and fences old owners")
+    }
     let global = DeviceGlobalID(home: "home-abc", session: sessionID)
     check(DeviceGlobalID(global.string) == global && DeviceGlobalID(home: "home-xyz", session: sessionID) != global, "Global session IDs stay unique per home and parse exactly")
 }

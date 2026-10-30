@@ -42,8 +42,11 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(settings.watched.isEmpty)
         settings.scheduleText = "every 20 minutes while the US stock market is open"
         settings.scheduleTimeZone = "America/New_York"
+        settings.remainingRuns = 0; settings.turnLimit = 3; settings.enabled = true
         let saved = await service.requestParticipant(home: home, action: "agent.configure", target: target, settings: settings)
         XCTAssertEqual(saved.outcome, "completed", saved.detail)
+        XCTAssertEqual(saved.settings?.turnLimit, 3, "Save acknowledges the per-activation limit even with an exhausted legacy counter")
+        XCTAssertEqual(saved.settings?.enabled, true, "The iPad can restart a loop using a text schedule")
         let refreshed = await service.requestParticipant(home: home, action: "agent.settings", target: target)
         XCTAssertEqual(refreshed.settings?.scheduleText, settings.scheduleText)
         XCTAssertEqual(service.remoteLeases, oldLeases, "Agent control never steals or changes a display lease")
@@ -121,6 +124,16 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(restored.draft(id).dirty)
         XCTAssertFalse(restored.canSend(id))
         XCTAssertTrue(service.outbox.isEmpty)
+    }
+    func testBlockMarkdownForAgentReports() {
+        let rendered = PadTranscript.render("### Status\n| Session | Status |\n|---|---|\n| Steward | **Ready** |\n- Done\n```\n### literal\n```")
+        XCTAssertFalse(rendered.string.contains("### Status"))
+        XCTAssertFalse(rendered.string.contains("|---|"))
+        XCTAssertTrue(rendered.string.contains("Session: Steward"))
+        XCTAssertTrue(rendered.string.contains("Status: Ready"))
+        XCTAssertTrue(rendered.string.contains("• Done"))
+        XCTAssertTrue(rendered.string.contains("### literal"))
+        XCTAssertTrue((rendered.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)?.fontDescriptor.symbolicTraits.contains(.traitBold) == true)
     }
     func testBackgroundDropsLeasesAndForegroundDoesNotAcquire() throws {
         let service = try service(); let model = PadModel(service: service)
@@ -223,6 +236,39 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Tail following completes synchronously rather than queuing a scroll animation")
         view.frame.size.height = 180; view.setNeedsLayout(); view.layoutIfNeeded()
         XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Keyboard resizing retains the tail when already following it")
+    }
+    func testTranscriptRelayoutWithoutTypingAfterSheetSizedBounds() {
+        let parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: String(repeating: "History stays visible after setup.\n", count: 80))], draft: "unchanged draft", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.delegate = coordinator
+        view.frame = CGRect(x: 0, y: 0, width: 700, height: 450)
+        parent.update(view, coordinator: coordinator)
+        let original = view.textStorage.string
+        for size in [CGSize(width: 320, height: 180), .zero, CGSize(width: 700, height: 450)] {
+            view.frame.size = size; view.setNeedsLayout(); view.layoutIfNeeded()
+            parent.update(view, coordinator: coordinator)
+        }
+        XCTAssertFalse(view.layoutManager.allowsNonContiguousLayout)
+        XCTAssertEqual(view.textStorage.string, original)
+        XCTAssertGreaterThan(view.layoutManager.numberOfGlyphs, 100)
+        let visible = view.layoutManager.glyphRange(forBoundingRect: CGRect(x: 0, y: view.contentOffset.y, width: view.bounds.width, height: view.bounds.height), in: view.textContainer)
+        XCTAssertGreaterThan(visible.length, 0, "A restored pane lays out visible history without a draft edit")
+    }
+    func testClipboardPasteUsesClipboardAndLeavesHistoryAlone() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 9, height: 7)).image { c in UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 9, height: 7)) }
+        UIPasteboard.general.image = image
+        defer { UIPasteboard.general.items = [] }
+        var attached: Data?
+        let parent = PadTranscript(messages: [], draft: "Keep draft", images: [:], editable: true, lineNumbers: false, edit: { _ in }, send: {}, attach: { attached = $0 })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        let before = view.textStorage.string
+        view.paste(nil)
+        let pasted = try XCTUnwrap(attached.flatMap(UIImage.init(data:)))
+        XCTAssertEqual(pasted.cgImage?.width, image.cgImage?.width)
+        XCTAssertEqual(pasted.cgImage?.height, image.cgImage?.height)
+        XCTAssertEqual(view.textStorage.string, before)
     }
     func testReadingPositionSurvivesAppendAndEarlierHistory() {
         let messages = (0..<70).map { DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply \($0): " + String(repeating: "readable text ", count: 14)) }
@@ -378,9 +424,7 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(restored.draft(row.globalID).hashes, [hash])
         try service.startNetworkForTesting(); service.connectManual(host: "127.0.0.1", port: port)
         try await eventually("Trusted home reconnects") { service.homes[DeviceGlobalID(row.globalID)!.home]?.online == true }
-        XCTAssertNil(service.remoteLeases[row.globalID], "Reconnect alone never takes a lease")
-        service.acquireRemote(globalID: row.globalID)
-        try await eventually("Fresh epoch after reacquire") { (service.remoteLeases[row.globalID] ?? 0) > firstEpoch && service.remoteTranscripts[row.globalID] != nil }
+        try await eventually("Saved iPad pane restores automatically after background without Take") { (service.remoteLeases[row.globalID] ?? 0) > firstEpoch && service.remoteTranscripts[row.globalID] != nil }
         restored.reconcile()
         try await eventually("Cached PNG is resent and verified on home") { service.blobReady[hash] == true }
         XCTAssertEqual(service.blobCache[hash], cached, "Recovery rediscovers the verified file without an in-memory cache index")

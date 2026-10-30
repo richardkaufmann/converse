@@ -127,6 +127,7 @@ public sealed partial class MainWindow : Window
         _placements = PanePlacements.Load(folder);
         _store = new SessionStore(folder);
         _devices = new DeviceSyncService(folder, _store);
+        _devices.IsViewerPlaced = id => PanePlacements.Load(_dataFolder).PaneOf("remote:" + id) is not null;
         InitializeAgents();
         // No modal pairing prompt: joins surface as codes in the Groups
         // dialog, where both sides compare all eight groups. (The
@@ -344,6 +345,7 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(Refresh);
             return;
         }
+        bool parkedByHygiene = false;
         // Placement hygiene: a placed remote whose home is gone (group
         // move) and a local placed session whose display lease is held by
         // another device (Mac Workspace.shared.park on remote take) cannot
@@ -353,13 +355,15 @@ public sealed partial class MainWindow : Window
             if (_placements.KeyIn(pane) is not { } key) continue;
             if (key.StartsWith("remote:", StringComparison.Ordinal)
                 && DeviceGlobalID.Parse(key["remote:".Length..]) is { } parsed
-                && !_devices.Homes.ContainsKey(parsed.Home))
-                _placements.Park(key);
+                && !_devices.Homes.ContainsKey(parsed.Home)
+                && !_devices.Trust.Devices.Any(d => d.DeviceID == parsed.Home && d.GroupID == _devices.CurrentGroup?.Id))
+                { _placements.Park(key); parkedByHygiene = true; }
             else if (key.StartsWith("local:", StringComparison.Ordinal)
                 && Guid.TryParse(key["local:".Length..], out var localId)
                 && _devices.DisplayHolder(localId) is { } holder && holder.Device != _devices.DeviceId)
-                _placements.Park(key);
+                { _placements.Park(key); parkedByHygiene = true; }
         }
+        if (parkedByHygiene) _placements.Save(_dataFolder);
         RefreshSidebar();
         RefreshPanes();
         RenderGroupsDialog();

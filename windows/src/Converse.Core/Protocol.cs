@@ -37,6 +37,8 @@ public static class DeviceKind
     public const string LeaseAcquire = "lease.acquire";
     public const string LeaseGranted = "lease.granted";
     public const string LeaseDenied = "lease.denied";
+    public const string LeaseResume = "lease.resume";
+    public const string LeaseExpired = "lease.expired";
     public const string LeaseStolen = "lease.stolen";
     public const string LeaseHeartbeat = "lease.heartbeat";
     public const string LeaseRelease = "lease.release";
@@ -139,7 +141,7 @@ public sealed class DeviceHello
     [JsonPropertyName("deviceName")] public string DeviceName { get; set; } = "";
     [JsonPropertyName("converseVersion")] public string ConverseVersion { get; set; } = "";
     [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; set; } = 1;
-    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1" };
+    [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1" };
     [JsonPropertyName("listenPort")] public int? ListenPort { get; set; }
     [JsonPropertyName("group")] public ConverseGroup? Group { get; set; }
     [JsonPropertyName("joinGroupID")] public string? JoinGroupID { get; set; }

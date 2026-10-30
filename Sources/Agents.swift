@@ -27,6 +27,13 @@ struct AgentConfig: Codable, Equatable {
     var scheduleText: String? = nil
     var scheduleTimeZone: String? = nil
     var remainingRuns = 20
+    // Legacy counter remains decodable for saved archives and older peers.
+    // It no longer limits the number of scheduled activations.
+    var maxTurnsPerLoop: Int? = nil
+    var turnLimit: Int {
+        get { maxTurnsPerLoop ?? max(1, remainingRuns) }
+        set { maxTurnsPerLoop = newValue }
+    }
     var scoreboardEveryLoops: Int? = nil
     var loopsSinceScoreboard: Int? = nil
     var enabled = false
@@ -43,6 +50,7 @@ struct AgentConfig: Codable, Equatable {
     var discordLastMessageID: String? = nil
     var discordMentions: Bool? = nil
     var discordDefault: Bool? = nil
+    var discordShareScoreboard: Bool? = nil
     var discordMentionSince: Date? = nil
     var discordActiveRequestID: String? = nil
     var lastArtMood: String? = nil
@@ -64,7 +72,6 @@ struct AgentConfig: Codable, Equatable {
         return "\(seconds) sec"
     }
     func loopStatus(at now: Date, busy: Bool, queuePaused: Bool, pendingCount: Int) -> String {
-        if remainingRuns <= 0 { return "Loop stopped · no automatic runs left" }
         guard enabled else { return "Loop paused · automatic checks off" }
         if queuePaused { return "Loop on · queue paused" }
         if pendingCount > 0 && !busy { return "Loop on · waiting for \(pendingCount) queued message\(pendingCount == 1 ? "" : "s")" }
@@ -74,16 +81,24 @@ struct AgentConfig: Codable, Equatable {
         guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
         return schedule + " · next " + next.formatted(date: .abbreviated, time: .shortened)
     }
-    var canSchedule: Bool { enabled && remainingRuns > 0 }
+    var canSchedule: Bool { enabled && turnLimit > 0 }
     func scheduleRule() throws -> AgentSchedule { try AgentSchedule.compile(interval: intervalSeconds, text: scheduleText, zone: scheduleTimeZone) }
     func nextScheduledRun(after date: Date) -> Date? { (try? scheduleRule())?.next(after: date) }
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now && (try? scheduleRule().permits(now)) == true }
     mutating func reserveRun(at now: Date) -> Bool {
         guard due(at: now) else { return false }
         settingsChanged()
-        remainingRuns -= 1; nextRunAt = nextScheduledRun(after: now)
-        if remainingRuns == 0 { enabled = false }
+        nextRunAt = nextScheduledRun(after: now)
         return true
+    }
+}
+
+struct AgentActivationBudget {
+    let limit: Int
+    private(set) var used = 0
+    mutating func consume() throws {
+        guard (1...1000).contains(limit), used < limit else { throw AgentFailure.message("This activation reached its turn limit. The next scheduled loop gets a fresh limit.") }
+        used += 1
     }
 }
 
@@ -176,6 +191,7 @@ struct AgentReply: Decodable {
     var tell: [Tell]?
     var memory: String?
     var speechIntent: String?
+    var discordImage: String?
     var notifyDiscord: String?
     var scoreboard: AgentScoreboard?
     static func decode(_ text: String) -> AgentReply? {
@@ -328,8 +344,8 @@ extension AgentConfig {
     func wire(home: String) -> DeviceAgentSettings {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
-            intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier)
+            intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true)
     }
     mutating func apply(_ wire: DeviceAgentSettings) throws {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
@@ -338,7 +354,7 @@ extension AgentConfig {
         let repository = wire.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard repository.isEmpty || AgentRepoSnapshot.validRepository(repository), !wire.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, wire.model.utf8.count <= 200,
               wire.objective.utf8.count <= 16000, wire.watched.count <= 64, wire.watched.allSatisfy({ DeviceGlobalID($0) != nil }),
-              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (0...1000).contains(wire.remainingRuns), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
+              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (1...1000).contains(wire.turnLimit), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
             throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
         }
         if !(scheduleText ?? "").isEmpty && wire.scheduleText == nil {
@@ -350,8 +366,9 @@ extension AgentConfig {
         if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
         objective = wire.objective; self.repository = repository; model = wire.model
         watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
-        intervalSeconds = wire.intervalSeconds; scheduleText = wire.scheduleText; scheduleTimeZone = schedule.zoneID; remainingRuns = wire.remainingRuns; enabled = wire.enabled && wire.remainingRuns > 0
+        intervalSeconds = wire.intervalSeconds; scheduleText = wire.scheduleText; scheduleTimeZone = schedule.zoneID; turnLimit = wire.turnLimit; enabled = wire.enabled
         if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }
+        if let share = wire.discordShareScoreboard { discordShareScoreboard = share }
         generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
         nextRunAt = enabled ? schedule.next(after: Date()) : nil
     }

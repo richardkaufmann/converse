@@ -55,8 +55,8 @@ input and emotionally directed speech output are optional interfaces to that sam
 conversation. Goals, success criteria and permitted session scope are configurable
 through conversation and Agent Setup.
 
-The home runs the loop while Converse is running, with an explicit remaining-turn
-budget, interval, pause/run-once controls and no overlapping runs. External stimuli
+The home runs the loop while Converse is running, with an explicit per-activation turn
+limit, interval, pause/run-once controls and no overlapping runs. External stimuli
 can schedule work through the same bounded queue: initially file-drop or URL events,
 with authenticated webhooks/connectors as later adapters. Inputs from other agents
 or external systems retain their provenance. Attention uses the existing yellow
@@ -132,7 +132,7 @@ Requested logos and humor are allowed; data stays in legible overlay cards.
 Converse owns the authenticated connector bridge and its file journal. No other
 application is a fallback. The bridge lists eligible local agents, accepts an
 explicit name/ID, and asks for clarification when ambiguous. Agent selection
-does not acquire a display lease. Each admission uses a saved run allowance;
+does not acquire a display lease. Each admission receives a fresh per-activation limit;
 busy/paused agents refuse without interrupting or changing the draft. Only the
 agent's already-authorized session scope is available to its run.
 
@@ -147,7 +147,7 @@ the original. No automatic fallback is installed.
 
 ## Hands-free conversation (Mac)
 
-Start talking explicitly owns one local agent’s microphone turn. Sustained audio plus 1.5 seconds of silence produces one transcribed human prompt; idle silence never submits. Thinking and speech playback keep capture off. Only the correlated response can speak and re-arm capture, after a short echo guard. Stop, pane removal, failure, and app exit fence all late permission, transcription, model, and speech callbacks. Spoken turns preserve the separately edited draft and do not spend automatic-loop allowances. Loop ticks, file events, Jolly requests, and queued messages cannot take over that listening session. Dictate remains a review-before-send alternative.
+Start talking explicitly owns one local agent’s microphone turn. Sustained audio plus 1.5 seconds of silence produces one transcribed human prompt; idle silence never submits. Thinking and speech playback keep capture off. Only the correlated response can speak and re-arm capture, after a short echo guard. Stop, pane removal, failure, and app exit fence all late permission, transcription, model, and speech callbacks. Spoken turns preserve the separately edited draft and do not consume future scheduled checks. Loop ticks, file events, Jolly requests, and queued messages cannot take over that listening session. Dictate remains a review-before-send alternative.
 
 
 ## Deterministic schedules
@@ -156,7 +156,7 @@ Loop settings accept either a numeric interval (minutes in the UI, seconds on th
 
 Calendar windows anchor intervals at their opening time. The NYSE regular-session calendar uses New York time, holidays and early closes from the [official calendar](https://www.nyse.com/trade/hours-calendars), verified October 29, 2026 and bounded through 2028. It does not detect emergency closures or individual trading halts. An exhausted calendar pauses the loop visibly. Daily schedules skip nonexistent DST times and use the first occurrence of repeated times.
 
-There are no overlapping runs or catch-up bursts. Relaunch schedules a future check. Queued loop checks revalidate their window before starting; a skipped already-reserved check retains its turn charge conservatively. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.
+There are no overlapping runs or catch-up bursts. Relaunch schedules a future check. Queued loop checks revalidate their window before starting; a skipped check does not consume a future activation. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.
 
 
 ## Cross-platform release boundary (0.5.22)
@@ -214,7 +214,7 @@ threads with no explicit channel-ID configuration are out of scope.
 `Discord/mentions.json` is a local, atomic request journal, separate from ordinary
 monitoring cursors. Accepted requests survive restart, are deduplicated by Discord
 message ID, and wait until the target is idle with an unpaused, empty local queue.
-Each starts outside the loop schedule using one persisted automatic turn. At most
+Each starts outside the loop schedule with a durable reservation and a fresh activation limit. At most
 20 commands can wait/run at once; waiting requests expire after ten minutes.
 Scope and budget are checked again at dispatch. Completed receipts are retained
 for a day and cursors provide the permanent duplicate barrier.
@@ -222,7 +222,7 @@ for a day and cursors provide the permanent duplicate barrier.
 Public mention turns receive only their question and up to 20 recent channel
 messages, plus optional public web research. They receive no private objective,
 notes, transcript/session evidence, GitHub credentials or agent action permissions.
-Their only accepted output is a public reply. Thus they can discuss publicly posted
+Their accepted output is a public reply and, only with the per-agent sharing opt-in, a host-rendered scoreboard or existing mood image. Arbitrary model-selected files cannot be uploaded. Thus they can discuss publicly posted
 progress but cannot reveal unpublished agent context or trigger switchboard tells.
 The reply references its source message and disables all pings. The host persists
 the send attempt first and uses Discord's enforced nonce as an additional duplicate
@@ -231,3 +231,9 @@ uncertain POST is not automatically repeated. The session shows a delivery notic
 
 Protocol reference: [Discord message API](https://docs.discord.com/developers/resources/message)
 and [rate limits](https://docs.discord.com/developers/topics/rate-limits).
+
+### Per-loop limits and iPad controls
+
+Schedules continue until paused; `maxTurnsPerLoop` is an optional archive/wire field replacing the lifetime meaning of `remainingRuns`. Old counters remain decodable, with an exhausted counter becoming a minimum one-turn cap, but disabled loops stay disabled. Each activation currently makes one model response with bounded hosted search and output tokens. It never automatically chains another response. The cap is a ceiling, not a request to repeat the objective N times. Queue capacity, message deduplication, the eight-hop switchboard bound, and pause-on-error remain in force.
+
+iPad Agent Setup uses explicit Save/Cancel. Save and run once persists the edited schedule first, and only requests the run after home acknowledges it. Unsupported text schedules display the parser error. The clipboard button uses the system clipboard; the adjacent Photos button opens the library.

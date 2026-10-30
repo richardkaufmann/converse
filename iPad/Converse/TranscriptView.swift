@@ -44,17 +44,28 @@ final class TailTextView: UITextView {
     required init?(coder: NSCoder) { super.init(coder: coder) }
     static func native() -> TailTextView {
         let storage = NSTextStorage()
-        let layout = NSLayoutManager(); storage.addLayoutManager(layout)
+        let layout = NSLayoutManager(); layout.allowsNonContiguousLayout = false; storage.addLayoutManager(layout)
         let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true; layout.addTextContainer(container)
-        return TailTextView(frame: .zero, textContainer: container)
+        let view = TailTextView(frame: .zero, textContainer: container)
+        layout.allowsNonContiguousLayout = false
+        return view
     }
     override func layoutSubviews() {
         if pendingViewport == nil, previousBounds != .zero, previousBounds != bounds.size,
            contentOffset.y + previousBounds.height >= previousContentHeight - 80, !isDragging, !isDecelerating {
             pendingViewport = .bottom
         }
+        let geometryChanged = previousBounds != bounds.size
+        if geometryChanged {
+            layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: textStorage.length), actualCharacterRange: nil)
+        }
         super.layoutSubviews()
+        if geometryChanged {
+            layoutManager.ensureLayout(for: textContainer)
+            layoutManager.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: textStorage.length))
+            setNeedsDisplay()
+        }
         if let viewport = pendingViewport, bounds.width > 0, bounds.height > 0 {
             pendingViewport = nil
             layoutManager.ensureLayout(for: textContainer)
@@ -73,6 +84,13 @@ final class TailTextView: UITextView {
         gutter.frame = CGRect(x: contentOffset.x, y: contentOffset.y, width: 42, height: bounds.height)
         bringSubviewToFront(gutter); gutter.setNeedsDisplay()
         layoutDraftImageButtons()
+    }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        layoutManager.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: textStorage.length))
+        setNeedsLayout(); setNeedsDisplay()
     }
     override var keyCommands: [UIKeyCommand]? {
         let commands = [UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(handleReturnCommand(_:))),
@@ -126,6 +144,7 @@ final class TailTextView: UITextView {
         super.replace(range, withText: text)
     }
     override func paste(_ sender: Any?) {
+        guard isEditable else { return }
         if let image = UIPasteboard.general.image, let data = image.pngData(), let coordinator = delegate as? PadTranscript.Coordinator { coordinator.parent.attach(data); return }
         pastingText = true; defer { pastingText = false }; super.paste(sender)
     }
@@ -266,7 +285,60 @@ struct PadTranscript: UIViewRepresentable {
         view.undoManager?.removeAllActions(); c.updating = false
     }
     static func separator() -> NSAttributedString { NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.label]) }
+    // UIKit has no NSTextTable. Render tables as wrapping, labelled records
+    // so narrow panes remain readable, while keeping the stored Markdown intact.
     static func render(_ text: String) -> NSMutableAttributedString {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        let result = NSMutableAttributedString()
+        func cells(_ line: String) -> [String] {
+            var line = line.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("|") { line.removeFirst() }; if line.hasSuffix("|") { line.removeLast() }
+            var out: [String] = [], value = "", escaped = false, code = false
+            for c in line {
+                if escaped { value.append(c); escaped = false; continue }
+                if c == "\\" { value.append(c); escaped = true; continue }
+                if c == "`" { code.toggle() }
+                if c == "|" && !code { out.append(value.trimmingCharacters(in: .whitespaces)); value = "" }
+                else { value.append(c) }
+            }
+            out.append(value.trimmingCharacters(in: .whitespaces)); return out
+        }
+        func append(_ body: NSAttributedString) { result.append(body); result.append(separator()) }
+        var i = 0
+        while i < lines.count {
+            let line = lines[i], trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let fence = String(trimmed.prefix(3)); i += 1
+                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
+                    append(NSAttributedString(string: lines[i], attributes: [.font: UIFont.monospacedSystemFont(ofSize: 14, weight: .regular), .foregroundColor: UIColor.label, .backgroundColor: UIColor.quaternarySystemFill])); i += 1
+                }
+                if i < lines.count { i += 1 }; continue
+            }
+            if i + 1 < lines.count && cells(line).count > 1 && cells(lines[i + 1]).allSatisfy({ $0.range(of: "^:?-{3,}:?$", options: .regularExpression) != nil }) {
+                let headers = cells(line); i += 2
+                while i < lines.count && lines[i].contains("|") && !lines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+                    let row = cells(lines[i])
+                    for column in headers.indices {
+                        let entry = inline(headers[column])
+                        entry.addAttribute(.font, value: UIFont.boldSystemFont(ofSize: 16), range: NSRange(location: 0, length: entry.length))
+                        entry.append(inline(": " + (column < row.count ? row[column] : ""))); append(entry)
+                    }
+                    append(NSAttributedString(string: "")); i += 1
+                }
+                continue
+            }
+            if let match = trimmed.range(of: "^#{1,6} +", options: .regularExpression) {
+                let heading = inline(String(trimmed[match.upperBound...]))
+                heading.addAttribute(.font, value: UIFont.boldSystemFont(ofSize: 18), range: NSRange(location: 0, length: heading.length)); append(heading)
+            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                append(inline("• " + trimmed.dropFirst(2)))
+            } else { append(inline(line)) }
+            i += 1
+        }
+        if !text.hasSuffix("\n") && result.string.hasSuffix("\n") { result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1)) }
+        return result
+    }
+    static func inline(_ text: String) -> NSMutableAttributedString {
         let output = NSMutableAttributedString()
         guard let parsed = try? AttributedString(markdown: TranscriptStyle.imageLinks(text), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSMutableAttributedString(string: text, attributes: [.font: UIFont.systemFont(ofSize: 16)])

@@ -37,7 +37,7 @@ import Foundation
     first.draft = "keep my typing"; first.attachments = ["keep-image"]
     let req = request("a", agent: first.id.uuidString)
     enqueue(req); router.tick(store: store, now: now)
-    check(starts == 1 && first.agent?.remainingRuns == 19 && first.agent?.jollyRequestID == req.id && first.draft == "keep my typing" && first.attachments == ["keep-image"], "Jolly reserves and persists one turn before starting while preserving the human draft")
+    check(starts == 1 && first.agent?.turnLimit == 20 && first.agent?.jollyRequestID == req.id && first.draft == "keep my typing" && first.attachments == ["keep-image"], "Jolly reserves and persists one turn before starting while preserving the human draft")
     check(draftPersistedAtStart, "Jolly preserves the human draft in every save before the model starts, including a crash during handoff")
     router.tick(store: store, now: now)
     check(starts == 1, "Repeated polling cannot start a second copy of an active Jolly request")
@@ -47,8 +47,8 @@ import Foundation
     check(result(req.id)["answer"] as? String == "A correlated answer" && starts == 1 && first.agent?.jollyRequestID == nil, "Jolly persists a correlated reply and never replays its completed request")
     first.queuePaused = true
     let held = request("b"); enqueue(held); router.tick(store: store, now: now)
-    check(result(held.id)["status"] as? String == "busy" && starts == 1 && first.agent?.remainingRuns == 19, "Paused queues refuse Jolly without injection or budget consumption")
-    first.queuePaused = false; first.agent?.remainingRuns = 0
+    check(result(held.id)["status"] as? String == "busy" && starts == 1 && first.agent?.turnLimit == 20, "Paused queues refuse Jolly without injection or budget consumption")
+    first.queuePaused = false; first.agent?.turnLimit = 0
     let exhausted = request("c"); enqueue(exhausted); router.tick(store: store, now: now)
     check(result(exhausted.id)["status"] as? String == "budget_exhausted" && starts == 1, "Jolly cannot bypass the agent turn budget")
     first.agent?.jollyRequestID = String(repeating: "d", count: 64)

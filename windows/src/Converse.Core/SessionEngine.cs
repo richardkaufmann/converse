@@ -402,10 +402,9 @@ public sealed class SessionStore
         var next = session.Pending[0];
         if (session.Agent is { } config && next.Autonomous && !next.AgentRunReserved)
         {
-            if (config.Settings.RemainingRuns <= 0) { session.QueuePaused = true; config.Attention = "Automatic run budget exhausted."; Save(); return; }
+            if (config.Settings.TurnLimit <= 0) { session.QueuePaused = true; config.Attention = "Automatic run budget exhausted."; Save(); return; }
             var old = config.Settings.RemainingRuns; var enabled = config.Settings.Enabled; var revision = config.Settings.Revision;
-            config.Settings.RemainingRuns--; config.Settings.Revision = checked((revision ?? 0) + 1);
-            if (config.Settings.RemainingRuns == 0) config.Settings.Enabled = false;
+            config.Settings.Revision = checked((revision ?? 0) + 1);
             next.AgentRunReserved = true;
             try { Save(); }
             catch { config.Settings.RemainingRuns = old; config.Settings.Enabled = enabled; config.Settings.Revision = revision; next.AgentRunReserved = false; session.QueuePaused = true; config.Attention = "Could not preserve run budget. Agent paused."; return; }

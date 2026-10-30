@@ -138,6 +138,7 @@ public sealed partial class DeviceSyncService
         if (previous is not null) return Task.FromResult(previous.Origin == origin && previous.Hash == hash ? previous.Response : Result("rejected", "Operation ID belongs to another request."));
         if (_store.ParticipantReceipts.Count >= 100000) return Task.FromResult(Result("rejected", "Home operation journal is full."));
         var old = session?.Agent is null ? null : JsonSerializer.SerializeToUtf8Bytes(session.Agent);
+        var oldQueuePaused = session?.QueuePaused;
         var pending = session?.Pending.ToList(); ChatSession? created = null; bool run = false, widget = false;
         try
         {
@@ -147,15 +148,16 @@ public sealed partial class DeviceSyncService
                 case "agent.create": created = _store.CreateAgent(request.Title ?? "New Agent", false); session = created; detail = "Agent created paused. Add a Meta key on its home computer."; break;
                 case "agent.configure":
                     if (session?.Agent is null || request.Settings is null || request.Settings.Watched.Any(w => DeviceGlobalID.Parse(w) is not { } r || !IsParticipantAllowed(r.Home, group))) throw new ArgumentException("Agent missing or scope outside this group.");
-                    session.Agent.Apply(request.Settings); detail = "Settings saved on home."; break;
+                    session.Agent.Apply(request.Settings); if (request.Settings.Enabled && session.Pending.Count == 0) session.QueuePaused = false; detail = "Settings saved on home."; break;
                 case "agent.run":
-                    if (session?.Agent is not { } agent || agent.Settings.RemainingRuns <= 0 || session.Pending.Count >= 100) throw new ArgumentException("Agent missing, budget exhausted, or queue full.");
-                    agent.Settings.RemainingRuns--; agent.Settings.Revision = checked((agent.Settings.Revision ?? 0) + 1); if (agent.Settings.RemainingRuns == 0) agent.Settings.Enabled = false;
+                    if (session?.Agent is not { } agent || agent.Settings.TurnLimit <= 0 || session.Pending.Count >= 100) throw new ArgumentException("Agent missing, budget exhausted, or queue full.");
+                    agent.Settings.Revision = checked((agent.Settings.Revision ?? 0) + 1);
                     session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and refresh the scoreboard.", Autonomous = true, AgentRunReserved = true, OriginGroupID = group, OriginHomeID = origin }); run = true; detail = "Run saved on home."; break;
                 case "agent.widget": if (session?.Agent is null) throw new ArgumentException("Target is not an agent."); widget = true; detail = "Scoreboard requested on home."; break;
                 default: return Task.FromResult(Result("rejected", "Unsupported operation."));
             }
             var response = Result("completed", detail, session);
+            if (session?.Agent is { } saved) response.Settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(saved.Settings));
             _store.ParticipantReceipts.Add(new ParticipantReceipt { Id = id, Origin = origin, Hash = hash, Response = response });
             _store.Save();
             if (run) _store.RunNext(session!);
@@ -165,7 +167,7 @@ public sealed partial class DeviceSyncService
         catch (Exception e)
         {
             if (created is not null) _store.Sessions.Remove(created);
-            if (session is not null && old is not null) { session.Agent = JsonSerializer.Deserialize<AgentConfig>(old); session.Pending = pending ?? new(); }
+            if (session is not null && old is not null) { session.Agent = JsonSerializer.Deserialize<AgentConfig>(old); session.Pending = pending ?? new(); if (oldQueuePaused is { } paused) session.QueuePaused = paused; }
             _store.ParticipantReceipts.RemoveAll(r => r.Id == id);
             return Task.FromResult(Result("rejected", e is ArgumentException ? e.Message : "Home could not save the operation. Nothing applied."));
         }

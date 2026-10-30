@@ -8,6 +8,17 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     let restoredSidebar = PaneSizing.sidebar(preferred: 410, reference: 1400, window: 1400, limit: 480, paneCount: 3)
     check(smallSidebar == 162 && restoredSidebar == 410, "Sidebar compresses in small windows and restores the preferred width as space returns")
     check(PaneSizing.sidebar(preferred: 200, reference: 1100, window: 1100, limit: 359, paneCount: 2) == 200, "Adding panes retains an intentionally narrow sidebar instead of expanding it")
+    do {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("workspace-restore-" + UUID().uuidString)
+        let original = Workspace(); _ = original.restore(folder: folder)
+        let window = WindowState(workspace: original), session = UUID()
+        original.rename(window.id, to: "Saved window"); original.assign(session, to: window.id, pane: 2)
+        let restored = Workspace(); let windows = restored.restore(folder: folder)
+        check(windows == [window.id] && restored.names[window.id] == "Saved window" && restored.session(in: window.id, pane: 2) == session, "Mac relaunch restores named windows and saved pane placements without taking sessions")
+        restored.park(session)
+        let parked = Workspace(); _ = parked.restore(folder: folder)
+        check(parked.placements.isEmpty, "Explicit Park stays parked after Mac relaunch")
+    }
     let workspace = Workspace()
     let first = WindowState(workspace: workspace), second = WindowState(workspace: workspace)
     check(first.title == "Converse" && second.title == "Converse 2", "New windows have distinct names and independent empty panes")

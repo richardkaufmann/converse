@@ -145,6 +145,7 @@ final class DeviceSyncService: ObservableObject {
     private var participantReplies: [UUID: (home: String, group: String, finish: (DeviceParticipantResponse) -> Void)] = [:]
     private var pendingTells: [UUID: (source: UUID, home: String, group: String)] = [:]
     private var pendingTakes: [String: Date] = [:]
+    private var resumeEpochs: [String: UInt64] = [:]
     private var leaseBoots: [String: UInt64] = [:]
     private var pendingUploads: Set<String> = []
     private var recoveredUploads: [String: [String: UInt64]] = [:]
@@ -161,6 +162,7 @@ final class DeviceSyncService: ObservableObject {
     // Isolated harness wiring without listener, browser, timers, or Keychain.
     func configureForTesting(folder: URL) throws {
         testFolder = folder
+        loadResumeEpochs()
         identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: false)
         trustStore = try DeviceTrustStore(folder: folder)
         commandStore = try DeviceCommandStore(folder: folder)
@@ -193,6 +195,7 @@ final class DeviceSyncService: ObservableObject {
         started = true
         do {
             let folder = storageFolder
+            loadResumeEpochs()
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)
             try initializeGroups(folder: folder)
@@ -524,7 +527,7 @@ extension DeviceSyncService {
         homes[hello.deviceID] = RemoteHomeState(deviceID: hello.deviceID, deviceName: hello.deviceName, online: true, rows: homes[hello.deviceID]?.rows ?? [], lastSeen: Date())
         if !locallyRemoved { sendSidebar(to: peer) }
         broadcastFabric()
-        serviceStatus = locallyRemoved ? "Membership exchange only. Fresh sponsor approval is required to rejoin." : "Connected to " + hello.deviceName + ". Take a session again to control it."
+        serviceStatus = locallyRemoved ? "Membership exchange only. Fresh sponsor approval is required to rejoin." : "Connected to " + hello.deviceName + ". Previously displayed sessions restore if nobody else took them."
     }
     private func broadcastFabric() {
         guard let records = trustStore?.records, let data = try? JSONEncoder().encode(records.filter { !groupsEnabled || $0.groupID == currentGroup?.id }) else { return }
@@ -564,6 +567,7 @@ extension DeviceSyncService {
             homes[hello.deviceID]?.online = false; homes[hello.deviceID]?.lastSeen = Date()
             // Viewer authority never survives disconnect.
             for row in homes[hello.deviceID]?.rows ?? [] {
+                pendingTakes.removeValue(forKey: row.globalID)
                 remoteLeases.removeValue(forKey: row.globalID); remoteOffline.insert(row.globalID)
                 try? outboxStore?.markUncertain(sessionID: row.globalID)
             }
@@ -594,7 +598,7 @@ extension DeviceSyncService {
                 for peer in peers.values where peer.hello?.deviceID == expired.device {
                     peer.leasedSessions.remove(expired.session)
                     if let home = identity?.deviceID {
-                        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseStolen.rawValue, sessionID: DeviceGlobalID(home: home, session: expired.session).string))
+                        sendEnvelope(peer, DeviceEnvelope(kind: peer.hello?.capabilities.contains("lease-resume-v1") == true ? DeviceMessageKind.leaseExpired.rawValue : DeviceMessageKind.leaseStolen.rawValue, sessionID: DeviceGlobalID(home: home, session: expired.session).string, epoch: expired.epoch))
                     }
                 }
             }
@@ -604,6 +608,7 @@ extension DeviceSyncService {
         for globalID in Array(remoteLeases.keys) where !viewerHasPlacement(globalID) {
             releaseRemote(globalID: globalID)
         }
+        restoreAvailableDisplays()
         for (globalID, epoch) in remoteLeases {
             guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { continue }
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseHeartbeat.rawValue, sessionID: globalID, epoch: epoch))
@@ -909,9 +914,12 @@ extension DeviceSyncService {
             for row in payload.rows { remoteOffline.remove(row.globalID) }
             if let encoded = try? JSONEncoder().encode(homes.values.map { DeviceSidebarPayload(homeDeviceID: $0.deviceID, homeDeviceName: $0.deviceName, homeSeq: 0, rows: $0.rows) }) { stateStore?.saveSidebarCache(encoded) }
         #if os(macOS)
-        case DeviceMessageKind.leaseAcquire.rawValue:
+        case DeviceMessageKind.leaseAcquire.rawValue, DeviceMessageKind.leaseResume.rawValue:
             guard let (session, _) = homeSession(envelope), let leases else { return }
-            let result = leases.acquire(session: session.id, device: peerHome)
+            let restoring = envelope.kind == DeviceMessageKind.leaseResume.rawValue
+            let result = restoring
+                ? leases.resume(session: session.id, device: peerHome, expectedEpoch: envelope.epoch ?? 0)
+                : leases.acquire(session: session.id, device: peerHome)
             guard result.granted else {
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseDenied.rawValue, boot: boot, sessionID: envelope.sessionID)); return
             }
@@ -934,17 +942,26 @@ extension DeviceSyncService {
             guard let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome, let epoch = envelope.epoch else { return }
             if pendingTakes[idString] != nil {
                 pendingTakes.removeValue(forKey: idString)
+                rememberDisplay(idString, epoch: epoch)
                 remoteLeases[idString] = epoch; leaseBoots[idString] = envelope.boot; remoteOffline.remove(idString)
                 lastOutcome = "Display taken. Epoch " + String(epoch) + "."
             } else if let current = remoteLeases[idString], epoch > current {
                 // Second grant from a coalesced duplicate: adopt monotonically.
+                rememberDisplay(idString, epoch: epoch)
                 remoteLeases[idString] = epoch; leaseBoots[idString] = envelope.boot
             } else {
                 // Late grant after park/cancel: release it at home immediately.
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: idString, epoch: epoch))
             }
+        case DeviceMessageKind.leaseExpired.rawValue:
+            if let id = envelope.sessionID, DeviceGlobalID(id)?.home == peerHome, let epoch = envelope.epoch, remoteLeases[id] == epoch {
+                remoteLeases.removeValue(forKey: id); leaseBoots.removeValue(forKey: id)
+                remoteOffline.insert(id)
+                // Retain the pane and its remembered epoch; restore is conditional.
+            }
         case DeviceMessageKind.leaseStolen.rawValue, DeviceMessageKind.leaseDenied.rawValue:
             if let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome {
+                forgetDisplay(idString)
                 pendingTakes.removeValue(forKey: idString)
                 remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString)
                 remoteTranscripts.removeValue(forKey: idString)
@@ -1131,6 +1148,32 @@ extension DeviceSyncService {
         guard !locallyRemoved else { return nil }
         return peers.values.first { $0.trustedReady && !$0.controlOnly && (!groupsEnabled || currentGroup != nil) && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
     }
+    private func loadResumeEpochs() {
+        resumeEpochs = (try? JSONDecoder().decode([String: UInt64].self, from: Data(contentsOf: storageFolder.appendingPathComponent("display-resume.json")))) ?? [:]
+    }
+    private func rememberDisplay(_ id: String, epoch: UInt64) {
+        resumeEpochs[id] = epoch
+        saveResumeEpochs()
+    }
+    private func forgetDisplay(_ id: String) {
+        guard resumeEpochs.removeValue(forKey: id) != nil else { return }
+        saveResumeEpochs()
+    }
+    private func saveResumeEpochs() {
+        do { try JSONEncoder().encode(resumeEpochs).write(to: storageFolder.appendingPathComponent("display-resume.json"), options: .atomic) }
+        catch { lastOutcome = "Could not save display restore state. Take manually after restarting." }
+    }
+    // Never use lease.acquire here: an automatic reconnect must not steal.
+    func restoreAvailableDisplays() {
+        for (id, epoch) in resumeEpochs {
+            guard viewerHasPlacement(id), remoteLeases[id] == nil, pendingTakes[id] == nil,
+                  let global = DeviceGlobalID(id), let peer = peerForHome(global.home),
+                  peer.hello?.capabilities.contains("lease-resume-v1") == true else { continue }
+            remoteTranscripts.removeValue(forKey: id)
+            pendingTakes[id] = Date()
+            sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseResume.rawValue, sessionID: id, epoch: epoch))
+        }
+    }
     func acquireRemote(globalID: String) {
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { lastOutcome = "Home is offline."; return }
         // Coalesce: moving panes or double-clicking must not mint a second
@@ -1141,7 +1184,8 @@ extension DeviceSyncService {
         pendingTakes[globalID] = Date()
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: globalID))
     }
-    func releaseRemote(globalID: String) {
+    func releaseRemote(globalID: String, preservingDisplay: Bool = false) {
+        if !preservingDisplay { forgetDisplay(globalID) }
         pendingTakes.removeValue(forKey: globalID)
         guard let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else {
             remoteLeases.removeValue(forKey: globalID); leaseBoots.removeValue(forKey: globalID); return
@@ -1162,7 +1206,8 @@ extension DeviceSyncService {
         releaseRemote(globalID: globalID)
     }
     func localTake(sessionID: UUID) {
-        guard started, let home = identity?.deviceID, let leases, leases.holder(session: sessionID) != nil else { return }
+        guard started, let home = identity?.deviceID, let leases else { return }
+        if leases.holder(session: sessionID)?.device == home { return }
         let result = leases.acquire(session: sessionID, device: home)
         guard result.granted else { lastOutcome = "Could not record local display fence."; return }
         let globalID = DeviceGlobalID(home: home, session: sessionID).string
@@ -1314,14 +1359,14 @@ extension DeviceSyncService {
     // persist synchronously; release is best effort and home TTL is the backstop.
     func suspendViewer() {
         persistDrafts()
-        for id in Set(remoteLeases.keys).union(pendingTakes.keys) { releaseRemote(globalID: id) }
+        for id in Set(remoteLeases.keys).union(pendingTakes.keys) { releaseRemote(globalID: id, preservingDisplay: true) }
         heartbeatTimer?.invalidate(); publishTimer?.invalidate()
         heartbeatTimer = nil; publishTimer = nil
         browser?.cancel(); listener?.cancel(); browser = nil; listener = nil
         for peer in Array(peers.values) { disconnect(peer) }
         pairingPrompt = nil
         started = false
-        serviceStatus = "Disconnected while in background. Take here after reconnecting."
+        serviceStatus = "Disconnected while in background. Available displays restore after reconnecting."
     }
     func resumeViewer() { startIfNeeded() }
     func storedDraft(globalID: String) -> String? { drafts.text(session: globalID) }
@@ -1725,6 +1770,7 @@ extension DeviceSyncService {
         }
         guard store.participantReceipts.count < 100000 else { reject("Home command journal is full."); return true }
         var created: Session?
+        let oldQueuePaused = session?.queuePaused
         let oldConfig = session?.agent
         let oldPending = session?.pending
         let oldModel = session?.toolStatus.model
@@ -1739,9 +1785,9 @@ extension DeviceSyncService {
                 let agent = store.createAgent(title: name, persist: false); created = agent
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent created paused. Configure API credentials on its home.", target: DeviceGlobalID(home: identity!.deviceID, session: agent.id).string)
             case "agent.run":
-                guard let session, var config = session.agent, config.remainingRuns > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
-                config.settingsChanged(); config.remainingRuns -= 1
-                if config.remainingRuns == 0 { config.enabled = false }
+                guard let session, var config = session.agent, config.turnLimit > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
+                config.settingsChanged()
+
                 session.agent = config
                 session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and refresh the scoreboard.", images: []))
                 runAfterCommit = true
@@ -1754,7 +1800,8 @@ extension DeviceSyncService {
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
                 guard settings.watched.allSatisfy({ ref in DeviceGlobalID(ref).map { acceptsParticipant(home: $0.home, groupID: group) } == true }) else { reject("Scope includes a participant outside this group."); return true }
                 try session.agent?.apply(settings); session.toolStatus.model = settings.model
-                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent settings saved on home.", target: request.target)
+                if settings.enabled && session.pending.isEmpty { session.queuePaused = false }
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent settings saved on home.", target: request.target, settings: session.agent?.wire(home: identity!.deviceID))
             default: reject("Unsupported participant operation."); return true
             }
             store.participantReceipts.append(ParticipantMutationReceipt(id: id, origin: origin, payloadHash: hash, response: result))
@@ -1763,7 +1810,7 @@ extension DeviceSyncService {
             if let session, widgetAfterCommit, !isTestEnvironment { MainActor.assumeIsolated { AgentWindows.shared.widget(session) } }
         } catch {
             if let created { store.sessions.removeAll { $0 === created } }
-            if let session { session.agent = oldConfig; session.pending = oldPending ?? []; if let oldModel { session.toolStatus.model = oldModel } }
+            if let session { session.agent = oldConfig; session.pending = oldPending ?? []; if let oldQueuePaused { session.queuePaused = oldQueuePaused }; if let oldModel { session.toolStatus.model = oldModel } }
             store.participantReceipts.removeAll { $0.id == id }; reject("Home could not validate or persist the operation. Nothing was applied.")
         }
         #else

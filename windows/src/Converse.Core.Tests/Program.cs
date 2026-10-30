@@ -151,6 +151,13 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(first.Granted && second.Epoch == first.Epoch + 1 && !leases.Validate(session, "device-a", first.Epoch) && leases.Validate(session, "device-b", second.Epoch), "Takeover fences stale holder");
     now = now.AddSeconds(16);
     Check(leases.SweepExpired().Any(e => e.Device == "device-b") && !leases.Validate(session, "device-b", second.Epoch), "Expired leases sweep");
+    var resumed = leases.Resume(session, "device-b", second.Epoch);
+    Check(resumed.Granted && resumed.Epoch > second.Epoch, "Idle viewer resumes without stealing and receives fresh epoch");
+    var newer = leases.Acquire(session, "device-c");
+    leases.Release(session, "device-c", newer.Epoch);
+    Check(!leases.Resume(session, "device-b", resumed.Epoch).Granted, "Resume refuses newer take even after its holder parks");
+    var restarted = new DeviceLeaseManager(initialEpochs: new() { [session] = newer.Epoch });
+    Check(!restarted.Resume(session, "device-b", resumed.Epoch).Granted && restarted.Resume(session, "device-c", newer.Epoch).Granted, "Restart preserves conditional restore fencing");
     var denied = new DeviceLeaseManager(persistEpochs: _ => false);
     Check(!denied.Acquire(session, "device-c").Granted, "Epoch persistence failure denies grant (fail closed)");
 }
@@ -375,7 +382,14 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         await b.AcquireRemoteAsync(gid);
         Check(await UntilTakeover(() => b.RemoteTranscripts.ContainsKey(gid) && home.DisplayHolder(session.Id)?.Device == b.DeviceId),
             "Remote viewer can take the session back again after a home take");
+        b.IsViewerPlaced = id => id == gid;
+        var priorResumeEpoch = b.RemoteLeases[gid];
+        b.RemoteLeases.Clear(); // Simulate a viewer losing authority on suspend.
+        await b.RestoreAvailableDisplaysAsync();
+        Check(await UntilTakeover(() => b.RemoteLeases.GetValueOrDefault(gid) > priorResumeEpoch), "Loopback conditional resume restores a still-placed viewer with a fresh fence");
         await b.ReleaseRemoteAsync(gid);
+        await b.RestoreAvailableDisplaysAsync();
+        Check(!b.RemoteLeases.ContainsKey(gid), "Parked viewer does not automatically reacquire");
         Check(await UntilTakeover(() => home.DisplayHolder(session.Id) is null && holderSeenByUI is null),
             "Display holder clears and refreshes the home UI on release");
     }

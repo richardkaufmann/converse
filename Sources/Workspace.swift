@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-struct PaneLocation: Equatable {
+struct PaneLocation: Equatable, Codable {
     let windowID: UUID
     let pane: Int
 }
@@ -9,8 +9,30 @@ struct PaneLocation: Equatable {
 // the source in one publication, so a conversation never has two owners.
 final class Workspace: ObservableObject {
     static let shared = Workspace()
-    @Published private(set) var placements: [UUID: PaneLocation] = [:]
-    @Published private(set) var names: [UUID: String] = [:]
+    @Published private(set) var placements: [UUID: PaneLocation] = [:] { didSet { persist() } }
+    @Published private(set) var names: [UUID: String] = [:] { didSet { persist() } }
+    private var file: URL?
+    private struct Saved: Codable { var names: [UUID: String]; var placements: [UUID: PaneLocation] }
+    func restore(folder: URL) -> [UUID] {
+        let url = folder.appendingPathComponent("window-placements.json")
+        if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(Saved.self, from: data) {
+            names = Dictionary(uniqueKeysWithValues: saved.names.sorted { $0.key.uuidString < $1.key.uuidString }.prefix(16).map { ($0.key, $0.value) })
+            var seen: Set<String> = []
+            placements = saved.placements.filter { id, location in
+                guard names[location.windowID] != nil, (1...3).contains(location.pane) else { return false }
+                return seen.insert(location.windowID.uuidString + ":" + String(location.pane)).inserted
+            }
+        }
+        file = url
+        return names.keys.sorted { $0.uuidString < $1.uuidString }
+    }
+    private func persist() {
+        guard let file else { return }
+        do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(Saved(names: names, placements: placements)).write(to: file, options: .atomic)
+        } catch { NSLog("Converse could not save window placements.") }
+    }
     func register(_ windowID: UUID, name: String = "Converse") {
         guard names[windowID] == nil else { return }
         names[windowID] = uniqueName(name, excluding: windowID)
@@ -58,7 +80,7 @@ final class Workspace: ObservableObject {
     }
 }
 final class WindowState: ObservableObject {
-    let id = UUID()
+    let id: UUID
     let workspace: Workspace
     @Published var settings = false
     @Published var deviceConnect = false
@@ -66,7 +88,7 @@ final class WindowState: ObservableObject {
     @Published var sidebarCollapsed = false
     @Published var sessionSetup: SessionSetupRequest? = nil
     @Published var closingSessionID: UUID? = nil
-    init(workspace: Workspace = .shared) { self.workspace = workspace; workspace.register(id) }
+    init(workspace: Workspace = .shared, id: UUID = UUID()) { self.id = id; self.workspace = workspace; workspace.register(id) }
     var title: String { workspace.names[id] ?? "Converse" }
 }
 

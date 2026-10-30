@@ -6,6 +6,7 @@ import Foundation
 enum DeviceMessageKind: String, Codable {
     case hello, sidebarSnapshot = "sidebar.snapshot", sidebarDelta = "sidebar.delta"
     case leaseAcquire = "lease.acquire", leaseGranted = "lease.granted", leaseDenied = "lease.denied"
+    case leaseResume = "lease.resume", leaseExpired = "lease.expired"
     case leaseStolen = "lease.stolen", leaseHeartbeat = "lease.heartbeat", leaseRelease = "lease.release"
     case transcriptSnapshot = "transcript.snapshot", transcriptTail = "transcript.tail"
     case draftPatch = "draft.patch", draftAck = "draft.ack", command, commandAck = "command.ack", commandQuery = "command.query"
@@ -96,7 +97,7 @@ struct DeviceHello: Codable, Equatable {
     var deviceName: String
     var converseVersion: String
     var protocolVersion = 1
-    var capabilities: [String] = ["sidebar", "lease", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1", "converse-groups-v1"]
+    var capabilities: [String] = ["sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1", "converse-groups-v1"]
     var listenPort: Int? = nil
     var group: ConverseGroup? = nil
     var joinGroupID: String? = nil
@@ -279,6 +280,13 @@ struct DeviceAgentSettings: Codable, Equatable {
     var watched: [String]
     var intervalSeconds: Double
     var remainingRuns: Int
+    // Legacy counter remains decodable for saved archives and older peers.
+    // It no longer limits the number of scheduled activations.
+    var maxTurnsPerLoop: Int? = nil
+    var turnLimit: Int {
+        get { maxTurnsPerLoop ?? max(1, remainingRuns) }
+        set { maxTurnsPerLoop = newValue }
+    }
     var enabled: Bool
     var generateArt: Bool
     var speak: Bool
@@ -288,6 +296,7 @@ struct DeviceAgentSettings: Codable, Equatable {
     var scoreboardEveryLoops: Int? = nil
     var scheduleText: String? = nil
     var scheduleTimeZone: String? = nil
+    var discordShareScoreboard: Bool? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var groupID: String

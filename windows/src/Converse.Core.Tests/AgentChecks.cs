@@ -55,8 +55,8 @@ static class AgentChecks
             agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.IntervalSeconds = 60; agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1);
             home.Agents.Tick(DateTime.UtcNow); home.Agents.Tick(DateTime.UtcNow);
             deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
-            check(calls == 2 && agent.Agent.Settings.RemainingRuns == before - 1, "Agent scheduler persists exactly one reserved budget and coalesces ticks");
-            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before - 1, "Agent budget and scoreboard survive archive reload");
+            check(calls == 2 && agent.Agent.Settings.RemainingRuns == before, "Agent scheduler persists one activation without depleting the schedule and coalesces ticks");
+            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and scoreboard survive archive reload");
             var created = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Created remotely");
             check(created.Outcome == "completed" && store.Sessions.Any(s => s.Title == "Created remotely" && s.Agent is not null), "Viewer creates a paused agent on the selected home");
             await viewer.LeaveGroupAsync();
