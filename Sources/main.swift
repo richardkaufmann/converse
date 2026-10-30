@@ -1750,7 +1750,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
-                let trafficSummary = TranscriptStyle.trafficSummary(visible)
+                let trafficSummary = TranscriptStyle.trafficSummary(visible, resolveName: DeviceSyncService.shared.switchboardDisplayName)
                 if let summary = trafficSummary {
                     let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                     body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })

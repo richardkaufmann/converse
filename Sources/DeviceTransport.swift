@@ -744,6 +744,11 @@ extension DeviceSyncService {
         for peer in peers.values where peer.trustedReady { sendSidebar(to: peer) }
     }
     #if os(macOS)
+    func publishSwitchboardQueue(_ sessionID: UUID) {
+        for peer in peers.values where peer.trustedReady && peer.leasedSessions.contains(sessionID) {
+            sendTranscript(to: peer, sessionID: sessionID)
+        }
+    }
     private func sendTranscript(to peer: DevicePeer, sessionID: UUID, beforeOffset: Int? = nil) {
         guard let session = Store.shared.sessions.first(where: { $0.id == sessionID }), let home = identity?.deviceID, let leases, let device = peer.hello?.deviceID else { return }
         // Never stream without a current lease for this exact peer and epoch.
@@ -1675,12 +1680,14 @@ extension DeviceSyncService {
             return "Could not persist the tracked delivery. Nothing was sent."
         }
         pendingTells[id] = (source.id, global.home, group)
-        source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " · " + id.uuidString))
+        source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " [" + target + "] · " + id.uuidString + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
         participantStore.save()
         sendEnvelope(peer, DeviceEnvelope(kind: "participant.tell", commandID: id, payload: try? JSONEncoder().encode(payload)))
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             guard let self, let pending = self.pendingTells.removeValue(forKey: id), let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
-            source.messages.append(Message(role: "notice", text: "Switchboard: delivery unconfirmed · " + id.uuidString + ". Check the target home before resending; no automatic replay."))
+            if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {
+                source.messages[at].text = source.messages[at].text.replacingOccurrences(of: "awaiting home acceptance →", with: "delivery unconfirmed →")
+            }
             self.participantStore.save()
         }
         return nil
@@ -1697,8 +1704,13 @@ extension DeviceSyncService {
             pendingTells.removeValue(forKey: id)
             if let source = store.sessions.first(where: { $0.id == pending.source }) {
                 store.switchboardReceipt(source, delivery: id, accepted: ack.outcome == "queued")
-                source.messages.append(Message(role: "notice", text: "Switchboard: " + ack.outcome + " · " + id.uuidString + " · " + (ack.detail ?? "")))
+                if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {
+                    let updated = source.messages[at].text.replacingOccurrences(of: "awaiting home acceptance →", with: (ack.outcome == "queued" ? "queued" : "rejected") + " →")
+                    let pieces = updated.components(separatedBy: "\n")
+                    source.messages[at].text = pieces[0] + " · " + (ack.detail ?? "") + "\n" + pieces.dropFirst().joined(separator: "\n")
+                }
                 store.save()
+                publishSwitchboardQueue(source.id)
             }
             return true
         }
@@ -1725,11 +1737,12 @@ extension DeviceSyncService {
         let oldWatches = target.switchboardObligations, oldExpected = target.switchboardExpectations
         let oldPending = target.pending, oldMessages = target.messages
         if request.urgent { target.pending.insert(prompt, at: 0) } else { target.pending.append(prompt) }
-        target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + request.sourceTitle + " [" + from.string + "] · " + id.uuidString + "\n" + request.text))
+        target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + request.sourceTitle + " [" + from.string + "] · " + id.uuidString + (request.replyExpected == true ? " [ask]" : " [tell]") + "\n" + request.text))
         store.switchboardReceived(target, source: from.string, name: request.sourceTitle, id: id, prompt: prompt, replyExpected: request.replyExpected == true, inReplyTo: request.inReplyTo, group: group, home: origin)
         store.groupTellReceipts.append(GroupTellReceipt(id: id, origin: origin, payloadHash: hash))
         do { try store.saveChecked() }
         catch { target.switchboardObligations = oldWatches; target.switchboardExpectations = oldExpected; target.pending = oldPending; target.messages = oldMessages; store.groupTellReceipts.removeAll { $0.id == id }; ack("rejected", "Home could not save delivery. Nothing was queued."); return true }
+        publishSwitchboardQueue(target.id)
         ack("queued", "Persisted on " + deviceName + ". Queued does not mean read or answered.")
         if request.urgent { target.queuePaused = false; if target.busy { target.resumeAfterInterrupt = true; store.interruptProcess(target) } }
         if !target.busy { DispatchQueue.main.async { store.runNext(target) } }
@@ -1879,5 +1892,20 @@ extension DeviceSyncService {
         reject("This device is a viewer. Choose a capable agent home.")
         #endif
         return true
+    }
+}
+
+
+extension DeviceSyncService {
+    func switchboardDisplayName(_ raw: String) -> String? {
+        let global = DeviceGlobalID(raw)
+        #if os(macOS)
+        if let id = UUID(uuidString: raw) ?? (global?.home == localDeviceID ? global?.session : nil),
+           let session = participantStore.sessions.first(where: { $0.id == id }) { return session.title }
+        #endif
+        let matches = participantHomes.flatMap { $0.rows }.filter { row in
+            row.globalID == raw || (global == nil && DeviceGlobalID(row.globalID)?.session.uuidString.lowercased() == raw.lowercased())
+        }
+        return matches.count == 1 ? matches[0].title : nil
     }
 }

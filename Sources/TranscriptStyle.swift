@@ -23,18 +23,23 @@ struct TranscriptFollowState {
 
 // Display classification only; never executes JSON or changes stored text.
 enum TranscriptStyle {
-    static func trafficSummary(_ source: String, queued: Bool = false) -> String? {
+    static func trafficSummary(_ source: String, queued: Bool = false, resolveName: (String) -> String? = { _ in nil }) -> String? {
         let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
         func clipped(_ value: String, limit: Int = 100) -> String {
             let flat = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             return flat.count > limit ? String(flat.prefix(limit - 1)) + "…" : flat
         }
-        func name(_ value: String) -> String { clipped(value.components(separatedBy: " · session ")[0].components(separatedBy: " [")[0], limit: 35) }
+        func name(_ value: String) -> String { clipped(value.components(separatedBy: " · ")[0].components(separatedBy: " [")[0], limit: 35) }
+        func destination(_ value: String) -> String {
+            if let resolved = resolveName(value) { return clipped(resolved, limit: 35) }
+            return UUID(uuidString: value) != nil || value.contains("/") ? "Unavailable session" : clipped(value, limit: 35)
+        }
+        let kind = text.contains("[Reply expected") || text.components(separatedBy: "\n")[0].contains("[ask]") ? "ask" : "tell"
         let lines = text.components(separatedBy: "\n")
         let detail = clipped(lines.dropFirst().joined(separator: " "))
         if text.hasPrefix("[Converse message from ") {
             let who = String((lines.first ?? "").dropFirst("[Converse message from ".count))
-            return (queued ? "Queued ← " : "Received ← ") + name(who) + (text.contains("[Reply expected") ? " · Reply expected" : "") + (detail.isEmpty ? "" : " · " + detail)
+            return (queued ? "Queued " : "Received ") + kind + " ← " + name(who) + (detail.isEmpty ? "" : " · " + detail)
         }
         if text.hasPrefix("[Converse switchboard recovery") { return "Reply needed · " + clipped(detail) }
         if text.hasPrefix("[Converse switchboard supervision") { return "Needs attention · " + clipped(detail) }
@@ -42,20 +47,20 @@ enum TranscriptStyle {
         if text.hasPrefix("Switchboard:") {
             let header = String((lines.first ?? "").dropFirst("Switchboard:".count)).trimmingCharacters(in: .whitespaces)
             if header.hasPrefix("message queued from ") {
-                return "Queued ← " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
+                return "Queued " + kind + " ← " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
             }
             if let arrow = header.range(of: "→") {
-                let status = header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : "Sent"
-                return status + " → " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
+                let status = header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : header.hasPrefix("rejected") ? "Rejected" : header.hasPrefix("delivery unconfirmed") ? "Unconfirmed" : "Sent"
+                return status + " " + kind + " → " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
             }
-            return "Switchboard · " + clipped(header)
+            return "Switchboard · " + clipped(header.components(separatedBy: " · ")[0])
         }
         if text.hasPrefix("```converse\n"), text.hasSuffix("\n```"),
            let data = String(text.dropFirst(12).dropLast(4)).data(using: .utf8),
            let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             let action = command["command"] as? String ?? "command"
             if action == "tell" || action == "ask" || action == "tell-urgently" {
-                return (action == "ask" ? "Ask → " : "Tell → ") + clipped(command["to"] as? String ?? "session", limit: 28) + " · " + clipped(command["text"] as? String ?? "")
+                return (action == "ask" || command["replyExpected"] as? Bool == true ? "Ask → " : "Tell → ") + destination(command["to"] as? String ?? "session") + " · " + clipped(command["text"] as? String ?? "")
             }
             return "Switchboard · " + action
         }

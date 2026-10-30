@@ -19,6 +19,14 @@ public sealed partial class ConversationPane : UserControl
 {
     private MainWindow _host = null!;
     private int _pane;
+    private string? SwitchboardName(string raw)
+    {
+        var global = DeviceGlobalID.Parse(raw);
+        if (Guid.TryParse(raw, out var local) || global is { } target && target.Home == _host.Devices.DeviceId && Guid.TryParse(target.Session.ToString(), out local))
+            if (_host.Store.Sessions.FirstOrDefault(s => s.Id == local) is { } session) return session.Title;
+        var matches = _host.Devices.Homes.Values.SelectMany(h => h.Rows).Where(r => r.GlobalID == raw || global is null && DeviceGlobalID.Parse(r.GlobalID)?.Session.ToString().Equals(raw, StringComparison.OrdinalIgnoreCase) == true).ToList();
+        return matches.Count == 1 ? matches[0].Title : null;
+    }
     private SidebarSession? _selected;
 
     public ConversationPane()
@@ -808,7 +816,7 @@ public sealed partial class ConversationPane : UserControl
         var blocks = isUser
             ? new List<MdBlock> { new MdText(flat, new List<MdRun>()) }
             : MarkdownBlocks.Parse(flat);
-        if (SwitchboardPresentation.Summary(flat) is { } summary)
+        if (SwitchboardPresentation.Summary(flat, resolveName: SwitchboardName) is { } summary)
         {
             var row = new TextBlock { Text = summary, FontSize = 16, MaxLines = 1, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = new SolidColorBrush(Microsoft.UI.Colors.DarkOrange) };
             ToolTipService.SetToolTip(row, line.Text);

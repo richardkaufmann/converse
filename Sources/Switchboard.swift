@@ -91,8 +91,8 @@ extension Store {
             guard target.switchboardObligations.filter({ !$0.terminal }).count < 128 else { return "Recipient supervision journal is full. Nothing was queued." }
             let oldSourceMessages = source.messages, oldTargetMessages = target.messages, oldTargetExpected = target.switchboardExpectations
             let delivery = id.uuidString
-            source.messages.append(Message(role: "notice", text: "Switchboard: " + (urgent ? "urgent delivery" : "queued") + " → " + target.title + " [" + target.id.uuidString + "] · " + delivery + "\n" + text))
-            target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + source.title + " [" + source.id.uuidString + "] · " + delivery + "\n" + text))
+            source.messages.append(Message(role: "notice", text: "Switchboard: " + (urgent ? "urgent delivery" : "queued") + " → " + target.title + " [" + target.id.uuidString + "] · " + delivery + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
+            target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + source.title + " [" + source.id.uuidString + "] · " + delivery + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
             let sender = service.localDeviceID.map { DeviceGlobalID(home: $0, session: source.id).string } ?? source.id.uuidString
             let prompt = PendingPrompt(switchboardHop: hop, autonomous: true, text: "[Converse message from " + source.title + " · session " + sender + " · delivery " + delivery + " · hop " + String(hop) + "/" + String(SwitchboardPolicy.maxHops) + "]\n" + text + Store.replyInstruction(id: id, expected: replyExpected, inReplyTo: inReplyTo), images: [])
             let oldPending = target.pending, oldWatches = target.switchboardObligations, oldExpected = source.switchboardExpectations, oldSourceWatches = source.switchboardObligations
@@ -104,6 +104,7 @@ extension Store {
                 target.pending = oldPending; target.switchboardObligations = oldWatches; source.switchboardExpectations = oldExpected; source.switchboardObligations = oldSourceWatches
                 return "Could not persist delivery. Nothing was queued."
             }
+            service.publishSwitchboardQueue(target.id); service.publishSwitchboardQueue(source.id)
             if urgent { target.queuePaused = false; if target.busy { target.resumeAfterInterrupt = true; interruptProcess(target) } }
             if !target.busy { DispatchQueue.main.async { self.runNext(target) } }
             return nil

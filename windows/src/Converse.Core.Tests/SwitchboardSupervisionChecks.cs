@@ -95,7 +95,13 @@ static class SwitchboardSupervisionChecks
             a.Interrupted = remote.Interrupted = false;
             home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
             check(!a.Interrupted && !remote.Interrupted, "Remote mutual recovery never repeats on the other home");
-            check(SwitchboardPresentation.Summary("[Converse message from Muse · session abc · delivery xyz]\nReview\nplease") == "Received ← Muse · Review please", "Compact traffic shows peer and direction");
+            check(SwitchboardPresentation.Summary("[Converse message from Muse · session abc · delivery xyz]\nReview\nplease") == "Received tell ← Muse · Review please", "Compact traffic shows peer and direction");
+            var commandText = "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "ask", to = a.Id.ToString(), text = "Review" }) + "\n```";
+            check(SwitchboardPresentation.Summary(commandText, resolveName: _ => "MuseConverse") == "Ask → MuseConverse · Review", "Outgoing command resolves destination without claiming delivery");
+            check(SwitchboardPresentation.Summary(commandText) == "Ask → Unavailable session · Review", "Unresolved IDs never appear in compact labels");
+            check(SwitchboardPresentation.Summary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask → Muse · Review", "Accepted ask summary names destination and direction");
+            check(SwitchboardPresentation.Summary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell → Muse · Review", "Rejected messages never render as sent");
+            check(SwitchboardPresentation.Summary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)!.StartsWith("Queued ask ← Muse"), "Receiver queue identifies source and ask kind");
             check(SwitchboardPresentation.Summary("Some prose\n```converse\n{}\n```") is null, "Quoted JSON examples remain expanded");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { /* Disposed transport callbacks may finish their last isolated write. */ } }

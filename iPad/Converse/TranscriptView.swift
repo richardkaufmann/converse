@@ -262,7 +262,7 @@ struct PadTranscript: UIViewRepresentable {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
             let body: NSMutableAttributedString
-            if let summary = TranscriptStyle.trafficSummary(message.text) {
+            if let summary = TranscriptStyle.trafficSummary(message.text, resolveName: DeviceSyncService.shared.switchboardDisplayName) {
                 let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                 let key = message.id.uuidString
                 c.trafficDetails[key] = message.text

@@ -110,7 +110,7 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(a.remoteLeases.isEmpty && b.remoteLeases.isEmpty && target.draft == "Unsent human draft" && target.queuePaused, "Cross-device tells need no display lease and preserve human drafts and paused queues")
         _ = sa.deliverSwitchboard(from: source, to: gid, text: "Cross-device hello", id: delivery, hop: 1)
         _ = pump { source.messages.filter { $0.text.contains("Previously recorded") }.count == 1 }
-        check(target.pending.count == 1 && source.messages.contains { $0.text.contains("Switchboard: queued · " + delivery.uuidString + " · Previously recorded") }, "Repeated remote delivery IDs cannot queue the same message twice")
+        check(target.pending.count == 1 && source.messages.contains { $0.text.hasPrefix("Switchboard: queued → Group receiver") && $0.text.contains(delivery.uuidString) && $0.text.contains("Previously recorded") }, "Repeated remote delivery IDs cannot queue the same message twice")
         let reload = Store(folder: root.appendingPathComponent("B"))
         check(reload.groupTellReceipts.contains { $0.id == delivery } && reload.sessions.first(where: { $0.id == target.id })?.pending.count == 1, "Remote receipt and recipient queue survive one atomic archive reload")
         let tracked = UUID()
@@ -268,8 +268,14 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     let ruler = MessageNumberRuler(scroll: hoverScroll, text: hoverText)
     check(ruler.responds(to: NSSelectorFromString("view:stringForToolTip:point:userData:")),
           "Message timestamp ruler exposes the native AppKit tooltip callback")
+    let commandText = "```converse\n{\"command\":\"ask\",\"to\":\"" + sender.id.uuidString + "\",\"text\":\"Review\"}\n```"
+    check(TranscriptStyle.trafficSummary(commandText, resolveName: { _ in "MuseConverse" }) == "Ask → MuseConverse · Review", "Outgoing command resolves destination name without claiming delivery")
+    check(TranscriptStyle.trafficSummary(commandText) == "Ask → Unavailable session · Review", "Unresolved session IDs never leak into compact labels")
+    check(TranscriptStyle.trafficSummary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask → Muse · Review", "Accepted ask summary names destination and direction")
+    check(TranscriptStyle.trafficSummary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell → Muse · Review", "Rejected messages never render as sent")
+    check(TranscriptStyle.trafficSummary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)?.hasPrefix("Queued ask ← Muse") == true, "Receiver queue identifies source and ask kind")
     let summary = TranscriptStyle.trafficSummary("[Converse message from MuseConverse · session abc · delivery xyz · hop 1/100]\nPlease review\nsecond line")
-    check(summary == "Received ← MuseConverse · Please review second line" && summary?.contains("\n") == false,
+    check(summary == "Received tell ← MuseConverse · Please review second line" && summary?.contains("\n") == false,
           "Traffic summary retains direction and session name on one line")
     check(TranscriptStyle.trafficSummary("{\"ordinary\":\"JSON\"}") == nil && TranscriptStyle.trafficSummary("Example:\n```converse\n{\"command\":\"tell\"}\n```") == nil,
           "Ordinary JSON and quoted switchboard examples remain expanded")

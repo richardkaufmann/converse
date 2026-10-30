@@ -103,7 +103,7 @@ public sealed partial class DeviceSyncService
             foreach (var s in _store.Sessions)
             {
                 var notice = s.Messages.LastOrDefault(m => m.Role == "notice" && m.Text.StartsWith("Switchboard: awaiting home acceptance → ") && m.Text.Contains(id.ToString()) && m.Text.Contains("[" + hello.DeviceID + "/"));
-                if (notice is not null) notice.Text = notice.Text.Replace("awaiting home acceptance →", (ack.Outcome == "queued" ? "queued" : "rejected") + " →");
+                if (notice is not null) { notice.Text = notice.Text.Replace("awaiting home acceptance →", (ack.Outcome == "queued" ? "queued" : "rejected") + " →"); PushTranscriptToHolder(s); }
                 foreach (var item in s.SwitchboardObligations.Where(o => o.ReplyDeliveryID == id && DeviceGlobalID.Parse(o.Source)?.Home == hello.DeviceID))
                     item.State = ack.Outcome == "queued" ? "resolved" : "deliveryFailed";
                 if (ack.Outcome != "queued") foreach (var e in s.SwitchboardExpectations.Where(e => e.Id == id && DeviceGlobalID.Parse(e.Target)?.Home == hello.DeviceID)) e.Answered = true;
@@ -130,7 +130,7 @@ public sealed partial class DeviceSyncService
                     RecordSwitchboardIncoming(session, request.Source, request.SourceTitle, id, prompt, request.ReplyExpected, request.InReplyTo, group.Id, hello.DeviceID);
                     var receipt = new ParticipantReceipt { Id = id, Origin = hello.DeviceID, Hash = hash };
                     _store.ParticipantReceipts.Add(receipt);
-                    try { _store.Save(); response = new() { Outcome = "queued", Detail = "Persisted on home. Queued does not mean read or answered." }; _store.RunNext(session); }
+                    try { _store.Save(); PushTranscriptToHolder(session); response = new() { Outcome = "queued", Detail = "Persisted on home. Queued does not mean read or answered." }; _store.RunNext(session); }
                     catch { session.Pending.Remove(prompt); _store.ParticipantReceipts.Remove(receipt);
                         session.SwitchboardObligations = JsonSerializer.Deserialize<List<SwitchboardObligation>>(oldObligations)!;
                         session.SwitchboardExpectations = JsonSerializer.Deserialize<List<SwitchboardExpectation>>(oldExpectations)!; }
@@ -218,7 +218,7 @@ public sealed partial class DeviceSyncService
             var beforeSource = JsonSerializer.SerializeToUtf8Bytes(source);
             var beforeTarget = JsonSerializer.SerializeToUtf8Bytes(session);
             session.Pending.Add(prompt);
-            source.Messages.Add(new() { Role = "notice", Text = $"Switchboard: queued → {session.Title} [{target}] · {id}\n{text}" });
+            source.Messages.Add(new() { Role = "notice", Text = $"Switchboard: queued → {session.Title} [{target}] · {id} [{(replyExpected ? "ask" : "tell")}]\n{text}" });
             RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, false);
             RecordSwitchboardIncoming(session, new DeviceGlobalID(DeviceId, source.Id).ToString(), source.Title, id, prompt, replyExpected, inReplyTo);
             try { _store.Save(); } catch {
@@ -226,6 +226,7 @@ public sealed partial class DeviceSyncService
                 source.SwitchboardObligations = oldSource.SwitchboardObligations; source.SwitchboardExpectations = oldSource.SwitchboardExpectations; source.Messages = oldSource.Messages;
                 session.Pending.Remove(prompt); session.SwitchboardObligations = oldTarget.SwitchboardObligations; session.SwitchboardExpectations = oldTarget.SwitchboardExpectations; throw;
             }
+            PushTranscriptToHolder(session); PushTranscriptToHolder(source);
             _store.RunNext(session); return;
         }
         if (!IsParticipantAllowed(to.Home, CurrentGroup?.Id) || PeerForHome(to.Home) is not { } peer || peer.Hello?.Capabilities.Contains("participant-control-v1") != true || Homes.GetValueOrDefault(to.Home)?.Rows.Any(r => r.GlobalID == target && r.MessagingEnabled == true) != true) return;
@@ -234,7 +235,7 @@ public sealed partial class DeviceSyncService
         var sourceBefore = JsonSerializer.SerializeToUtf8Bytes(source);
         RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, true);
         var request = new DeviceTellPayload { ReplyExpected = replyExpected, InReplyTo = inReplyTo, GroupID = CurrentGroup!.Id, Source = new DeviceGlobalID(DeviceId, source.Id).ToString(), SourceTitle = source.Title, Target = target, Text = text, Hop = hop };
-        source.Messages.Add(new ChatMessage { Role = "notice", Text = $"Switchboard: awaiting home acceptance → {targetTitle} [{target}] · {id}\n{text}" });
+        source.Messages.Add(new ChatMessage { Role = "notice", Text = $"Switchboard: awaiting home acceptance → {targetTitle} [{target}] · {id} [{(replyExpected ? "ask" : "tell")}]\n{text}" });
         try { _store.Save(); } catch {
             var previous = JsonSerializer.Deserialize<ChatSession>(sourceBefore)!;
             source.SwitchboardObligations = previous.SwitchboardObligations; source.SwitchboardExpectations = previous.SwitchboardExpectations; source.Messages = previous.Messages; throw;
