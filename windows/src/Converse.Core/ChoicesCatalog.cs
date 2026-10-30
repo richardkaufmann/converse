@@ -1,10 +1,10 @@
 namespace Converse.Core;
 
 /// <summary>
-/// Static per-engine model/effort/access options for the settings row.
+/// Fallback per-engine model/effort/access options for the settings row.
 /// Values verified against real CLI help (claude --help, muse exec --help)
-/// and the Mac catalog; live provider probing will supersede these lists
-/// when it lands on Windows. Models stay free text (editable combo) so new
+/// and the Mac catalog. Codex models and supported efforts are discovered
+/// from its app-server on the session home. Models stay free text (editable combo) so new
 /// model IDs never need an app update; "CLI default" (null choice) omits the
 /// flag entirely.
 /// </summary>
@@ -16,7 +16,7 @@ public static class ChoicesCatalog
     // latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full
     // name"). Muse models arrive live from MSP and Codex has no published
     // static list, so those engines offer nothing static (Mac parity) and the
-    // editable combo covers typed IDs everywhere.
+    // editable combo also accepts typed IDs when discovery is unavailable.
     public static IReadOnlyList<ChoiceOption> ModelsFor(string engine) => engine switch
     {
         "claude" => new[]

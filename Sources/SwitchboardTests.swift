@@ -186,6 +186,18 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         _ = sb.injectPending(target)
         check(target.pending.first?.groupOrigins.contains(where: { $0.home == aid }) == true, "Inject all retains the origin of every contributing group message")
         target.busy = false; target.queuePaused = true
+        let disposable = sb.create(target.entry)
+        disposable.title = "Close fixture"; disposable.draft = "Recover my draft"; sb.save()
+        let closeGID = DeviceGlobalID(home: bid, session: disposable.id).string
+        check(pump { a.homes[bid]?.rows.contains { $0.globalID == closeGID } == true }, "Remote close fixture appears in the group directory")
+        let closeID = UUID()
+        let closed = request("session.close", target: closeGID, id: closeID)
+        let replay = request("session.close", target: closeGID, id: closeID)
+        let closeReload = Store(folder: root.appendingPathComponent("B"))
+        let backup = root.appendingPathComponent("B/Deleted Sessions/" + disposable.id.uuidString + ".json")
+        check(closed?.outcome == "completed" && replay?.outcome == closed?.outcome && replay?.target == closed?.target && !sb.sessions.contains { $0.id == disposable.id } && closeReload.participantReceipts.filter { $0.id == closeID }.count == 1 && (try? String(contentsOf: backup, encoding: .utf8))?.contains("Recover my draft") == true,
+              "Remote close without a lease saves recovery data and persists one replayable deletion receipt")
+        check(pump { a.homes[bid]?.rows.contains { $0.globalID == closeGID } == false }, "Remote close promptly removes the group directory row")
         b.leaveGroup(); sb.runNext(target)
         check(target.pending.count == 1 && target.pending[0].text == "Additional local queue item" && target.draft == "Unsent human draft" && target.messages.contains { $0.text.contains("discarded because") }, "Leaving a group removes stale queued tells while preserving combined local input and the human draft")
         check(!sb.switchboardDirectory(for: target).contains("Group sender"), "Ungrouped directory hides remote sessions")

@@ -521,11 +521,20 @@ public sealed partial class ConversationPane : UserControl
     // Bottom settings row: model (editable combo — new model IDs never need an
     // app update), effort, access. Remote sessions use the home's live option
     // lists when the snapshot carries them, else the static per-engine catalog.
+    private readonly HashSet<string> _catalogRequests = new();
+    private async void RefreshCodexCatalog(AgentEntry entry)
+    {
+        var key = CodexModelCatalog.Key(entry);
+        if (_host.Store.CodexModels.Cached(entry)?.ExpiresAt > DateTime.UtcNow || !_catalogRequests.Add(key)) return;
+        try { await _host.Store.CodexModels.GetAsync(entry); }
+        finally { DispatcherQueue.TryEnqueue(() => { _catalogRequests.Remove(key); _host.RequestRefresh(); }); }
+    }
     private void RefreshSettings()
     {
         if (_selected is null) return;
         string engine;
         string? model, effort, access;
+        CodexCatalogResult? catalog = null;
         List<SettingItem> modelItems = new() { new SettingItem("", CliDefault) };
         List<SettingItem> effortItems = new() { new SettingItem("", CliDefault) };
         List<SettingItem> accessItems = new() { new SettingItem("", CliDefault) };
@@ -534,6 +543,7 @@ public sealed partial class ConversationPane : UserControl
             var session = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId);
             if (session is null) return;
             engine = session.Entry.Engine;
+            if (engine == "codex") { RefreshCodexCatalog(session.Entry); catalog = _host.Store.CodexModels.Cached(session.Entry); }
             model = session.Choices.Model; effort = session.Choices.Effort; access = session.Choices.Access;
         }
         else if (_selected.GlobalID is { } globalId)
@@ -560,8 +570,9 @@ public sealed partial class ConversationPane : UserControl
         else return;
         if (_selected.LocalSessionID is not null)
         {
-            foreach (var option in ChoicesCatalog.ModelsFor(engine)) modelItems.Add(new SettingItem(option.Id, option.Label));
-            foreach (var id in ChoicesCatalog.EffortsFor(engine)) effortItems.Add(new SettingItem(id, id));
+            if (catalog is not null) foreach (var option in catalog.Models) modelItems.Add(new SettingItem(option.Id, option.Label));
+            else foreach (var option in ChoicesCatalog.ModelsFor(engine)) modelItems.Add(new SettingItem(option.Id, option.Label));
+            foreach (var id in catalog?.EffortsFor(model) ?? ChoicesCatalog.EffortsFor(engine).ToArray()) effortItems.Add(new SettingItem(id, id));
             foreach (var option in ChoicesCatalog.AccessFor(engine)) accessItems.Add(new SettingItem(option.Id, option.Label));
         }
         if (model is not null && modelItems.All(i => i.Id != model)) modelItems.Add(new SettingItem(model, model));

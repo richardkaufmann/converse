@@ -407,6 +407,7 @@ public sealed partial class DeviceSyncService : IDisposable
         RefreshGroupMembers();
         _store.Changed += PublishSidebars;
         _store.TranscriptAdvanced += PushTranscriptToHolder;
+        _store.SessionClosed += HomeSessionClosed;
         LoadParticipants();
         _store.FinalParticipantReply = (session, reply) => { _ = ProcessParticipantReplyAsync(session, reply); };
         _store.AcceptGroupPrompt = p => IsParticipantAllowed(p.OriginHomeID ?? "", p.OriginGroupID);
@@ -560,7 +561,7 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         Agents.Shutdown();
         _shutdown?.Cancel();
-        try { _store.TranscriptAdvanced -= PushTranscriptToHolder; } catch { /* store outlives us */ }
+        try { _store.TranscriptAdvanced -= PushTranscriptToHolder; _store.SessionClosed -= HomeSessionClosed; } catch { /* store outlives us */ }
         _mdns?.Dispose();
         _listener?.Stop();
         // Best-effort shutdown: connect/accept threads can mutate _peers
@@ -642,7 +643,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
-        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
+        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -1519,6 +1520,23 @@ public sealed partial class DeviceSyncService : IDisposable
         }
     }
 
+    private void HomeSessionClosed(ChatSession session)
+    {
+        _publishedMetadata.Remove(session.Id);
+        if (_leases.Holder(session.Id) is { } holder)
+        {
+            _leases.Release(session.Id, holder.Device, holder.Epoch);
+            DisplayLeaseReleased?.Invoke(session.Id, holder.Device, holder.Epoch);
+        }
+        var global = new DeviceGlobalID(DeviceId, session.Id).ToString();
+        foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly).ToArray())
+        {
+            peer.LeasedSessions.Remove(session.Id);
+            _ = SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseStolen, Boot = _boot, SessionID = global });
+        }
+        PublishSidebars(); Changed?.Invoke();
+    }
+
     private string ImageHash(string path)
     {
         var hash = DeviceBlob.Sha256Hex(File.ReadAllBytes(path));
@@ -1526,9 +1544,30 @@ public sealed partial class DeviceSyncService : IDisposable
         return hash;
     }
 
+    private readonly ConcurrentDictionary<Guid, byte> _catalogRefreshes = new();
+    private async Task RefreshCodexCatalogAsync(ChatSession session)
+    {
+        if (!_catalogRefreshes.TryAdd(session.Id, 0)) return;
+        var entry = session.Entry.Copy();
+        try
+        {
+            await _store.CodexModels.GetAsync(entry);
+            if (_shutdown?.IsCancellationRequested == false && _store.Sessions.Contains(session) && CodexModelCatalog.Key(session.Entry) == CodexModelCatalog.Key(entry))
+                PushTranscriptToHolder(session);
+        }
+        finally { _catalogRefreshes.TryRemove(session.Id, out _); }
+    }
+
     private async Task SendTranscriptAsync(Peer peer, ChatSession session, int? beforeOffset = null)
     {
         if (peer.Hello is null || !IsGroupMember(peer.Hello.DeviceID)) return;
+        CodexCatalogResult? catalog = null;
+        if (session.Entry.Engine == "codex")
+        {
+            catalog = _store.CodexModels.Cached(session.Entry);
+            if (catalog is null || catalog.ExpiresAt <= DateTime.UtcNow) _ = RefreshCodexCatalogAsync(session);
+        }
+        if (!_store.Sessions.Contains(session) || peer.Hello is null || !IsGroupMember(peer.Hello.DeviceID)) return;
         var holder = _leases.Holder(session.Id);
         if (holder is null || holder.Value.Device != peer.Hello.DeviceID) { peer.LeasedSessions.Remove(session.Id); return; }
         var total = session.Messages.Count;
@@ -1570,9 +1609,9 @@ public sealed partial class DeviceSyncService : IDisposable
             Busy = session.Busy, Status = session.Status, Title = session.Title, Engine = session.Entry.Engine,
             AccountName = session.Entry.AccountName,
             Model = session.Choices.Model ?? "", Effort = session.Choices.Effort ?? "", Access = session.Choices.Access ?? "",
-            ModelOptions = ChoicesCatalog.ModelsFor(session.Entry.Engine)
-                .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
-            EffortOptions = ChoicesCatalog.EffortsFor(session.Entry.Engine).ToArray(),
+            ModelOptions = catalog is not null ? catalog.Models.Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label, Provider = "codex" }).ToList()
+                : ChoicesCatalog.ModelsFor(session.Entry.Engine).Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
+            EffortOptions = catalog?.EffortsFor(session.Choices.Model) ?? ChoicesCatalog.EffortsFor(session.Entry.Engine).ToArray(),
             AccessOptions = ChoicesCatalog.AccessFor(session.Entry.Engine)
                 .Select(o => new DeviceChoiceDto { Id = o.Id, Label = o.Label }).ToList(),
             QueuePaused = session.QueuePaused,

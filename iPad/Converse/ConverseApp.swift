@@ -24,6 +24,8 @@ struct PadRoot: View {
     @ObservedObject private var service = DeviceSyncService.shared
     @State private var agentTarget: PadAgentTarget?
     @State private var dragWidth: Double?
+    @State private var closingTarget: DeviceSidebarRow?
+    @State private var closeInFlight = Set<String>()
     var body: some View {
         GeometryReader { geometry in
             let width = PadLayout.sidebarWidth(preferred: model.state.sidebarWidth, available: geometry.size.width)
@@ -94,6 +96,17 @@ struct PadRoot: View {
             let previous = Set(old.map(\.id))
             if requests.contains(where: { !$0.approved && !previous.contains($0.id) }) { model.connectShown = true }
         }
+        .alert("Close ‘" + (closingTarget?.title ?? "session") + "’ on its home?", isPresented: Binding(get: { closingTarget != nil }, set: { if !$0 { closingTarget = nil } }), presenting: closingTarget) { row in
+            Button("Cancel", role: .cancel) { closingTarget = nil }
+            Button("Close session", role: .destructive) {
+                closeInFlight.insert(row.globalID); closingTarget = nil
+                Task { @MainActor in
+                    let result = await service.closeRemoteSession(row.globalID)
+                    closeInFlight.remove(row.globalID)
+                    if result.outcome != "completed" { model.error = result.detail }
+                }
+            }
+        } message: { _ in Text("Stops its work and removes the session from every viewer. A recovery snapshot stays on its home.") }
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
         .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
@@ -129,7 +142,8 @@ struct PadRoot: View {
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
-                                    placementButton("X", selected: false) {}.disabled(true).opacity(0.3).accessibilityLabel("Close on home device")
+                                    placementButton("X", selected: false) { closingTarget = row }
+                                        .disabled(closeInFlight.contains(row.globalID) || !service.canCloseRemote(home.deviceID)).accessibilityLabel("Close " + row.title + " on home")
                                 }.frame(width: 132).fixedSize(horizontal: true, vertical: false).disabled(!home.online)
                             }.font(.system(size: 13)).padding(.vertical, 4).padding(.horizontal, 3)
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))

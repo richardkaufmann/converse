@@ -238,6 +238,7 @@ public sealed class SessionStore
     public string Folder { get; }
     public List<ChatSession> Sessions { get; private set; } = new();
     public List<AgentEntry> Entries { get; private set; } = new();
+    public CodexModelCatalog CodexModels { get; } = new();
     public event Action? Changed;
     public List<ParticipantReceipt> ParticipantReceipts { get; private set; } = new();
     public Func<ChatSession, string, IReadOnlyList<string>, Task>? AgentRun { get; set; }
@@ -314,11 +315,21 @@ public sealed class SessionStore
         Sessions.Add(session); if (persist) Save(); return session;
     }
 
-    public void DeleteSession(ChatSession session)
+    public event Action<ChatSession>? SessionClosed;
+    public void DeleteSession(ChatSession session, ParticipantReceipt? receipt = null)
     {
-        Stop(session);
-        Sessions.Remove(session);
-        Save();
+        var index = Sessions.IndexOf(session);
+        if (index < 0) return;
+        // Preserve everything before stopping work or removing the live record.
+        var deleted = Path.Combine(Folder, "Deleted Sessions");
+        Directory.CreateDirectory(deleted);
+        AtomicJson.Write(Path.Combine(deleted, session.Id.ToString("D") + ".json"), session);
+        Sessions.RemoveAt(index);
+        if (receipt is not null) ParticipantReceipts.Add(receipt);
+        try { Save(); }
+        catch { Sessions.Insert(index, session); if (receipt is not null) ParticipantReceipts.Remove(receipt); throw; }
+        session.QueuePaused = true; session.Pending.Clear(); Stop(session);
+        SessionClosed?.Invoke(session);
     }
 
     /// <summary>

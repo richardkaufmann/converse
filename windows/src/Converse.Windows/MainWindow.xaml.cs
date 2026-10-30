@@ -570,7 +570,7 @@ public sealed partial class MainWindow : Window
                     home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (!string.IsNullOrEmpty(row.Attention) ? "⚠ " : row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: false, ShowPlace: true, ShowGreyClose: true,
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: home.Online && _devices.CanCloseRemote(home.DeviceID), ShowPlace: true, ShowGreyClose: !home.Online || !_devices.CanCloseRemote(home.DeviceID),
                     PActive: _placements.PaneOf("remote:" + row.GlobalID) is null,
                     In1: _placements.KeyIn(1) == "remote:" + row.GlobalID,
                     In2: _placements.KeyIn(2) == "remote:" + row.GlobalID,
@@ -626,13 +626,14 @@ public sealed partial class MainWindow : Window
 
     private async void OnCloseClick(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: SidebarSession row } || row.LocalSessionID is not { } localId) return;
-        var session = _store.Sessions.FirstOrDefault(s => s.Id == localId);
-        if (session is null) return;
+        if (sender is not Button { Tag: SidebarSession row }) return;
+        var session = row.LocalSessionID is { } localId ? _store.Sessions.FirstOrDefault(s => s.Id == localId) : null;
+        var remote = row.GlobalID is { } gid ? DeviceGlobalID.Parse(gid) : null;
+        if (session is null && remote is null) return;
         var dialog = new ContentDialog
         {
             Title = "Close session?",
-            Content = "“" + session.Title + "” leaves the sidebar. Its CLI process stops.",
+            Content = "“" + row.Title + "” closes on its home, stops its work and disappears from every viewer. A recovery snapshot stays on the home.",
             PrimaryButtonText = "Close session",
             CloseButtonText = "Cancel",
             XamlRoot = Content.XamlRoot,
@@ -642,9 +643,20 @@ public sealed partial class MainWindow : Window
         closeStyle.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Microsoft.UI.Colors.White)));
         dialog.PrimaryButtonStyle = closeStyle;
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-        _placements.Park("local:" + localId);
-        _placements.Save(_dataFolder);
-        _store.DeleteSession(session);
+        try
+        {
+            if (remote is { } target)
+            {
+                var result = await _devices.RequestParticipantAsync(target.Home, "session.close", row.GlobalID);
+                if (result.Outcome != "completed") throw new InvalidOperationException(result.Detail);
+            }
+            else if (session is not null)
+            {
+                _store.DeleteSession(session);
+                _placements.Park("local:" + session.Id); _placements.Save(_dataFolder);
+            }
+        }
+        catch (Exception error) { await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not close session", Content = error.Message, CloseButtonText = "OK" }.ShowAsync(); }
         Refresh();
     }
 

@@ -907,23 +907,30 @@ final class Store: ObservableObject {
         return true
     }
     func deleteSession(_ s: Session) {
-        let deleted = folder.appendingPathComponent("Deleted Sessions")
-        do {
-            try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(s.saved)
-            try data.write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
-        } catch {
-            let alert = NSAlert(); alert.messageText = "Could not close conversation"; alert.informativeText = error.localizedDescription; alert.runModal(); return
+        do { try closeSessionChecked(s) }
+        catch {
+            let alert = NSAlert(); alert.messageText = "Could not close conversation"; alert.informativeText = error.localizedDescription; alert.runModal()
         }
-        do { try closeIdentity(s) } catch {
-            let alert = NSAlert(); alert.messageText = "Could not close conversation identity"; alert.informativeText = error.localizedDescription; alert.runModal(); return
+    }
+    func closeSessionChecked(_ s: Session, receipt: ParticipantMutationReceipt? = nil) throws {
+        guard let index = sessions.firstIndex(where: { $0 === s }) else { return }
+        let deleted = folder.appendingPathComponent("Deleted Sessions")
+        try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
+        try JSONEncoder().encode(s.saved).write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
+        try closeIdentity(s)
+        sessions.remove(at: index)
+        if let receipt { participantReceipts.append(receipt) }
+        do { try saveChecked() }
+        catch {
+            sessions.insert(s, at: index)
+            if let receipt { participantReceipts.removeAll { $0.id == receipt.id } }
+            syncIdentity(s)
+            throw error
         }
         s.identityChanged = nil
-        s.pending = []; stop(s)
-        sessions.removeAll { $0.id == s.id }
+        s.queuePaused = true; s.pending = []; stop(s)
         DeviceSyncService.shared.homeSessionClosed(s.id)
         AppDelegate.shared?.sessionWasDeleted(s)
-        save()
     }
     func restoreDeleted() -> Session? {
         let dir = folder.appendingPathComponent("Deleted Sessions")

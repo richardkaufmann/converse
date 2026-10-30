@@ -29,6 +29,7 @@ public sealed partial class DeviceSyncService
         foreach (var intent in _participantIntents.Where(i => i.Outcome == "pending")) intent.Outcome = "uncertain";
     }
     private void SaveParticipants() => AtomicJson.Write(Path.Combine(_folder, "participant-intents.json"), _participantIntents);
+    public bool CanCloseRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-close-v1") == true;
     public bool CanHostAgent(string home) => home == DeviceId || PeerForHome(home)?.Hello?.Capabilities.Contains("agent-host-v1") == true;
     public async Task<DeviceParticipantResponse> RequestParticipantAsync(string home, string action, string? target = null, string? title = null, DeviceAgentSettings? settings = null)
     {
@@ -192,6 +193,19 @@ public sealed partial class DeviceSyncService
         // new work and are refused while the home drains for an update.
         if (!AcceptingWork && request.Action is "agent.create" or "agent.configure" or "agent.run" or "agent.widget")
             return Task.FromResult(Result("rejected", "This home is draining for an update. Nothing was created or queued."));
+        if (request.Action == "session.close")
+        {
+            if (target?.Home != DeviceId) return Task.FromResult(Result("rejected", "Target belongs to another home."));
+            var response = Result("completed", session is null ? "Session already closed." : "Session closed on home. A recovery snapshot was saved.");
+            var receipt = new ParticipantReceipt { Id = id, Origin = origin, Hash = hash, Response = response };
+            try
+            {
+                if (session is not null) _store.DeleteSession(session, receipt);
+                else { _store.ParticipantReceipts.Add(receipt); _store.Save(); }
+                return Task.FromResult(response);
+            }
+            catch { _store.ParticipantReceipts.Remove(receipt); return Task.FromResult(Result("rejected", "Home could not save the close operation. The session remains open.")); }
+        }
         var old = session?.Agent is null ? null : JsonSerializer.SerializeToUtf8Bytes(session.Agent);
         var oldQueuePaused = session?.QueuePaused;
         var pending = session?.Pending.ToList(); ChatSession? created = null; bool run = false, widget = false;

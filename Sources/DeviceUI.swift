@@ -113,6 +113,9 @@ struct RemoteSidebarRow: View {
     let park: () -> Void
     let assign: (Int) -> Void
     @StateObject private var hover = SidebarHoverState()
+    @State private var confirmingClose = false
+    @State private var closing = false
+    @State private var closeError: String?
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if let account = row.accountName { text += "\nAccount: " + account }
@@ -136,8 +139,9 @@ struct RemoteSidebarRow: View {
                     PaneButton(label: String(pane), selected: localPane == pane) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
-                PaneButton(label: "X", selected: false) {}.disabled(true).opacity(0.3)
-                    .help("Close this session on its home device")
+                PaneButton(label: "X", selected: confirmingClose, destructive: true) { confirmingClose = true }
+                    .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
+                    .help("Close this session on its home and remove it from every viewer. The home must support remote closing.")
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
@@ -148,6 +152,20 @@ struct RemoteSidebarRow: View {
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
                 Button("Park conversation") { park() }
             }
+            .alert("Close ‘\(row.title)’ on \(homeName)?", isPresented: $confirmingClose) {
+                Button("Cancel", role: .cancel) { }
+                Button("Close session", role: .destructive) {
+                    closing = true
+                    Task { @MainActor in
+                        let result = await DeviceSyncService.shared.closeRemoteSession(row.globalID)
+                        closing = false
+                        if result.outcome != "completed" { closeError = result.detail }
+                    }
+                }
+            } message: { Text("Stops its work and removes the session from every viewer. A recovery snapshot stays on its home.") }
+            .alert("Could not close session", isPresented: Binding(get: { closeError != nil }, set: { if !$0 { closeError = nil } })) {
+                Button("OK") { closeError = nil }
+            } message: { Text(closeError ?? "") }
     }
 }
 

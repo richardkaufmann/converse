@@ -339,6 +339,9 @@ final class DeviceSyncService: ObservableObject {
         hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1"])
         #endif
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
+        #if os(macOS)
+        hello.capabilities.append("session-close-v1")
+        #endif
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
@@ -1760,6 +1763,13 @@ extension DeviceSyncService {
 }
 
 extension DeviceSyncService {
+    func canCloseRemote(_ home: String) -> Bool {
+        peerForHome(home)?.hello?.capabilities.contains("session-close-v1") == true
+    }
+    @MainActor func closeRemoteSession(_ target: String) async -> DeviceParticipantResponse {
+        guard let reference = DeviceGlobalID(target) else { return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Unknown session.") }
+        return await requestParticipant(home: reference.home, action: "session.close", target: target)
+    }
     func canHostAgent(_ home: String) -> Bool {
         #if os(macOS)
         if home == identity?.deviceID { return true }
@@ -1852,6 +1862,20 @@ extension DeviceSyncService {
             return true
         }
         guard store.participantReceipts.count < 100000 else { reject("Home command journal is full."); return true }
+        if request.action == "session.close" {
+            guard global?.home == identity?.deviceID else { reject("Target belongs to another home."); return true }
+            let result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Session closed on home. A recovery snapshot was saved.", target: request.target)
+            let receipt = ParticipantMutationReceipt(id: id, origin: origin, payloadHash: hash, response: result)
+            do {
+                if let session { try store.closeSessionChecked(session, receipt: receipt); if self !== DeviceSyncService.shared { homeSessionClosed(session.id) } }
+                else { store.participantReceipts.append(receipt); try store.saveChecked() }
+                send(result); publishSidebarIfChanged()
+            } catch {
+                store.participantReceipts.removeAll { $0.id == id }
+                reject("Home could not save the close operation. The session remains open.")
+            }
+            return true
+        }
         var created: Session?
         let oldQueuePaused = session?.queuePaused
         let oldConfig = session?.agent
