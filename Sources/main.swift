@@ -1682,7 +1682,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let firstRender = previous == nil
             var historyChanged = firstRender
             if seenMessagesRevision != session.messagesRevision {
-                let messages = session.messages.filter { $0.role != "activity" }
+                let messages = session.messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
                 historyChanged = previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }

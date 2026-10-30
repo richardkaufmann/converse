@@ -167,11 +167,11 @@ public sealed partial class ConversationPane : UserControl
         List<(string Role, string Text, List<string> Images)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Messages
-                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList())).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
-                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes))).ToList();
         if (lines is null) return (new List<(string Role, string Text, List<string> Images)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
@@ -799,7 +799,7 @@ public sealed partial class ConversationPane : UserControl
         if (_selected?.LocalSessionID is { } localID)
         {
             var message = _host.Store.Sessions.FirstOrDefault(s => s.Id == localID)?.Messages
-                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text)).ElementAtOrDefault(number - 1);
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text)).ElementAtOrDefault(number - 1);
             if (message?.CreatedAt is { } date) ToolTipService.SetToolTip(chip, "Recorded " + date.ToLocalTime().ToString("G"));
         }
         Grid.SetColumn(chip, 0);

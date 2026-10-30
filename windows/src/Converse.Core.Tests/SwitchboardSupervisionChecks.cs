@@ -80,7 +80,9 @@ static class SwitchboardSupervisionChecks
             await Until(() => home.Homes.GetValueOrDefault(peerHome.DeviceId)?.Rows.Any(r => r.GlobalID == remoteID) == true && peerHome.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == ID(a)) == true);
             await home.SendAgentTellAsync(a, remoteID, "Across homes");
             await peerHome.SendAgentTellAsync(remote, ID(a), "Back across homes");
-            check(await Until(() => a.Pending.Count == 1 && remote.Pending.Count == 1), "Mutual ordinary tells arrive on both homes");
+            check(await Until(() => a.Pending.Count == 1 && remote.Pending.Count == 1 &&
+                a.Messages.Any(m => m.Text.StartsWith("Switchboard: queued →") && m.Text.EndsWith("Across homes")) &&
+                remote.Messages.Any(m => m.Text.StartsWith("Switchboard: queued →") && m.Text.EndsWith("Back across homes"))), "Mutual ordinary tells arrive and are acknowledged on both homes");
             a.Busy = remote.Busy = true; a.QueuePaused = remote.QueuePaused = false;
             // Start a new progress baseline, then age only the synthetic fixture.
             a.Messages.Add(new() { Role = "notice", Text = "fixture progress" });
@@ -89,19 +91,21 @@ static class SwitchboardSupervisionChecks
             foreach (var item in a.SwitchboardObligations.Concat(remote.SwitchboardObligations)) item.CreatedAt = remoteNow.AddSeconds(-130);
             a.Interrupted = remote.Interrupted = false;
             home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
-            await Task.Delay(150);
-            home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
-            check(a.Interrupted != remote.Interrupted, "Two authenticated homes elect exactly one mutual-queue interruption");
+            var recovered = await Until(() => {
+                home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
+                return a.Interrupted || remote.Interrupted;
+            });
+            check(recovered && a.Interrupted != remote.Interrupted, "Two authenticated homes elect exactly one mutual-queue interruption");
             a.Interrupted = remote.Interrupted = false;
             home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
             check(!a.Interrupted && !remote.Interrupted, "Remote mutual recovery never repeats on the other home");
-            check(SwitchboardPresentation.Summary("[Converse message from Muse · session abc · delivery xyz]\nReview\nplease") == "Received tell ← Muse · Review please", "Compact traffic shows peer and direction");
+            check(SwitchboardPresentation.Summary("[Converse message from Muse · session abc · delivery xyz]\nReview\nplease") == "Received tell from Muse · Review please", "Compact traffic shows peer and direction");
             var commandText = "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "ask", to = a.Id.ToString(), text = "Review" }) + "\n```";
-            check(SwitchboardPresentation.Summary(commandText, resolveName: _ => "MuseConverse") == "Ask → MuseConverse · Review", "Outgoing command resolves destination without claiming delivery");
-            check(SwitchboardPresentation.Summary(commandText) == "Ask → Unavailable session · Review", "Unresolved IDs never appear in compact labels");
-            check(SwitchboardPresentation.Summary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask → Muse · Review", "Accepted ask summary names destination and direction");
-            check(SwitchboardPresentation.Summary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell → Muse · Review", "Rejected messages never render as sent");
-            check(SwitchboardPresentation.Summary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)!.StartsWith("Queued ask ← Muse"), "Receiver queue identifies source and ask kind");
+            check(SwitchboardPresentation.Summary(commandText, resolveName: _ => "MuseConverse") == "Ask to MuseConverse · Review", "Outgoing command resolves destination without claiming delivery");
+            check(SwitchboardPresentation.Summary(commandText) == "Ask to Unavailable session · Review", "Unresolved IDs never appear in compact labels");
+            check(SwitchboardPresentation.Summary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask to Muse · Review", "Accepted ask summary names destination and direction");
+            check(SwitchboardPresentation.Summary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell to Muse · Review", "Rejected messages never render as sent");
+            check(SwitchboardPresentation.Summary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)!.StartsWith("Queued ask from Muse"), "Receiver queue identifies source and ask kind");
             check(SwitchboardPresentation.Summary("Some prose\n```converse\n{}\n```") is null, "Quoted JSON examples remain expanded");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { /* Disposed transport callbacks may finish their last isolated write. */ } }

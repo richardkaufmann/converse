@@ -92,7 +92,6 @@ extension Store {
             let oldSourceMessages = source.messages, oldTargetMessages = target.messages, oldTargetExpected = target.switchboardExpectations
             let delivery = id.uuidString
             source.messages.append(Message(role: "notice", text: "Switchboard: " + (urgent ? "urgent delivery" : "queued") + " → " + target.title + " [" + target.id.uuidString + "] · " + delivery + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
-            target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + source.title + " [" + source.id.uuidString + "] · " + delivery + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
             let sender = service.localDeviceID.map { DeviceGlobalID(home: $0, session: source.id).string } ?? source.id.uuidString
             let prompt = PendingPrompt(switchboardHop: hop, autonomous: true, text: "[Converse message from " + source.title + " · session " + sender + " · delivery " + delivery + " · hop " + String(hop) + "/" + String(SwitchboardPolicy.maxHops) + "]\n" + text + Store.replyInstruction(id: id, expected: replyExpected, inReplyTo: inReplyTo), images: [])
             let oldPending = target.pending, oldWatches = target.switchboardObligations, oldExpected = source.switchboardExpectations, oldSourceWatches = source.switchboardObligations

@@ -39,7 +39,7 @@ enum TranscriptStyle {
         let detail = clipped(lines.dropFirst().joined(separator: " "))
         if text.hasPrefix("[Converse message from ") {
             let who = String((lines.first ?? "").dropFirst("[Converse message from ".count))
-            return (queued ? "Queued " : "Received ") + kind + " ← " + name(who) + (detail.isEmpty ? "" : " · " + detail)
+            return (queued ? "Queued " : "Received ") + kind + " from " + name(who) + (detail.isEmpty ? "" : " · " + detail)
         }
         if text.hasPrefix("[Converse switchboard recovery") { return "Reply needed · " + clipped(detail) }
         if text.hasPrefix("[Converse switchboard supervision") { return "Needs attention · " + clipped(detail) }
@@ -47,11 +47,11 @@ enum TranscriptStyle {
         if text.hasPrefix("Switchboard:") {
             let header = String((lines.first ?? "").dropFirst("Switchboard:".count)).trimmingCharacters(in: .whitespaces)
             if header.hasPrefix("message queued from ") {
-                return "Queued " + kind + " ← " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
+                return "Queued " + kind + " from " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
             }
             if let arrow = header.range(of: "→") {
                 let status = header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : header.hasPrefix("rejected") ? "Rejected" : header.hasPrefix("delivery unconfirmed") ? "Unconfirmed" : "Sent"
-                return status + " " + kind + " → " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
+                return status + " " + kind + " to " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
             }
             return "Switchboard · " + clipped(header.components(separatedBy: " · ")[0])
         }
@@ -60,12 +60,13 @@ enum TranscriptStyle {
            let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             let action = command["command"] as? String ?? "command"
             if action == "tell" || action == "ask" || action == "tell-urgently" {
-                return (action == "ask" || command["replyExpected"] as? Bool == true ? "Ask → " : "Tell → ") + destination(command["to"] as? String ?? "session") + " · " + clipped(command["text"] as? String ?? "")
+                return (action == "ask" || command["replyExpected"] as? Bool == true ? "Ask to " : "Tell to ") + destination(command["to"] as? String ?? "session") + " · " + clipped(command["text"] as? String ?? "")
             }
             return "Switchboard · " + action
         }
         return nil
     }
+    static func isQueueReceipt(_ text: String) -> Bool { text.hasPrefix("Switchboard: message queued from ") }
     static let blockSpacing: CGFloat = 8
     // Trim only display terminators. Internal paragraphs and stored source,
     // including explicitly typed draft newlines, remain untouched.

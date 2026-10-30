@@ -269,15 +269,15 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     check(ruler.responds(to: NSSelectorFromString("view:stringForToolTip:point:userData:")),
           "Message timestamp ruler exposes the native AppKit tooltip callback")
     let commandText = "```converse\n{\"command\":\"ask\",\"to\":\"" + sender.id.uuidString + "\",\"text\":\"Review\"}\n```"
-    check(TranscriptStyle.trafficSummary(commandText, resolveName: { _ in "MuseConverse" }) == "Ask → MuseConverse · Review", "Outgoing command resolves destination name without claiming delivery")
-    check(TranscriptStyle.trafficSummary(commandText) == "Ask → Unavailable session · Review", "Unresolved session IDs never leak into compact labels")
-    check(TranscriptStyle.trafficSummary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask → Muse · Review", "Accepted ask summary names destination and direction")
-    check(TranscriptStyle.trafficSummary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell → Muse · Review", "Rejected messages never render as sent")
-    check(TranscriptStyle.trafficSummary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)?.hasPrefix("Queued ask ← Muse") == true, "Receiver queue identifies source and ask kind")
+    check(TranscriptStyle.trafficSummary(commandText, resolveName: { _ in "MuseConverse" }) == "Ask to MuseConverse · Review", "Outgoing command resolves destination name without claiming delivery")
+    check(TranscriptStyle.trafficSummary(commandText) == "Ask to Unavailable session · Review", "Unresolved session IDs never leak into compact labels")
+    check(TranscriptStyle.trafficSummary("Switchboard: queued → Muse [id] · delivery [ask]\nReview") == "Queued ask to Muse · Review", "Accepted ask summary names destination and direction")
+    check(TranscriptStyle.trafficSummary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell to Muse · Review", "Rejected messages never render as sent")
+    check(TranscriptStyle.trafficSummary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)?.hasPrefix("Queued ask from Muse") == true, "Receiver queue identifies source and ask kind")
     let summary = TranscriptStyle.trafficSummary("[Converse message from MuseConverse · session abc · delivery xyz · hop 1/100]\nPlease review\nsecond line")
-    check(summary == "Received tell ← MuseConverse · Please review second line" && summary?.contains("\n") == false,
+    check(summary == "Received tell from MuseConverse · Please review second line" && summary?.contains("\n") == false,
           "Traffic summary retains direction and session name on one line")
     check(TranscriptStyle.trafficSummary("{\"ordinary\":\"JSON\"}") == nil && TranscriptStyle.trafficSummary("Example:\n```converse\n{\"command\":\"tell\"}\n```") == nil,
           "Ordinary JSON and quoted switchboard examples remain expanded")
-    check(TranscriptStyle.trafficSummary("```converse\n{\"command\":\"tell\",\"to\":\"Muse\",\"text\":\"Review\"}\n```") == "Tell → Muse · Review", "Unexecuted command summaries never claim delivery")
+    check(TranscriptStyle.trafficSummary("```converse\n{\"command\":\"tell\",\"to\":\"Muse\",\"text\":\"Review\"}\n```") == "Tell to Muse · Review", "Unexecuted command summaries never claim delivery")
 }

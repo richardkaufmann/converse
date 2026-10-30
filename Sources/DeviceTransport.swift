@@ -1737,7 +1737,6 @@ extension DeviceSyncService {
         let oldWatches = target.switchboardObligations, oldExpected = target.switchboardExpectations
         let oldPending = target.pending, oldMessages = target.messages
         if request.urgent { target.pending.insert(prompt, at: 0) } else { target.pending.append(prompt) }
-        target.messages.append(Message(role: "notice", text: "Switchboard: message queued from " + request.sourceTitle + " [" + from.string + "] · " + id.uuidString + (request.replyExpected == true ? " [ask]" : " [tell]") + "\n" + request.text))
         store.switchboardReceived(target, source: from.string, name: request.sourceTitle, id: id, prompt: prompt, replyExpected: request.replyExpected == true, inReplyTo: request.inReplyTo, group: group, home: origin)
         store.groupTellReceipts.append(GroupTellReceipt(id: id, origin: origin, payloadHash: hash))
         do { try store.saveChecked() }

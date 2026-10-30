@@ -230,7 +230,7 @@ struct PadTranscript: UIViewRepresentable {
         let leftInset: CGFloat = lineNumbers ? 48 : 10
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
-        let visibleMessages = messages.filter { $0.role != "activity" && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
+        let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
         let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
         guard signature != c.signature || c.lastDraft != draft else { return }
