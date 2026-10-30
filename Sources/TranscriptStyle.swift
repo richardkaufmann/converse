@@ -54,8 +54,8 @@ enum TranscriptStyle {
            let data = String(text.dropFirst(12).dropLast(4)).data(using: .utf8),
            let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             let action = command["command"] as? String ?? "command"
-            if action == "tell" || action == "tell-urgently" {
-                return "Tell → " + clipped(command["to"] as? String ?? "session", limit: 28) + " · " + clipped(command["text"] as? String ?? "")
+            if action == "tell" || action == "ask" || action == "tell-urgently" {
+                return (action == "ask" ? "Ask → " : "Tell → ") + clipped(command["to"] as? String ?? "session", limit: 28) + " · " + clipped(command["text"] as? String ?? "")
             }
             return "Switchboard · " + action
         }

@@ -278,7 +278,7 @@ public sealed partial class DeviceSyncService
     public void TeachSwitchboard(ChatSession session)
     {
         session.MessagingEnabled = true;
-        session.Pending.Add(new PendingPrompt { Text = "[Converse switchboard instructions]\nYour entire final reply must be exactly one converse fenced JSON block, without prose before or after it. Otherwise it is discussion and sends nothing. Discover IDs using ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same whole-reply fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
+        session.Pending.Add(new PendingPrompt { Text = SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nYour entire final reply must be exactly one converse fenced JSON block, without prose before or after it. Otherwise it is discussion and sends nothing. Discover IDs using ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same whole-reply fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
         _store.Save(); _store.RunNext(session);
     }
     private async Task ProcessParticipantReplyAsync(ChatSession source, string reply)
@@ -296,12 +296,12 @@ public sealed partial class DeviceSyncService
                 foreach (var home in Homes.Values.Where(h => IsParticipantAllowed(h.DeviceID, CurrentGroup?.Id))) rows.AddRange(home.Rows.Select(s => new { id = s.GlobalID, name = s.Title, homeDeviceName = home.DeviceName, online = home.Online, messagingEnabled = s.MessagingEnabled == true }));
                 source.Pending.Add(new PendingPrompt { Text = "[Converse switchboard directory · live lookup]\n" + JsonSerializer.Serialize(new { command = "sessions", self = new DeviceGlobalID(DeviceId,source.Id).ToString(), sessions = rows }), Hop = source.ActiveHop + 1 }); _store.Save();
             }
-            else if (action == "tell" && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
+            else if ((action is "tell" or "ask") && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
-                await SendAgentTellAsync(source, target, text, command["replyExpected"]?.GetValue<bool>() == true, command["inReplyTo"] is { } replyID ? Guid.Parse(replyID.GetValue<string>()) : null);
+                await SendAgentTellAsync(source, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, command["inReplyTo"] is { } replyID ? Guid.Parse(replyID.GetValue<string>()) : null);
             }
-            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions or tell." }); _store.Save(); }
+            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, tell or ask." }); _store.Save(); }
         }
         catch { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard delivery unconfirmed. Check the target before retrying." }); _store.Save(); }
     }

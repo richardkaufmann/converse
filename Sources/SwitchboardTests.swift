@@ -199,6 +199,22 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     let id = UUID(), now = Date()
     check(store.deliverSwitchboard(from: sender, to: receiver.id.uuidString, text: "Review this change", id: id, hop: 1, replyExpected: true) == nil,
           "Tracked tell registers an explicit reply obligation")
+    // Exercise the actual final-reply command path on separate paused sessions.
+    let asker = store.create(entry), answerer = store.create(entry)
+    asker.switchboardEnabled = true; answerer.switchboardEnabled = true
+    asker.queuePaused = true; answerer.queuePaused = true
+    func command(_ action: String) {
+        let body: [String: Any] = ["command": action, "to": answerer.id.uuidString, "text": "Question", "replyExpected": false]
+        let text = "```converse\n" + String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "\n```"
+        asker.switchboardTurnStart = asker.messages.count
+        asker.messages.append(Message(role: "assistant", text: text, finalReply: text)); store.processSwitchboard(asker)
+    }
+    command("tell")
+    check(asker.switchboardExpectations.isEmpty && answerer.pending.count == 1, "Plain tell delivers without requesting a receipt turn")
+    command("ask")
+    check(asker.switchboardExpectations.count == 1 && answerer.pending.count == 2 && answerer.pending.last!.text.contains("Reply expected"), "Ask command always requests a correlated reply, even with conflicting false flag")
+    check(!asker.switchboardExpectations[0].answered, "Delivery acceptance does not answer an ask")
+    check(store.localContext(asker, directory: NSTemporaryDirectory()).contains("one-way tell"), "Existing enabled sessions receive ask/tell policy on their next turn")
     let original = receiver.pending[0]
     check(receiver.switchboardObligations.first?.id == id && original.text.contains("inReplyTo") && sender.switchboardExpectations.first?.id == id,
           "Request ID and reply instructions persist with the original queue item")
