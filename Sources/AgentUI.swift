@@ -62,6 +62,11 @@ struct AgentSetupView: View {
                         if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
                         Toggle("Read Discord channel during agent runs", isOn: Binding(get: { settings.discordRead == true }, set: { settings.discordRead = $0 }))
                         Toggle("Allow Discord channel alerts", isOn: $settings.discord)
+                        Toggle("Anyone in this channel may @mention this agent", isOn: Binding(get: { settings.discordMentions == true }, set: { settings.discordMentions = $0 }))
+                        if settings.discordMentions == true {
+                            Toggle("Default agent for this channel", isOn: Binding(get: { settings.discordDefault == true }, set: { settings.discordDefault = $0 }))
+                            Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request uses one automatic turn and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
+                        }
                         Text("Sessions this agent may read and message · select explicitly").font(.headline)
                         ScrollView {
                             VStack(alignment: .leading) {
@@ -141,11 +146,18 @@ struct AgentSetupView: View {
             try current.apply(settings.wire(home: DeviceSyncService.shared.localDeviceID ?? "local"))
             guard ![("meta", metaKey), ("github", githubKey), ("discordBot", discordToken)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
             let channel = (settings.discordChannelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !channel.isEmpty || settings.discordRead == true || settings.discord { _ = try AgentDiscord.channelID(channel) }
-            if settings.discordRead == true || settings.discord {
+            if !channel.isEmpty || settings.discordRead == true || settings.discord || settings.discordMentions == true { _ = try AgentDiscord.channelID(channel) }
+            if settings.discordRead == true || settings.discord || settings.discordMentions == true {
                 guard !removeSecrets.contains("discordBot"), try AgentCredentialProbe.resolve(discordToken, name: "discordBot") != nil else { throw AgentFailure.message("Add a Converse bot token before enabling Discord reading or alerts.") }
             }
             if current.discordChannelID != channel { current.discordLastMessageID = nil; current.discordCursorChannel = nil }
+            if settings.discordMentions == true && settings.discordDefault == true && Store.shared.sessions.contains(where: {
+                $0.id != session.id && $0.agent?.discordMentions == true && $0.agent?.discordDefault == true && $0.agent?.discordChannelID == channel
+            }) { throw AgentFailure.message("This channel already has a default agent. Turn off its Default setting first, or use explicit agent names.") }
+            if current.discordMentions != settings.discordMentions || current.discordChannelID != channel {
+                current.discordMentionSince = settings.discordMentions == true ? Date() : nil
+            }
+            current.discordMentions = settings.discordMentions; current.discordDefault = settings.discordDefault
             current.discordChannelID = channel; current.discordRead = settings.discordRead
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
@@ -178,6 +190,11 @@ struct AgentControls: View {
             ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
                 Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
                 Text("\(session.agent?.remainingRuns ?? 0) automatic runs left").font(.caption).foregroundStyle(.secondary)
+                if session.agent?.discordMentions == true {
+                    TimelineView(.periodic(from: .now, by: 5)) { _ in
+                        Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Button("Loop…") { loopSettings = true }
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
                 Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.busy || (session.agent?.remainingRuns ?? 0) == 0)

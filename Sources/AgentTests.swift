@@ -4,6 +4,7 @@ import Foundation
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
     agentScheduleSelfTests(check)
     agentDiscordSelfTests(check)
+    agentDiscordRouterSelfTests(check)
     let voice = AgentDictation()
     voice.keyReader = { "synthetic-key" }
     voice.permission = { false }

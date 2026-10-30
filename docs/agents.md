@@ -183,8 +183,8 @@ history. It leaves that marker visible and does not advance agent cursors or sav
 credentials. Reading the bot's own test does not prove access to all human content;
 the UI states the Message Content Intent requirement separately.
 
-An agent reads during ordinary/manual/loop runs, not through an always-running
-Discord listener. Its first read includes up to 50 recent messages; later reads
+Ordinary monitoring reads during manual/loop runs; mention routing has its own
+independent listener described below. Its first read includes up to 50 recent messages; later reads
 request up to 100 after its saved message ID. A full batch is explicitly marked
 as potentially incomplete. Cursors advance only after a successful run and are
 stored with the agent. Each agent has its own cursor; concurrent identical reads
@@ -193,3 +193,41 @@ and channel text is untrusted evidence, not permission to operate other sessions
 Alerts use the same bot token, are labeled with the agent name, and disable mentions.
 HTTP 429 starts a client cooldown; uncertain posts are never automatically retried.
 The app must remain open for agent runs and Discord reads to occur.
+
+### Mention routing
+
+Mac Agent Setup adds an explicit per-agent mention opt-in and channel default.
+Anyone able to post in that configured channel may address it. A real bot mention
+must start the message; bot/webhook authors and incidental mentions are ignored.
+`@Converse question` uses the default (or the sole enabled agent). Exact names work
+as `@Converse Agent Name: question` or `@Converse ask Agent Name question`; UUID
+plus colon disambiguates duplicate names. Ambiguous/unknown targets get a usage
+reply and are never broadcast or silently sent to the default.
+
+One Mac-host listener polls each distinct enabled channel about every five seconds
+while the app is open. This is REST polling, not a Gateway connection. Token
+identity and channel access use the existing client and rate-limit cooldown.
+New enablement establishes a start boundary; old mentions are not replayed.
+Reads paginate full history batches rather than jumping over bursts. DMs and
+threads with no explicit channel-ID configuration are out of scope.
+
+`Discord/mentions.json` is a local, atomic request journal, separate from ordinary
+monitoring cursors. Accepted requests survive restart, are deduplicated by Discord
+message ID, and wait until the target is idle with an unpaused, empty local queue.
+Each starts outside the loop schedule using one persisted automatic turn. At most
+20 commands can wait/run at once; waiting requests expire after ten minutes.
+Scope and budget are checked again at dispatch. Completed receipts are retained
+for a day and cursors provide the permanent duplicate barrier.
+
+Public mention turns receive only their question and up to 20 recent channel
+messages, plus optional public web research. They receive no private objective,
+notes, transcript/session evidence, GitHub credentials or agent action permissions.
+Their only accepted output is a public reply. Thus they can discuss publicly posted
+progress but cannot reveal unpublished agent context or trigger switchboard tells.
+The reply references its source message and disables all pings. The host persists
+the send attempt first and uses Discord's enforced nonce as an additional duplicate
+barrier. An interrupted model run reports uncertainty without replaying it; an
+uncertain POST is not automatically repeated. The session shows a delivery notice.
+
+Protocol reference: [Discord message API](https://docs.discord.com/developers/resources/message)
+and [rate limits](https://docs.discord.com/developers/topics/rate-limits).

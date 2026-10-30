@@ -9,6 +9,8 @@ struct AgentDiscordMessage: Codable, Equatable {
     var timestamp: String
     var automated: Bool
     var attachmentNames: [String]
+    var authorID: String? = nil
+    var mentions: [String]? = nil
 }
 struct AgentDiscordBatch {
     var channel: String
@@ -39,10 +41,11 @@ enum AgentDiscord {
 // cursors belong to agents, so one agent cannot consume another agent's input.
 // The short cache is memory-only, including the credential used to partition it.
 @MainActor final class AgentDiscordClient {
-    struct Query: Hashable { var token: String; var channel: String; var after: String? }
+    struct Query: Hashable { var token: String; var channel: String; var after: String?; var before: String? }
     private var pending: [Query: Task<AgentDiscordBatch, Error>] = [:]
     private var cache: [Query: (Date, AgentDiscordBatch)] = [:]
     private var retryAt: Date = .distantPast
+    private var identities: [String: String] = [:]
 
     private func call(_ path: String, token: String, api: AgentAPI, body: [String: Any]? = nil) async throws -> Any {
         guard retryAt <= Date() else { throw AgentFailure.message("Discord is rate limited. Try again after " + retryAt.formatted(date: .omitted, time: .standard) + ".") }
@@ -64,6 +67,10 @@ enum AgentDiscord {
                 retryAt = Date().addingTimeInterval(seconds.isFinite ? min(3600, max(1, seconds)) : 60)
                 throw AgentFailure.message("Discord is rate limited. Wait before trying again; no automatic repost was made.")
             }
+            if response.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0",
+               let seconds = Double(response.value(forHTTPHeaderField: "X-RateLimit-Reset-After") ?? ""), seconds.isFinite {
+                retryAt = Date().addingTimeInterval(min(3600, max(0, seconds)))
+            }
             guard (200..<300).contains(response.statusCode) else {
                 switch response.statusCode {
                 case 401: throw AgentFailure.message("Discord rejected the bot token. Replace it in Agent Setup.")
@@ -78,16 +85,17 @@ enum AgentDiscord {
         catch let error as AgentFailure { throw error }
         catch { throw AgentFailure.message("Could not complete the Discord request. Check the network; check the channel before retrying a post.") }
     }
-    func read(channel: String, after: String?, token: String, api: AgentAPI) async throws -> AgentDiscordBatch {
+    func read(channel: String, after: String?, token: String, api: AgentAPI, before: String? = nil) async throws -> AgentDiscordBatch {
         let channel = try AgentDiscord.channelID(channel)
         if let after { _ = try AgentDiscord.channelID(after) }
-        let query = Query(token: token, channel: channel, after: after)
+        if let before { _ = try AgentDiscord.channelID(before) }
+        let query = Query(token: token, channel: channel, after: after, before: before)
         cache = cache.filter { Date().timeIntervalSince($0.value.0) < 5 }
         if let value = cache[query] { return value.1 }
         if let task = pending[query] { return try await task.value }
         let task = Task { @MainActor in
-            let limit = after == nil ? 50 : 100
-            let suffix = after.map { "&after=" + $0 } ?? ""
+            let limit = after == nil && before == nil ? 50 : 100
+            let suffix = before.map { "&before=" + $0 } ?? after.map { "&after=" + $0 } ?? ""
             let raw = try await self.call("channels/\(channel)/messages?limit=\(limit)" + suffix, token: token, api: api)
             guard let rows = raw as? [[String: Any]] else { throw AgentFailure.message("Discord returned an invalid channel history response.") }
             var messages: [AgentDiscordMessage] = []
@@ -103,7 +111,7 @@ enum AgentDiscord {
                 if !automated && content.isEmpty && attachments.isEmpty && (row["embeds"] as? [Any] ?? []).isEmpty && (row["type"] as? Int ?? 0) == 0 {
                     throw AgentFailure.message("Discord returned a human message without readable content. Enable Message Content Intent for the Converse bot; read position was not advanced.")
                 }
-                messages.append(AgentDiscordMessage(id: id, author: String(((author["global_name"] as? String) ?? (author["username"] as? String) ?? "Unknown").prefix(100)), content: String(content.prefix(1200)), timestamp: row["timestamp"] as? String ?? "Unknown", automated: automated, attachmentNames: Array(attachments.prefix(10))))
+                messages.append(AgentDiscordMessage(id: id, author: String(((author["global_name"] as? String) ?? (author["username"] as? String) ?? "Unknown").prefix(100)), content: String(content.prefix(4000)), timestamp: row["timestamp"] as? String ?? "Unknown", automated: automated, attachmentNames: Array(attachments.prefix(10)), authorID: author["id"] as? String, mentions: (row["mentions"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }))
             }
             messages.sort { AgentDiscord.newer($1.id, than: $0.id) }
             return AgentDiscordBatch(channel: channel, messages: messages, newestID: messages.last?.id ?? after, atLimit: rows.count == limit)
@@ -114,10 +122,40 @@ enum AgentDiscord {
         cache[query] = (Date(), result)
         return result
     }
-    func post(_ text: String, channel: String, token: String, api: AgentAPI) async throws -> String {
+    func readMentions(channel: String, after: String, token: String, api: AgentAPI) async throws -> AgentDiscordBatch {
+        var batch = try await read(channel: channel, after: after, token: token, api: api)
+        var messages = batch.messages
+        // Discord history is newest-first. Walk backwards from a full page so
+        // a burst larger than 100 cannot jump over earlier, unseen commands.
+        var pages = 1
+        while batch.atLimit, let oldest = batch.messages.first?.id, AgentDiscord.newer(oldest, than: after) {
+            guard pages < 10 else { throw AgentFailure.message("Discord mention backlog exceeds 1000 messages; no commands were skipped or started. Review the channel before re-enabling mentions.") }
+            batch = try await read(channel: channel, after: nil, token: token, api: api, before: oldest)
+            let fresh = batch.messages.filter { AgentDiscord.newer($0.id, than: after) }
+            messages += fresh
+            pages += 1
+            if fresh.count != batch.messages.count { break }
+        }
+        let unique = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { AgentDiscord.newer($1.id, than: $0.id) }
+        return AgentDiscordBatch(channel: channel, messages: unique, newestID: unique.last?.id ?? after, atLimit: false)
+    }
+    func botID(token: String, api: AgentAPI) async throws -> String {
+        if let id = identities[token] { return id }
+        let user = try await call("users/@me", token: token, api: api) as? [String: Any]
+        guard user?["bot"] as? Bool == true, let id = user?["id"] as? String else { throw AgentFailure.message("Use a Discord bot token.") }
+        _ = try AgentDiscord.channelID(id)
+        identities = [token: id]
+        return id
+    }
+    func post(_ text: String, channel: String, token: String, api: AgentAPI, replyingTo: String? = nil, nonce: String? = nil) async throws -> String {
         let channel = try AgentDiscord.channelID(channel)
-        let raw = try await call("channels/\(channel)/messages", token: token, api: api,
-                                 body: ["content": String(text.prefix(1800)), "allowed_mentions": ["parse": []]])
+        var body: [String: Any] = ["content": String(text.prefix(1800)), "allowed_mentions": ["parse": [], "replied_user": false]]
+        if let replyingTo {
+            _ = try AgentDiscord.channelID(replyingTo)
+            body["message_reference"] = ["message_id": replyingTo, "channel_id": channel, "fail_if_not_exists": false]
+        }
+        if let nonce { body["nonce"] = String(nonce.prefix(25)); body["enforce_nonce"] = true }
+        let raw = try await call("channels/\(channel)/messages", token: token, api: api, body: body)
         guard let row = raw as? [String: Any], row["channel_id"] as? String == channel,
               let id = row["id"] as? String, (try? AgentDiscord.channelID(id)) != nil else {
             throw AgentFailure.message("Discord did not confirm delivery. Check the channel before retrying.")

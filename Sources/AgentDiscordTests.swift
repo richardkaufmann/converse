@@ -75,6 +75,19 @@ import Foundation
     }
     let empty = run { _ = try await AgentDiscordClient().read(channel: "42", after: nil, token: "fixture", api: api); return "unexpected" }
     check(empty.contains("Message Content Intent"), "Empty human content fails visibly instead of reporting no complaints")
+    // A full newest-first page must not skip the older part of a burst.
+    var pages = 0
+    api.request = { request in
+        pages += 1
+        let before = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "before" })?.value
+        let values = before == nil ? Array(111...210) : Array(90...110)
+        return (try JSONSerialization.data(withJSONObject: values.reversed().map { row(String($0)) }), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    let burst = run {
+        let result = try await AgentDiscordClient().readMentions(channel: "42", after: "100", token: "fixture", api: api)
+        return result.messages.map(\.id) == (101...210).map(String.init) && result.newestID == "210" ? "complete" : "skipped"
+    }
+    check(burst == "complete" && pages == 2, "Mention listener paginates a burst over 100 messages without skipping the older commands")
     do {
         var a = AgentConfig(); a.discordRead = true; a.discordChannelID = "42"; a.discordCursorChannel = "42"; a.discordLastMessageID = "12"
         let restored = try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(a))

@@ -41,6 +41,10 @@ struct AgentConfig: Codable, Equatable {
     var discordChannelID: String? = nil
     var discordCursorChannel: String? = nil
     var discordLastMessageID: String? = nil
+    var discordMentions: Bool? = nil
+    var discordDefault: Bool? = nil
+    var discordMentionSince: Date? = nil
+    var discordActiveRequestID: String? = nil
     var lastArtMood: String? = nil
     var lastArtAt: Date? = nil
     var snapshot: AgentRepoSnapshot? = nil
