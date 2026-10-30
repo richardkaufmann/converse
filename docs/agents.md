@@ -162,3 +162,34 @@ There are no overlapping runs or catch-up bursts. Relaunch schedules a future ch
 ## Cross-platform release boundary (0.5.22)
 
 Mac and Windows host agents; iPad controls them on a desktop home. All three display attention, loop status, transcript images and scoreboards. Windows uses Windows Credential Manager for its Meta key and the same bounded direct Responses/Image APIs, with synthetic API and live loopback coverage. Voice, Discord and file triggers remain Mac-home features for this release; Windows explicitly rejects enabling unsupported options. Jolly continues to use the existing Mac bridge. No iPad background execution is promised.
+
+
+## Discord bot integration
+
+Mac homes use one `discordBot` credential in the Converse Agent Keychain service,
+shared by all local agents. No KAOS credential, config, service or cursor is used.
+The former webhook credential is no longer read; it is not converted to a bot token.
+Each agent selects a numeric channel ID plus separate read and alert permissions.
+Other devices can view these agents; bot credentials and channel configuration are
+set on the Mac home. Windows hosting remains unsupported for Discord in this release.
+
+Create a dedicated Converse application/bot in Discord's Developer Portal, enable
+Message Content Intent, and invite it to the desired server with View Channel,
+Read Message History, and Send Messages for the chosen channel. Store its bot token
+in Agent Setup, never in a transcript. With Discord Developer Mode enabled, use
+Copy Channel ID for the destination. Test Discord checks the bot identity/history,
+posts one labeled non-mention test message and finds its exact text through channel
+history. It leaves that marker visible and does not advance agent cursors or save
+credentials. Reading the bot's own test does not prove access to all human content;
+the UI states the Message Content Intent requirement separately.
+
+An agent reads during ordinary/manual/loop runs, not through an always-running
+Discord listener. Its first read includes up to 50 recent messages; later reads
+request up to 100 after its saved message ID. A full batch is explicitly marked
+as potentially incomplete. Cursors advance only after a successful run and are
+stored with the agent. Each agent has its own cursor; concurrent identical reads
+share one host request. Bot and webhook messages are excluded from model evidence,
+and channel text is untrusted evidence, not permission to operate other sessions.
+Alerts use the same bot token, are labeled with the agent name, and disable mentions.
+HTTP 429 starts a client cooldown; uncertain posts are never automatically retried.
+The app must remain open for agent runs and Discord reads to occur.

@@ -8,7 +8,8 @@ struct AgentSetupView: View {
     @State private var testingServices: Set<String> = []
     @State private var testOutcomes: [String: String] = [:]
     @State private var githubKey = ""
-    @State private var discordURL = ""
+    @State private var discordToken = ""
+    @State private var discordClient = AgentDiscordClient()
     @State private var removeSecrets: Set<String> = []
     @State private var error = ""
     var onClose: (() -> Void)? = nil
@@ -17,7 +18,7 @@ struct AgentSetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Agent Setup · " + session.title).font(.title2.bold())
-            Text("Runs on this home computer while Converse is open. Only the selected sessions are sent to Meta. Keys and the Discord webhook stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
+            Text("Runs on this home computer while Converse is open. Selected sessions and enabled Discord channel messages are sent to Meta. Keys stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -34,11 +35,17 @@ struct AgentSetupView: View {
                         }
                         testStatus("github")
                         HStack {
-                            SecureField("Discord webhook · optional", text: $discordURL).disabled(testingServices.contains("discord"))
-                            Button(testingServices.contains("discord") ? "Sending…" : "Send test") { testService("discord") }.disabled(testingServices.contains("discord") || removeSecrets.contains("discord")).help("Posts one labeled test message to the entered or saved webhook’s channel; no session content or mentions")
-                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("discord") }, set: { if $0 { removeSecrets.insert("discord") } else { removeSecrets.remove("discord") } })).toggleStyle(.checkbox).disabled(testingServices.contains("discord")).fixedSize().help("Remove this saved credential from this Mac for all agents when you click Save")
+                            SecureField("Discord bot token · shared on this Mac", text: $discordToken).disabled(testingServices.contains("discordBot"))
+                            Button(testingServices.contains("discordBot") ? "Testing…" : "Test Discord") { testService("discordBot") }.disabled(testingServices.contains("discordBot") || removeSecrets.contains("discordBot"))
+                                .help("Posts one labeled test and reads it back through channel history. No session content or mentions. Does not save credentials or advance any agent’s read position.")
+                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("discordBot") }, set: { if $0 { removeSecrets.insert("discordBot") } else { removeSecrets.remove("discordBot") } })).toggleStyle(.checkbox).disabled(testingServices.contains("discordBot")).fixedSize()
                         }
-                        testStatus("discord")
+                        HStack {
+                            Text("Discord channel").frame(width: 110, alignment: .leading)
+                            TextField("Channel ID · this agent", text: Binding(get: { settings.discordChannelID ?? "" }, set: { settings.discordChannelID = $0 })).disabled(testingServices.contains("discordBot"))
+                        }
+                        Text("One Converse bot serves all agents. Enable Message Content Intent in Discord; invite it with View Channel, Read Message History and Send Messages. Copy the channel ID with Discord Developer Mode enabled.").font(.caption).foregroundStyle(.secondary)
+                        testStatus("discordBot")
                         HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model).disabled(testingServices.contains("meta")) }
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
@@ -53,7 +60,8 @@ struct AgentSetupView: View {
                         Toggle("Speak replies with expressive pace", isOn: $settings.speak)
                         Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
                         if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
-                        Toggle("Allow Discord webhook alerts", isOn: $settings.discord)
+                        Toggle("Read Discord channel during agent runs", isOn: Binding(get: { settings.discordRead == true }, set: { settings.discordRead = $0 }))
+                        Toggle("Allow Discord channel alerts", isOn: $settings.discord)
                         Text("Sessions this agent may read and message · select explicitly").font(.headline)
                         ScrollView {
                             VStack(alignment: .leading) {
@@ -95,8 +103,9 @@ struct AgentSetupView: View {
     private func testService(_ service: String) {
         guard !testingServices.contains(service), !removeSecrets.contains(service) else { return }
         testingServices.insert(service)
-        testOutcomes[service] = service == "discord" ? "Sending one labeled test message; no session content or mentions." : "Checking access; no session history is sent."
-        let entered = service == "meta" ? metaKey : service == "github" ? githubKey : discordURL
+        testOutcomes[service] = service == "discordBot" ? "Testing send and read with one labeled message; no session content or mentions." : "Checking access; no session history is sent."
+        let entered = service == "meta" ? metaKey : service == "github" ? githubKey : discordToken
+        let discordChannel = settings.discordChannelID ?? ""
         let model = settings.model, repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
             defer { testingServices.remove(service) }
@@ -105,9 +114,9 @@ struct AgentSetupView: View {
                 let api = AgentAPI()
                 switch service {
                 case "github": testOutcomes[service] = try await api.testGitHub(repository: repository, token: key)
-                case "discord":
-                    guard let key else { throw AgentFailure.message("Enter a Discord webhook URL or save one first.") }
-                    testOutcomes[service] = try await api.testDiscord(webhook: key)
+                case "discordBot":
+                    guard let key else { throw AgentFailure.message("Enter a Converse bot token or save one first.") }
+                    testOutcomes[service] = try await discordClient.test(channel: discordChannel, token: key, api: api)
                 default:
                     guard let key else { throw AgentFailure.message("Enter a Meta API key or save one first.") }
                     _ = try await api.respond(model: model, instructions: "Reply with the words Connection verified. Do not use tools.", input: "Converse API connection test. No private session data is included.", key: key)
@@ -130,10 +139,17 @@ struct AgentSetupView: View {
         do {
             var current = session.agent ?? AgentConfig()
             try current.apply(settings.wire(home: DeviceSyncService.shared.localDeviceID ?? "local"))
-            guard ![("meta", metaKey), ("github", githubKey), ("discord", discordURL)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
+            guard ![("meta", metaKey), ("github", githubKey), ("discordBot", discordToken)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
+            let channel = (settings.discordChannelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !channel.isEmpty || settings.discordRead == true || settings.discord { _ = try AgentDiscord.channelID(channel) }
+            if settings.discordRead == true || settings.discord {
+                guard !removeSecrets.contains("discordBot"), try AgentCredentialProbe.resolve(discordToken, name: "discordBot") != nil else { throw AgentFailure.message("Add a Converse bot token before enabling Discord reading or alerts.") }
+            }
+            if current.discordChannelID != channel { current.discordLastMessageID = nil; current.discordCursorChannel = nil }
+            current.discordChannelID = channel; current.discordRead = settings.discordRead
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
-            try AgentSecrets.update("discord", value: discordURL, remove: removeSecrets.contains("discord"))
+            try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             session.agent = current; session.toolStatus.model = current.model
             Store.shared.save(); close()

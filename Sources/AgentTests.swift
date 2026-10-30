@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
     agentScheduleSelfTests(check)
+    agentDiscordSelfTests(check)
     let voice = AgentDictation()
     voice.keyReader = { "synthetic-key" }
     voice.permission = { false }
@@ -172,25 +173,6 @@ import Foundation
     let invalidRepository = probe { try await probeAPI.testGitHub(repository: "../repo", token: "test-token") }
     check(invalidRepository.contains("owner/name") && probeRequests.isEmpty, "GitHub probe rejects an invalid repository before making any request")
     responseStatus = 200; probeRequests = []
-    let testWebhook = "https://discord.com/api/webhooks/12345/test_token?thread_id=6789&wait=false"
-    let discordOK = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
-    let sentBody = probeRequests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    let sentQuery = probeRequests.first?.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
-    check(discordOK.contains("confirmed") && probeRequests.count == 1 && probeRequests[0].httpMethod == "POST" && sentBody?["content"] as? String == "Converse connection test — this webhook is working. No session content is included." && (sentBody?["allowed_mentions"] as? [String: Any])?["parse"] as? [String] == [] && sentQuery.contains(URLQueryItem(name: "wait", value: "true")) && sentQuery.contains(URLQueryItem(name: "thread_id", value: "6789")), "Discord test posts only the fixed labeled message, disables mentions, preserves thread routing and waits for confirmation")
-    for webhook in ["https://discord.com.attacker.test/api/webhooks/12345/test_token", "http://discord.com/api/webhooks/12345/test_token", "https://discord.com/api/users/@me", "https://name:password@discord.com/api/webhooks/12345/test_token", "https://discord.com/api/webhooks/12345/test_token?redirect=elsewhere"] {
-        probeRequests = []
-        let rejected = probe { try await probeAPI.testDiscord(webhook: webhook) }
-        check(rejected.contains("Integrations") && probeRequests.isEmpty, "Discord probe refuses non-webhook or untrusted destinations without sending")
-    }
-    responseStatus = 404; probeRequests = []
-    let missingWebhook = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
-    check(missingWebhook.contains("may have been deleted") && !missingWebhook.contains("private-service-error-canary") && !missingWebhook.contains("test_token"), "Discord probe explains a deleted webhook without exposing its URL or the API response")
-    probeAPI.request = { request in throw NSError(domain: "private-url-canary-test_token", code: -1, userInfo: [NSLocalizedDescriptionKey: request.url!.absoluteString]) }
-    let offlineDiscord = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
-    check(offlineDiscord.contains("Check the channel and network") && !offlineDiscord.contains("test_token"), "Discord network errors cannot leak secret webhook URLs")
-    probeAPI.request = { request in (Data(), HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!) }
-    let unconfirmedDiscord = probe { try await probeAPI.testDiscord(webhook: testWebhook) }
-    check(unconfirmedDiscord.contains("did not confirm") && !unconfirmedDiscord.contains("confirmed the test"), "Discord test does not report delivery without a returned message receipt")
     let quitStore = Store(folder: root.appendingPathComponent("quit-fixture"))
     let quitCLI = quitStore.create(Entry(name: "Quit fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
     check(ConverseQuitWarning(sessions: quitStore.sessions) == nil, "Idle ordinary sessions do not introduce an unnecessary quit confirmation")
@@ -459,6 +441,38 @@ import Foundation
     check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/metrics.json").path), "Clearing GitHub removes stale exported repository measurements")
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.repository == "", "No-repository agent survives a full session archive reload")
     runtime.keyReader = { _ in "isolated-test-key" }
+    agent.agent?.discordRead = true; agent.agent?.discordChannelID = "42"
+    agent.agent?.discord = false
+    let priorRequest = runtime.api.request
+    runtime.api.request = { request in
+        if request.url?.host == "discord.com" {
+            let messages: [[String: Any]] = [["id": "100", "channel_id": "42", "content": "The window is clipped", "author": ["username": "Tester", "bot": false]]]
+            return (try JSONSerialization.data(withJSONObject: messages), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        return try await priorRequest(request)
+    }
+    requests = []; agent.busy = true
+    let discordID = UUID(); agent.messages.append(Message(id: discordID, role: "assistant", text: ""))
+    runtime.run(agent, store: store, responseID: discordID)
+    let discordDeadline = Date().addingTimeInterval(8)
+    while agent.busy && Date() < discordDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    let discordBody = requests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    check(agent.agent?.lastOutcome == "Completed" && agent.agent?.discordLastMessageID == "100" && (discordBody?["input"] as? String)?.contains("The window is clipped") == true, "Agent run supplies Discord evidence to the model and commits its read cursor on a valid response")
+    check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.discordLastMessageID == "100", "Successful Discord read cursor survives session archive reload")
+    agent.agent?.discordLastMessageID = "99"
+    runtime.api.request = { request in
+        if request.url?.host == "discord.com" {
+            return (Data("[{\"id\":\"101\",\"channel_id\":\"42\",\"content\":\"Still clipped\",\"author\":{\"username\":\"Tester\"}}]".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        return (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    agent.busy = true
+    let discordFailID = UUID(); agent.messages.append(Message(id: discordFailID, role: "assistant", text: ""))
+    runtime.run(agent, store: store, responseID: discordFailID)
+    let discordFailDeadline = Date().addingTimeInterval(8)
+    while agent.busy && Date() < discordFailDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(agent.agent?.discordLastMessageID == "99" && agent.agent?.lastOutcome.hasPrefix("Stopped:") == true, "Failed model response leaves Discord messages unread for a later retry")
+    agent.agent?.discordRead = false; agent.agent?.discordChannelID = nil
 
     let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!
     runtime.api.request = { request in
