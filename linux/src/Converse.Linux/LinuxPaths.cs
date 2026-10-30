@@ -196,27 +196,29 @@ internal sealed record ProductInfo(
                 .FirstOrDefault(attribute => attribute.Key == "ConverseSourceCommit")?.Value;
         int? build = int.TryParse(buildText, out var parsedBuild) ? parsedBuild : null;
 
+        // The binary's own stamped identity wins over VERSION.json files: a
+        // staged newer binary must not inherit the linked older release's
+        // version. Files remain only for binaries built without stamping.
+        var informational = typeof(ProductInfo).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0+0";
+        var parts = informational.Split('+', 2);
+        var buildSuffix = parts.Length == 2 ? parts[1].Split('.')[0] : "";
+        if (string.IsNullOrWhiteSpace(version) && !string.IsNullOrWhiteSpace(parts[0]))
+            version = parts[0];
+        if (build is null && int.TryParse(buildSuffix, out var assemblyBuild))
+            build = assemblyBuild;
+
         foreach (var candidate in VersionFiles(paths))
         {
+            if (!string.IsNullOrWhiteSpace(version) && build is not null) break;
             try
             {
                 if (!File.Exists(candidate)) continue;
                 using var document = JsonDocument.Parse(File.ReadAllText(candidate));
                 version ??= document.RootElement.GetProperty("version").GetString();
                 build ??= document.RootElement.GetProperty("build").GetInt32();
-                break;
             }
-            catch { /* Assembly metadata remains the fallback. */ }
-        }
-
-        if (string.IsNullOrWhiteSpace(version) || build is null)
-        {
-            var informational = typeof(ProductInfo).Assembly
-                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0+0";
-            var parts = informational.Split('+', 2);
-            version ??= parts[0];
-            if (build is null && parts.Length == 2 && int.TryParse(parts[1], out var assemblyBuild))
-                build = assemblyBuild;
+            catch { /* Unstamped binaries keep their assembly identity. */ }
         }
 
         var architecture = RuntimeInformation.OSArchitecture switch
