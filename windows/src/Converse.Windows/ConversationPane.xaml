@@ -94,6 +94,8 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="HintText" Grid.Column="0" VerticalAlignment="Center" FontSize="11"
+                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                       IsTextTrimmedChanged="OnHintTrimmedChanged"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        Text="Type at the end in blue. Return sends or queues · Ctrl+Return for newline"/>
             <CheckBox x:Name="LineNumbersBox" Grid.Column="1" Content="line numbers" FontSize="11"

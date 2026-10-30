@@ -389,6 +389,19 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
+    private void OnHintTrimmedChanged(TextBlock sender, IsTextTrimmedChangedEventArgs args)
+        => UpdateHintVisibility();
+
+    private void UpdateHintVisibility()
+    {
+        // Keep the text in layout so widening the pane can reveal it again.
+        // Only the optional instructional hint disappears; operation notices
+        // remain visible and expose their full text on hover.
+        var instructional = HintText.Text.StartsWith(DefaultHint, StringComparison.Ordinal);
+        HintText.Opacity = instructional && HintText.IsTextTrimmed ? 0 : 1;
+        ToolTipService.SetToolTip(HintText, instructional ? null : HintText.Text);
+    }
+
     private void UpdateHint()
     {
         RefreshDraftImages();
@@ -412,6 +425,7 @@ public sealed partial class ConversationPane : UserControl
             ? _host.Store.Sessions.FirstOrDefault(s => s.Id == lid)?.Attachments.Count > 0
             : _selected?.GlobalID is string g && _host.RemoteHashes.GetValueOrDefault(g)?.Count > 0;
         ClearImagesButton.Visibility = hasImages ? Visibility.Visible : Visibility.Collapsed;
+        UpdateHintVisibility();
     }
 
     private string _draftImagesKey = "";
