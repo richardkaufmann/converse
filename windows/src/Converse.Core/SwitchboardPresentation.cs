@@ -38,8 +38,8 @@ public static class SwitchboardPresentation
                 using var doc = JsonDocument.Parse(text[12..^4]);
                 var root = doc.RootElement;
                 var action = root.GetProperty("command").GetString();
-                if (action is "tell" or "tell-urgently")
-                    return "Tell → " + Clip(root.GetProperty("to").GetString() ?? "session", 28) + " · " + Clip(root.GetProperty("text").GetString() ?? "");
+                if (action is "tell" or "ask" or "tell-urgently")
+                    return (action == "ask" ? "Ask → " : "Tell → ") + Clip(root.GetProperty("to").GetString() ?? "session", 28) + " · " + Clip(root.GetProperty("text").GetString() ?? "");
                 return "Switchboard · " + action;
             }
             catch (Exception e) when (e is JsonException or InvalidOperationException or KeyNotFoundException) { }

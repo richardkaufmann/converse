@@ -508,7 +508,7 @@ public sealed class SessionStore
             session.Status = "Working…";
             session.TurnCancellation = new CancellationTokenSource();
             using var registration = session.TurnCancellation.Token.Register(() => _ = client.InterruptAsync());
-            await client.SubmitAsync(ImageGuidance.WithGuidance(prompt), prompt, images, session.Choices.Effort);
+            await client.SubmitAsync(ImageGuidance.WithGuidance(SwitchboardInstructions.WithPolicy(session, prompt)), prompt, images, session.Choices.Effort);
             if (session.Interrupted) await client.InterruptAsync();
             var (status, notice) = await session.MuseTurnDone.Task;
             FinishMuse(session, status, notice);
@@ -689,7 +689,7 @@ public sealed class SessionStore
         var exit = -1;
         try
         {
-            var input = await ProviderInput.CreateAsync(session.Entry.Engine, ImageGuidance.WithGuidance(prompt), images);
+            var input = await ProviderInput.CreateAsync(session.Entry.Engine, ImageGuidance.WithGuidance(SwitchboardInstructions.WithPolicy(session, prompt)), images);
             exit = await _runner.RunAsync(session, args, input,
                 line => Consume(line, session, response), session.TurnCancellation.Token);
         }

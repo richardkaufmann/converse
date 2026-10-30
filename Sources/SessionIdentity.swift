@@ -56,7 +56,7 @@ extension Store {
             identity += "; Claude transcript UUID \(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent); read-only session identity sidecar \(path)"
         }
         if !session.identityError.isEmpty { identity += "; session identity sidecar unavailable" }
-        return "[Local context from Converse: \(identity); time zone \(zone.identifier) (\(zone.abbreviation() ?? "local")); local time at send \(formatter.string(from: date)); working directory \(directory). Use this time zone for dates and times unless I request another.]"
+        return "[Local context from Converse: \(identity); time zone \(zone.identifier) (\(zone.abbreviation() ?? "local")); local time at send \(formatter.string(from: date)); working directory \(directory). Use this time zone for dates and times unless I request another.]" + (session.switchboardEnabled && session.agent == nil ? "\n[" + SwitchboardCommand.conversationPolicy + "]" : "")
     }
 }
 

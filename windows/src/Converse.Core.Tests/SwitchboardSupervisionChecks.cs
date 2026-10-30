@@ -9,6 +9,22 @@ static class SwitchboardSupervisionChecks
         {
             var store = new SessionStore(root, new FakeRunner());
             using var home = new DeviceSyncService(root, store, "Supervision");
+            var asker = store.Create(new AgentEntry { Name = "Asker", Engine = "codex" });
+            var answerer = store.Create(new AgentEntry { Name = "Answerer", Engine = "codex" });
+            asker.MessagingEnabled = answerer.MessagingEnabled = true;
+            asker.QueuePaused = answerer.QueuePaused = true;
+            async Task Command(string action, int count)
+            {
+                var body = System.Text.Json.JsonSerializer.Serialize(new { command = action, to = answerer.Id.ToString(), text = "Question", replyExpected = false });
+                store.FinalParticipantReply!(asker, "```converse\n" + body + "\n```");
+                for (var i = 0; i < 100 && answerer.Pending.Count < count; i++) await Task.Delay(10);
+            }
+            await Command("tell", 1);
+            check(asker.SwitchboardExpectations.Count == 0 && answerer.Pending.Count == 1, "Plain tell delivers without requesting a receipt turn");
+            await Command("ask", 2);
+            check(asker.SwitchboardExpectations.Count == 1 && answerer.Pending.Count == 2 && answerer.Pending.Last().Text.Contains("Reply expected"), "Ask command always requests correlated reply, even with conflicting false flag");
+            check(!asker.SwitchboardExpectations.Single().Answered, "Delivery acceptance does not answer an ask");
+            check(SwitchboardInstructions.WithPolicy(asker, "Hello").Contains("one-way tell") && SwitchboardInstructions.WithPolicy(new ChatSession(), "Hello") == "Hello", "Policy refresh reaches enabled existing sessions only");
             var a = store.Create(new AgentEntry { Name = "A", Engine = "codex" });
             var b = store.Create(new AgentEntry { Name = "B", Engine = "codex" });
             a.MessagingEnabled = b.MessagingEnabled = true;

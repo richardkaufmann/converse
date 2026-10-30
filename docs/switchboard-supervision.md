@@ -15,3 +15,9 @@ Traffic summaries are a presentation layer; stored text, provider input, copies 
 ## Linux integration
 
 This change is on canonical main, separate from feature/linux-home. When integrating its C# host, bind `DeviceSyncService.CanSuperviseSwitchboard` to the same admission/shutdown gate as ordinary work, and run AgentRuntime.Tick on its serialized state executor. Do not start corrective turns during update drain or probation. Linux release/acceptance is not claimed by this change.
+
+## Tell versus ask
+
+Natural language “tell MuseConverse …” sends a one-way message. “Ask MuseConverse …” requests a correlated answer, blocker, or explicit decline. CLI sessions emit `command: "tell"` or `command: "ask"` in the existing whole-reply converse fence. Ask always enables `replyExpected`, even if false was supplied. Existing `tell` plus `replyExpected: true` remains supported. Agent JSON uses its existing `tell` array with `replyExpected: true` for asks.
+
+Transport acknowledgements still report acceptance or failure; they never count as an answer and do not create an acknowledgement turn. A receiver answers using `tell` with `inReplyTo` set to the request UUID. Teaching instructions and subsequent CLI turns explain the distinction, so existing enabled sessions learn it without a separate teaching turn. Names are resolved from the live directory, never guessed.
