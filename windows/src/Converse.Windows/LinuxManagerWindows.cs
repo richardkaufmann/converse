@@ -400,12 +400,18 @@ public sealed partial class MainWindow
             await RunLinuxAsync("Approving Linux group request", async () =>
             {
                 if (!await BindLinuxReviewRequesterAsync()) return;
-                await ConfirmLocalJoinPromptAsync(_linuxReviewBinding);
-                if (_devices.GroupReview?.Request.Id != _linuxReviewBinding.PairingID)
+                if (!await ConfirmLocalJoinPromptAsync(_linuxReviewBinding)) return;
+                var listed = await LinuxManager.ListPairingRequestsAsync(_linuxSelected);
+                var liveReview = listed.Value?.FirstOrDefault(item =>
+                    item.PairingID == _linuxReviewBinding.PairingID &&
+                    item.VerificationCodeFingerprint ==
+                        _linuxReviewBinding.VerificationCodeFingerprint);
+                if (liveReview is null)
                 {
-                    SetLinuxMessage("The local review changed. Review the Linux request again before approving.");
+                    SetLinuxMessage("The Linux review changed. Review the request again before approving.");
                     return;
                 }
+                _linuxReviewBinding = liveReview;
                 var result = await LinuxManager.ApproveRequestAsync(
                     _linuxSelected, _linuxReviewBinding);
                 SetLinuxMessage(result.Success ? "Request approved on Linux." : result.Message);
@@ -696,13 +702,23 @@ public sealed partial class MainWindow
         return true;
     }
 
-    private async Task ConfirmLocalJoinPromptAsync(LinuxPairingBinding binding)
+    private async Task<bool> ConfirmLocalJoinPromptAsync(LinuxPairingBinding binding)
     {
         var peerIDs = _devices.GroupPairingPrompts
             .Where(item => item.PeerId == binding.RequesterConnectionInstanceID ||
                 (binding.VerificationCode is not null && item.Code == binding.VerificationCode))
             .Select(item => item.PeerId).Distinct().ToList();
-        if (peerIDs.Count == 1) await _devices.ConfirmPairing(peerIDs[0]);
+        if (peerIDs.Count != 1)
+        {
+            SetLinuxMessage("No unique local join prompt matches. Pairing stopped.");
+            return false;
+        }
+        if (!await _devices.ConfirmPairing(peerIDs[0]))
+        {
+            SetLinuxMessage("Local confirmation did not apply. Pairing stopped.");
+            return false;
+        }
+        return true;
     }
 
     private async Task RunLinuxAsync(string label, Func<Task> action)

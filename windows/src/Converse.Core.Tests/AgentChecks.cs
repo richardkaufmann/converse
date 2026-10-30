@@ -27,7 +27,8 @@ static class AgentChecks
         {
             var store = new SessionStore(roots[0], new FakeRunner());
             using var home = new DeviceSyncService(roots[0], store, "AgentHome");
-            using var viewer = new DeviceSyncService(roots[1], new SessionStore(roots[1], new FakeRunner()), "AgentViewer");
+            var viewerStore = new SessionStore(roots[1], new FakeRunner());
+            using var viewer = new DeviceSyncService(roots[1], viewerStore, "AgentViewer");
             var sender = store.Create(new AgentEntry { Name = "Hop sender", Engine = "codex" });
             var receiver = store.Create(new AgentEntry { Name = "Hop receiver", Engine = "codex" });
             sender.MessagingEnabled = receiver.MessagingEnabled = true;
@@ -45,6 +46,7 @@ static class AgentChecks
             check(receiver.Pending.Count == queued, "Switchboard rejects hop one hundred and one");
             store.Sessions.Remove(sender); store.Sessions.Remove(receiver);
             var agent = store.CreateAgent("Agent fixture");
+            agent.MessagingEnabled = true;
             check(agent.Agent!.Settings.Watched.Count == 0 && !agent.Agent.CanSchedule, "New Windows agent starts paused with empty explicit scope");
             var calls = 0; string input = "";
             home.Agents.ReadSecret = _ => "test-only-not-a-real-key";
@@ -86,6 +88,17 @@ static class AgentChecks
                 "Closed admission rejects remote agent runs before queueing");
             agent.Pending.Clear(); agent.QueuePaused = false;
             home.SetAcceptingWork(true);
+            var remoteSender = viewerStore.Create(new AgentEntry { Name = "Drain tell probe", Engine = "codex" });
+            remoteSender.MessagingEnabled = true;
+            agent.QueuePaused = true;
+            home.SetAcceptingWork(false);
+            var tellCountBefore = agent.Pending.Count;
+            await viewer.SendAgentTellAsync(remoteSender, target, "DRAIN_PROBE_NEW_EXTERNAL_TELL");
+            var tellDeadline = DateTime.UtcNow.AddSeconds(2);
+            while (agent.Pending.Count == tellCountBefore && DateTime.UtcNow < tellDeadline) await Task.Delay(20);
+            check(agent.Pending.Count == tellCountBefore,
+                "Closed admission rejects a new incoming switchboard tell");
+            agent.Pending.Clear(); agent.QueuePaused = false; home.SetAcceptingWork(true);
             await viewer.LeaveGroupAsync();
             var refused = await viewer.RequestParticipantAsync(home.DeviceId, "agent.run", target);
             check(refused.Outcome == "rejected" && calls == 2, "Leaving group immediately fences remote agent control");

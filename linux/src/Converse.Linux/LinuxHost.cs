@@ -84,6 +84,8 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
 
     public int OutstandingWorkCount => _devices?.WorkSnapshot().Total ?? ActiveTurnCount;
 
+    public bool IsWorkQuiescent() => _devices?.IsWorkQuiescent() ?? ActiveTurnCount == 0;
+
     private static readonly HashSet<string> OrdinaryMutations = new(StringComparer.Ordinal)
     {
         "group.create", "pairing.join.begin", "pairing.bindPeerConnection",

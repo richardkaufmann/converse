@@ -14,6 +14,7 @@ internal enum StartupAdmission
 internal interface ILinuxUpdateRuntime
 {
     int OutstandingWorkCount { get; }
+    bool IsWorkQuiescent();
     bool FabricStarted { get; }
     void SetAcceptingWork(bool accepting);
     Task StartFabricAsync(CancellationToken cancellationToken);
@@ -308,9 +309,11 @@ internal sealed class LinuxUpdateManager
         Guid operationID, UpdateEpisode episode, int drainTimeoutSeconds)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(drainTimeoutSeconds);
-        // Admission was closed before this task started, so the snapshot
-        // can only shrink; the final idle check below runs under _gate.
-        while (_runtime.OutstandingWorkCount > 0 && DateTimeOffset.UtcNow < deadline)
+        // Admission closed before this task started under the shared Core
+        // admission lock, so no new external work can begin and the
+        // in-flight count can only shrink. The final quiescence decision
+        // below runs under _gate and rechecks that same shared boundary.
+        while (!_runtime.IsWorkQuiescent() && DateTimeOffset.UtcNow < deadline)
             await Task.Delay(100);
 
         var restart = false;
@@ -321,7 +324,7 @@ internal sealed class LinuxUpdateManager
             if (ledger.UpdateEpisode?.EpisodeID != episode.EpisodeID ||
                 ledger.UpdateEpisode.Phase != "draining_old_release") return;
 
-            if (_runtime.OutstandingWorkCount > 0)
+            if (!_runtime.IsWorkQuiescent())
             {
                 var aborted = episode.Clone();
                 aborted.Phase = "aborted";

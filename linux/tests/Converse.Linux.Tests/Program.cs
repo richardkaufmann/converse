@@ -723,6 +723,7 @@ try
         var code = "0000 1111 2222 3333 4444 5555 6666 7777";
         var fingerprint = Convert.ToHexString(SHA256.HashData(
             Encoding.UTF8.GetBytes(code.Replace(" ", "")))).ToLowerInvariant();
+        var reviewJoinExpiry = "2999-01-01T00:00:00Z";
         LinuxPairingBinding MakeBinding(string state = "awaiting_user", Guid? native = null) => new()
         {
             PairingID = pairingID,
@@ -743,7 +744,7 @@ try
             SponsorConnectionInstanceID = native,
             VerificationCode = state == "awaiting_user" ? code : null,
             VerificationCodeFingerprint = fingerprint,
-            ExpiresAt = "2999-01-01T00:00:00Z",
+            ExpiresAt = reviewJoinExpiry,
             CreatedAt = "2026-10-30T16:00:00Z",
             UpdatedAt = "2026-10-30T16:00:00Z",
         };
@@ -829,6 +830,22 @@ try
         checks.That(!expiredDuringReview.Success &&
                     !order.Contains("pairing.join.confirm"),
             "Pair rechecks native expiry after asynchronous review before confirmation");
+        boundNative = null;
+        nativeRequest.ExpiresAt = DeviceTrustStore.AppleNow() + 180;
+        order.Clear();
+        var expiredLinux = await manager.PairJoinAsync(
+            deployment, MakeBinding(),
+            () => new List<GroupJoinRequest> { nativeRequest },
+            _ =>
+            {
+                reviewJoinExpiry = DateTimeOffset.UtcNow.AddSeconds(-1).ToString("O");
+                return Task.FromResult<string?>(code);
+            },
+            (_, _, _) => { order.Add("sponsor.approve"); return Task.FromResult(true); });
+        checks.That(!expiredLinux.Success &&
+                    !order.Contains("pairing.join.confirm") &&
+                    !order.Contains("sponsor.approve"),
+            "Linux-side expiry is independently checked after review");
     }
 
     // Real host and Unix-socket admin path.
@@ -939,6 +956,25 @@ try
             checks.That(!pendingReplay.Ok &&
                         secretStore.Read("meta") == Encoding.UTF8.GetString(rotatedBytes),
                 "Uncertain unapplied rotation cannot complete from an older configured key");
+
+            var reviewDevices = (DeviceSyncService)typeof(LinuxHost).GetField(
+                "_devices", flags)!.GetValue(host)!;
+            var nonexistentReviewID = Guid.NewGuid();
+            reviewDevices.GroupReview = new GroupJoinReview
+            {
+                Request = new GroupJoinRequest
+                {
+                    Id = nonexistentReviewID,
+                    GroupID = Guid.NewGuid().ToString("D"),
+                    ExpiresAt = DeviceTrustStore.AppleNow() + 180,
+                },
+                Code = "synthetic-test-code",
+            };
+            var claimedApproval = await reviewDevices.TryApproveGroupReviewAsync(
+                nonexistentReviewID, "synthetic-test-code");
+            reviewDevices.GroupReview = null;
+            checks.That(!claimedApproval,
+                "Approval reports false when no live matching join exists");
 
             var groupOperationID = Guid.NewGuid();
             var group = await AdminClient.SendAsync(paths, Request(
@@ -1142,6 +1178,7 @@ sealed class FakeUpdateRuntime : ILinuxUpdateRuntime
     public int ActiveTurnCount { get; set; }
     public int ExtraWorkCount { get; set; }
     public int OutstandingWorkCount => ActiveTurnCount + ExtraWorkCount;
+    public bool IsWorkQuiescent() => OutstandingWorkCount == 0;
     public bool FabricStarted { get; private set; }
     public bool Accepting { get; private set; } = true;
     public List<string> Restarts { get; } = new();

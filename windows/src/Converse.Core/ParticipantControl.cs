@@ -81,12 +81,28 @@ public sealed partial class DeviceSyncService
         {
             var request = DeviceJson.Decode<DeviceParticipantRequest>(bytes);
             if (request.GroupID != group.Id) return true;
-            var response = await HandleAgentRequestAsync(hello.DeviceID, id, request);
+            var admitted = request.Action is "inspect" or "agent.settings" || TryBeginExternalWork();
+            DeviceParticipantResponse response;
+            try
+            {
+                response = admitted
+                    ? await HandleAgentRequestAsync(hello.DeviceID, id, request)
+                    : new DeviceParticipantResponse { GroupID = group.Id, Outcome = "rejected", Detail = "This home is draining for an update. Nothing was created or queued." };
+            }
+            finally { if (admitted && request.Action is not ("inspect" or "agent.settings")) EndExternalWork(); }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.response", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
         }
         if (envelope.Kind == "participant.tell")
         {
+            if (!TryBeginExternalWork())
+            {
+                var closed = new DeviceAckPayload { Outcome = "rejected", Detail = "This home is draining for an update. Nothing was queued." };
+                await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell.ack", CommandID = id, Payload = DeviceJson.Encode(closed) });
+                return true;
+            }
+            try
+            {
             var request = DeviceJson.Decode<DeviceTellPayload>(bytes);
             var from = DeviceGlobalID.Parse(request.Source); var target = DeviceGlobalID.Parse(request.Target);
             var response = new DeviceAckPayload { Outcome = "rejected", Detail = "Invalid, disabled, or out-of-group target." };
@@ -108,6 +124,8 @@ public sealed partial class DeviceSyncService
             }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell.ack", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
+            }
+            finally { EndExternalWork(); }
         }
         return true;
     }

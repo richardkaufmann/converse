@@ -974,19 +974,32 @@ public sealed class LinuxDeploymentManager
         if (!status.Success || status.Value is null) return (null, "changed");
         var current = status.Value;
         var live = sponsorRequests().Where(request => request.Id == nativeRequestID).ToList();
-        if (current.VerificationCodeFingerprint != expectedFingerprint ||
-            current.NativeRequestID != nativeRequestID ||
-            current.SponsorConnectionInstanceID != binding.SponsorConnectionInstanceID ||
-            current.State is not ("awaiting_user" or "connecting") ||
-            live.Count != 1 ||
-            live[0].ExpiresAt <= DeviceTrustStore.AppleNow() + 15)
-        {
-            var expired =
-                (!DateTimeOffset.TryParse(current.ExpiresAt, out var until) ||
-                 until <= DateTimeOffset.UtcNow.AddSeconds(15)) ||
-                (live.Count == 1 && live[0].ExpiresAt <= DeviceTrustStore.AppleNow() + 15);
-            return (current, expired ? "expired" : "changed");
-        }
+        // Both expiries are evaluated independently: an expired Linux
+        // binding fails even when every other field still matches.
+        var linuxFresh = DateTimeOffset.TryParse(current.ExpiresAt, out var linuxUntil) &&
+            linuxUntil > DateTimeOffset.UtcNow.AddSeconds(15);
+        var nativeFresh = live.Count == 1 &&
+            live[0].ExpiresAt > DeviceTrustStore.AppleNow() + 15;
+        var stable =
+            current.PairingID == binding.PairingID &&
+            current.RequestCorrelationID == binding.RequestCorrelationID &&
+            current.Role == binding.Role &&
+            current.LinuxDeviceID == binding.LinuxDeviceID &&
+            current.RequesterDeviceID == binding.RequesterDeviceID &&
+            current.SponsorDeviceID == binding.SponsorDeviceID &&
+            current.LinuxPublicKeyFingerprint == binding.LinuxPublicKeyFingerprint &&
+            current.RequesterPublicKeyFingerprint == binding.RequesterPublicKeyFingerprint &&
+            current.SponsorPublicKeyFingerprint == binding.SponsorPublicKeyFingerprint &&
+            current.GroupID == binding.GroupID &&
+            current.GroupName == binding.GroupName &&
+            current.VerificationCode == binding.VerificationCode &&
+            current.VerificationCodeFingerprint == expectedFingerprint &&
+            current.NativeRequestID == nativeRequestID &&
+            current.SponsorConnectionInstanceID == binding.SponsorConnectionInstanceID &&
+            current.ExpiresAt == binding.ExpiresAt &&
+            current.State is ("awaiting_user" or "connecting");
+        if (!linuxFresh || !nativeFresh) return (current, "expired");
+        if (!stable || live.Count != 1) return (current, "changed");
         return (current, null);
     }
 

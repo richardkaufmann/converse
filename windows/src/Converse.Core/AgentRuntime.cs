@@ -66,7 +66,9 @@ public sealed class AgentRuntime
     }
     public void Tick(DateTime now)
     {
-        if (_stopping || !_devices.AcceptingWork) return;
+        if (_stopping || !_devices.TryBeginExternalWork()) return;
+        try
+        {
         foreach (var session in _store.Sessions.Where(s => s.Agent?.CanSchedule == true && !s.Busy && !s.QueuePaused && s.Pending.Count == 0).ToArray())
         {
             var config = session.Agent!;
@@ -81,6 +83,8 @@ public sealed class AgentRuntime
             }
             catch (Exception e) { config.Settings.Enabled = false; config.Attention = e is ArgumentException or InvalidOperationException ? e.Message : "Could not save loop state. Agent paused."; try { _store.Save(); } catch { } }
         }
+        }
+        finally { _devices.EndExternalWork(); }
     }
     private async Task<JsonObject> JsonAsync(string url, JsonObject? body, string? key, CancellationToken token)
     {
