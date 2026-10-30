@@ -202,12 +202,12 @@ struct SidebarSession: View {
                 Text(session.toolStatus.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(width: 105, alignment: .leading)
             }
             HStack(spacing: 2) {
-                PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)")
+                PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: localPane == pane) { AppDelegate.shared.assign(session, to: state, pane: pane) }
-                        .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)")
+                        .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)").help("Move this session to pane \(pane) here, taking it back from any other display.")
                 }
-                PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)")
+                PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored.")
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
         }.padding(.horizontal, 4).padding(.vertical, 3)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))

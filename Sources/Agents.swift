@@ -51,6 +51,7 @@ struct AgentConfig: Codable, Equatable {
     var discordMentions: Bool? = nil
     var discordDefault: Bool? = nil
     var discordShareScoreboard: Bool? = nil
+    var discordShareSessionInformation: Bool? = nil
     var discordMentionSince: Date? = nil
     var discordActiveRequestID: String? = nil
     var lastArtMood: String? = nil
@@ -87,7 +88,6 @@ struct AgentConfig: Codable, Equatable {
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now && (try? scheduleRule().permits(now)) == true }
     mutating func reserveRun(at now: Date) -> Bool {
         guard due(at: now) else { return false }
-        settingsChanged()
         nextRunAt = nextScheduledRun(after: now)
         return true
     }
@@ -345,7 +345,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true)
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true)
     }
     mutating func apply(_ wire: DeviceAgentSettings) throws {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
@@ -369,6 +369,7 @@ extension AgentConfig {
         intervalSeconds = wire.intervalSeconds; scheduleText = wire.scheduleText; scheduleTimeZone = schedule.zoneID; turnLimit = wire.turnLimit; enabled = wire.enabled
         if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }
         if let share = wire.discordShareScoreboard { discordShareScoreboard = share }
+        if let share = wire.discordShareSessionInformation { discordShareSessionInformation = share }
         generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
         nextRunAt = enabled ? schedule.next(after: Date()) : nil
     }

@@ -21,6 +21,10 @@ import Foundation
     check(AgentDiscordRouter.resolve("What is new?", sessions: [a, b]).0 === a, "Unqualified Discord mention selects only the configured channel default")
     check(AgentDiscordRouter.resolve("ask Meta Stock Agent price?", sessions: [a, b]).0 === b && AgentDiscordRouter.resolve("Meta Stock Agent: price?", sessions: [a, b]).1 == "price?", "Explicit exact agent names route without model guessing")
     check(AgentDiscordRouter.resolve("ask Missing Agent something", sessions: [a, b]).0 == nil, "Unknown explicit Discord target never falls back to default")
+    check(AgentDiscordRouter.resolve("ask converse agent for current status", sessions: [a, b]).0 === a, "Natural Converse agent wording routes to the configured channel default")
+    check(AgentDiscordRouter.resolve("please ask Meta Stock Agent for status", sessions: [a, b]).0 === b, "Polite natural named requests preserve exact-target routing")
+    let namedConverse = store.createAgent(title: "Converse Steward")
+    check(AgentDiscordRouter.resolve("ask Converse Steward for status", sessions: [a, namedConverse]).0 === namedConverse, "An explicit Converse-prefixed agent name wins over the generic default alias")
     let duplicate = store.createAgent(title: "Meta Stock Agent")
     check(AgentDiscordRouter.resolve("Meta Stock Agent: question", sessions: [a, b, duplicate]).0 == nil, "Duplicate agent names require disambiguation rather than broadcast")
     b.agent?.discordDefault = true
@@ -172,6 +176,47 @@ import Foundation
     rows = [row(id1, "public question")]
     wait { await isolatedRuntime.discordRouter.poll(store: isolatedStore, runtime: isolatedRuntime, now: now) }
     check(healthyStarts == 1 && healthy.agent?.turnLimit == 20, "A denied channel cannot starve queued requests in another enabled channel")
+    // Exercise both gates and revocation at delivery with synthetic HTTP/model
+    // responses. No credentials or real Discord traffic are involved.
+    for scenario in ["public", "private-off", "private-on", "made-public", "revoked"] {
+        let privacyStore = Store(folder: root.appendingPathComponent(scenario)), privacyRuntime = AgentRuntime()
+        let target = privacyStore.createAgent(title: "Private fixture")
+        target.agent?.discordMentions = true; target.agent?.discordChannelID = "42"; target.agent?.discordMentionSince = since
+        target.agent?.discordShareSessionInformation = scenario != "private-off"
+        target.agent?.workingMemory = "AUTHORIZED-SESSION-CONTEXT"
+        target.agent?.generateArt = false; target.agent?.webSearch = false
+        target.draft = "UNSENT-DRAFT-MUST-STAY-LOCAL"
+        var privateChannel = scenario != "public", privateInput = false, draftLeaked = false, delivered = ""
+        privacyRuntime.keyReader = { _ in "synthetic" }
+        privacyRuntime.api.request = { request in
+            let path = request.url!.path
+            let body: Any
+            if request.url?.host != "discord.com" {
+                privateInput = String(decoding: request.httpBody ?? Data(), as: UTF8.self).contains("AUTHORIZED-SESSION-CONTEXT")
+                draftLeaked = String(decoding: request.httpBody ?? Data(), as: UTF8.self).contains("UNSENT-DRAFT-MUST-STAY-LOCAL")
+                if scenario == "made-public" { privateChannel = false }
+                if scenario == "revoked" { target.agent?.discordShareSessionInformation = false }
+                body = ["status": "completed", "output": [["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "{\"reply\":\"Fixture status\"}"]]]]]
+            } else if path.hasSuffix("users/@me") { body = ["id": "7", "bot": true] }
+            else if path.hasSuffix("/roles") { body = [["id": "99", "permissions": "1024"]] }
+            else if path.hasSuffix("channels/42") { body = ["id": "42", "guild_id": "99", "type": 0, "permission_overwrites": [["id": "99", "type": 0, "deny": privateChannel ? "1024" : "0", "allow": "0"]]] }
+            else if request.httpMethod == "POST" {
+                let post = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+                delivered = post["content"] as? String ?? ""; body = ["id": "901", "channel_id": "42"]
+            } else { body = [row(id1, "current status")] }
+            return (try JSONSerialization.data(withJSONObject: body), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        privacyStore.startAgentRun = { session, response in privacyRuntime.run(session, store: privacyStore, responseID: response) }
+        wait { await privacyRuntime.discordRouter.poll(store: privacyStore, runtime: privacyRuntime, now: now) }
+        let deadline = Date().addingTimeInterval(5)
+        while target.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        wait { await privacyRuntime.discordRouter.poll(store: privacyStore, runtime: privacyRuntime, now: now) }
+        check(!draftLeaked, "Discord context never includes an unsent draft")
+        check(privateInput == ["private-on", "made-public", "revoked"].contains(scenario), "Session context needs private channel AND opt-in: " + scenario)
+        check(!delivered.isEmpty, "Privacy scenario produces a reply: " + scenario)
+        check(delivered.contains("Fixture status") == !["made-public", "revoked"].contains(scenario), "Queued private reply rechecks permissions and opt-in: " + scenario)
+        privacyRuntime.prepareForQuit()
+    }
     isolatedRuntime.prepareForQuit()
     runtime.prepareForQuit(); restarted.prepareForQuit(); afterFailure.prepareForQuit()
 }

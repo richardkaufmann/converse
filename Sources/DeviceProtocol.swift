@@ -297,6 +297,7 @@ struct DeviceAgentSettings: Codable, Equatable {
     var scheduleText: String? = nil
     var scheduleTimeZone: String? = nil
     var discordShareScoreboard: Bool? = nil
+    var discordShareSessionInformation: Bool? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var groupID: String

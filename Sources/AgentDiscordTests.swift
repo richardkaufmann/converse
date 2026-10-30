@@ -14,6 +14,14 @@ import Foundation
     func row(_ id: String, text: String = "A complaint", bot: Bool = false) -> [String: Any] {
         ["id": id, "channel_id": "42", "content": text, "author": ["username": "Fixture", "bot": bot], "timestamp": "2026-10-30T03:00:00Z", "type": 0]
     }
+    let everyone: [[String: Any]] = [["id": "99", "permissions": "1024"]]
+    var privacyChannel: [String: Any] = ["guild_id": "99", "type": 0, "permission_overwrites": [["id": "99", "type": 0, "deny": "1024", "allow": "0"]]]
+    check(AgentDiscordClient.isPrivate(channel: privacyChannel, roles: everyone), "Discord private text channel denies VIEW_CHANNEL to everyone")
+    check(!AgentDiscordClient.isPrivate(channel: privacyChannel, roles: [["id": "99", "permissions": "1032"]]), "Everyone administrator bypass cannot count as private")
+    privacyChannel["permission_overwrites"] = [["id": "99", "type": 0, "deny": "1024", "allow": "1024"]]
+    check(!AgentDiscordClient.isPrivate(channel: privacyChannel, roles: everyone), "Discord everyone allow wins over deny")
+    privacyChannel["permission_overwrites"] = [["id": "99", "type": 0, "deny": "invalid", "allow": "0"]]
+    check(!AgentDiscordClient.isPrivate(channel: privacyChannel, roles: everyone) && !AgentDiscordClient.isPrivate(channel: [:], roles: []), "Missing or malformed Discord privacy evidence denies session sharing")
     let table = "### Report\n| Name | State |\n|---|---|\n| Steward | **Ready** |"
     check(AgentDiscord.format(table).contains("**Name:** Steward · **State:** **Ready**") && !AgentDiscord.format(table).contains("|---|"), "Discord preserves Markdown and renders tables as readable labelled fields")
     check(AgentDiscord.format("```\n| a | b |\n|---|---|\n```") == "```\n| a | b |\n|---|---|\n```", "Discord table conversion preserves literal fenced code")

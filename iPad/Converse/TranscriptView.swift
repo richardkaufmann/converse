@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 final class TailTextView: UITextView {
     var send: (() -> Void)?
@@ -146,7 +147,20 @@ final class TailTextView: UITextView {
     override func paste(_ sender: Any?) {
         guard isEditable else { return }
         if let image = UIPasteboard.general.image, let data = image.pngData(), let coordinator = delegate as? PadTranscript.Coordinator { coordinator.parent.attach(data); return }
+        let providers = UIPasteboard.general.itemProviders.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        if !providers.isEmpty { paste(itemProviders: providers); return }
         pastingText = true; defer { pastingText = false }; super.paste(sender)
+    }
+    override func paste(itemProviders: [NSItemProvider]) {
+        guard isEditable, let coordinator = delegate as? PadTranscript.Coordinator else { return }
+        let images = itemProviders.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        guard !images.isEmpty else { super.paste(itemProviders: itemProviders); return }
+        let attach = coordinator.parent.attach
+        let failure = coordinator.parent.pasteError
+        Task { @MainActor in
+            do { for provider in images { attach(try await PadClipboard.imageData(from: provider)) } }
+            catch { failure("Could not paste image: " + error.localizedDescription) }
+        }
     }
     func lineTop(at character: Int) -> CGFloat {
         if character >= textStorage.length { return textContainerInset.top + layoutManager.extraLineFragmentRect.minY }
@@ -170,10 +184,12 @@ struct PadTranscript: UIViewRepresentable {
     var draftImageHashes: [String] = []
     var editable: Bool
     var lineNumbers: Bool
+    var displayEpoch: UInt64? = nil
     var edit: (String) -> Void
     var send: () -> Void
     var attach: (Data) -> Void
     var removeImage: (String) -> Void = { _ in }
+    var pasteError: (String) -> Void = { _ in }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
@@ -189,6 +205,10 @@ struct PadTranscript: UIViewRepresentable {
     }
     func updateUIView(_ view: TailTextView, context: Context) { update(view, coordinator: context.coordinator) }
     func update(_ view: TailTextView, coordinator c: Coordinator) {
+        let acquired = displayEpoch != nil && displayEpoch != c.displayEpoch
+        c.displayEpoch = displayEpoch
+        if acquired && !c.explicitSelection { c.follow.resume(); view.pendingViewport = .bottom; view.setNeedsLayout() }
+        c.view = view
         c.parent = self; view.send = send; view.removeDraftImage = editable ? removeImage : nil
         if view.isEditable != editable { view.isEditable = editable }
         guard !c.updating else { return }
@@ -202,10 +222,18 @@ struct PadTranscript: UIViewRepresentable {
         guard signature != c.signature || c.lastDraft != draft else { return }
         // Don't overwrite marked text while dictation/IME is composing.
         if view.markedTextRange != nil { return }
+        let addedImage = draftImageHashes.contains { !c.draftHashes.contains($0) }
+        c.draftHashes = draftImageHashes
+        let first = c.signature.isEmpty
         let previousSelection = view.selectedRange
         let relative = previousSelection.location >= c.historyLength ? previousSelection.location - c.historyLength : nil
         let previousOffset = view.contentOffset.y
-        let nearBottom = c.signature.isEmpty || (previousOffset + view.bounds.height >= view.contentSize.height - 80 && !view.isDragging && !view.isDecelerating)
+        if !first && c.follow.following && (c.explicitSelection || previousOffset + view.bounds.height < view.contentSize.height - 80) {
+            c.follow.pause(now: c.now()); c.scheduleResume()
+        }
+        if first || addedImage || (acquired && !c.explicitSelection) { c.follow.resume() }
+        _ = c.follow.resumeIfIdle(now: c.now(), selecting: c.explicitSelection, scrolling: view.isDragging || view.isDecelerating)
+        let nearBottom = c.follow.following && !c.explicitSelection || addedImage || first
         let visibleCharacter = view.visibleCharacter()
         let visibleDistance = visibleCharacter.map { view.lineTop(at: $0) - previousOffset }
         let anchorMessage = visibleCharacter.flatMap { character in c.messageRanges.last { $0.range.location <= character } }
@@ -263,7 +291,8 @@ struct PadTranscript: UIViewRepresentable {
         view.textStorage.setAttributedString(result)
         view.configureDraftImageButtons()
         view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft), .paragraphStyle: NSParagraphStyle.default]
-        if let relative {
+        if first { view.selectedRange = NSRange(location: result.length, length: 0) }
+        else if let relative {
             let position = min(result.length, c.historyLength + relative)
             view.selectedRange = NSRange(location: position, length: min(previousSelection.length, result.length - position))
         } else {
@@ -365,6 +394,41 @@ struct PadTranscript: UIViewRepresentable {
         var signature = ""
         var lastDraft = ""
         var messageRanges: [(id: UUID, range: NSRange)] = []
+        var displayEpoch: UInt64?
+        var draftHashes: [String] = []
+        var follow = TranscriptFollowState()
+        var explicitSelection = false
+        var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+        private var idleResume: DispatchWorkItem?
+        deinit { idleResume?.cancel() }
+        func scheduleResume() {
+            idleResume?.cancel()
+            guard !follow.following else { return }
+            let work = DispatchWorkItem { [weak self] in self?.resumeIfIdle() }
+            idleResume = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowState.idleDelay, execute: work)
+        }
+        func resumeIfIdle() {
+            guard let view, follow.resumeIfIdle(now: now(), selecting: explicitSelection || view.markedTextRange != nil, scrolling: view.isDragging || view.isDecelerating) else { return }
+            view.pendingViewport = .bottom; view.setNeedsLayout(); view.layoutIfNeeded()
+        }
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard !updating else { return }
+            explicitSelection = textView.selectedRange.length > 0 || (textView.isFirstResponder && textView.selectedRange.location < textView.textStorage.length)
+            if explicitSelection { follow.pause(now: now()) } else { follow.interaction(now: now()) }
+            scheduleResume()
+        }
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { recordScroll(scrollView) }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard !updating, scrollView.isDragging || scrollView.isDecelerating else { return }
+            recordScroll(scrollView)
+        }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) { recordScroll(scrollView) }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { recordScroll(scrollView) }
+        func recordScroll(_ scrollView: UIScrollView) {
+            follow.scroll(nearBottom: !explicitSelection && scrollView.contentOffset.y + scrollView.bounds.height >= scrollView.contentSize.height - 80, now: now())
+            scheduleResume()
+        }
         init(_ parent: PadTranscript) { self.parent = parent }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             guard !updating, parent.editable else { return false }
@@ -381,6 +445,7 @@ struct PadTranscript: UIViewRepresentable {
         }
         func textViewDidChange(_ view: UITextView) {
             guard !updating, view.textStorage.length >= historyLength else { return }
+            follow.interaction(now: now()); scheduleResume()
             let text = (view.text as NSString).substring(from: historyLength)
             lastDraft = text
             let color = PadPalette.draft(text)
@@ -388,6 +453,28 @@ struct PadTranscript: UIViewRepresentable {
             view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: NSParagraphStyle.default]
             (view as? TailTextView)?.gutter.setNeedsDisplay()
             parent.edit(text)
+        }
+    }
+}
+
+// The system Paste button supplies authorized item providers, including images
+// copied by Photos, Safari and other apps rather than only UIPasteboard.image.
+enum PadClipboard {
+    static func imageData(from provider: NSItemProvider) async throws -> Data {
+        if provider.canLoadObject(ofClass: UIImage.self) {
+            return try await withCheckedThrowingContinuation { continuation in
+                provider.loadObject(ofClass: UIImage.self) { object, error in
+                    if let image = object as? UIImage, let data = image.pngData() { continuation.resume(returning: data) }
+                    else { continuation.resume(throwing: error ?? CocoaError(.fileReadCorruptFile)) }
+                }
+            }
+        }
+        guard let type = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else { throw CocoaError(.fileReadUnknown) }
+        return try await withCheckedThrowingContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
+                if let data { continuation.resume(returning: data) }
+                else { continuation.resume(throwing: error ?? CocoaError(.fileReadCorruptFile)) }
+            }
         }
     }
 }

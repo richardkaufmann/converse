@@ -113,8 +113,6 @@ struct JollyRequest: Codable {
                     try answer(id, text: "Invalid per-loop turn limit. Review Agent Setup.", status: "budget_exhausted", agent: session, store: store); continue
                 }
                 let prior = session.agent
-                config.settingsChanged()
-
                 config.jollyRequestID = id; session.agent = config
                 do { try store.saveChecked() } catch { session.agent = prior; throw error }
                 let draft = session.draft, attachments = session.attachments

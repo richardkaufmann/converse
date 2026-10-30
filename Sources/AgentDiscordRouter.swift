@@ -12,6 +12,7 @@ struct DiscordMentionRequest: Codable, Equatable {
     var reply: String? = nil
     var receipt: String? = nil
     var imageHash: String? = nil
+    var sharedSessionInformation: Bool? = nil
 }
 struct DiscordMentionJournal: Codable {
     var botID = ""
@@ -57,11 +58,13 @@ struct DiscordMentionJournal: Codable {
     }
     static func resolve(_ text: String, sessions: [Session]) -> (Session?, String) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.lowercased().hasPrefix("please ") { text = String(text.dropFirst(7)) }
         let asks = text.lowercased().hasPrefix("ask ")
         if asks { text = String(text.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let defaults = sessions.filter { $0.agent?.discordDefault == true }
         let matches = sessions.filter { s in
             let title = s.title.lowercased(), value = text.lowercased()
-            return value == title || value.hasPrefix(title + ":") || (asks && value.hasPrefix(title + " "))
+            return value == title || value.hasPrefix(title + ":") || value.hasPrefix(title + " ")
                 || value.hasPrefix(s.id.uuidString.lowercased() + ":")
         }
         if matches.count == 1, let s = matches.first {
@@ -69,9 +72,11 @@ struct DiscordMentionJournal: Codable {
             let question = String(text.dropFirst(length)).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ":")))
             return (s, question)
         }
+        if matches.isEmpty, asks, defaults.count == 1, text.lowercased().hasPrefix("converse agent ") {
+            return (defaults[0], String(text.dropFirst("converse agent".count)).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         // Unknown explicit names must never fall through to the default.
         if !matches.isEmpty || asks || text.contains(":") { return (nil, text) }
-        let defaults = sessions.filter { $0.agent?.discordDefault == true }
         if defaults.count == 1 { return (defaults[0], text) }
         return (sessions.count == 1 ? sessions[0] : nil, text)
     }
@@ -207,8 +212,6 @@ struct DiscordMentionJournal: Codable {
             }
             journal.requests[i].state = "running"; try persist(store)
             let previous = session.agent
-            config.settingsChanged()
-
             config.discordActiveRequestID = request.id; session.agent = config
             do { try store.saveChecked() } catch { session.agent = previous; throw error }
             let draft = session.draft, images = session.attachments
@@ -224,7 +227,7 @@ struct DiscordMentionJournal: Codable {
     func active(_ session: Session) -> DiscordMentionRequest? {
         journal.requests.first { $0.id == session.agent?.discordActiveRequestID && $0.sessionID == session.id && $0.state == "running" }
     }
-    func complete(_ id: String, text: String, store: Store, image: Data? = nil) throws {
+    func complete(_ id: String, text: String, store: Store, image: Data? = nil, sharedSessionInformation: Bool = false) throws {
         guard let i = journal.requests.firstIndex(where: { $0.id == id && $0.state == "running" }) else { return }
         if let image {
             let hash = DeviceBlob.sha256Hex(image)
@@ -233,6 +236,7 @@ struct DiscordMentionJournal: Codable {
             try image.write(to: folder.appendingPathComponent(hash + ".png"), options: .atomic)
             journal.requests[i].imageHash = hash
         }
+        journal.requests[i].sharedSessionInformation = sharedSessionInformation
         journal.requests[i].reply = String(text.prefix(1700)); journal.requests[i].state = "ready"
         try persist(store)
         if let session = store.sessions.first(where: { $0.id == journal.requests[i].sessionID }) {
@@ -263,6 +267,17 @@ struct DiscordMentionJournal: Codable {
                         image = bytes
                     }
                 }
+                if request.sharedSessionInformation == true {
+                    let allowed = targets.first(where: { $0.id == request.sessionID })?.agent?.discordShareSessionInformation == true
+                    let privateChannel = allowed ? ((try? await runtime.discordClient.isPrivateChannel(request.channel, token: token, api: runtime.api)) == true) : false
+                    // Recheck after the network suspension: revocation takes effect
+                    // even for a reply already generated and journaled.
+                    if !privateChannel || targets.first(where: { $0.id == request.sessionID })?.agent?.discordShareSessionInformation != true {
+                        reply = "Session information was not shared: enable Share session information and use a private channel."
+                        image = nil
+                    }
+                }
+                guard targets.contains(where: { $0.id == request.sessionID && Self.permits(request, session: $0) }) || request.sessionID == nil else { continue }
                 journal.requests[i].state = "sending"; try persist(store)
                 let title = targets.first(where: { $0.id == request.sessionID })?.title ?? "Converse"
                 let receipt = try await runtime.discordClient.post("[" + String(title.prefix(60)) + "] " + reply, channel: request.channel, token: token, api: runtime.api, replyingTo: request.id, nonce: request.id, image: image)

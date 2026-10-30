@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import Network
+import UniformTypeIdentifiers
 @testable import Converse
 
 @MainActor
@@ -42,6 +43,9 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(settings.watched.isEmpty)
         settings.scheduleText = "every 20 minutes while the US stock market is open"
         settings.scheduleTimeZone = "America/New_York"
+        settings.discordShareSessionInformation = true
+        settings.discordShareScoreboard = true
+        settings.objective = "Persist the edited objective from the iPad"
         settings.remainingRuns = 0; settings.turnLimit = 3; settings.enabled = true
         let saved = await service.requestParticipant(home: home, action: "agent.configure", target: target, settings: settings)
         XCTAssertEqual(saved.outcome, "completed", saved.detail)
@@ -49,9 +53,21 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(saved.settings?.enabled, true, "The iPad can restart a loop using a text schedule")
         let refreshed = await service.requestParticipant(home: home, action: "agent.settings", target: target)
         XCTAssertEqual(refreshed.settings?.scheduleText, settings.scheduleText)
+        XCTAssertEqual(refreshed.settings?.objective, settings.objective)
+        XCTAssertEqual(refreshed.settings?.discordShareScoreboard, true)
+        XCTAssertEqual(refreshed.settings?.discordShareSessionInformation, true)
+        var duringRun = try XCTUnwrap(refreshed.settings)
+        let queued = await service.requestParticipant(home: home, action: "agent.run", target: target)
+        XCTAssertEqual(queued.outcome, "completed", queued.detail)
+        duringRun.discordShareScoreboard = false
+        let changedDuringRun = await service.requestParticipant(home: home, action: "agent.configure", target: target, settings: duringRun)
+        XCTAssertEqual(changedDuringRun.outcome, "completed", changedDuringRun.detail)
+        let readBack = await service.requestParticipant(home: home, action: "agent.settings", target: target)
+        XCTAssertEqual(readBack.settings?.discordShareScoreboard, false)
         XCTAssertEqual(service.remoteLeases, oldLeases, "Agent control never steals or changes a display lease")
         let stale = await service.requestParticipant(home: home, action: "agent.configure", target: target, settings: settings)
         XCTAssertEqual(stale.outcome, "rejected", "Stale settings cannot overwrite the new schedule")
+        XCTAssertTrue(stale.detail.contains("Reload"), "The home returns an actionable conflict message")
         service.leaveGroup()
         XCTAssertNil(service.currentGroup)
         XCTAssertTrue(service.homes.isEmpty)
@@ -269,6 +285,47 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(pasted.cgImage?.width, image.cgImage?.width)
         XCTAssertEqual(pasted.cgImage?.height, image.cgImage?.height)
         XCTAssertEqual(view.textStorage.string, before)
+    }
+    func testSystemPasteProviderPreservesImageAndDraft() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 19, height: 13)).image { c in UIColor.green.setFill(); c.fill(CGRect(x: 0, y: 0, width: 19, height: 13)) }
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) { completion in
+            completion(image.pngData(), nil); return nil
+        }
+        var attached: Data?
+        let parent = PadTranscript(messages: [], draft: "Keep this", images: [:], editable: true, lineNumbers: false, edit: { _ in }, send: {}, attach: { attached = $0 })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        view.paste(itemProviders: [provider])
+        try await eventually("System paste provider attaches asynchronously") { attached != nil }
+        let result = try XCTUnwrap(attached.flatMap(UIImage.init(data:)))
+        XCTAssertEqual(result.cgImage?.width, image.cgImage?.width); XCTAssertEqual(result.cgImage?.height, image.cgImage?.height)
+        XCTAssertEqual(view.textStorage.string, "Keep this")
+    }
+    func testFollowResumesAfterFiveIdleSecondsAndHonorsSelectionAndTake() {
+        var clock: TimeInterval = 100
+        var parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: String(repeating: "Long history\n", count: 150))], draft: "draft", images: [:], editable: true, lineNumbers: true, displayEpoch: 1, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent); coordinator.now = { clock }
+        let view = TailTextView.native(); view.delegate = coordinator
+        view.frame = CGRect(x: 0, y: 0, width: 700, height: 300)
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.selectedRange.location, view.textStorage.length, "Startup places the implicit cursor at the tail")
+        view.setContentOffset(CGPoint(x: 0, y: 100), animated: false); coordinator.recordScroll(view)
+        clock += 4; coordinator.resumeIfIdle()
+        XCTAssertEqual(view.contentOffset.y, 100, accuracy: 1)
+        clock += 1; coordinator.resumeIfIdle()
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1)
+        view.selectedRange = NSRange(location: 10, length: 5)
+        coordinator.textViewDidChangeSelection(view)
+        view.setContentOffset(CGPoint(x: 0, y: 100), animated: false)
+        clock += 10; coordinator.resumeIfIdle()
+        XCTAssertEqual(view.contentOffset.y, 100, accuracy: 1, "An explicit selection holds reading position indefinitely")
+        parent.displayEpoch = 2; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.contentOffset.y, 100, accuracy: 1, "Take does not discard deliberate selection")
+        view.selectedRange = NSRange(location: view.textStorage.length, length: 0); coordinator.textViewDidChangeSelection(view)
+        parent.displayEpoch = 3; parent.update(view, coordinator: coordinator); view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1, "Take scrolls an existing pane even without new transcript text")
     }
     func testReadingPositionSurvivesAppendAndEarlierHistory() {
         let messages = (0..<70).map { DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply \($0): " + String(repeating: "readable text ", count: 14)) }

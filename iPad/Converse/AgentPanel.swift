@@ -11,6 +11,7 @@ struct PadAgentPanel: View {
     @State private var settings: DeviceAgentSettings?
     @State private var working = false
     @State private var notice = ""
+    @State private var failure: String?
     var body: some View {
         NavigationStack {
             Form {
@@ -48,6 +49,8 @@ struct PadAgentPanel: View {
                         Toggle("Generate mood art", isOn: field(\.generateArt))
                         Toggle("Speak on home", isOn: field(\.speak))
                         Toggle("Allow Discord alerts", isOn: field(\.discord))
+                        Toggle("Share session information", isOn: Binding(get: { settings?.discordShareSessionInformation == true }, set: { settings?.discordShareSessionInformation = $0 }))
+                        Text("Shares this agent’s recent conversation, working notes and scoreboard only in a verified private Discord channel.").font(.caption)
                         Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings?.discordShareScoreboard == true }, set: { settings?.discordShareScoreboard = $0 }))
                     }
                     Section("Sessions this agent may read and message") {
@@ -68,14 +71,17 @@ struct PadAgentPanel: View {
                 } else if !working { Button("Load Agent Setup") { perform("agent.settings") } }
                 if working { ProgressView("Waiting for home…") }
                 if !notice.isEmpty { Text(notice).textSelection(.enabled) }
-            }.navigationTitle(target == nil ? "Create Agent" : "Agent Setup")
+            }.disabled(working).navigationTitle(target == nil ? "Create Agent" : "Agent Setup")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(working) }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") { perform("agent.configure", dismissAfterSave: true) }.disabled(working || settings == nil)
                     }
                 }
-                .task { if target != nil { perform("agent.settings") } }
+                .alert("Settings were not saved", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+                    Button("OK", role: .cancel) { failure = nil }
+                } message: { Text(failure ?? "") }
+                .task { if target != nil && settings == nil { perform("agent.settings") } }
         }
     }
     func field<T>(_ path: WritableKeyPath<DeviceAgentSettings, T>) -> Binding<T> {
@@ -85,13 +91,15 @@ struct PadAgentPanel: View {
         guard !working else { return }
         if action == "agent.configure", let settings {
             do { _ = try AgentSchedule.compile(interval: settings.intervalSeconds, text: settings.scheduleText, zone: settings.scheduleTimeZone) }
-            catch { notice = error.localizedDescription; return }
+            catch { notice = error.localizedDescription; failure = notice; return }
         }
+        let submitted = settings
         working = true
         Task { @MainActor in
-            let response = await service.requestParticipant(home: home, action: action, target: target, title: title, settings: action == "agent.configure" ? settings : nil)
+            let response = await service.requestParticipant(home: home, action: action, target: target, title: title, settings: action == "agent.configure" ? submitted : nil)
             if let saved = response.settings { settings = saved }
             notice = response.detail; working = false
+            if response.outcome != "completed" { failure = response.detail }
             if action == "agent.configure", response.outcome == "completed" {
                 if dismissAfterSave { dismiss() }
                 else if runAfterSave { perform("agent.run") }

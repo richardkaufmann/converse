@@ -84,9 +84,8 @@ struct DeviceSidebarSection: View {
                 ForEach(homes, id: \.deviceID) { home in
                     if home.online {
                         HStack(spacing: 6) {
-                            Circle().fill(Color.green).frame(width: 8, height: 8)
-                            Text(home.deviceName).fontWeight(.bold).lineLimit(1)
-                            Text("remote").font(.caption).foregroundStyle(.secondary)
+                            Text(home.deviceName).fontWeight(.semibold).lineLimit(1).help(home.deviceName + " is online. Its sessions run there; choose 1, 2 or 3 to display one here.")
+                            Text("remote").font(.caption).foregroundStyle(.secondary).help("Sessions run on this other device in your group.")
                         }.padding(.horizontal, 4)
                         ForEach(home.rows) { row in
                             RemoteSidebarRow(row: row, homeName: home.deviceName, online: true, showsModel: showsModel,
@@ -96,7 +95,7 @@ struct DeviceSidebarSection: View {
                         }
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
                     } else {
-                        Text(home.deviceName).fontWeight(.regular).foregroundStyle(Color.primary.opacity(0.3))
+                        Text(home.deviceName).fontWeight(.semibold).foregroundStyle(Color.primary.opacity(0.3))
                             .lineLimit(1).padding(.horizontal, 4).help("Remote device offline. Sessions reappear when it reconnects.")
                     }
                 }
@@ -132,10 +131,10 @@ struct RemoteSidebarRow: View {
             if showsModel { Text(row.model).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 105, alignment: .leading) }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
-                PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title)
+                PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: localPane == pane) { assign(pane) }
-                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here")
+                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
                 PaneButton(label: "X", selected: false) {}.disabled(true).opacity(0.3)
                     .help("Close this session on its home device")

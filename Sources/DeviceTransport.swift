@@ -1785,10 +1785,7 @@ extension DeviceSyncService {
                 let agent = store.createAgent(title: name, persist: false); created = agent
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent created paused. Configure API credentials on its home.", target: DeviceGlobalID(home: identity!.deviceID, session: agent.id).string)
             case "agent.run":
-                guard let session, var config = session.agent, config.turnLimit > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
-                config.settingsChanged()
-
-                session.agent = config
+                guard let session, let config = session.agent, config.turnLimit > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
                 session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and refresh the scoreboard.", images: []))
                 runAfterCommit = true
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: session.queuePaused ? "Run saved in paused queue. Resume the queue to run it." : "Agent run queued on home.", target: request.target)
@@ -1811,7 +1808,10 @@ extension DeviceSyncService {
         } catch {
             if let created { store.sessions.removeAll { $0 === created } }
             if let session { session.agent = oldConfig; session.pending = oldPending ?? []; if let oldQueuePaused { session.queuePaused = oldQueuePaused }; if let oldModel { session.toolStatus.model = oldModel } }
-            store.participantReceipts.removeAll { $0.id == id }; reject("Home could not validate or persist the operation. Nothing was applied.")
+            store.participantReceipts.removeAll { $0.id == id }
+            if let validation = error as? AgentFailure { reject(validation.localizedDescription) }
+            else if let validation = error as? AgentScheduleError { reject(validation.localizedDescription) }
+            else { reject("Home could not persist the operation. Nothing was applied. Try again after checking the home device.") }
         }
         #else
         reject("This device is a viewer. Choose a capable agent home.")

@@ -64,6 +64,8 @@ struct AgentSetupView: View {
                         Toggle("Allow Discord channel alerts", isOn: $settings.discord)
                         Toggle("Anyone in this channel may @mention this agent", isOn: Binding(get: { settings.discordMentions == true }, set: { settings.discordMentions = $0 }))
                         if settings.discordMentions == true {
+                            Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 }))
+                                .help("Allows this agent’s recent conversation, working notes and scoreboard in Discord replies, only in a verified private channel.")
                             Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                             Toggle("Default agent for this channel", isOn: Binding(get: { settings.discordDefault == true }, set: { settings.discordDefault = $0 }))
                             Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request gets a fresh activation limit and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
@@ -159,6 +161,7 @@ struct AgentSetupView: View {
                 current.discordMentionSince = settings.discordMentions == true ? Date() : nil
             }
             current.discordShareScoreboard = settings.discordShareScoreboard
+            current.discordShareSessionInformation = settings.discordShareSessionInformation
             current.discordMentions = settings.discordMentions; current.discordDefault = settings.discordDefault
             current.discordChannelID = channel; current.discordRead = settings.discordRead
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
@@ -529,6 +532,8 @@ struct RemoteAgentSetupView: View {
                 Toggle("Generate status art", isOn: $settings.generateArt)
                 Toggle("Speak on the home", isOn: $settings.speak)
                 Toggle("Allow configured Discord alerts", isOn: $settings.discord)
+                Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 })).help("Only in verified private Discord channels.")
+                Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                 Toggle("Accept home Inbox file events", isOn: $settings.fileTriggers)
                 Text("Allowed sessions").bold()
                 #if os(macOS)

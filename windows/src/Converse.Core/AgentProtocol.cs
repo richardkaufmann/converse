@@ -35,6 +35,7 @@ public sealed class DeviceAgentSettings
     [JsonPropertyName("revision")] public ulong? Revision { get; set; } = 0;
     [JsonPropertyName("scoreboardEveryLoops")] public int? ScoreboardEveryLoops { get; set; } = 1;
     [JsonPropertyName("scheduleText")] public string? ScheduleText { get; set; } = "";
+    [JsonPropertyName("discordShareSessionInformation")] public bool? DiscordShareSessionInformation { get; set; }
     [JsonPropertyName("discordShareScoreboard")] public bool? DiscordShareScoreboard { get; set; }
     [JsonPropertyName("scheduleTimeZone")] public string? ScheduleTimeZone { get; set; } = "UTC";
 }

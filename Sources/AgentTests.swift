@@ -383,6 +383,13 @@ import Foundation
     check(migrated.allows(global: DeviceGlobalID(home: localHome, session: recipient.id).string, home: localHome)
         && !migrated.allows(global: DeviceGlobalID(home: otherHome, session: recipient.id).string, home: localHome), "Legacy agent scope migrates only within its original home, never a same-UUID remote session")
 
+    var runningSettings = AgentConfig()
+    runningSettings.enabled = true; runningSettings.nextRunAt = .distantPast
+    let openForm = runningSettings.wire(home: localHome)
+    check(runningSettings.reserveRun(at: Date()), "Settings fixture starts a scheduled activation")
+    do { try runningSettings.apply(openForm); check(true, "Starting an activation does not invalidate an open settings form") }
+    catch { check(false, "Unedited settings must remain saveable during an activation: \(error)") }
+
     var revisionFixture = AgentConfig()
     let staleSettings = revisionFixture.wire(home: localHome)
     revisionFixture.settingsChanged(); revisionFixture.turnLimit -= 1

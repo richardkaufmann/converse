@@ -155,7 +155,7 @@ final class PadModel: ObservableObject {
         if restore { flush(record.sessionID) }
     }
     func attach(_ id: String, data: Data) {
-        guard canControl(id) else { return }
+        guard canControl(id) else { error = "This session is no longer connected or controlled here. Take it into a pane, then paste the image again."; return }
         do {
             let png = try PadImage.normalize(data)
             guard let hash = service.sendRemoteBlob(globalID: id, data: png) else { throw CocoaError(.fileWriteUnknown) }

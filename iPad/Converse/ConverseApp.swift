@@ -101,10 +101,10 @@ struct PadRoot: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    if let group = service.currentGroup { Text("Group").bold().padding(.top, 6); Text(group.name).font(.caption).foregroundStyle(.secondary) }
+                    if let group = service.currentGroup { Text(group.name + " group").font(.title2.weight(.semibold)).foregroundStyle(Color.accentColor).padding(.top, 6).help("Devices sharing sessions in " + group.name) }
                     ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                         if home.online {
-                        HStack { Circle().fill(.green).frame(width: 8, height: 8); Text(home.deviceName).bold().lineLimit(1); Text("remote").font(.caption).foregroundStyle(.secondary)
+                        HStack { Text(home.deviceName).fontWeight(.semibold).lineLimit(1).help("Online: sessions run on " + home.deviceName); Text("remote").font(.caption).foregroundStyle(.secondary)
                             if service.canHostAgent(home.deviceID) { Button { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("Create agent on " + home.deviceName) }
                         }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
@@ -131,7 +131,7 @@ struct PadRoot: View {
                                 }
                                 .accessibilityElement(children: .contain)
                         }
-                        } else { Text(home.deviceName).fontWeight(.regular).foregroundStyle(Color.primary.opacity(0.3)).padding(.top, 10) }
+                        } else { Text(home.deviceName).fontWeight(.semibold).foregroundStyle(Color.primary.opacity(0.3)).help("Offline. Sessions reappear when this device reconnects.").padding(.top, 10) }
                     }
                     if service.homes.isEmpty { Text("Join a Converse group to see its devices and sessions.").font(.callout).foregroundStyle(.secondary).padding(10) }
                 }.padding(.horizontal, 5)
@@ -215,8 +215,8 @@ struct PadPane: View {
                 }.padding(8).background(Color.orange.opacity(0.12))
             }
             if let snapshot, snapshot.offset > 0 { Button("Load \(snapshot.offset) earlier messages") { service.requestEarlier(globalID: id) }.font(.caption).padding(4) }
-            PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers,
-                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) })
+            PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers, displayEpoch: service.remoteLeases[id],
+                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 })
             Divider()
             if let status = snapshot?.agentWidget?.loopStatus { Text(status).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6) }
             if let snapshot {
@@ -232,10 +232,14 @@ struct PadPane: View {
                 Text(service.lastOutcome).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(8)
             }
             HStack {
-                Button {
-                    if let data = UIPasteboard.general.image?.pngData() { model.attach(id, data: data) }
-                    else { model.error = "The clipboard does not contain an image. Copy an image first, or choose Photos." }
-                } label: { Image(systemName: "doc.on.clipboard") }.accessibilityLabel("Paste clipboard image")
+                PasteButton(supportedContentTypes: [.image]) { providers in
+                    let destination = id
+                    Task { @MainActor in
+                        do {
+                            for provider in providers { model.attach(destination, data: try await PadClipboard.imageData(from: provider)) }
+                        } catch { model.error = "Could not paste image: " + error.localizedDescription }
+                    }
+                }.labelStyle(.iconOnly).accessibilityLabel("Paste clipboard image")
                 PhotosPicker(selection: $photo, matching: .images) { Image(systemName: "photo") }.accessibilityLabel("Choose image from Photos")
                 Button { importing = true } label: { Image(systemName: "paperclip") }.accessibilityLabel("Attach image file")
                 if !model.draft(id).hashes.isEmpty {

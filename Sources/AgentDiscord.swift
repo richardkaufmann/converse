@@ -118,6 +118,32 @@ enum AgentDiscord {
         catch let error as AgentFailure { throw error }
         catch { throw AgentFailure.message("Could not complete the Discord request. Check the network; check the channel before retrying a post.") }
     }
+    // A guild text channel is private when the @everyone role cannot view it.
+    // Category-synced overwrites are returned on the channel itself. Unknown
+    // types, missing permissions and request failures never grant sharing.
+    static func isPrivate(channel: [String: Any], roles: [[String: Any]]) -> Bool {
+        guard let guild = channel["guild_id"] as? String,
+              let type = channel["type"] as? Int, [0, 5].contains(type),
+              let overwrites = channel["permission_overwrites"] as? [[String: Any]],
+              let everyone = roles.first(where: { $0["id"] as? String == guild }),
+              let raw = everyone["permissions"] as? String, var permissions = UInt64(raw),
+              permissions & 8 == 0 else { return false }
+        for overwrite in overwrites where overwrite["id"] as? String == guild {
+            guard overwrite["type"] as? Int == 0,
+                  let deny = (overwrite["deny"] as? String).flatMap(UInt64.init),
+                  let allow = (overwrite["allow"] as? String).flatMap(UInt64.init) else { return false }
+            permissions = (permissions & ~deny) | allow
+        }
+        return permissions & (1 << 10) == 0
+    }
+    func isPrivateChannel(_ channelID: String, token: String, api: AgentAPI) async throws -> Bool {
+        let id = try AgentDiscord.channelID(channelID)
+        guard let channel = try await call("channels/" + id, token: token, api: api) as? [String: Any],
+              channel["id"] as? String == id, let guild = channel["guild_id"] as? String else { return false }
+        _ = try AgentDiscord.channelID(guild)
+        guard let roles = try await call("guilds/" + guild + "/roles", token: token, api: api) as? [[String: Any]] else { return false }
+        return Self.isPrivate(channel: channel, roles: roles)
+    }
     func read(channel: String, after: String?, token: String, api: AgentAPI, before: String? = nil) async throws -> AgentDiscordBatch {
         let channel = try AgentDiscord.channelID(channel)
         if let after { _ = try AgentDiscord.channelID(after) }

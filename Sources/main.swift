@@ -370,14 +370,12 @@ final class Store: ObservableObject {
             save()
         }
         guard !s.pending.isEmpty else { return }
-        if var config = s.agent, let next = s.pending.first,
+        if let config = s.agent, let next = s.pending.first,
            ((next.switchboardHop ?? 0) > 0 || next.autonomous == true), next.agentRunReserved != true {
             guard config.turnLimit > 0 else {
                 s.queuePaused = true; s.agent?.attention = "Invalid per-loop turn limit. Review Agent Setup, then resume the queue."; save(); return
             }
             let previous = s.agent
-            config.settingsChanged()
-
             s.agent = config; s.pending[0].agentRunReserved = true
             do { try saveChecked() }
             catch { s.agent = previous; s.pending[0].agentRunReserved = false; s.queuePaused = true; s.agent?.attention = "Could not save run budget. Agent paused."; return }
@@ -1232,7 +1230,7 @@ final class ConversationScrollView: NSScrollView {
         NotificationCenter.default.addObserver(self, selector: #selector(endedScrolling), name: NSScrollView.didEndLiveScrollNotification, object: self)
     }
     var nearBottom: Bool { contentView.bounds.maxY >= (documentView?.bounds.height ?? 0) - 200 }
-    var selecting: Bool { ((documentView as? NSTextView)?.selectedRange().length ?? 0) > 0 || NSEvent.pressedMouseButtons != 0 }
+    var selecting: Bool { ((documentView as? NSTextView)?.selectedRange().length ?? 0) > 0 || (documentView as? ConversationTextView)?.explicitCursor == true || NSEvent.pressedMouseButtons != 0 }
     func prepareForRender(first: Bool) -> Bool {
         if first { followState.resume() }
         else if followState.following && (!nearBottom || selecting) {
@@ -1266,6 +1264,7 @@ final class ConversationScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) { super.scrollWheel(with: event); recordScroll() }
     @objc func jumpToLatest() {
         idleResume?.cancel(); followState.resume()
+        (documentView as? ConversationTextView)?.explicitCursor = false
         if let text = documentView as? NSTextView { text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0)) }
         refreshLatest()
     }
@@ -1280,6 +1279,9 @@ final class ConversationScrollView: NSScrollView {
         tiling = true; defer { tiling = false }
         super.tile()
         (documentView as? ConversationTextView)?.fitDocumentHeight()
+        if followState.following && !selecting, let text = documentView as? ConversationTextView, contentView.bounds.height > 0 {
+            text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0))
+        }
         refreshLatest()
     }
 }
@@ -1298,6 +1300,7 @@ final class DraftImageRemoveButton: NSButton {
     @objc private func removeImage() { remove?() }
 }
 final class ConversationTextView: NSTextView {
+    var explicitCursor = false
     var draftImages: [(location: Int, path: String)] = []
     private(set) var draftImageButtons: [DraftImageRemoveButton] = []
     var imageRemove: ((String) -> Void)?
@@ -1342,6 +1345,7 @@ final class ConversationTextView: NSTextView {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
     func focusInput() {
+        explicitCursor = false
         window?.makeFirstResponder(self)
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         let color = TranscriptPalette.draft((string as NSString).substring(from: min(inputStart, (string as NSString).length)))
@@ -1585,6 +1589,7 @@ struct ScrollingConversation: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             if !rendering, let text = notification.object as? ConversationTextView,
                let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown].contains(event.type) {
+                text.explicitCursor = text.selectedRange().location < (text.string as NSString).length
                 (text.enclosingScrollView as? ConversationScrollView)?.interaction()
             }
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
@@ -1598,8 +1603,10 @@ struct ScrollingConversation: NSViewRepresentable {
             text.refreshDecorations()
             text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
             text.fitDocumentHeight()
-            text.scrollRangeToVisible(NSRange(location: length, length: 0))
-            (text.enclosingScrollView as? ConversationScrollView)?.jumpToLatest()
+            text.explicitCursor = text.selectedRange().length > 0 || text.selectedRange().location < length
+            text.scrollRangeToVisible(text.selectedRange())
+            if !text.explicitCursor { (text.enclosingScrollView as? ConversationScrollView)?.jumpToLatest() }
+            else { (text.enclosingScrollView as? ConversationScrollView)?.interaction() }
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
         }
@@ -1620,6 +1627,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
             historyChanged = historyChanged || numberingChanged
             renderedMessageNumbers = session.messageNumbers; renderedMessageNumberOffset = session.messageNumberOffset
+            let addedAttachment = session.attachments.contains { !renderedAttachments.contains($0) }
             let attachmentsChanged = renderedAttachments != session.attachments
             let current = text.textStorage?.mutableString ?? NSMutableString(string: text.string)
             if !historyChanged && !attachmentsChanged {
@@ -1743,7 +1751,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.insertionPointColor = .systemBlue
             text.undoManager?.removeAllActions()
-            if session.draft.isEmpty && selection.length == 0 { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
+            if session.draft.isEmpty && selection.length == 0 && !text.explicitCursor { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else {
                 let start = min(selection.location, document.length)
@@ -1752,7 +1760,10 @@ struct ScrollingConversation: NSViewRepresentable {
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.layoutManager?.ensureLayout(for: text.textContainer!)
             text.fitDocumentHeight()
-            if follow { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
+            if addedAttachment {
+                nativeScroll?.jumpToLatest()
+                text.scrollRangeToVisible(NSRange(location: text.inputStart, length: 0))
+            } else if follow { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
@@ -1874,15 +1885,16 @@ struct RootView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         if let group = devices.currentGroup {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Group").fontWeight(.bold)
-                                Text(group.name).font(.caption).foregroundStyle(.secondary)
+                                Text(group.name + " group").font(.system(size: 17, weight: .semibold)).foregroundStyle(Color.accentColor)
+                                    .help("Converse group: " + group.name + ". These devices share sessions; choose a pane number to bring a session here.")
                                 Text((devices.identity?.deviceName ?? "This Mac") + " · this device").fontWeight(.semibold)
+                                    .help("This Mac. Sessions below run here, even when displayed on another group device.")
                             }.padding(.horizontal, 4)
                         }
                         ForEach(store.assistantFamilies, id: \.self) { engine in
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
-                                    Text(AssistantFamily.name(engine)).fontWeight(store.sessions.contains { $0.entry.engine == engine } ? .bold : .regular)
+                                    Text(AssistantFamily.name(engine)).fontWeight(store.sessions.contains { $0.entry.engine == engine } ? .bold : .regular).help(AssistantFamily.name(engine) + " sessions on this device. Use + to create a session.")
                                     Spacer()
                                     Button { state.sessionSetup = SessionSetupRequest(engine: engine) } label: { Image(systemName: "plus") }
                                         .buttonStyle(.plain).help("New " + AssistantFamily.name(engine) + " session")
@@ -2344,6 +2356,21 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     let rightArrow = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}", charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: 124)!
     view.keyDown(with: rightArrow)
     check(view.selectedRange().location < view.inputStart && !scroll.followState.following, "History navigation keys move within history without being mistaken for typing and jumping to the draft")
+    view.explicitCursor = true; view.setSelectedRange(NSRange(location: 10, length: 0))
+    session.messages.append(Message(role: "assistant", text: "Keep an explicitly positioned cursor"))
+    coordinator.render(view)
+    check(view.selectedRange() == NSRange(location: 10, length: 0) && scroll.selecting && !scroll.followState.following, "An explicit Mac cursor holds its position even without a selection or draft")
+    let pasteFile = FileManager.default.temporaryDirectory.appendingPathComponent("converse-scroll-image-" + UUID().uuidString + ".png")
+    defer { try? FileManager.default.removeItem(at: pasteFile) }
+    let pasted = NSImage(size: NSSize(width: 300, height: 700))
+    pasted.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 300, height: 700).fill(); pasted.unlockFocus()
+    if let tiff = pasted.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) { try? png.write(to: pasteFile) }
+    session.attachments = [pasteFile.path]
+    coordinator.render(view)
+    let imageBottom = view.layoutManager!.boundingRect(forGlyphRange: view.layoutManager!.glyphRange(forCharacterRange: NSRange(location: view.draftImages[0].location, length: 1), actualCharacterRange: nil), in: view.textContainer!).maxY + view.textContainerOrigin.y
+    check(imageBottom <= scroll.contentView.bounds.maxY + 1 && imageBottom > scroll.contentView.bounds.minY, "Pasting a tall image reveals its bottom even while the transcript was scrolled up")
+    session.attachments = []
+    coordinator.render(view)
     scroll.jumpToLatest()
     check(scroll.followState.following && scroll.followState.unreadUpdates == 0, "Native Jump to latest explicitly resumes following and clears unread output")
     session.messages = [Message(role: "assistant", text: "Short reply")]; session.draft = "Typing here"
