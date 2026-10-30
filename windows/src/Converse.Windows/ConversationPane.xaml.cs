@@ -1153,6 +1153,15 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
+    // Sidebar rows are immutable snapshots. Refresh their metadata even
+    // when the pane assignment is unchanged, without resetting its editor.
+    internal void RefreshSessionMetadata(SidebarSession? session)
+    {
+        if (_selected?.Key != session?.Key) throw new InvalidOperationException("Pane assignment changed.");
+        _selected = session;
+        RenderPane();
+    }
+
     internal void ShowSession(SidebarSession? session, bool caretToEnd)
     {
         _selected = session;

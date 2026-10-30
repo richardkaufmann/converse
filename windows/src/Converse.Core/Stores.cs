@@ -10,20 +10,24 @@ public sealed class DeviceLeaseManager
     private readonly Func<Dictionary<Guid, ulong>, bool>? _persistEpochs;
     private readonly Dictionary<Guid, (string Device, ulong Epoch, DateTimeOffset ExpiresAt)> _leases = new();
     private Dictionary<Guid, ulong> _epochs;
+    private readonly ulong _initialEpoch;
 
     public DeviceLeaseManager(Func<DateTimeOffset>? now = null, double ttlSeconds = 15,
-        Dictionary<Guid, ulong>? initialEpochs = null, Func<Dictionary<Guid, ulong>, bool>? persistEpochs = null)
+        Dictionary<Guid, ulong>? initialEpochs = null, Func<Dictionary<Guid, ulong>, bool>? persistEpochs = null, ulong initialEpoch = 0)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _ttl = TimeSpan.FromSeconds(ttlSeconds);
         _epochs = initialEpochs ?? new Dictionary<Guid, ulong>();
         _persistEpochs = persistEpochs;
+        _initialEpoch = initialEpoch;
     }
 
     public (bool Granted, ulong Epoch, string? Displaced) Acquire(Guid session, string device)
     {
         string? displaced = _leases.TryGetValue(session, out var old) && old.Device != device ? old.Device : null;
-        var epoch = (_epochs.TryGetValue(session, out var current) ? current : 0) + 1;
+        var current = _epochs.TryGetValue(session, out var saved) ? saved : _initialEpoch;
+        if (current == ulong.MaxValue) return (false, current, null);
+        var epoch = current + 1;
         var candidate = new Dictionary<Guid, ulong>(_epochs) { [session] = epoch };
         // Fail closed: never grant an epoch that cannot be persisted.
         if (_persistEpochs is not null && !_persistEpochs(candidate))

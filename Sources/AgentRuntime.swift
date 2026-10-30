@@ -165,6 +165,7 @@ import AVFoundation
                 let reply: AgentReply? = decoded
                 let display = decoded.reply + (research.sources.isEmpty ? "" : "\n\nSources: " + research.markdown)
                 if let index = session.messages.firstIndex(where: { $0.id == responseID }) { session.messages[index].text = display }
+                if !display.isEmpty { store.assistantResponded(session) }
                 let board = decoded.scoreboard?.validated(research: research)
                 let mood = config.hasRepository ? snapshot.mood(previous: session.agent?.snapshot) : (board?.sentiment ?? "neutral")
                 if refreshScoreboard && session.agent?.repository == config.repository {

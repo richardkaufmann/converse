@@ -397,6 +397,9 @@ final class Store: ObservableObject {
         guard !s.interrupted, let target = s.injectionTargetID, !s.pending.contains(where: { $0.id == target }) else { return }
         s.injectionNotice = "Injected prompt started."; s.injectionTargetID = nil
     }
+    func assistantResponded(_ s: Session) {
+        if s.injectionNotice == "Injected prompt started." { s.injectionNotice = "" }
+    }
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
         if success && !s.interrupted { processSwitchboard(s) }
@@ -935,6 +938,7 @@ final class Store: ObservableObject {
         return String(format: "[%.1f hours]", seconds / 3600)
     }
     func markOutput(_ s: Session, index: Int, offset: Int, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        assistantResponded(s)
         if let previous = s.lastOutputAt, now - previous >= 10 {
             var marks = s.messages[index].delays ?? []
             marks.append(DelayMark(offset: offset, seconds: now - previous))
@@ -2444,9 +2448,15 @@ func selfTest() {
     store.consume(#"{"payload_type":"text.delta","payload":{"delta":" quickly"}}"#, session: timed, responseID: r)
     check(timed.messages[0].delays?.count == 2, "Short gaps produce no marker")
     let exact = Session(entry: entry); exact.messages = [Message(role: "assistant", text: "Answer")]; exact.lastOutputAt = 100
+    exact.injectionNotice = "Injected prompt started."
     store.activity("hidden tool output", session: exact)
     check(exact.lastOutputAt == 100, "Hidden tool output does not reset response delay")
+    check(exact.injectionNotice == "Injected prompt started.", "Injection confirmation waits for an assistant response, not tool activity")
     store.markOutput(exact, index: 0, offset: 0, now: 110)
+    check(exact.injectionNotice.isEmpty, "First assistant response clears the injection confirmation")
+    exact.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying."
+    store.assistantResponded(exact)
+    check(!exact.injectionNotice.isEmpty, "Assistant response does not dismiss an injection failure notice")
     check(exact.messages[0].delays?.first?.seconds == 10 && Store.delayLabel(10) == "[10 sec]", "Delay threshold includes exactly ten seconds")
     let timedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
     let timedCoordinator = ScrollingConversation.Coordinator(exact); timedCoordinator.render(timedView)

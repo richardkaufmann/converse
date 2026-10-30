@@ -128,3 +128,5 @@ For isolated UI validation, set `CONVERSE_DATA_DIR` to a disposable directory be
 ## Session names and pane headers
 
 Right-click a session in the sidebar and choose **Rename…**. Local sessions rename immediately. For a remote session, first take it into a pane; the home applies the rename through the existing acknowledged command flow. Rename preserves the conversation and draft. Pane headers show the provider mark beside the title. Submitted prompts omit outer blank lines for display while retaining their original stored and copied text.
+
+Pane titles refresh in place when a session is renamed, including on a remote viewer. Renaming preserves the draft and editor position. Device update sequences, boot generations, and lease epochs persist in `device-sync-counters.json`; keep this file with the device identity when backing up the profile. Older Windows builds did not persist these counters. Do not downgrade and run the old build against the updated live profile.

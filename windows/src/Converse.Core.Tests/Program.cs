@@ -150,6 +150,36 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(!denied.Acquire(session, "device-c").Granted, "Epoch persistence failure denies grant (fail closed)");
 }
 
+// Restart/crash safety: durable sequence reservations and lease generations.
+{
+    var root = Directory.CreateTempSubdirectory("converse-counters-").FullName;
+    try
+    {
+        var first = new DeviceSyncCounters(root);
+        var last = 0UL;
+        for (var n = 0; n < 5000; n++) last = first.NextSequence();
+        var session = Guid.NewGuid();
+        Check(first.SaveEpochs(new() { [session] = 7 }), "Sync counters persist lease epochs");
+        var restarted = new DeviceSyncCounters(root);
+        Check(restarted.NextSequence() > last && restarted.Boot > first.Boot && restarted.Epochs[session] == 7,
+            "Sync counters reserve beyond issued range and retain epochs after restart");
+        Check(!restarted.SaveEpochs(new() { [session] = 6 }), "Sync counters refuse lease epoch rollback");
+        var file = Path.Combine(root, "device-sync-counters.json");
+        File.Move(file, file + ".backup"); Directory.CreateDirectory(file);
+        Check(!restarted.SaveEpochs(new() { [session] = 8 }) && restarted.Epochs[session] == 7,
+            "Sync counter write failure does not grant or adopt a lease epoch");
+        var refused = false;
+        try { for (var n = 0; n < 4096; n++) restarted.NextSequence(); } catch (IOException) { refused = true; }
+        catch (UnauthorizedAccessException) { refused = true; }
+        Check(refused, "Sync sequence cannot escape its reserved range after persistence failure");
+        Directory.Delete(file); File.WriteAllText(file, "{\"Boot\":4}");
+        refused = false;
+        try { _ = new DeviceSyncCounters(root); } catch (System.Text.Json.JsonException) { refused = true; }
+        Check(refused, "Incomplete sync counter state fails closed instead of resetting generations");
+    }
+    finally { Cleanup(root); }
+}
+
 // Command store dedup + uncertain recovery; outbox retention; draft adoption.
 {
     var root = Directory.CreateTempSubdirectory("converse-core-").FullName;
@@ -222,6 +252,39 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+        homeSession.Title = "Renamed on home while viewed remotely";
+        homeSession.Draft = "keep this draft";
+        homeStore.Save();
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Title == homeSession.Title
+            && viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == gid && r.Title == homeSession.Title)),
+            "Home rename updates both remote pane snapshot and sidebar without a new turn");
+        // Make the previous process's counter larger than a fresh process's
+        // startup traffic, exactly the condition rejected by a Mac viewer.
+        for (var n = 0; n < 40; n++) homeStore.Save();
+        await viewer.ReleaseRemoteAsync(gid);
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Epoch > 1), "Restart setup refreshes the held snapshot");
+        var oldSnapshot = viewer.RemoteTranscripts[gid];
+        home.Dispose();
+        await Until(() => !viewer.Homes[home.DeviceId].Online);
+        var restartedStore = new SessionStore(homeRoot, new FakeRunner());
+        var restartedSession = restartedStore.Sessions.Single(s => s.Id == homeSession.Id);
+        restartedSession.Title = "Renamed after restart";
+        restartedStore.Save();
+        using var restarted = new DeviceSyncService(homeRoot, restartedStore, "HomePC");
+        await restarted.StartAsync(0, enableDiscovery: false);
+        await viewer.ConnectManualAsync("127.0.0.1", restarted.ListeningPort);
+        Check(await Until(() => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.Title == restartedSession.Title) == true),
+            "Restart reconnect publishes current title without pairing again");
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Title == restartedSession.Title), "Restart allows a fresh take");
+        var fresh = viewer.RemoteTranscripts.GetValueOrDefault(gid);
+        Check(fresh is not null && fresh.HomeSeq > oldSnapshot.HomeSeq,
+            "Restart snapshot advances HomeSeq beyond previous process for Mac viewer acceptance");
+        Check(fresh is not null && fresh.Boot > oldSnapshot.Boot && fresh.Epoch > oldSnapshot.Epoch,
+            "Restart changes boot and advances lease epoch so old snapshots cannot match");
+        Check(fresh?.Draft == "keep this draft", "Rename and restart preserve the remote draft");
+
     }
     finally
     {

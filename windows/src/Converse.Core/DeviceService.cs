@@ -299,8 +299,8 @@ public sealed partial class DeviceSyncService : IDisposable
     private readonly Dictionary<string, DateTime> _pendingTakes = new();
     private readonly SemaphoreSlim _pairingQueue = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> _connecting = new();
-    private ulong _homeSeq;
-    private ulong _boot = 1;
+    private readonly DeviceSyncCounters _syncCounters;
+    private ulong _boot => _syncCounters.Boot;
     public List<MdnsService> DiscoveredDevices { get; } = new();
     private MdnsDiscovery? _mdns;
     private TcpListener? _listener;
@@ -319,7 +319,9 @@ public sealed partial class DeviceSyncService : IDisposable
         Trust = new DeviceTrustStore(folder);
         _commands = new DeviceCommandStore(folder);
         _outbox = new DeviceOutboxStore(folder);
-        _leases = new DeviceLeaseManager();
+        _syncCounters = new DeviceSyncCounters(folder);
+        _leases = new DeviceLeaseManager(initialEpochs: _syncCounters.Epochs,
+            persistEpochs: _syncCounters.SaveEpochs, initialEpoch: 1UL << 48);
         GroupStore = new ConverseGroupStore(folder);
         KnownGroups = GroupStore.Groups.ToList();
         InitializeGroups();
@@ -1317,11 +1319,11 @@ public sealed partial class DeviceSyncService : IDisposable
     }
 
     // ---- Home side ----
-    private DeviceSidebarPayload SidebarPayload() => new()
+    private DeviceSidebarPayload SidebarPayload(ulong sequence) => new()
     {
         HomeDeviceID = DeviceId,
         HomeDeviceName = DeviceName,
-        HomeSeq = _homeSeq,
+        HomeSeq = sequence,
         Rows = _store.Sessions.Select(session => new DeviceSidebarRow
         {
             GlobalID = new DeviceGlobalID(DeviceId, session.Id).ToString(),
@@ -1346,20 +1348,23 @@ public sealed partial class DeviceSyncService : IDisposable
     private async Task SendSidebarAsync(Peer peer)
     {
         if (peer.Hello is null || !IsGroupMember(peer.Hello.DeviceID)) return;
+        var sequence = _syncCounters.NextSequence();
         await SendEnvelopeAsync(peer, new DeviceEnvelope
-        { Kind = DeviceKind.SidebarSnapshot, HomeSeq = ++_homeSeq, Payload = DeviceJson.Encode(SidebarPayload()) });
+        { Kind = DeviceKind.SidebarSnapshot, HomeSeq = sequence, Boot = _boot, Payload = DeviceJson.Encode(SidebarPayload(sequence)) });
     }
 
-    private readonly Dictionary<Guid, string> _publishedAgents = new();
+    private readonly Dictionary<Guid, string> _publishedMetadata = new();
     private void PublishSidebars()
     {
         if (CurrentGroup is null || LocallyRemoved) return;
         foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly)) _ = SendSidebarAsync(peer);
-        foreach (var session in _store.Sessions.Where(s => s.Agent is not null))
+        foreach (var session in _store.Sessions)
         {
-            var signature = System.Text.Json.JsonSerializer.Serialize(session.Agent);
-            if (_publishedAgents.GetValueOrDefault(session.Id) == signature) continue;
-            _publishedAgents[session.Id] = signature; PushTranscriptToHolder(session);
+            // A home-side rename must reach the held pane, not only the
+            // directory. Ordinary draft saves do not force a transcript push.
+            var signature = System.Text.Json.JsonSerializer.Serialize(new { session.Title, session.Agent });
+            if (_publishedMetadata.GetValueOrDefault(session.Id) == signature) continue;
+            _publishedMetadata[session.Id] = signature; PushTranscriptToHolder(session);
         }
     }
 
@@ -1384,7 +1389,7 @@ public sealed partial class DeviceSyncService : IDisposable
         var payload = new DeviceTranscriptPayload
         {
             GlobalID = new DeviceGlobalID(DeviceId, session.Id).ToString(),
-            HomeSeq = ++_homeSeq, Epoch = holder.Value.Epoch, Boot = _boot,
+            HomeSeq = _syncCounters.NextSequence(), Epoch = holder.Value.Epoch, Boot = _boot,
             Messages = session.Messages.Skip(start).Take(end - start).Select(m => new DeviceWireMessage
             {
                 Id = m.Id, Role = m.Role, Text = m.Text,

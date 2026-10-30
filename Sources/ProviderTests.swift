@@ -164,7 +164,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         check(session.pending.first?.id == promotedID && session.pending.count == 2 && session.resumeAfterInterrupt, engine + " repeated injection while stopping keeps the original intent and queue order")
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: second", "answer: first"] && session.draft == "untouched", engine + " Inject now promotes selected row, interrupts, and preserves draft")
-        check(session.injectionNotice == "Injected prompt started." && session.injectionTargetID == nil, engine + " injection confirms the promoted prompt actually started")
+        check(session.injectionNotice.isEmpty && session.injectionTargetID == nil, engine + " injection confirmation clears once the promoted prompt receives a response")
         session.pending = [PendingPrompt(text: "one", images: []), PendingPrompt(text: "two", images: [])]
         session.queuePaused = true
         store.injectPending(session)

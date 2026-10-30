@@ -397,7 +397,7 @@ public sealed partial class MainWindow : Window
             var key = _placements.KeyIn(pane);
             var row = key is not null && rows.TryGetValue(key, out var found) ? found : null;
             if (view.Current?.Key != row?.Key) view.ShowSession(row, caretToEnd: false);
-            else view.RenderPane();
+            else view.RefreshSessionMetadata(row);
             view.SyncLineNumbersBox();
             view.SetFocused(pane == _focusedPane);
         }
