@@ -1,0 +1,8 @@
+{
+  "adminApiVersion": 1,
+  "requestID": "00000000-0000-4000-8000-000000000001",
+  "operation": "status.get",
+  "expectedDeviceID": "1111111111111111111111111111111111111111111111111111111111111111",
+  "operationID": null,
+  "payload": {}
+}

@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:admin-request:v1",
+  "title": "Converse Linux admin request v1",
+  "type": "object",
+  "required": [
+    "adminApiVersion",
+    "requestID",
+    "operation",
+    "expectedDeviceID",
+    "operationID",
+    "payload"
+  ],
+  "properties": {
+    "adminApiVersion": { "const": 1 },
+    "requestID": { "$ref": "#/$defs/uuid" },
+    "operation": {
+      "enum": [
+        "status.get",
+        "operation.get",
+        "group.create",
+        "pairing.join.begin",
+        "pairing.join.status",
+        "pairing.bindPeerConnection",
+        "pairing.join.confirm",
+        "pairing.join.cancel",
+        "pairing.requests.list",
+        "pairing.request.review",
+        "pairing.request.approve",
+        "pairing.request.reject",
+        "update.stage.begin",
+        "update.stage.verify",
+        "update.activate",
+        "update.healthCommit",
+        "update.rollback",
+        "session.create",
+        "service.start",
+        "service.stop",
+        "service.restart"
+      ]
+    },
+    "expectedDeviceID": {
+      "anyOf": [
+        { "$ref": "#/$defs/deviceID" },
+        { "type": "null" }
+      ]
+    },
+    "operationID": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "group.create",
+              "pairing.join.begin",
+              "pairing.bindPeerConnection",
+              "pairing.join.confirm",
+              "pairing.join.cancel",
+              "pairing.request.review",
+              "pairing.request.approve",
+              "pairing.request.reject",
+              "update.stage.begin",
+              "update.stage.verify",
+              "update.activate",
+              "update.healthCommit",
+              "update.rollback",
+              "session.create",
+              "service.start",
+              "service.stop",
+              "service.restart"
+            ]
+          }
+        },
+        "required": ["operation"]
+      },
+      "then": {
+        "properties": {
+          "operationID": { "$ref": "#/$defs/uuid" }
+        }
+      }
+    },
+    { "$ref": "#/$defs/payloadByOperation" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "deviceID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "releaseID": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "nullableUuid": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "nullableShortString": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "null" }
+      ]
+    },
+    "nullableAbsolutePath": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 500,
+          "pattern": "^/[^\\u0000-\\u001f]*$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "payloadByOperation": {
+      "oneOf": [
+        {
+          "properties": {
+            "operation": { "enum": ["status.get", "pairing.requests.list", "service.start", "service.stop", "service.restart"] },
+            "payload": { "type": "object" }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "operation.get" },
+            "payload": {
+              "type": "object",
+              "required": ["operationID"],
+              "properties": { "operationID": { "$ref": "#/$defs/uuid" } }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "group.create" },
+            "payload": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 120 }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "pairing.join.begin" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "requestCorrelationID",
+                "sponsorDeviceID",
+                "sponsorPublicKeyFingerprint",
+                "sponsorEndpoint",
+                "groupID"
+              ],
+              "properties": {
+                "requestCorrelationID": { "$ref": "#/$defs/uuid" },
+                "sponsorDeviceID": { "$ref": "#/$defs/deviceID" },
+                "sponsorPublicKeyFingerprint": { "$ref": "#/$defs/deviceID" },
+                "sponsorEndpoint": { "$ref": "#/$defs/endpoint" },
+                "groupID": { "$ref": "#/$defs/uuid" }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "pairing.join.status" },
+            "payload": {
+              "type": "object",
+              "required": ["pairingID", "requestCorrelationID"],
+              "properties": {
+                "pairingID": { "$ref": "#/$defs/uuid" },
+                "requestCorrelationID": { "$ref": "#/$defs/uuid" }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": {
+              "enum": [
+                "pairing.bindPeerConnection",
+                "pairing.join.confirm",
+                "pairing.join.cancel",
+                "pairing.request.review",
+                "pairing.request.approve",
+                "pairing.request.reject"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": ["binding"],
+              "properties": {
+                "binding": { "$ref": "pairing-binding.schema.json" }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "update.stage.begin" },
+            "payload": {
+              "type": "object",
+              "required": ["releaseID", "bundleSHA256", "bundleSize"],
+              "properties": {
+                "releaseID": { "$ref": "#/$defs/releaseID" },
+                "bundleSHA256": { "$ref": "#/$defs/sha256" },
+                "bundleSize": { "type": "integer", "minimum": 1, "maximum": 536870912 }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "update.stage.verify" },
+            "payload": {
+              "type": "object",
+              "required": ["uploadID"],
+              "properties": { "uploadID": { "$ref": "#/$defs/uuid" } }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "update.activate" },
+            "payload": {
+              "type": "object",
+              "required": ["releaseID", "drainTimeoutSeconds"],
+              "properties": {
+                "releaseID": { "$ref": "#/$defs/releaseID" },
+                "drainTimeoutSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "update.healthCommit" },
+            "payload": {
+              "type": "object",
+              "required": ["episodeID"],
+              "properties": { "episodeID": { "$ref": "#/$defs/uuid" } }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "update.rollback" },
+            "payload": {
+              "type": "object",
+              "required": ["episodeID", "reason"],
+              "properties": {
+                "episodeID": { "$ref": "#/$defs/uuid" },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        },
+        {
+          "properties": {
+            "operation": { "const": "session.create" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "sessionID",
+                "engine",
+                "title",
+                "entryID",
+                "entryName",
+                "workingDirectory",
+                "model",
+                "effort",
+                "access",
+                "messagingEnabled"
+              ],
+              "properties": {
+                "sessionID": { "$ref": "#/$defs/uuid" },
+                "engine": { "enum": ["claude", "codex", "muse", "agent"] },
+                "title": { "$ref": "#/$defs/nullableShortString" },
+                "entryID": { "$ref": "#/$defs/nullableUuid" },
+                "entryName": { "$ref": "#/$defs/nullableShortString" },
+                "workingDirectory": { "$ref": "#/$defs/nullableAbsolutePath" },
+                "model": { "$ref": "#/$defs/nullableShortString" },
+                "effort": { "$ref": "#/$defs/nullableShortString" },
+                "access": { "$ref": "#/$defs/nullableShortString" },
+                "messagingEnabled": { "type": "boolean" }
+              }
+            }
+          },
+          "required": ["operation", "payload"]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:admin-response:v1",
+  "title": "Converse Linux admin response v1",
+  "type": "object",
+  "required": [
+    "adminApiVersion",
+    "requestID",
+    "ok",
+    "result",
+    "operation",
+    "error"
+  ],
+  "properties": {
+    "adminApiVersion": { "const": 1 },
+    "requestID": { "$ref": "#/$defs/uuid" },
+    "ok": { "type": "boolean" },
+    "result": {
+      "anyOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    },
+    "operation": {
+      "anyOf": [
+        { "$ref": "operation.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        { "$ref": "#/$defs/error" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "ok": { "const": true } },
+        "required": ["ok"]
+      },
+      "then": {
+        "properties": { "error": { "type": "null" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "ok": { "const": false } },
+        "required": ["ok"]
+      },
+      "then": {
+        "properties": {
+          "result": { "type": "null" },
+          "error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable", "uncertain"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_request",
+            "unsupported_admin_api",
+            "identity_mismatch",
+            "daemon_unavailable",
+            "admission_closed",
+            "busy_draining",
+            "drain_timeout",
+            "operation_not_found",
+            "operation_conflict",
+            "stage_verification_failed",
+            "probation_health_failed",
+            "recovery_required",
+            "secret_not_found",
+            "pairing_not_found",
+            "pairing_binding_mismatch",
+            "pairing_expired",
+            "unsupported_supervisor",
+            "service_control_failed",
+            "internal_error"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retryable": { "type": "boolean" },
+        "uncertain": { "type": "boolean" }
+      }
+    }
+  }
+}

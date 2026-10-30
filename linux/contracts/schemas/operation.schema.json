@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:operation:v1",
+  "title": "Converse Linux durable operation v1",
+  "type": "object",
+  "required": [
+    "operationID",
+    "kind",
+    "state",
+    "episodeID",
+    "createdAt",
+    "updatedAt",
+    "stage",
+    "message",
+    "retryable",
+    "uncertain",
+    "result"
+  ],
+  "properties": {
+    "operationID": { "$ref": "#/$defs/uuid" },
+    "kind": {
+      "enum": [
+        "bootstrap.install",
+        "group.create",
+        "pairing.join.begin",
+        "pairing.bindPeerConnection",
+        "pairing.join.confirm",
+        "pairing.join.cancel",
+        "pairing.request.review",
+        "pairing.request.approve",
+        "pairing.request.reject",
+        "update.stage.begin",
+        "update.stage.verify",
+        "update.activate",
+        "update.healthCommit",
+        "update.rollback",
+        "session.create",
+        "service.start",
+        "service.stop",
+        "service.restart",
+        "secret.set",
+        "secret.delete"
+      ]
+    },
+    "state": {
+      "enum": [
+        "accepted",
+        "running",
+        "draining_old_release",
+        "activating_new_release",
+        "probation_new_release",
+        "completed",
+        "aborted",
+        "failed",
+        "uncertain"
+      ]
+    },
+    "episodeID": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "stage": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "message": {
+      "anyOf": [
+        { "type": "string", "maxLength": 1000 },
+        { "type": "null" }
+      ]
+    },
+    "retryable": { "type": "boolean" },
+    "uncertain": { "type": "boolean" },
+    "result": {
+      "anyOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    }
+  }
+}

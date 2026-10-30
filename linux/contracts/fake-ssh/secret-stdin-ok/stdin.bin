@@ -1,0 +1,2 @@
+{"secretApiVersion":1,"requestID":"00000000-0000-4000-8000-000000000901","operationID":"00000000-0000-4000-8000-000000000902","expectedDeviceID":"1111111111111111111111111111111111111111111111111111111111111111","action":"set","secretID":"agent.meta.api-key","kind":"provider_api_key","valueByteCount":20,"valueSHA256":"b3e4d08d0be1b5ab8c2c504221ac482d602626718ab43bcf2c866333af962a0b"}
+fixture-secret-value

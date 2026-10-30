@@ -1,0 +1,1 @@
+{"adminApiVersion":1,"requestID":"00000000-0000-4000-8000-000000000002","operation":"update.activate","expectedDeviceID":"1111111111111111111111111111111111111111111111111111111111111111","operationID":"00000000-0000-4000-8000-000000000201","payload":{"releaseID":"1.0.0-2-linux-x64","drainTimeoutSeconds":600}}

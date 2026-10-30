@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:deployment-registry:v1",
+  "title": "Converse manager-local Linux deployment registry v1",
+  "type": "object",
+  "required": ["registryVersion", "deployments", "provisionalDeployments"],
+  "properties": {
+    "registryVersion": { "const": 1 },
+    "deployments": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/deployment" }
+    },
+    "provisionalDeployments": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/provisionalDeployment" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "deviceID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "destination": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^-\\s][^\\s]{0,254}$"
+    },
+    "nullableDateTime": {
+      "anyOf": [
+        { "type": "string", "format": "date-time" },
+        { "type": "null" }
+      ]
+    },
+    "stagingToken": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]{32,64}$"
+    },
+    "nullableStagingToken": {
+      "anyOf": [
+        { "$ref": "#/$defs/stagingToken" },
+        { "type": "null" }
+      ]
+    },
+    "hostKeyFingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9+/]{43}$"
+    },
+    "nullableHostKeyFingerprint": {
+      "anyOf": [
+        { "$ref": "#/$defs/hostKeyFingerprint" },
+        { "type": "null" }
+      ]
+    },
+    "nullableUuid": {
+      "anyOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "provisionalDeployment": {
+      "type": "object",
+      "required": [
+        "operationID",
+        "stagingToken",
+        "stage",
+        "displayName",
+        "destination",
+        "hostKeyFingerprintSHA256",
+        "bootstrapSHA256",
+        "bootstrapSize",
+        "releaseID",
+        "deviceID",
+        "createdAt",
+        "updatedAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "operationID": { "$ref": "#/$defs/uuid" },
+        "stagingToken": { "$ref": "#/$defs/stagingToken" },
+        "stage": {
+          "enum": [
+            "created",
+            "host_key_pending",
+            "host_key_verified",
+            "staged",
+            "uploaded",
+            "preflight_passed",
+            "install_requested",
+            "installed",
+            "admin_verified",
+            "cleanup_pending",
+            "uncertain",
+            "failed"
+          ]
+        },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "destination": { "$ref": "#/$defs/destination" },
+        "hostKeyFingerprintSHA256": { "$ref": "#/$defs/nullableHostKeyFingerprint" },
+        "bootstrapSHA256": {
+          "anyOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "bootstrapSize": { "type": "integer", "minimum": 0 },
+        "releaseID": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "deviceID": {
+          "anyOf": [
+            { "$ref": "#/$defs/deviceID" },
+            { "type": "null" }
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "required": [
+        "deploymentID",
+        "displayName",
+        "ssh",
+        "remote",
+        "converse",
+        "installation",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "deploymentID": { "$ref": "#/$defs/uuid" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ssh": {
+          "type": "object",
+          "required": [
+            "destination",
+            "hostKeyFingerprintSHA256",
+            "proxyJump",
+            "lastVerifiedAt"
+          ],
+          "properties": {
+            "destination": { "$ref": "#/$defs/destination" },
+            "hostKeyFingerprintSHA256": {
+              "type": "string",
+              "pattern": "^SHA256:[A-Za-z0-9+/]{43}$"
+            },
+            "proxyJump": {
+              "anyOf": [
+                { "$ref": "#/$defs/destination" },
+                { "type": "null" }
+              ]
+            },
+            "lastVerifiedAt": { "$ref": "#/$defs/nullableDateTime" }
+          }
+        },
+        "remote": {
+          "type": "object",
+          "required": ["linuxUser", "installRoot", "stateRoot", "supervisor"],
+          "properties": {
+            "linuxUser": {
+              "type": "string",
+              "pattern": "^[a-z_][a-z0-9_-]{0,63}$"
+            },
+            "installRoot": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 500,
+              "pattern": "^/[^\\u0000-\\u001f]*$"
+            },
+            "stateRoot": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 500,
+              "pattern": "^/[^\\u0000-\\u001f]*$"
+            },
+            "supervisor": {
+              "enum": ["none", "systemd-user", "cron-fallback", "manual-test"]
+            }
+          }
+        },
+        "converse": {
+          "type": "object",
+          "required": [
+            "deviceID",
+            "groupID",
+            "groupName",
+            "lastKnownReleaseID",
+            "lastStatusAt",
+            "capabilities"
+          ],
+          "properties": {
+            "deviceID": {
+              "anyOf": [
+                { "$ref": "#/$defs/deviceID" },
+                { "type": "null" }
+              ]
+            },
+            "groupID": {
+              "anyOf": [
+                { "$ref": "#/$defs/uuid" },
+                { "type": "null" }
+              ]
+            },
+            "groupName": {
+              "anyOf": [
+                { "type": "string", "maxLength": 120 },
+                { "type": "null" }
+              ]
+            },
+            "lastKnownReleaseID": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+                },
+                { "type": "null" }
+              ]
+            },
+            "lastStatusAt": { "$ref": "#/$defs/nullableDateTime" },
+            "capabilities": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
+              }
+            }
+          }
+        },
+        "installation": {
+          "type": "object",
+          "required": ["operationID", "stagingToken", "completedAt"],
+          "properties": {
+            "operationID": { "$ref": "#/$defs/nullableUuid" },
+            "stagingToken": { "$ref": "#/$defs/nullableStagingToken" },
+            "completedAt": { "$ref": "#/$defs/nullableDateTime" }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "releaseID": "1.0.0-2-linux-x64",
+  "product": "Converse",
+  "productVersion": "1.0.0",
+  "build": 2,
+  "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "createdAt": "2026-10-30T16:00:00Z",
+  "signingKeyID": "converse-linux-2026-01",
+  "protocols": {
+    "deviceProtocolVersion": 1,
+    "adminApiVersion": 1,
+    "stateSchemaCompatibility": {
+      "minimumReadableStateSchemaVersion": 1,
+      "maximumReadableStateSchemaVersion": 1,
+      "writableStateSchemaVersion": 1
+    },
+    "recoveryLedgerVersion": 1
+  },
+  "artifact": {
+    "fileName": "converse",
+    "operatingSystem": "linux",
+    "architecture": "x64",
+    "size": 12345678,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

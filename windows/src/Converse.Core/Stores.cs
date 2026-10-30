@@ -124,6 +124,28 @@ public sealed class DeviceCommandStore
     public bool BindingMatches(Guid id, string origin, string sessionId, string payloadHash) =>
         Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId && record.PayloadHash == payloadHash;
 
+    // Recovery-ledger receipts survive an application-data restore that lost
+    // this store. Seed only missing IDs; an existing local record stays as-is.
+    public void SeedIfMissing(IEnumerable<DeviceCommandRecord> receipts)
+    {
+        var changed = false;
+        foreach (var receipt in receipts)
+        {
+            if (receipt.Id == Guid.Empty || Records.ContainsKey(receipt.Id)) continue;
+            Records[receipt.Id] = new DeviceCommandRecord
+            {
+                Id = receipt.Id,
+                Origin = receipt.Origin,
+                Outcome = receipt.Outcome is "accepted" or "running" ? "uncertain" : receipt.Outcome,
+                UpdatedAt = receipt.UpdatedAt == default ? DateTime.UtcNow : receipt.UpdatedAt,
+                SessionID = receipt.SessionID,
+                PayloadHash = receipt.PayloadHash,
+            };
+            changed = true;
+        }
+        if (changed) Save();
+    }
+
     public void MarkRunning(Guid id) => Update(id, "running");
     public void MarkCompleted(Guid id) => Update(id, "completed");
     public void MarkFailed(Guid id) => Update(id, "failed");

@@ -268,6 +268,16 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+        home.SetAcceptingWork(false);
+        var drainRename = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed during drain" });
+        Check(drainRename is not null && await Until(() => homeSession.Title == "Renamed during drain" && viewer.Unresolved(gid).Count == 0), "Drain still applies non-work commands such as rename");
+        var drainSubmit = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "submit", Text = "must not submit during drain" });
+        Check(drainSubmit is not null && await Until(() =>
+            homeSession.Pending.Count == 0 &&
+            viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == drainSubmit)?.Outcome == "failed"),
+            "Drain refuses new submit work without queueing");
+        if (drainSubmit is not null) viewer.DiscardOutbox(drainSubmit.Value);
+        home.SetAcceptingWork(true);
         homeSession.Title = "Renamed on home while viewed remotely";
         homeSession.Draft = "keep this draft";
         homeStore.Save();
@@ -1276,15 +1286,31 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         }
         Check(await JoinPair(a, b, () => b.CurrentGroup?.Id == a.CurrentGroup?.Id), "Member B joins through sponsor A");
         await c.ConnectManualAsync("127.0.0.1", a.ListeningPort, a.CurrentGroup!.Id);
-        Check(await Until(() => b.GroupRequests.Count == 1), "Sponsor publishes the join request to members");
-        await b.ReviewGroupRequestAsync(b.GroupRequests[0]);
-        string? joinerCode = null;
-        Check(await Until(() => b.GroupReview is not null
-            && (joinerCode = c.GroupPairingPrompts.FirstOrDefault()?.Code) is not null
-            && b.GroupReview.Code == joinerCode), "Review by another member reproduces the joiner's code");
-        await b.ApproveGroupReviewAsync();
-        Check(await Until(() => c.CurrentGroup?.Id == a.CurrentGroup?.Id
-            && a.Trust.Devices.Any(d => d.DeviceID == c.DeviceId)), "Relayed approval admits the joiner");
+        var published = await Until(() => b.GroupRequests.Count == 1);
+        Check(published, "Sponsor publishes the join request to members");
+        if (!published)
+        {
+            // Preserve the original readiness failure instead of letting an
+            // unconditional GroupRequests[0] index replace it with a crash.
+            string Homes(DeviceSyncService service) =>
+                string.Join(",", service.Homes.Values.Select(h => $"{h.DeviceName}:{(h.Online ? "online" : "offline")}"));
+            Console.WriteLine(
+                "DIAG sponsor-publish readiness: "
+                + $"a(port={a.ListeningPort}, group={a.CurrentGroup?.Id ?? "none"}, requests={a.GroupRequests.Count}, prompts={a.GroupPairingPrompts.Count}, homes=[{Homes(a)}], outcome=\"{a.LastOutcome}\") "
+                + $"b(port={b.ListeningPort}, group={b.CurrentGroup?.Id ?? "none"}, requests={b.GroupRequests.Count}, prompts={b.GroupPairingPrompts.Count}, homes=[{Homes(b)}], outcome=\"{b.LastOutcome}\") "
+                + $"c(port={c.ListeningPort}, group={c.CurrentGroup?.Id ?? "none"}, requests={c.GroupRequests.Count}, prompts={c.GroupPairingPrompts.Count}, homes=[{Homes(c)}], outcome=\"{c.LastOutcome}\")");
+        }
+        else
+        {
+            await b.ReviewGroupRequestAsync(b.GroupRequests[0]);
+            string? joinerCode = null;
+            Check(await Until(() => b.GroupReview is not null
+                && (joinerCode = c.GroupPairingPrompts.FirstOrDefault()?.Code) is not null
+                && b.GroupReview.Code == joinerCode), "Review by another member reproduces the joiner's code");
+            await b.ApproveGroupReviewAsync();
+            Check(await Until(() => c.CurrentGroup?.Id == a.CurrentGroup?.Id
+                && a.Trust.Devices.Any(d => d.DeviceID == c.DeviceId)), "Relayed approval admits the joiner");
+        }
     }
     finally
     {

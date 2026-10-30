@@ -93,7 +93,15 @@ public sealed partial class DeviceSyncService
         {
             var request = DeviceJson.Decode<DeviceParticipantRequest>(bytes);
             if (request.GroupID != group.Id) return true;
-            var response = await HandleAgentRequestAsync(hello.DeviceID, id, request);
+            var admitted = request.Action is "inspect" or "agent.settings" || TryBeginExternalWork();
+            DeviceParticipantResponse response;
+            try
+            {
+                response = admitted
+                    ? await HandleAgentRequestAsync(hello.DeviceID, id, request)
+                    : new DeviceParticipantResponse { GroupID = group.Id, Outcome = "rejected", Detail = "This home is draining for an update. Nothing was created or queued." };
+            }
+            finally { if (admitted && request.Action is not ("inspect" or "agent.settings")) EndExternalWork(); }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.response", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
         }
@@ -112,6 +120,14 @@ public sealed partial class DeviceSyncService
         }
         if (envelope.Kind == "participant.tell")
         {
+            if (!TryBeginExternalWork())
+            {
+                var closed = new DeviceAckPayload { Outcome = "rejected", Detail = "This home is draining for an update. Nothing was queued." };
+                await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell.ack", CommandID = id, Payload = DeviceJson.Encode(closed) });
+                return true;
+            }
+            try
+            {
             var request = DeviceJson.Decode<DeviceTellPayload>(bytes);
             var from = DeviceGlobalID.Parse(request.Source); var target = DeviceGlobalID.Parse(request.Target);
             var response = new DeviceAckPayload { Outcome = "rejected", Detail = "Invalid, disabled, or out-of-group target." };
@@ -138,6 +154,8 @@ public sealed partial class DeviceSyncService
             }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.tell.ack", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
+            }
+            finally { EndExternalWork(); }
         }
         return true;
     }
@@ -168,6 +186,12 @@ public sealed partial class DeviceSyncService
         var previous = _store.ParticipantReceipts.FirstOrDefault(r => r.Id == id);
         if (previous is not null) return Task.FromResult(previous.Origin == origin && previous.Hash == hash ? previous.Response : Result("rejected", "Operation ID belongs to another request."));
         if (_store.ParticipantReceipts.Count >= 100000) return Task.FromResult(Result("rejected", "Home operation journal is full."));
+        // Admission closes new work only: replayed receipts above are
+        // returned unchanged, and already-accepted queued work still runs.
+        // Agent creation, settings changes, runs, and widget requests are
+        // new work and are refused while the home drains for an update.
+        if (!AcceptingWork && request.Action is "agent.create" or "agent.configure" or "agent.run" or "agent.widget")
+            return Task.FromResult(Result("rejected", "This home is draining for an update. Nothing was created or queued."));
         var old = session?.Agent is null ? null : JsonSerializer.SerializeToUtf8Bytes(session.Agent);
         var oldQueuePaused = session?.QueuePaused;
         var pending = session?.Pending.ToList(); ChatSession? created = null; bool run = false, widget = false;

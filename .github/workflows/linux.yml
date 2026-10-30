@@ -1,0 +1,26 @@
+name: Linux contracts + shared core
+on:
+  push:
+    paths:
+      - "linux/**"
+      - "docs/linux.md"
+      - "windows/src/Converse.Core/**"
+      - "windows/src/Converse.Core.Tests/**"
+      - ".github/workflows/linux.yml"
+  pull_request:
+    paths:
+      - "linux/**"
+      - "docs/linux.md"
+      - "windows/src/Converse.Core/**"
+      - "windows/src/Converse.Core.Tests/**"
+      - ".github/workflows/linux.yml"
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Linux contract and shared Core checks
+        run: ./linux/test.sh

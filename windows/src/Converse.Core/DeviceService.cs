@@ -37,8 +37,10 @@ public sealed class DeviceTrustStore
     public List<TrustedDevice> Records { get { lock (_gate) return _records.ToList(); } }
     public List<TrustedDevice> Devices { get { lock (_gate) return _records.Where(d => d.Removed != true).ToList(); } }
     private static readonly JsonSerializerOptions ReadOptions = new() { PropertyNameCaseInsensitive = true };
-    public DeviceTrustStore(string folder)
+    private readonly ulong _generationFloor;
+    public DeviceTrustStore(string folder, ulong nextGenerationFloor = 0)
     {
+        _generationFloor = nextGenerationFloor > 0 ? nextGenerationFloor - 1 : 0;
         Directory.CreateDirectory(folder);
         _file = Path.Combine(folder, "devices.json");
         if (File.Exists(_file))
@@ -54,10 +56,15 @@ public sealed class DeviceTrustStore
     }
     private ulong NextGeneration()
     {
-        var highest = _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max();
+        var highest = Math.Max(_generationFloor,
+            _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max());
         if (highest >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
         return highest + 1;
     }
+
+    public ulong NextGenerationFloor =>
+        Math.Max(_generationFloor,
+            Records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max()) + 1;
     public static double AppleNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200;
     public static string BoundedName(string name)
     {
@@ -274,8 +281,70 @@ public sealed partial class DeviceSyncService : IDisposable
     public int ListeningPort { get; private set; }
     public event Action? Changed;
     public event Action<string>? RemoteViewDisplaced;
+    public event Action<Guid, string, ulong>? DisplayLeaseGranted;
+    public event Action<Guid, string, ulong>? DisplayLeaseReleased;
+    public bool AcceptingWork { get; private set; } = true;
     public Func<string, bool>? IsViewerPlaced { get; set; }
     public Func<PairingPrompt, Task<bool>>? PairingConfirmation { get; set; }
+
+    // Shared admission boundary. Every producer of NEW external work takes
+    // TryBeginExternalWork under the same lock that flips AcceptingWork, so
+    // once admission closes no new work can start and the in-flight count
+    // can only shrink. The final idle-to-activation decision observes
+    // IsWorkQuiescent, which reads that same count plus the work snapshot.
+    // Already-accepted work (queued prompts, running turns, acknowledgments,
+    // stop/answers/queue management) never takes this guard.
+    private readonly object _admissionLock = new();
+    private int _admissionInflight;
+    private readonly HashSet<string> _guardedBlobs = new();
+
+    public void SetAcceptingWork(bool accepting)
+    {
+        lock (_admissionLock)
+        {
+            if (AcceptingWork == accepting) return;
+            AcceptingWork = accepting;
+        }
+        Changed?.Invoke();
+    }
+
+    public bool TryBeginExternalWork()
+    {
+        lock (_admissionLock)
+        {
+            if (!AcceptingWork) return false;
+            _admissionInflight++;
+            return true;
+        }
+    }
+
+    public void EndExternalWork()
+    {
+        lock (_admissionLock) { _admissionInflight--; }
+    }
+
+    public bool IsWorkQuiescent()
+    {
+        lock (_admissionLock) { if (_admissionInflight != 0) return false; }
+        return WorkSnapshot().Idle;
+    }
+
+    private void ReleaseBlobGuard(string hash)
+    {
+        lock (_admissionLock) { if (_guardedBlobs.Remove(hash)) _admissionInflight--; }
+    }
+
+    public DeviceSyncCounterSnapshot SyncCounterSnapshot()
+    {
+        var snapshot = _syncCounters.Snapshot();
+        return snapshot with
+        {
+            NextLeaseEpoch = Math.Max(snapshot.NextLeaseEpoch, (1UL << 48) + 1),
+        };
+    }
+
+    public IReadOnlyList<DeviceCommandRecord> CommandReceipts =>
+        _commands.Records.Values.OrderBy(record => record.UpdatedAt).ToList();
 
     // Converse Groups state, mirroring Swift DeviceTransport.
     public ConverseGroupStore GroupStore { get; }
@@ -311,7 +380,8 @@ public sealed partial class DeviceSyncService : IDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _shutdown;
 
-    public DeviceSyncService(string folder, SessionStore store, string? deviceName = null)
+    public DeviceSyncService(string folder, SessionStore store, string? deviceName = null,
+        DeviceRecoveryFloors? recoveryFloors = null)
     {
         _folder = folder;
         _store = store;
@@ -323,12 +393,14 @@ public sealed partial class DeviceSyncService : IDisposable
         _staticPrivate = File.Exists(keyFile) ? File.ReadAllBytes(keyFile) : CreateKeyFile(keyFile);
         DeviceId = DeviceBlob.DeviceIdForPublicKey(X25519.PublicKeyFromPrivate(_staticPrivate));
         DeviceName = deviceName ?? Environment.MachineName;
-        Trust = new DeviceTrustStore(folder);
+        Trust = new DeviceTrustStore(folder, recoveryFloors?.NextMembershipGeneration ?? 0);
         _commands = new DeviceCommandStore(folder);
+        if (recoveryFloors is not null) _commands.SeedIfMissing(recoveryFloors.CommandReceipts);
         _outbox = new DeviceOutboxStore(folder);
-        _syncCounters = new DeviceSyncCounters(folder);
+        _syncCounters = new DeviceSyncCounters(folder, recoveryFloors);
         _leases = new DeviceLeaseManager(initialEpochs: _syncCounters.Epochs,
-            persistEpochs: _syncCounters.SaveEpochs, initialEpoch: 1UL << 48);
+            persistEpochs: _syncCounters.SaveEpochs,
+            initialEpoch: Math.Max(1UL << 48, _syncCounters.LeaseEpochFloor));
         GroupStore = new ConverseGroupStore(folder);
         KnownGroups = GroupStore.Groups.ToList();
         InitializeGroups();
@@ -434,6 +506,25 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public IReadOnlyList<DeviceOutboxRecord> Outbox => _outbox.Records;
 
+    public sealed record DeviceWorkSnapshot(
+        int ActiveTurns, int QueuedPrompts, int PendingOutbox, int BlobTransfers)
+    {
+        public int Total => ActiveTurns + QueuedPrompts + PendingOutbox + BlobTransfers;
+        public bool Idle => Total == 0;
+    }
+
+    public DeviceWorkSnapshot WorkSnapshot()
+    {
+        int blobTransfers;
+        lock (_blobAcks) { blobTransfers = _blobAcks.Count; }
+        lock (_blobDownloads) { blobTransfers += _blobDownloads.Count; }
+        return new DeviceWorkSnapshot(
+            _store.Sessions.Count(session => session.Busy),
+            _store.Sessions.Sum(session => session.Pending.Count),
+            _outbox.Records.Count(record => record.Outcome == "pending"),
+            blobTransfers + _staged.Count);
+    }
+
     // Tests disable discovery AND bind loopback so they neither advertise
     // phantom groups nor open a LAN listener that asks for firewall access.
     public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = false, bool loopbackOnly = true)
@@ -489,6 +580,15 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         var id = Guid.NewGuid();
         await ConnectAsync(id, host, port, joiningGroupID, joiningGroupID is not null);
+    }
+
+    // Headless setup needs the connection's peer ID so an admin client can
+    // track the exact pairing prompt it displays and confirms.
+    public async Task<Guid> BeginGroupJoinAsync(string host, int port, string groupID)
+    {
+        var id = Guid.NewGuid();
+        await ConnectAsync(id, host, port, groupID, wantsJoin: true);
+        return id;
     }
 
     internal async Task ConnectAsync(Guid id, string host, int port, string? joiningGroupID, bool wantsJoin, bool userInitiated = true)
@@ -791,13 +891,14 @@ public sealed partial class DeviceSyncService : IDisposable
             });
     }
 
-    public async Task ConfirmPairing(Guid peerId)
+    public async Task<bool> ConfirmPairing(Guid peerId)
     {
-        if (!_peers.TryGetValue(peerId, out var peer) || peer.Hello is null || peer.Keys is null) return;
+        if (!_peers.TryGetValue(peerId, out var peer) || peer.Hello is null || peer.Keys is null) return false;
         peer.HumanConfirmed = true;
         peer.LocalConfirmed = true;
         await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
         FinishTrust(peer);
+        return true;
     }
 
     public void RejectPairing(Guid peerId)
@@ -1132,7 +1233,7 @@ public sealed partial class DeviceSyncService : IDisposable
         {
             _sponsoredRequests.Remove(id);
             GroupRequests.RemoveAll(r => r.Id == id);
-            if (GroupReview?.Request.Id == id) GroupReview = null;
+            lock (_reviewLock) { if (GroupReview?.Request.Id == id) GroupReview = null; }
             if (_peers.TryGetValue(id, out var peer)) Disconnect(peer);
         }
         if (expired.Count > 0) Changed?.Invoke();
@@ -1185,7 +1286,7 @@ public sealed partial class DeviceSyncService : IDisposable
             && _peers.TryGetValue(request.Id, out var joinPeer)
             && joinPeer is { Keys: not null, Hello: not null } && !joinPeer.TrustedReady)
         {
-            GroupReview = new GroupJoinReview { Request = live, Code = DeviceSas.Code(joinPeer.Keys.HandshakeHash) };
+            lock (_reviewLock) { GroupReview = new GroupJoinReview { Request = live, Code = DeviceSas.Code(joinPeer.Keys.HandshakeHash) }; }
             Changed?.Invoke();
             return;
         }
@@ -1197,36 +1298,63 @@ public sealed partial class DeviceSyncService : IDisposable
         { Kind = DeviceKind.GroupReview, Payload = DeviceJson.Encode(request) });
     }
 
+    // Atomic approval: the expected review is captured and consumed under
+    // the shared review lock, and the captured value — never the mutable
+    // property — flows into the approval below. A replaced or missing
+    // review refuses instead of approving the wrong request.
+    private readonly object _reviewLock = new();
+
+    public async Task<bool> TryApproveGroupReviewAsync(Guid expectedRequestID, string expectedCode)
+    {
+        GroupJoinReview? stored;
+        lock (_reviewLock)
+        {
+            stored = GroupReview;
+            if (stored is null || stored.Request.Id != expectedRequestID || stored.Code != expectedCode)
+                return false;
+            GroupReview = null;
+        }
+        return await ApproveReviewAsync(stored);
+    }
+
     public async Task ApproveGroupReviewAsync()
+    {
+        GroupJoinReview? stored;
+        lock (_reviewLock)
+        {
+            stored = GroupReview;
+            GroupReview = null;
+        }
+        if (stored is null) return;
+        await ApproveReviewAsync(stored);
+    }
+
+    private async Task<bool> ApproveReviewAsync(GroupJoinReview stored)
     {
         // Approval always follows a human-reviewed code, even when the
         // reviewer is the sponsor itself: the stored code is verified
         // against the live join channel either way. No direct path.
-        if (GroupReview is not { } stored) return;
-        GroupReview = null;
         if (_sponsoredRequests.ContainsKey(stored.Request.Id))
-        {
-            await ApproveSponsoredAsync(stored);
-            return;
-        }
+            return await ApproveSponsoredAsync(stored);
         var sponsor = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == stored.Request.SponsorID && CanExchangeFabric(p));
-        if (sponsor is null) { LastOutcome = "Sponsor is unreachable."; return; }
+        if (sponsor is null) { LastOutcome = "Sponsor is unreachable."; return false; }
         await SendEnvelopeAsync(sponsor, new DeviceEnvelope
         { Kind = DeviceKind.GroupApprove, Payload = DeviceJson.Encode(stored) });
+        return true;
     }
 
     // The approve gate: the request must equal the live sponsored original
     // field-for-field, and the reviewed code must match the join channel's
     // current handshake hash — verified for direct and relayed reviews
     // alike. Either side failing refuses admission silently.
-    private async Task ApproveSponsoredAsync(GroupJoinReview review)
+    private async Task<bool> ApproveSponsoredAsync(GroupJoinReview review)
     {
-        if (CurrentGroup is null || review.Request.GroupID != CurrentGroup.Id || !GroupJoinRequests.Live(review.Request)) return;
+        if (CurrentGroup is null || review.Request.GroupID != CurrentGroup.Id || !GroupJoinRequests.Live(review.Request)) return false;
         if (!_sponsoredRequests.TryGetValue(review.Request.Id, out var original)
-            || !GroupJoinRequests.Same(original, review.Request)) return;
+            || !GroupJoinRequests.Same(original, review.Request)) return false;
         if (!_peers.TryGetValue(review.Request.Id, out var peer)
-            || peer is not { Keys: not null, Hello: not null } || peer.TrustedReady) return;
-        if (review.Code != DeviceSas.Code(peer.Keys.HandshakeHash)) return;
+            || peer is not { Keys: not null, Hello: not null } || peer.TrustedReady) return false;
+        if (review.Code != DeviceSas.Code(peer.Keys.HandshakeHash)) return false;
         original.Approved = true;
         _sponsoredRequests[review.Request.Id] = original;
         GroupRequests.RemoveAll(r => r.Id == review.Request.Id);
@@ -1235,6 +1363,7 @@ public sealed partial class DeviceSyncService : IDisposable
         peer.LocalConfirmed = true;
         await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.PairConfirm });
         FinishTrust(peer);
+        return true;
     }
 
     private async Task HandleGroupEnvelopeAsync(Peer peer, DeviceEnvelope envelope)
@@ -1314,14 +1443,14 @@ public sealed partial class DeviceSyncService : IDisposable
                 var review = DeviceJson.Decode<GroupJoinReview>(envelope.Payload);
                 if (review.Request.GroupID != CurrentGroup?.Id || !GroupJoinRequests.Live(review.Request)
                     || review.Code.Length != 39) break;
-                GroupReview = review;
+                lock (_reviewLock) { GroupReview = review; }
                 Changed?.Invoke();
                 break;
             }
             case DeviceKind.GroupApprove:
             {
                 if (envelope.Payload is null) break;
-                await ApproveSponsoredAsync(DeviceJson.Decode<GroupJoinReview>(envelope.Payload));
+                _ = await ApproveSponsoredAsync(DeviceJson.Decode<GroupJoinReview>(envelope.Payload));
                 break;
             }
         }
@@ -1497,6 +1626,27 @@ public sealed partial class DeviceSyncService : IDisposable
             await SendAckAsync(peer, commandId, envelope.SessionID, "failed", "Unknown action.", envelope.Epoch);
             return;
         }
+        // Drain closes only work-starting actions. Stop, answers, queue
+        // management and settings remain available so active work can finish.
+        // The shared admission guard spans the rest of this command so the
+        // final quiescence decision cannot miss in-flight work.
+        if (!AcceptingWork && command.Action is "submit" or "inject" or "injectAll" or "resumeQueue")
+        {
+            _commands.MarkFailed(commandId);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
+                "This home is draining for an update. Nothing was submitted.", envelope.Epoch);
+            return;
+        }
+        var startsWork = command.Action is "submit" or "inject" or "injectAll" or "resumeQueue";
+        if (startsWork && !TryBeginExternalWork())
+        {
+            _commands.MarkFailed(commandId);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
+                "This home is draining for an update. Nothing was submitted.", envelope.Epoch);
+            return;
+        }
+        try
+        {
         if (command.Action == "submit")
         {
             var missing = command.BlobHashes.Where(h => !_blobPaths.TryGetValue(h, out var path) || !File.Exists(path)).ToList();
@@ -1580,6 +1730,8 @@ public sealed partial class DeviceSyncService : IDisposable
         _commands.MarkCompleted(commandId);
         await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
         await SendTranscriptAsync(peer, session);
+        }
+        finally { if (startsWork) EndExternalWork(); }
     }
 
     // ---- Dispatch ----
@@ -1682,6 +1834,7 @@ public sealed partial class DeviceSyncService : IDisposable
                             });
                         }
                     peer.LeasedSessions.Add(leased.Id);
+                    DisplayLeaseGranted?.Invoke(leased.Id, peerHome, result.Epoch);
                     PublishSidebars();
                     Changed?.Invoke();
                     await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseGranted, Boot = _boot, SessionID = envelope.SessionID, Epoch = result.Epoch });
@@ -1695,7 +1848,10 @@ public sealed partial class DeviceSyncService : IDisposable
             case DeviceKind.LeaseRelease:
                 if (HomeSession(envelope) is { } released && envelope.Epoch is { } relEpoch)
                 {
+                    var wasHolder = _leases.Holder(released.Id) is { } holder
+                        && holder.Device == peerHome && holder.Epoch == relEpoch;
                     _leases.Release(released.Id, peerHome, relEpoch);
+                    if (wasHolder) DisplayLeaseReleased?.Invoke(released.Id, peerHome, relEpoch);
                     peer.LeasedSessions.Remove(released.Id);
                     PublishSidebars();
                     Changed?.Invoke();
@@ -1796,14 +1952,18 @@ public sealed partial class DeviceSyncService : IDisposable
                     }
                     if (blob.Chunk is not null)
                     {
-                        if (!_staged.TryGetValue(blob.Sha256Hex, out var staged)) { staged = new List<byte>(); _staged[blob.Sha256Hex] = staged; }
+                        if (!_staged.TryGetValue(blob.Sha256Hex, out var staged))
+                        {
+                            if (!TryBeginExternalWork()) { await SendBlobAckAsync(peer, envelope, blob.Sha256Hex, false); break; }
+                            staged = new List<byte>(); _staged[blob.Sha256Hex] = staged; _guardedBlobs.Add(blob.Sha256Hex);
+                        }
                         staged.AddRange(blob.Chunk);
-                        if (staged.Count > DeviceBlob.MaxBlob) { _staged.Remove(blob.Sha256Hex); await SendBlobAckAsync(peer, envelope, blob.Sha256Hex, false); break; }
+                        if (staged.Count > DeviceBlob.MaxBlob) { _staged.Remove(blob.Sha256Hex); ReleaseBlobGuard(blob.Sha256Hex); await SendBlobAckAsync(peer, envelope, blob.Sha256Hex, false); break; }
                     }
                     if (blob.Done)
                     {
                         var bytes = _staged.GetValueOrDefault(blob.Sha256Hex)?.ToArray() ?? Array.Empty<byte>();
-                        _staged.Remove(blob.Sha256Hex);
+                        _staged.Remove(blob.Sha256Hex); ReleaseBlobGuard(blob.Sha256Hex);
                         if (!DeviceBlob.Verify(bytes, blob.Sha256Hex)) { await SendBlobAckAsync(peer, envelope, blob.Sha256Hex, false); break; }
                         var dir = Path.Combine(_folder, "Attachments", blobSession.Id.ToString("D"));
                         Directory.CreateDirectory(dir);
@@ -2031,6 +2191,7 @@ public sealed partial class DeviceSyncService : IDisposable
         if (holder?.Device == DeviceId) return true;
         var result = _leases.Acquire(sessionId, DeviceId);
         if (!result.Granted) { LastOutcome = "Could not record local display fence."; return false; }
+        DisplayLeaseGranted?.Invoke(sessionId, DeviceId, result.Epoch);
         foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == result.Displaced).ToArray())
         {
             old.LeasedSessions.Remove(sessionId);
