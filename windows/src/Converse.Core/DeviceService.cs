@@ -429,7 +429,7 @@ public sealed partial class DeviceSyncService : IDisposable
 
     // Tests disable discovery AND bind loopback so they neither advertise
     // phantom groups nor open a LAN listener that asks for firewall access.
-    public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = true, bool loopbackOnly = false)
+    public async Task StartAsync(int port = DefaultPort, bool enableDiscovery = false, bool loopbackOnly = true)
     {
         if (loopbackOnly && enableDiscovery) throw new ArgumentException("Loopback listeners cannot advertise on the LAN.");
         _shutdown = new CancellationTokenSource();

@@ -141,7 +141,8 @@ versioned folders as rollback sources; do not overwrite a running app or
 change the taskbar target on each update. Preserve the scoped firewall rules
 Richard approved for the fixed executable (TCP 48721 and UDP 5353, local
 subnet). Test executables do not need firewall rules: every device-service
-test uses `enableDiscovery: false, loopbackOnly: true`.
+test uses loopback. `StartAsync` defaults to no discovery and loopback-only;
+the production app explicitly opts into discovery and LAN listening.
 
 Clipboard images enter the normal attachment path, not RichEdit embedded
 objects. Clipboard text is inserted as plain text. The draft's default,

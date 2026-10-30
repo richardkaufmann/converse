@@ -37,7 +37,7 @@ static class AgentChecks
                 calls++; input = request.Content is null ? "" : await request.Content.ReadAsStringAsync(token);
                 return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Synthetic verified reply\\\",\\\"attention\\\":\\\"\\\",\\\"scoreboard\\\":{\\\"summary\\\":\\\"No live market data in this test\\\",\\\"metrics\\\":[{\\\"label\\\":\\\"Price\\\",\\\"value\\\":\\\"999\\\",\\\"sourceURL\\\":\\\"https://invented.invalid\\\"}]}}\"}]}]}");
             };
-            foreach (var service in new[] { home, viewer }) { service.PairingConfirmation = _ => Task.FromResult(true); await service.StartAsync(0, false); }
+            foreach (var service in new[] { home, viewer }) { service.PairingConfirmation = _ => Task.FromResult(true); await service.StartAsync(0, enableDiscovery: false, loopbackOnly: true); }
             check(await join(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Online == true), "Agent control peers join one group");
             var target = new DeviceGlobalID(home.DeviceId, agent.Id).ToString();
             var loaded = await viewer.RequestParticipantAsync(home.DeviceId, "agent.settings", target);

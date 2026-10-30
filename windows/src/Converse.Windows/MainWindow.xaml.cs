@@ -133,7 +133,7 @@ public sealed partial class MainWindow : Window
         // PairingConfirmation callback stays for headless tests only.)
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
-        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync();
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(enableDiscovery: true, loopbackOnly: false);
         _help = LoadHelp();
         Title = "Converse" + (_help is null ? " (dev)" : " " + _help.AppVersion
             + (_help.AppBuild.Length > 0 ? " (" + _help.AppBuild + ")" : ""));

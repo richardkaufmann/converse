@@ -238,12 +238,12 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
         home.PairingConfirmation = _ => Task.FromResult(true);
         viewer.PairingConfirmation = _ => Task.FromResult(true);
-        await home.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
+        await home.StartAsync(0); // Default service startup must remain loopback-only.
         await viewer.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
         var listeners = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
         Check(listeners.Any(e => e.Port == home.ListeningPort && e.Address.Equals(System.Net.IPAddress.Loopback)) &&
               !listeners.Any(e => e.Port == home.ListeningPort && !System.Net.IPAddress.IsLoopback(e.Address)),
-              "Isolated device tests listen on loopback only, never LAN interfaces");
+              "Default device startup listens on loopback only, never LAN interfaces");
         async Task<bool> Until(Func<bool> done)
         {
             var deadline = DateTime.UtcNow.AddSeconds(15);
