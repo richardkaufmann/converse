@@ -70,6 +70,8 @@ public sealed class DeviceParticipantResponse
 
 public sealed class DeviceTellPayload
 {
+    [JsonPropertyName("replyExpected")] public bool ReplyExpected { get; set; }
+    [JsonPropertyName("inReplyTo")] public Guid? InReplyTo { get; set; }
     [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
     [JsonPropertyName("source")] public string Source { get; set; } = "";
     [JsonPropertyName("sourceTitle")] public string SourceTitle { get; set; } = "";
@@ -79,3 +81,15 @@ public sealed class DeviceTellPayload
     [JsonPropertyName("urgent")] public bool Urgent { get; set; } = false;
 }
 
+
+public sealed class DeviceQueueWatch
+{
+    [JsonPropertyName("target")] public string Target { get; set; } = "";
+    [JsonPropertyName("source")] public string Source { get; set; } = "";
+    [JsonPropertyName("delivery")] public Guid Delivery { get; set; }
+}
+public sealed class DeviceQueueWatchReport
+{
+    [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
+    [JsonPropertyName("entries")] public List<DeviceQueueWatch> Entries { get; set; } = new();
+}

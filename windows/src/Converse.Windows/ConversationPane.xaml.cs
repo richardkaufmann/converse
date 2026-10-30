@@ -159,11 +159,11 @@ public sealed partial class ConversationPane : UserControl
         List<(string Role, string Text, List<string> Images)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Messages
-                .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList())).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
-                .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Text))
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes))).ToList();
         if (lines is null) return (new List<(string Role, string Text, List<string> Images)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
@@ -788,6 +788,12 @@ public sealed partial class ConversationPane : UserControl
             Margin = new Thickness(0, 2, 0, 0),
             Foreground = new SolidColorBrush(isUser ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray),
         };
+        if (_selected?.LocalSessionID is { } localID)
+        {
+            var message = _host.Store.Sessions.FirstOrDefault(s => s.Id == localID)?.Messages
+                .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text)).ElementAtOrDefault(number - 1);
+            if (message?.CreatedAt is { } date) ToolTipService.SetToolTip(chip, "Recorded " + date.ToLocalTime().ToString("G"));
+        }
         Grid.SetColumn(chip, 0);
         grid.Children.Add(chip);
         var body = new StackPanel { Spacing = 8 };
@@ -802,7 +808,13 @@ public sealed partial class ConversationPane : UserControl
         var blocks = isUser
             ? new List<MdBlock> { new MdText(flat, new List<MdRun>()) }
             : MarkdownBlocks.Parse(flat);
-        foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
+        if (SwitchboardPresentation.Summary(flat) is { } summary)
+        {
+            var row = new TextBlock { Text = summary, FontSize = 16, MaxLines = 1, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = new SolidColorBrush(Microsoft.UI.Colors.DarkOrange) };
+            ToolTipService.SetToolTip(row, line.Text);
+            body.Children.Add(row);
+        }
+        else foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
         if (body.Children.Count == 0) body.Children.Add(new RichTextBlock { FontSize = 16 });
         // Inline response images (Mac message.images parity): the caption
         // already renders as text above; each managed file draws bounded
@@ -1717,11 +1729,12 @@ public sealed partial class ConversationPane : UserControl
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var preview = new TextBlock
             {
-                Text = text.Replace("\r", " ").Replace("\n", " "),
+                Text = SwitchboardPresentation.Summary(text, queued: true) ?? text.Replace("\r", " ").Replace("\n", " "),
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            ToolTipService.SetToolTip(preview, text);
             Grid.SetColumn(preview, 0);
             row.Children.Add(preview);
             var injectingThis = queueBusy && queueRecord?.Payload.Action == "inject" && queueRecord.Payload.PendingID == id;

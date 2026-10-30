@@ -53,6 +53,9 @@ struct SavedSession: Codable {
     var pending: [PendingPrompt]? = nil
     var switchboardEnabled: Bool? = nil
     var switchboardHandled: [UUID]? = nil
+    var switchboardObligations: [SwitchboardObligation]? = nil
+    var switchboardExpectations: [SwitchboardExpectation]? = nil
+    var switchboardLastRecoveryAt: Date? = nil
     var createdAt: Date? = nil
     var titleUpdatedAt: Date? = nil
     var agent: AgentConfig? = nil
@@ -90,6 +93,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var queuePaused = false
     @Published var switchboardEnabled = false
     var switchboardHandled: [UUID] = []
+    var switchboardObligations: [SwitchboardObligation] = []
+    var switchboardExpectations: [SwitchboardExpectation] = []
+    var switchboardLastRecoveryAt: Date?
+    var switchboardProgress: (revision: UInt64, at: Date)?
     var switchboardTurnStart: Int?
     var switchboardHop = 0
     var interrupted = false
@@ -151,6 +158,10 @@ final class Session: ObservableObject, Identifiable {
         lastCompactedAt = saved.lastCompactedAt
         choices = saved.choices ?? SessionChoices()
         switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
+        switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
+        switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
+        // An interrupted supervised turn is uncertain after restart, never auto-replayed.
+        for index in switchboardObligations.indices where switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil { switchboardObligations[index].state = "cancelled" }
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
         if saved.compactionInProgress == true {
@@ -161,7 +172,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -400,6 +411,7 @@ final class Store: ObservableObject {
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
         send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
+        else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
             if !s.busy { s.injectionNotice = "Injected prompt is held in the queue. Check the session notice before retrying." }
             else if s.entry.engine == "muse" && usesInteractiveMuse && s.agent == nil { s.injectionNotice = "Opening your injected prompt…" }
@@ -416,7 +428,7 @@ final class Store: ObservableObject {
     }
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
-        if success && !s.interrupted { processSwitchboard(s) }
+        if success && !s.interrupted { processSwitchboard(s); switchboardTurnFinished(s) }
         s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
@@ -1159,11 +1171,14 @@ struct TranscriptMessageLabel: Equatable {
     var location: Int
     var number: Int
     var prompt: Bool
+    var timestamp: Date? = nil
     var color: NSColor { prompt ? .systemBlue : .systemGray }
 }
 final class MessageNumberRuler: NSRulerView {
     override var isFlipped: Bool { true }
     weak var text: ConversationTextView?
+    private var timestampTips: [Int: String] = [:]
+    @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String { timestampTips[tag] ?? "" }
     init(scroll: NSScrollView, text: ConversationTextView) {
         self.text = text
         super.init(scrollView: scroll, orientation: .verticalRuler)
@@ -1176,6 +1191,7 @@ final class MessageNumberRuler: NSRulerView {
     @objc func refresh() { needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) { drawHashMarksAndLabels(in: dirtyRect) }
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        removeAllToolTips(); timestampTips.removeAll()
         guard let text, let layout = text.layoutManager, let container = text.textContainer else { return }
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         (dark ? NSColor.black : NSColor.white).setFill(); bounds.fill()
@@ -1219,6 +1235,10 @@ final class MessageNumberRuler: NSRulerView {
             let y = origin + lineRect.minY + max(0, (lineRect.height - label.size().height) / 2)
             if y + label.size().height >= bounds.minY && y <= bounds.maxY {
                 label.draw(at: NSPoint(x: ruleThickness - label.size().width - 9, y: y))
+                if let date = message.timestamp {
+                    let tag = addToolTip(NSRect(x: 0, y: y, width: ruleThickness, height: max(18, label.size().height)), owner: self, userData: nil)
+                    timestampTips[tag] = "Recorded " + date.formatted(date: .abbreviated, time: .standard)
+                }
             }
         }
     }
@@ -1730,11 +1750,16 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
-                if message.role == "assistant" {
+                let trafficSummary = TranscriptStyle.trafficSummary(visible)
+                if let summary = trafficSummary {
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
+                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base))
+                } else if message.role == "assistant" {
                     if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
                     else { body = MarkdownText.render(visible); markdownCache[message.id] = (visible, NSAttributedString(attributedString: body)) }
                 } else { body = NSMutableAttributedString(string: visible, attributes: base) }
-                for mark in (message.delays ?? []).sorted(by: { $0.offset > $1.offset }) {
+                for mark in (trafficSummary == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
                     let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
                     let at = min(renderedOffset, body.length)
@@ -1763,7 +1788,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 for path in message.images { image(path) }
                 guard document.length > start else { continue }
                 messageNumber = session.messageNumbers[message.id].flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber + 1)
-                text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user"))
+                text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user", timestamp: message.createdAt))
                 let last = document.length - 1
                 let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
                 let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle

@@ -224,7 +224,7 @@ struct PadPane: View {
                         Button("Inject all") { command("injectAll") }
                         Button("Clear") { command("clearQueue") }
                     }
-                    ForEach(snapshot.pending) { item in HStack { Text(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
+                    ForEach(snapshot.pending) { item in HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
                 }.font(.caption).padding(8).background(Color.blue.opacity(0.06)).disabled(!model.canControl(id))
             }
             if let conflict = service.draftConflicts[id] {

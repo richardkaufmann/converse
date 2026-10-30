@@ -23,6 +23,44 @@ struct TranscriptFollowState {
 
 // Display classification only; never executes JSON or changes stored text.
 enum TranscriptStyle {
+    static func trafficSummary(_ source: String, queued: Bool = false) -> String? {
+        let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        func clipped(_ value: String, limit: Int = 100) -> String {
+            let flat = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            return flat.count > limit ? String(flat.prefix(limit - 1)) + "…" : flat
+        }
+        func name(_ value: String) -> String { clipped(value.components(separatedBy: " · session ")[0].components(separatedBy: " [")[0], limit: 35) }
+        let lines = text.components(separatedBy: "\n")
+        let detail = clipped(lines.dropFirst().joined(separator: " "))
+        if text.hasPrefix("[Converse message from ") {
+            let who = String((lines.first ?? "").dropFirst("[Converse message from ".count))
+            return (queued ? "Queued ← " : "Received ← ") + name(who) + (text.contains("[Reply expected") ? " · Reply expected" : "") + (detail.isEmpty ? "" : " · " + detail)
+        }
+        if text.hasPrefix("[Converse switchboard recovery") { return "Reply needed · " + clipped(detail) }
+        if text.hasPrefix("[Converse switchboard supervision") { return "Needs attention · " + clipped(detail) }
+        if text.hasPrefix("[Converse switchboard ") { return "Switchboard · " + clipped(String((lines.first ?? "").dropFirst(1).dropLast())) }
+        if text.hasPrefix("Switchboard:") {
+            let header = String((lines.first ?? "").dropFirst("Switchboard:".count)).trimmingCharacters(in: .whitespaces)
+            if header.hasPrefix("message queued from ") {
+                return "Queued ← " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
+            }
+            if let arrow = header.range(of: "→") {
+                let status = header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : "Sent"
+                return status + " → " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
+            }
+            return "Switchboard · " + clipped(header)
+        }
+        if text.hasPrefix("```converse\n"), text.hasSuffix("\n```"),
+           let data = String(text.dropFirst(12).dropLast(4)).data(using: .utf8),
+           let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let action = command["command"] as? String ?? "command"
+            if action == "tell" || action == "tell-urgently" {
+                return "Tell → " + clipped(command["to"] as? String ?? "session", limit: 28) + " · " + clipped(command["text"] as? String ?? "")
+            }
+            return "Switchboard · " + action
+        }
+        return nil
+    }
     static let blockSpacing: CGFloat = 8
     // Trim only display terminators. Internal paragraphs and stored source,
     // including explicitly typed draft newlines, remain untouched.

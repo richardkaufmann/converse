@@ -67,6 +67,7 @@ public sealed class AgentRuntime
     public void Tick(DateTime now)
     {
         if (_stopping) return;
+        try { _devices.SuperviseSwitchboard(now); } catch { /* Persistence failure prevents injection; try again on the next tick. */ }
         foreach (var session in _store.Sessions.Where(s => s.Agent?.CanSchedule == true && !s.Busy && !s.QueuePaused && s.Pending.Count == 0).ToArray())
         {
             var config = session.Agent!;
@@ -163,7 +164,7 @@ public sealed class AgentRuntime
             foreach (var tell in (reply["tell"] as JsonArray ?? new()).OfType<JsonObject>().Take(2))
             {
                 var target = Clip(tell["to"], 200); var content = Clip(tell["text"], 8000);
-                if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content);
+                if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, Guid.TryParse(tell["inReplyTo"]?.GetValue<string>(), out var correlation) ? correlation : null);
             }
             session.Status = "Ready";
         }

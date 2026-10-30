@@ -9,6 +9,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     helpSelfTests(check)
     workspaceSelfTests(check)
     switchboardSelfTests(check)
+    switchboardSupervisionSelfTests(check)
     groupSwitchboardSelfTests(check)
     transcriptExportSelfTests(check)
     setupSelfTests(check)

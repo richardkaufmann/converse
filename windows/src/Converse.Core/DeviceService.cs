@@ -542,7 +542,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
-        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1" },
+        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -864,6 +864,7 @@ public sealed partial class DeviceSyncService : IDisposable
 
     private void Disconnect(Peer peer)
     {
+        if (peer.Hello is { } departed) _queueWatchReports.TryRemove(departed.DeviceID, out _);
         peer.Client.Dispose();
         if (!_peers.Remove(peer.Id)) return; // Disconnect callbacks may arrive twice.
         GroupPairingPrompts.RemoveAll(p => p.PeerId == peer.Id);

@@ -280,6 +280,8 @@ struct DeviceTellPayload: Codable, Equatable {
     var text: String
     var hop: Int
     var urgent: Bool = false
+    var replyExpected: Bool? = nil
+    var inReplyTo: UUID? = nil
 }
 struct GroupTellReceipt: Codable {
     var id: UUID
@@ -354,4 +356,15 @@ struct DeviceParticipantIntent: Codable, Identifiable {
     var request: DeviceParticipantRequest
     var outcome: String = "pending"
     var response: DeviceParticipantResponse? = nil
+}
+
+// Only queue identities, never prompt text. Readiness is computed on its home.
+struct DeviceQueueWatch: Codable {
+    var target: String
+    var source: String
+    var delivery: UUID
+}
+struct DeviceQueueWatchReport: Codable {
+    var groupID: String
+    var entries: [DeviceQueueWatch]
 }
