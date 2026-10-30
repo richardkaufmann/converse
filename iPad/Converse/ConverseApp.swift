@@ -217,6 +217,14 @@ struct PadPane: View {
             if let snapshot, snapshot.offset > 0 { Button("Load \(snapshot.offset) earlier messages") { service.requestEarlier(globalID: id) }.font(.caption).padding(4) }
             PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers, displayEpoch: service.remoteLeases[id],
                           edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 })
+                .overlay(alignment: .bottomTrailing) {
+                    if let state = snapshot?.compaction, state.visible {
+                        Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }
+                            .buttonStyle(.borderedProminent).tint(state.phase == "available" ? .yellow : .gray).foregroundStyle(.black)
+                            .font(.caption).help(state.detail).accessibilityHint(state.detail)
+                            .disabled(!model.canControl(id) || state.phase == "running").padding(.trailing, 12).padding(.bottom, 46)
+                    }
+                }
             Divider()
             if let status = snapshot?.agentWidget?.loopStatus { Text(status).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(6) }
             if let snapshot {
@@ -275,6 +283,9 @@ struct PadPane: View {
     func command(_ action: String) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: action)) }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
         HStack(spacing: 8) {
+            if let state = snapshot.compaction {
+                Menu { Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(!model.canControl(id) || state.phase != "available") } label: { Image(systemName: "ellipsis.circle") }
+            }
             Menu(snapshot.model.isEmpty ? "Model" : snapshot.model) {
                 ForEach(snapshot.modelOptions) { choice in Button(choice.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "model", model: choice.id, modelProvider: choice.provider, modelProfile: choice.profile)) } }
             }

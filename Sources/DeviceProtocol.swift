@@ -198,6 +198,16 @@ struct DeviceTranscriptPayload: Codable {
     var requests: [DeviceRequestDTO] = []
     var queuePaused: Bool = false
     var agentWidget: DeviceAgentWidget? = nil
+    var compaction: DeviceCompactionState? = nil
+}
+// Optional capability/state: older homes omit it and viewers show no action.
+struct DeviceCompactionState: Codable, Equatable {
+    var recommended: Bool
+    var phase: String // available, queued, running
+    var percent: Int?
+    var detail: String
+    var title: String { phase == "running" ? "Compacting…" : phase == "queued" ? "Cancel compact" : "Compact" }
+    var visible: Bool { recommended || phase != "available" }
 }
 struct DeviceTranscriptRequest: Codable, Equatable {
     var beforeOffset: Int

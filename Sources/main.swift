@@ -56,6 +56,8 @@ struct SavedSession: Codable {
     var createdAt: Date? = nil
     var titleUpdatedAt: Date? = nil
     var agent: AgentConfig? = nil
+    var compactionInProgress: Bool? = nil
+    var lastCompactedAt: Date? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -99,6 +101,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var accountStatus = ""
     @Published var probeError = ""
     @Published var needsSignIn = false
+    @Published var compactionRequested = false
+    @Published var compacting = false
+    var lastCompactedAt: Date?
+    var claudeLastContext: (model: String, tokens: Int)?
     @Published var busy = false
     @Published var status = "Ready"
     var retryDetail: String?
@@ -142,15 +148,20 @@ final class Session: ObservableObject, Identifiable {
         id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages; agent = saved.agent
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
+        lastCompactedAt = saved.lastCompactedAt
         choices = saved.choices ?? SessionChoices()
         switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
+        if saved.compactionInProgress == true {
+            queuePaused = true
+            messages.append(Message(role: "notice", text: "Compaction was interrupted when Converse closed. Its completion is unknown; it will not be retried automatically. Your transcript and draft are retained."))
+        }
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -245,6 +256,7 @@ final class Store: ObservableObject {
         let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
+        s.compactionRequested = false
         s.queuePaused = true; s.resumeAfterInterrupt = false
         if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
         interruptProcess(s)
@@ -361,6 +373,7 @@ final class Store: ObservableObject {
             s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
             s.injectionTargetID = nil
         }
+        if !s.busy, !s.changingSetting, s.compactionRequested { startCompaction(s); return }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
         // A tick queued just before a window closes must not run after that
         // window (or after a changed restriction). Its persisted reservation is
@@ -411,7 +424,7 @@ final class Store: ObservableObject {
             s.messages.append(Message(role: "notice", text: "Interrupted before the CLI returned a conversation ID. Your queued message is held; use Resume queue to retry."))
         }
         s.interrupted = false; s.resumeAfterInterrupt = false
-        if !shouldRun { s.queuePaused = !s.pending.isEmpty }
+        if !shouldRun { s.queuePaused = !s.pending.isEmpty; s.compactionRequested = false }
         if !shouldRun && s.injectionTargetID != nil { s.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying." }
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
@@ -434,6 +447,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation" { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
+        s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
             // Restore before any runtime/save callback: an external request must
@@ -641,10 +655,16 @@ final class Store: ObservableObject {
                 s.messages.append(Message(role: "notice", text: "Approval " + decision + (diagnostics.isEmpty ? "" : ": " + diagnostics.joined(separator: "\n"))))
             }
             s.status = s.requests.isEmpty ? "Working…" : "Waiting for your answer"
+        case "session/contextUsage":
+            if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+            s.toolStatus.accountUsage?.context = AccountUsage.context(tokens: params["usedTokens"], capacity: params["windowTokens"], at: Date())
         case "session/tokenUsage":
             if let usage = params["usage"] as? [String: Any] { s.toolStatus.usage = "\((usage["inputTokens"] as? Int ?? 0).formatted()) in / \((usage["outputTokens"] as? Int ?? 0).formatted()) out" }
         case "item/started", "item/updated", "item/completed":
             guard let item = params["item"] as? [String: Any], let itemID = item["itemId"] as? String else { break }
+            if item["kind"] as? String == "compaction", method == "item/completed", item["outcome"] as? String == "compacted" {
+                s.lastCompactedAt = Date(); s.toolStatus.accountUsage?.context = nil
+            }
             if item["kind"] as? String == "agentMessage" {
                 if s.museItems[itemID] == nil {
                     if s.museItems.isEmpty { s.museItems[itemID] = responseID }
@@ -731,6 +751,10 @@ final class Store: ObservableObject {
                     let previousUsage = s.toolStatus.accountUsage
                     let identity = snapshot.status.account ?? "Muse CLI has no reported account email"
                     s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
+                    if let context = previousUsage?.context {
+                        if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+                        s.toolStatus.accountUsage?.context = context
+                    }
                     s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
@@ -742,7 +766,9 @@ final class Store: ObservableObject {
                 if let quotaResult {
                     s.quotaRefreshedAt = Date()
                     switch quotaResult {
-                    case .success(let value): s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage()
+                    case .success(let value):
+                        let context = s.toolStatus.accountUsage?.context
+                        s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage(context: context)
                     case .failure(let error): s.toolStatus.quota = error.localizedDescription
                     }
                 }
@@ -769,6 +795,7 @@ final class Store: ObservableObject {
         func remember() {
             switch change {
             case .model(let model):
+                s.toolStatus.accountUsage?.context = nil; s.claudeLastContext = nil
                 s.choices.model = model.id; s.choices.modelProvider = model.provider; s.choices.modelProfile = model.profile
                 if let effort = s.choices.effort, !model.efforts.contains(effort) {
                     s.choices.effort = s.entry.engine == "muse" ? nil : model.efforts.first
@@ -906,6 +933,7 @@ final class Store: ObservableObject {
         applySessionChoices(s)
     }
     func updateReportedStatus(_ obj: [String: Any], session s: Session) {
+        if s.entry.engine == "claude" { updateClaudeContext(obj, session: s) }
         let payload = obj["payload"] as? [String: Any] ?? obj
         if let quota = payload["allowance"] as? [String: Any], quota["window"] != nil { s.toolStatus.quota = MuseStatusProbe.quotaSummary(quota) }
         if let model = payload["model"] as? String { s.toolStatus.model = model }
@@ -1818,6 +1846,11 @@ struct Conversation: View {
             }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
+                .overlay(alignment: .bottomTrailing) {
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        if let state = session.compactionState { CompactionControl(state: state) { if session.compactionRequested { session.compactionRequested = false } else { _ = store.requestCompaction(session) } }.disabled(session.changingSetting || session.interrupted).padding(.trailing, 12).padding(.bottom, 46) }
+                    }
+                }
             Divider()
             if session.agent != nil { AgentControls(session: session) } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -1858,6 +1891,12 @@ struct Conversation: View {
                                 Button("Untrusted") { store.setApproval(session, value: "untrusted") }
                             }.menuStyle(.borderlessButton).fixedSize()
                                 .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
+                        }
+                        if session.compactionState != nil {
+                            Menu {
+                                Button(session.busy ? "Compact after this turn" : "Compact context") { _ = store.requestCompaction(session) }
+                                    .disabled(session.compacting || session.compactionRequested || session.changingSetting)
+                            } label: { Image(systemName: "ellipsis.circle") }.help("Session actions")
                         }
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.disabled(session.changingSetting)

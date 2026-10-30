@@ -16,6 +16,7 @@ struct AccountLimit: Codable, Equatable {
 }
 struct AccountUsage: Codable, Equatable {
     var context: ContextUsage?
+    var contextCompactedAt: Date? = nil
     var limits: [AccountLimit] = []
     var observedAt: Date?
     var notice: String?
@@ -159,4 +160,28 @@ func accountUsageSelfTests(_ check: (Bool, String) -> Void) {
     try? (try? JSONSerialization.data(withJSONObject: record))?.write(to: path)
     let snapshot = ProviderStatus.resolveCodex(catalog: [:], config: [:], thread: ["path": path.path])
     check(snapshot.status.accountUsage?.context?.percent == 25, "Provider status loads context from the reported thread path")
+}
+
+struct CompactionPolicy {
+    // A recommendation, not a hard model limit. Stale and pre-compaction
+    // observations cannot trigger it; billing totals are never inputs.
+    static func recommends(_ context: ContextUsage?, after lastCompacted: Date?, now: Date = Date()) -> Bool {
+        guard let context, context.capacity > 0, context.tokens >= 0,
+              context.observedAt <= now, now.timeIntervalSince(context.observedAt) <= 600,
+              lastCompacted.map({ context.observedAt > $0 && now.timeIntervalSince($0) >= 600 }) ?? true else { return false }
+        return Double(context.tokens) / Double(context.capacity) >= 0.8
+    }
+}
+
+struct CompactionControl: View {
+    var state: DeviceCompactionState
+    var action: () -> Void
+    var body: some View {
+        if state.visible {
+            Button(state.title, action: action).buttonStyle(.borderedProminent)
+                .tint(state.phase == "available" ? .yellow : .gray).foregroundStyle(.black)
+                .font(.system(size: 12, weight: .medium)).disabled(state.phase == "running")
+                .help(state.detail).accessibilityHint(state.detail)
+        }
+    }
 }

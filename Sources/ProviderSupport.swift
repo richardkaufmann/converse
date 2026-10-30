@@ -84,13 +84,13 @@ final class ProviderProbeConnection {
     private var buffer = Data()
     private var nextID = 0
     private var timeout: DispatchWorkItem?
-    init(entry: Entry, arguments: [String]) throws {
+    init(entry: Entry, arguments: [String], timeoutSeconds: Double = 12) throws {
         process = ProviderCommand.process(entry: entry, arguments: arguments)
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
         let p = process
         let task = DispatchWorkItem { if p.isRunning { p.terminate() } }
-        timeout = task; DispatchQueue.global().asyncAfter(deadline: .now() + 12, execute: task)
+        timeout = task; DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: task)
     }
     deinit { timeout?.cancel(); try? input.fileHandleForWriting.close(); if process.isRunning { process.terminate() } }
     func write(_ object: [String: Any]) throws {
@@ -108,11 +108,11 @@ final class ProviderProbeConnection {
             buffer.append(data)
         }
     }
-    func rpc(_ method: String, _ params: [String: Any]) throws -> [String: Any] {
+    func rpc(_ method: String, _ params: [String: Any], notification: (([String: Any]) throws -> Void)? = nil) throws -> [String: Any] {
         nextID += 1; let id = nextID
         try write(["id": id, "method": method, "params": params])
         while true {
-            let value = try read(); guard value["id"] as? Int == id else { continue }
+            let value = try read(); guard value["id"] as? Int == id else { try notification?(value); continue }
             if let error = value["error"] as? [String: Any] { throw NSError(domain: "Converse", code: 2, userInfo: [NSLocalizedDescriptionKey: error["message"] as? String ?? "CLI rejected status query"]) }
             return value["result"] as? [String: Any] ?? [:]
         }
@@ -146,8 +146,10 @@ struct ProviderStatus {
         // Optional telemetry must never make model/account discovery fail.
         if let limits = try? rpc.rpc("account/rateLimits/read", [:]) {
             let context = result.status.accountUsage?.context
+            let compactedAt = result.status.accountUsage?.contextCompactedAt
             result.status.accountUsage = AccountUsage.codexLimits(limits)
             result.status.accountUsage?.context = context
+            result.status.accountUsage?.contextCompactedAt = compactedAt
         }
         result.account = account?["email"] as? String ?? (account == nil ? "Not signed in" : "API key account")
         result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nApprovals: \(result.status.approval ?? "CLI default")\nAccount: \(result.account)\nCatalog availability does not guarantee account access."
@@ -169,6 +171,11 @@ struct ProviderStatus {
         result.access = ["read-only", "workspace-write", "danger-full-access"].map { MuseAccessChoice(id: $0, label: $0, available: true) }
         if let path = thread["path"] as? String {
             for object in tailRecords(path: path) {
+                if object["type"] as? String == "compacted" {
+                    if result.status.accountUsage == nil { result.status.accountUsage = AccountUsage() }
+                    result.status.accountUsage?.context = nil
+                    result.status.accountUsage?.contextCompactedAt = (object["timestamp"] as? String).flatMap(AccountUsage.parseDate)
+                }
                 if let context = AccountUsage.codexContext(object) {
                     if result.status.accountUsage == nil { result.status.accountUsage = AccountUsage() }
                     result.status.accountUsage?.context = context
@@ -260,7 +267,8 @@ extension Store {
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                         s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.access.first { $0.id == snapshot.status.access }?.label ?? snapshot.status.access
                         s.toolStatus.approval = snapshot.status.approval
-                        s.toolStatus.accountUsage = snapshot.status.accountUsage
+                        if s.entry.engine != "claude" || snapshot.status.accountUsage != nil { s.toolStatus.accountUsage = snapshot.status.accountUsage }
+                        if let date = snapshot.status.accountUsage?.contextCompactedAt, date > (s.lastCompactedAt ?? .distantPast) { s.lastCompactedAt = date }
                         s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
                         s.statusDetails = snapshot.detail; s.probeError = ""; s.needsSignIn = AccountLogin.requiresSignIn(snapshot.account)
                     case .failure(let error): s.probeError = error.localizedDescription; if AccountLogin.requiresSignIn(s.probeError) { s.needsSignIn = true }
@@ -386,5 +394,185 @@ enum ProviderRetry {
             if obj["willRetry"] as? Bool == true { return message }
         }
         return message.range(of: #"^Reconnecting(?:\.\.\.|…)\s*\d+/\d+(?:\s|$)"#, options: [.regularExpression, .caseInsensitive]) != nil ? message : nil
+    }
+}
+
+// Compaction is a provider operation, never a synthetic user prompt. This
+// connection owns only an idle thread for the duration of this operation.
+struct CodexCompactor {
+    static func failure(_ message: String) -> NSError {
+        NSError(domain: "Converse.Compaction", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+    static func run(entry: Entry, threadID: String, started: (Process) -> Void) throws {
+        let rpc = try ProviderProbeConnection(entry: entry, arguments: ["app-server"], timeoutSeconds: 180)
+        defer { rpc.closeAndWait() }
+        started(rpc.process)
+        _ = try rpc.rpc("initialize", ["clientInfo": ["name": "converse_compaction", "version": "1"]])
+        try rpc.write(["method": "initialized", "params": [:]])
+        let result = try rpc.rpc("thread/resume", ["threadId": threadID, "excludeTurns": true])
+        guard let thread = result["thread"] as? [String: Any], thread["id"] as? String == threadID,
+              (thread["status"] as? [String: Any])?["type"] as? String == "idle" else {
+            throw failure("The provider did not return this exact thread as idle. Nothing was compacted.")
+        }
+        var turnID: String?, itemID: String?
+        var compacted = false, finished = false
+        func observe(_ event: [String: Any]) throws {
+            guard let method = event["method"] as? String,
+                  let params = event["params"] as? [String: Any], params["threadId"] as? String == threadID else { return }
+            if method == "turn/started", let turn = params["turn"] as? [String: Any] {
+                guard turnID == nil else { throw failure("Unexpected overlapping turn during compaction.") }
+                turnID = turn["id"] as? String
+            }
+            if method == "item/started" || method == "item/completed" {
+                guard let turnID, params["turnId"] as? String == turnID,
+                      let item = params["item"] as? [String: Any], item["type"] as? String == "contextCompaction",
+                      let id = item["id"] as? String else { return }
+                if method == "item/started" { itemID = id }
+                else if id == itemID { compacted = true }
+            }
+            if method == "turn/completed", let turn = params["turn"] as? [String: Any],
+               let turnID, turn["id"] as? String == turnID {
+                guard turn["status"] as? String == "completed", compacted else {
+                    throw failure("Provider compaction did not complete. The saved conversation is retained.")
+                }
+                finished = true
+            }
+        }
+        _ = try rpc.rpc("thread/compact/start", ["threadId": threadID], notification: observe)
+        while !finished { try observe(rpc.read()) }
+        // Acknowledge unloading before a later CLI resume can begin.
+        _ = try rpc.rpc("thread/unsubscribe", ["threadId": threadID])
+    }
+}
+
+extension Session {
+    var compactionState: DeviceCompactionState? {
+        guard ["codex", "claude"].contains(entry.engine), agent == nil, remoteID != nil else { return nil }
+        let context = toolStatus.accountUsage?.context
+        let phase = compacting ? "running" : compactionRequested ? "queued" : "available"
+        let detail = phase == "queued" ? "Compact after the current turn, before queued prompts. Click to cancel." : phase == "running" ? "Compacting the model's context. Your displayed transcript and draft are retained." : (context.map { "Last reported context: \($0.percent)% full. " } ?? "Context usage is unknown. ") + "Summarize older model context to make room. The visible conversation remains; some details may be lost from the model's working context." + (busy ? " Runs after this turn." : "")
+        return DeviceCompactionState(recommended: CompactionPolicy.recommends(context, after: lastCompactedAt), phase: phase, percent: context?.percent, detail: detail)
+    }
+}
+
+extension Store {
+    @discardableResult func requestCompaction(_ s: Session) -> String? {
+        guard !applicationQuitting, sessions.contains(where: { $0 === s }), s.compactionState != nil else { return "Compaction is not supported for this session." }
+        guard !s.compacting, !s.compactionRequested else { return nil } // duplicate intent
+        guard !s.changingSetting, !s.interrupted else { return "Wait for the current settings change or interruption to finish." }
+        s.compactionRequested = true
+        if !s.busy { startCompaction(s) }
+        return nil
+    }
+    func startCompaction(_ s: Session) {
+        guard !applicationQuitting, !s.busy, !s.changingSetting, s.compactionRequested,
+              ["codex", "claude"].contains(s.entry.engine), let threadID = s.remoteID else { return }
+        s.compactionRequested = false; s.compacting = true; s.busy = true; s.interrupted = false
+        s.status = "Compacting…"
+        do { try saveChecked() }
+        catch {
+            s.compacting = false; s.busy = false; s.queuePaused = true; s.status = "Compaction not started"
+            s.messages.append(Message(role: "notice", text: "Could not save compaction intent. Nothing was compacted.")); return
+        }
+        let entry = s.entry
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                let started: (Process) -> Void = { process in
+                    DispatchQueue.main.sync { s.process = process; if s.interrupted || self.applicationQuitting { process.terminate() } }
+                }
+                if entry.engine == "claude" { try ClaudeCompactor.run(entry: entry, threadID: threadID, started: started) }
+                else { try CodexCompactor.run(entry: entry, threadID: threadID, started: started) }
+            }
+            DispatchQueue.main.async {
+                let cancelled = s.interrupted
+                s.process = nil; s.compacting = false; s.busy = false; s.interrupted = false; s.resumeAfterInterrupt = false
+                switch result {
+                case .success where !cancelled:
+                    s.lastCompactedAt = Date(); s.toolStatus.accountUsage?.context = nil; s.status = "Ready"
+                    s.messages.append(Message(role: "notice", text: "Context compacted. The full displayed conversation and draft are retained."))
+                default:
+                    s.queuePaused = true; s.status = "Compaction incomplete"
+                    let detail: String
+                    if case .failure(let error) = result { detail = error.localizedDescription } else { detail = "Interrupted." }
+                    s.messages.append(Message(role: "notice", text: "Compaction completion could not be confirmed. " + detail + " Your transcript and draft are retained; queued prompts are paused. Compaction will not retry automatically."))
+                }
+                self.save(); self.objectWillChange.send()
+                if !self.applicationQuitting && !cancelled {
+                    if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { self.refreshStatus(s) }
+                    if case .success = result { self.runNext(s) }
+                }
+            }
+        }
+    }
+}
+
+struct ClaudeCompactor {
+    static func run(entry: Entry, threadID: String, started: (Process) -> Void) throws {
+        let rpc = try ProviderProbeConnection(entry: entry, arguments: ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--resume", threadID], timeoutSeconds: 180)
+        defer { rpc.closeAndWait() }
+        started(rpc.process)
+        try rpc.write(["type": "control_request", "request_id": "compact-init", "request": ["subtype": "initialize"]])
+        while true {
+            let event = try rpc.read()
+            guard event["type"] as? String == "control_response", let response = event["response"] as? [String: Any], response["request_id"] as? String == "compact-init" else { continue }
+            let payload = response["response"] as? [String: Any] ?? [:]
+            let commands = payload["commands"] as? [[String: Any]] ?? []
+            guard response["subtype"] as? String == "success", commands.contains(where: { $0["name"] as? String == "compact" }) else {
+                throw CodexCompactor.failure("This Claude CLI does not advertise native compaction. Nothing was submitted.")
+            }
+            break
+        }
+        // /compact is a CLI command only after the native command catalog above
+        // confirms it; never ask the model to invent its own compaction.
+        try rpc.write(["type": "user", "session_id": threadID, "message": ["role": "user", "content": "/compact"], "parent_tool_use_id": NSNull()])
+        var boundary = false
+        while true {
+            let event = try rpc.read()
+            guard (event["session_id"] as? String)?.lowercased() == threadID.lowercased() else { continue }
+            if event["type"] as? String == "system", event["subtype"] as? String == "compact_boundary",
+               (event["compact_metadata"] as? [String: Any])?["trigger"] as? String == "manual" { boundary = true }
+            if event["type"] as? String == "result" {
+                guard boundary, event["subtype"] as? String == "success", event["is_error"] as? Bool != true else {
+                    throw CodexCompactor.failure("Claude did not confirm a completed compaction. There may be too little history to compact.")
+                }
+                return
+            }
+        }
+    }
+}
+
+extension Store {
+    func updateClaudeContext(_ event: [String: Any], session s: Session) {
+        if event["type"] as? String == "system", event["subtype"] as? String == "compact_boundary" {
+            s.lastCompactedAt = Date(); s.claudeLastContext = nil; s.toolStatus.accountUsage?.context = nil
+        }
+        if event["type"] as? String == "assistant", let message = event["message"] as? [String: Any],
+           let model = message["model"] as? String, let usage = message["usage"] as? [String: Any] {
+            let keys = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+            let counts = keys.map { usage[$0] as? Int ?? 0 }
+            if counts.allSatisfy({ $0 >= 0 && $0 <= 1_000_000_000 }), usage["input_tokens"] is Int {
+                s.claudeLastContext = (model, counts.reduce(0, +))
+            }
+        }
+        if event["type"] as? String == "result", let last = s.claudeLastContext,
+           let models = event["modelUsage"] as? [String: [String: Any]], let model = models[last.model],
+           let context = AccountUsage.context(tokens: last.tokens, capacity: model["contextWindow"], at: Date()) {
+            if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+            s.toolStatus.accountUsage?.context = context
+        }
+    }
+}
+
+extension ProviderProbeConnection {
+    // Wait until the owned CLI releases its session lock before a queued turn
+    // can resume. The separate probe deadline still bounds incomplete requests.
+    func closeAndWait() {
+        try? input.fileHandleForWriting.close()
+        let p = process
+        let stop = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        let killTask = DispatchWorkItem { if p.isRunning { kill(p.processIdentifier, SIGKILL) } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: stop)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: killTask)
+        p.waitUntilExit(); stop.cancel(); killTask.cancel()
     }
 }

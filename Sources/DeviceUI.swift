@@ -279,10 +279,19 @@ struct RemotePane: View {
                                       }
                                       syncEditor()
                                   })
+                .overlay(alignment: .bottomTrailing) {
+                    if let state = transcript?.compaction {
+                        CompactionControl(state: state) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: state.phase == "queued" ? "cancelCompact" : "compact")) }
+                            .disabled(!hasLease || offline).padding(.trailing, 12).padding(.bottom, 46)
+                    }
+                }
             Divider()
             if let transcript {
                 HStack(spacing: 10) {
                     Text(transcript.status).lineLimit(1)
+                    if let state = transcript.compaction {
+                        Menu { Button("Compact context") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "compact")) }.disabled(state.phase != "available" || !hasLease || offline) } label: { Image(systemName: "ellipsis.circle") }
+                    }
                     if let account = transcript.accountName { Text(account).foregroundStyle(.secondary).lineLimit(1) }
                     Spacer(minLength: 0)
                     Menu(transcript.model) { ForEach(transcript.modelOptions) { option in Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "model", model: option.id, modelProvider: option.provider, modelProfile: option.profile)) } } }.menuStyle(.borderlessButton).fixedSize()
