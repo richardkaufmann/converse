@@ -1141,8 +1141,7 @@ try
                             versionDocument.RootElement.GetProperty("version").GetString() &&
                         product.Build ==
                             versionDocument.RootElement.GetProperty("build").GetInt32() &&
-                        product.ReleaseID ==
-                            $"{product.Version}-{product.Build}-linux-{product.Architecture}",
+                        product.ReleaseID == "1.0.0-1-linux-test",
                 "Build identity stamps VERSION into the durable product identity");
         }
         var offline = await LinuxInstaller.BuildPreflightStatusAsync(paths, product);

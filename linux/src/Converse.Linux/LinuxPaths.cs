@@ -191,7 +191,7 @@ internal sealed record ProductInfo(
         var version = Environment.GetEnvironmentVariable("CONVERSE_VERSION");
         var buildText = Environment.GetEnvironmentVariable("CONVERSE_BUILD");
         var commit = Environment.GetEnvironmentVariable("CONVERSE_SOURCE_COMMIT")
-            ?? Assembly.GetExecutingAssembly()
+            ?? typeof(ProductInfo).Assembly
                 .GetCustomAttributes<AssemblyMetadataAttribute>()
                 .FirstOrDefault(attribute => attribute.Key == "ConverseSourceCommit")?.Value;
         int? build = int.TryParse(buildText, out var parsedBuild) ? parsedBuild : null;
@@ -211,7 +211,7 @@ internal sealed record ProductInfo(
 
         if (string.IsNullOrWhiteSpace(version) || build is null)
         {
-            var informational = Assembly.GetExecutingAssembly()
+            var informational = typeof(ProductInfo).Assembly
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0+0";
             var parts = informational.Split('+', 2);
             version ??= parts[0];
