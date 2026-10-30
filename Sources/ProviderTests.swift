@@ -308,6 +308,38 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     store.injectPending(lifecycle, id: lifecycle.pending.first?.id)
     pump { !lifecycle.busy && lifecycle.pending.isEmpty }
     check(lifecycle.messages.filter { $0.role == "user" && $0.text == "blocked input" }.count == 1 && lifecycle.messages.filter { $0.text == "answer: blocked input" }.count == 1 && lifecycle.draft == "keep typing" && lifecycle.attachments == ["new-attachment.png"], "Inject after a Muse lock clears delivers held input exactly once and preserves the draft")
+    let quittingStore = Store(folder: store.folder.appendingPathComponent("muse-quit"))
+    let quittingSession = quittingStore.create(lifecycleEntry)
+    let quitHost = MuseConnection(sessionID: UUID().uuidString)
+    var quitLoaded: Result<[String: Any], Error>?
+    quitHost.start(entry: lifecycleEntry) { result in
+        if case .failure = result { quitLoaded = result; return }
+        quitHost.load(entry: lifecycleEntry, choices: SessionChoices()) { quitLoaded = $0 }
+    }
+    pump { quitLoaded != nil }
+    if case .success? = quitLoaded { check(true, "Quit fixture acquires a real Muse session lock") }
+    else { check(false, "Quit fixture acquires a real Muse session lock") }
+    quittingSession.muse = quitHost; quittingSession.process = quitHost.process; quittingSession.busy = true
+    quittingSession.remoteID = quitHost.sessionID; quittingSession.draft = "unsent draft"
+    quittingSession.pending = [PendingPrompt(text: "held for restart", images: [])]
+    let quitAccepted = quittingStore.requestApplicationQuit(confirm: { _ in true }, stopAgents: {})
+    var quitDrained = false
+    quittingStore.closeMuseHostsForQuit { quitDrained = true }
+    check(quitAccepted && !quitDrained && FileManager.default.fileExists(atPath: lock.path), "Quit remains pending while its Muse host still holds the session lock")
+    pump { quitDrained }
+    check(quitDrained && !quitHost.process.isRunning && !FileManager.default.fileExists(atPath: lock.path), "Quit completes only after owned Muse host exits and releases its delayed lock")
+    quittingSession.busy = false; quittingSession.queuePaused = false; quittingStore.runNext(quittingSession)
+    check(!quittingSession.busy && quittingSession.pending.map(\.text) == ["held for restart"] && quittingSession.draft == "unsent draft" && quittingSession.remoteID == quitHost.sessionID, "Shutdown cannot drain held input and preserves the Muse identity and draft")
+    let reopened = MuseConnection(sessionID: quitHost.sessionID)
+    var reopenedResult: Result<[String: Any], Error>?
+    reopened.start(entry: lifecycleEntry) { result in
+        if case .failure = result { reopenedResult = result; return }
+        reopened.load(entry: lifecycleEntry, choices: SessionChoices()) { reopenedResult = $0 }
+    }
+    pump { reopenedResult != nil }
+    if case .success? = reopenedResult { check(true, "Immediate reopen resumes the same Muse identity without a host conflict") }
+    else { check(false, "Immediate reopen resumes the same Muse identity without a host conflict") }
+    var reopenedClosed = false; reopened.close { reopenedClosed = true }; pump { reopenedClosed }
     for mode in ["muse-stuck", "muse-no-ack", "muse-rejected-interrupt"] {
         var entry = museEntry
         entry.command = "python3 " + ProviderCommand.quote(fixture) + " " + mode

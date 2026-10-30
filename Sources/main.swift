@@ -172,6 +172,7 @@ final class Store: ObservableObject {
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     var startAgentRun: ((Session, UUID) -> Void)?
     let responseImageLoader = ResponseImageLoader()
+    private(set) var applicationQuitting = false
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
@@ -353,6 +354,7 @@ final class Store: ObservableObject {
         }
     }
     func runNext(_ s: Session) {
+        guard !applicationQuitting else { return }
         if s.agent != nil && MainActor.assumeIsolated({ AgentConversation.shared.owns(s) }) { return }
         sanitizeGroupQueue(s)
         if !s.busy && s.pending.isEmpty && s.injectionTargetID != nil {
@@ -704,6 +706,7 @@ final class Store: ObservableObject {
         }
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
+        guard !applicationQuitting else { completion?(); return }
         if let agent = s.agent { s.toolStatus.model = agent.model; s.toolStatus.access = "Monitor selected sessions"; completion?(); return }
         guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
         if s.entry.engine != "muse" { refreshProviderStatus(s, completion: completion); return }
@@ -1268,11 +1271,17 @@ final class ConversationScrollView: NSScrollView {
         if let text = documentView as? NSTextView { text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0)) }
         refreshLatest()
     }
-    private func refreshLatest() {
-        latest.isHidden = followState.following
+    var showsLatest: Bool { !latest.isHidden }
+    func refreshLatest() {
+        let bottomVisible = contentView.bounds.maxY >= (documentView?.bounds.maxY ?? 0) - 2
+        latest.isHidden = followState.following || bottomVisible
         latest.title = followState.unreadUpdates == 0 ? "Jump to latest" : "Jump to latest (" + String(followState.unreadUpdates) + " new updates)"
         latest.sizeToFit()
         latest.frame.origin = NSPoint(x: max(contentView.frame.minX + 8, contentView.frame.maxX - latest.frame.width - 12), y: isFlipped ? bounds.maxY - latest.frame.height - 10 : bounds.minY + 10)
+    }
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        refreshLatest()
     }
     override func tile() {
         guard !tiling else { return }
@@ -1422,7 +1431,7 @@ final class ConversationTextView: NSTextView {
     var messageLabels: [TranscriptMessageLabel] = []
     var userBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
-    func refreshDecorations() { layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
+    func refreshDecorations() { (enclosingScrollView as? ConversationScrollView)?.refreshLatest(); layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let layout = layoutManager, let container = textContainer else { return }
@@ -2029,8 +2038,20 @@ struct ConverseQuitWarning {
 }
 
 extension Store {
+    // Only close hosts owned by this app. Keep the main run loop alive so pipe
+    // closure, process-exit callbacks and the bounded forced-stop fallback run.
+    func closeMuseHostsForQuit(completion: @escaping () -> Void) {
+        let hosts = sessions.compactMap { $0.muse }
+        let group = DispatchGroup()
+        for host in hosts {
+            group.enter()
+            host.close { group.leave() }
+        }
+        group.notify(queue: .main) { self.save(); completion() }
+    }
     func requestApplicationQuit(confirm: (ConverseQuitWarning) -> Bool, stopAgents: () -> Void) -> Bool {
         if let warning = ConverseQuitWarning(sessions: sessions), !confirm(warning) { return false }
+        applicationQuitting = true
         // Stop the scheduler before stopping CLI sessions or saving. Agent shutdown
         // preserves enabled loops and held queues; ordinary Stop deliberately pauses.
         stopAgents()
@@ -2252,6 +2273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if quitting { return .terminateLater }
         let confirmed = Store.shared.requestApplicationQuit(confirm: { warning in
             let alert = NSAlert()
             alert.messageText = warning.title; alert.informativeText = warning.detail
@@ -2259,7 +2281,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return alert.runModal() == .alertSecondButtonReturn
         }, stopAgents: { MainActor.assumeIsolated { JollyRouter.shared.stop(store: .shared); AgentRuntime.shared.prepareForQuit() } })
         quitting = confirmed
-        return confirmed ? .terminateNow : .terminateCancel
+        guard confirmed else { return .terminateCancel }
+        DispatchQueue.main.async {
+            Store.shared.closeMuseHostsForQuit { sender.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
     }
 }
 
@@ -2360,6 +2386,13 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     session.messages.append(Message(role: "assistant", text: "Keep an explicitly positioned cursor"))
     coordinator.render(view)
     check(view.selectedRange() == NSRange(location: 10, length: 0) && scroll.selecting && !scroll.followState.following, "An explicit Mac cursor holds its position even without a selection or draft")
+    check(scroll.showsLatest, "Jump to latest appears when a paused transcript has output below the viewport")
+    scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, view.bounds.maxY - scroll.contentView.bounds.height)))
+    scroll.reflectScrolledClipView(scroll.contentView)
+    check(!scroll.showsLatest && !scroll.followState.following && view.explicitCursor, "Jump to latest hides at the bottom without clearing an explicit cursor or resuming following")
+    scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+    scroll.reflectScrolledClipView(scroll.contentView)
+    check(scroll.showsLatest, "Jump to latest returns when the paused viewport moves away from the bottom")
     let pasteFile = FileManager.default.temporaryDirectory.appendingPathComponent("converse-scroll-image-" + UUID().uuidString + ".png")
     defer { try? FileManager.default.removeItem(at: pasteFile) }
     let pasted = NSImage(size: NSSize(width: 300, height: 700))
