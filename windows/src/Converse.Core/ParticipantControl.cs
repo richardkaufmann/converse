@@ -29,9 +29,10 @@ public sealed partial class DeviceSyncService
         foreach (var intent in _participantIntents.Where(i => i.Outcome == "pending")) intent.Outcome = "uncertain";
     }
     private void SaveParticipants() => AtomicJson.Write(Path.Combine(_folder, "participant-intents.json"), _participantIntents);
+    public bool CanCreateRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-create-v1") == true;
     public bool CanCloseRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-close-v1") == true;
     public bool CanHostAgent(string home) => home == DeviceId || PeerForHome(home)?.Hello?.Capabilities.Contains("agent-host-v1") == true;
-    public async Task<DeviceParticipantResponse> RequestParticipantAsync(string home, string action, string? target = null, string? title = null, DeviceAgentSettings? settings = null)
+    public async Task<DeviceParticipantResponse> RequestParticipantAsync(string home, string action, string? target = null, string? title = null, DeviceAgentSettings? settings = null, string? provider = null)
     {
         var group = CurrentGroup?.Id ?? "";
         DeviceParticipantResponse Reject(string detail) => new() { GroupID = group, Detail = detail };
@@ -39,7 +40,7 @@ public sealed partial class DeviceSyncService
             return Reject("Home is offline, outside this group, or needs an update.");
         if (!string.IsNullOrEmpty(settings?.ScheduleText) && !peer.Hello.Capabilities.Contains("agent-schedule-v1"))
             return Reject("Update the home before editing text schedules.");
-        var request = new DeviceParticipantRequest { GroupID = group, Action = action, Target = target, Title = title, Settings = settings };
+        var request = new DeviceParticipantRequest { GroupID = group, Action = action, Target = target, Title = title, Settings = settings, Provider = provider };
         var bytes = DeviceJson.Encode(request);
         var intent = _participantIntents.FirstOrDefault(i => i.Home == home && i.Outcome is "pending" or "uncertain" && DeviceJson.Encode(i.Request).SequenceEqual(bytes));
         if (intent is null)
@@ -191,7 +192,7 @@ public sealed partial class DeviceSyncService
         // returned unchanged, and already-accepted queued work still runs.
         // Agent creation, settings changes, runs, and widget requests are
         // new work and are refused while the home drains for an update.
-        if (!AcceptingWork && request.Action is "agent.create" or "agent.configure" or "agent.run" or "agent.widget")
+        if (!AcceptingWork && request.Action is "session.create" or "agent.create" or "agent.configure" or "agent.run" or "agent.widget")
             return Task.FromResult(Result("rejected", "This home is draining for an update. Nothing was created or queued."));
         if (request.Action == "session.close")
         {
@@ -214,6 +215,11 @@ public sealed partial class DeviceSyncService
             string detail;
             switch (request.Action)
             {
+                case "session.create":
+                    if (request.Provider is not ("claude" or "codex" or "muse") || _store.Entries.FirstOrDefault(e => e.Engine == request.Provider) is not { } entry)
+                        throw new ArgumentException("This provider is not configured on home.");
+                    created = _store.Create(entry, persist: false); session = created;
+                    detail = "Session created on home. Choose 1, 2 or 3 to display it."; break;
                 case "agent.create": created = _store.CreateAgent(request.Title ?? "New Agent", false); session = created; detail = "Agent created paused. Add a Meta key on its home computer."; break;
                 case "agent.configure":
                     if (session?.Agent is null || request.Settings is null || request.Settings.Watched.Any(w => DeviceGlobalID.Parse(w) is not { } r || !IsParticipantAllowed(r.Home, group))) throw new ArgumentException("Agent missing or scope outside this group.");

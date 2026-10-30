@@ -52,6 +52,27 @@ static class HeadlessSessionChecks
         catalogReady.SetResult(catalog);
         check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.ModelOptions.Count == 2) && viewer.RemoteTranscripts[gid].EffortOptions.SequenceEqual(new[] { "ultra" }), "Headless snapshot sends live Codex models and selected-model effort levels to the viewer");
         check(await join(home, closer, () => closer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "A second group member can manage a headless home");
+        session.LastStreamSaveUtc = DateTime.UtcNow;
+        var streamed = new ChatMessage { Role = "assistant", Text = "" }; session.Messages.Add(streamed);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        store.Consume("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Prompt streaming without disk save\"}}", session, streamed);
+        var deadline = DateTime.UtcNow.AddSeconds(1);
+        while (DateTime.UtcNow < deadline && viewer.RemoteTranscripts[gid].Messages.All(m => m.Text != streamed.Text)) await Task.Delay(10);
+        check(viewer.RemoteTranscripts[gid].Messages.Any(m => m.Text == streamed.Text) && started.ElapsedMilliseconds < 1000,
+            "A final streamed fragment reaches a remote viewer within one second, without waiting for another fragment or disk checkpoint");
+        var beforeCreate = store.Sessions.Count;
+        var newRemote = await closer.RequestParticipantAsync(home.DeviceId, "session.create", provider: "codex");
+        var newID = newRemote.Target is null ? null : DeviceGlobalID.Parse(newRemote.Target);
+        var newSession = store.Sessions.FirstOrDefault(s => s.Id == newID?.Session);
+        check(newRemote.Outcome == "completed" && newSession?.Entry.Engine == "codex" && newSession.Busy == false && store.Sessions.Count == beforeCreate + 1,
+            "Group member creates a remote provider session without starting paid work or taking a lease");
+        check(await Until(() => viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == newRemote.Target)), "Created remote session appears in other viewers' sidebars");
+        var persistedCreation = new SessionStore(store.Folder, new FakeRunner());
+        check(persistedCreation.Sessions.Any(s => s.Id == newSession?.Id) && persistedCreation.ParticipantReceipts.Any(r => r.Response.Target == newRemote.Target), "Remote creation and receipt survive one archive commit");
+        check((await closer.RequestParticipantAsync(home.DeviceId, "session.create", provider: "shell")).Outcome == "rejected", "Remote creation rejects arbitrary providers and commands");
+        home.SetAcceptingWork(false);
+        check((await closer.RequestParticipantAsync(home.DeviceId, "session.create", provider: "claude")).Outcome == "rejected" && store.Sessions.Count == beforeCreate + 1, "Remote creation respects closed update admission");
+        home.SetAcceptingWork(true);
         var result = await closer.RequestParticipantAsync(home.DeviceId, "session.close", gid);
         check(result.Outcome == "completed" && !store.Sessions.Contains(session) && !closer.RemoteLeases.ContainsKey(gid), "Group member closes a remote session without taking its display lease");
         check(await Until(() => !viewer.RemoteTranscripts.ContainsKey(gid) && !viewer.RemoteLeases.ContainsKey(gid) && viewer.Homes[home.DeviceId].Rows.All(r => r.GlobalID != gid)), "Remote close immediately removes another viewer's pane, lease and sidebar row");

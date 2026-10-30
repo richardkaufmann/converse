@@ -77,6 +77,8 @@ struct DeviceSidebarSection: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     var showsModel = true
+    @State private var creating = Set<String>()
+    @State private var createError: String?
     var body: some View {
         let homes = service.homes.values.sorted { $0.deviceName < $1.deviceName }
         if service.currentGroup != nil && !homes.isEmpty {
@@ -86,6 +88,19 @@ struct DeviceSidebarSection: View {
                         HStack(spacing: 6) {
                             Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(home.online ? 1 : 0.4)).lineLimit(1)
                             if home.online { Text("remote").font(.caption).foregroundStyle(.secondary) }
+                            Spacer()
+                            if home.online && (service.canCreateRemote(home.deviceID) || service.canHostAgent(home.deviceID)) {
+                                Menu {
+                                    if service.canCreateRemote(home.deviceID) {
+                                        ForEach(["claude", "codex", "muse"], id: \.self) { provider in
+                                            Button("New " + provider.capitalized + " session") { create(home.deviceID, provider: provider) }
+                                        }
+                                    }
+                                    if service.canHostAgent(home.deviceID) { Button("New agent") { create(home.deviceID, provider: nil) } }
+                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.system(size: 8)) } }
+                                    .menuStyle(.borderlessButton).fixedSize().disabled(creating.contains(home.deviceID))
+                                    .help("Create a session on " + home.deviceName + " using its local login")
+                            }
                         }.padding(.horizontal, 4).frame(height: 28)
                             .help(home.online ? "Sessions run on " + home.deviceName + ". Choose 1, 2 or 3 to display one here." : "Offline. Sessions reappear when this device reconnects.")
                         if home.online {
@@ -100,6 +115,17 @@ struct DeviceSidebarSection: View {
                     }.padding(.bottom, 8)
                 }
             }
+            .alert("Could not create session", isPresented: Binding(get: { createError != nil }, set: { if !$0 { createError = nil } })) {
+                Button("OK") { createError = nil }
+            } message: { Text(createError ?? "") }
+        }
+    }
+    private func create(_ home: String, provider: String?) {
+        creating.insert(home)
+        Task { @MainActor in
+            let result = await service.requestParticipant(home: home, action: provider == nil ? "agent.create" : "session.create", title: provider == nil ? "New Agent" : nil, provider: provider)
+            creating.remove(home)
+            if result.outcome != "completed" { createError = result.detail }
         }
     }
 }

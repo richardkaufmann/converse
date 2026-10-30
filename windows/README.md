@@ -167,3 +167,14 @@ Clicking 1, 2, or 3 takes a session into that pane on the clicking device,
 including reclaiming a locally hosted session from a remote viewer. The old
 viewer parks immediately; it need not press Park first. Moving a different
 remote session out of the destination pane releases that old display lease.
+
+### Pane isolation regression check
+
+Run the built executable with `CONVERSE_UI_TEST=1`, `CONVERSE_UI_CHECK=pane-reset`,
+and `CONVERSE_DATA_DIR` pointing to a new absolute directory beneath the current
+user's temporary directory. This uses a separate instance identity, disables
+network discovery, creates only disposable sessions, writes
+`pane-reset-result.txt` in that directory, and closes itself. The native control
+check covers nonempty → empty → nonempty, return to the previous session, and
+an unassigned pane. An empty new session must contain only its draft control;
+previous transcript blocks must be removed even when both diff caches are empty.

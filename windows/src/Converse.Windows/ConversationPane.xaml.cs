@@ -283,9 +283,12 @@ public sealed partial class ConversationPane : UserControl
         }
         var (lines, hidden) = VisibleLines();
         _hiddenLocal = _selected.LocalSessionID is not null ? hidden : 0;
-        if (!LinesEqual(lines, _renderedLines))
+        // Equal text is insufficient: an empty new session must replace the
+        // previous session's blocks, and paging/number changes need a rebuild.
+        var sameIdentity = _lastChangeKey == (_selected.Key + "|" + hidden);
+        if (!sameIdentity || !LinesEqual(lines, _renderedLines))
         {
-            if (SelectedBusy() && (DateTime.UtcNow - _lastStreamRebuildUtc).TotalMilliseconds < 200)
+            if (sameIdentity && SelectedBusy() && (DateTime.UtcNow - _lastStreamRebuildUtc).TotalMilliseconds < 200)
             {
                 if (!_rebuildCoalesced)
                 {
@@ -1428,11 +1431,17 @@ public sealed partial class ConversationPane : UserControl
         RenderPane();
     }
 
+    internal int VisibleMessageBlockCount => TranscriptStack.Children.Count - 1;
+
     internal void ShowSession(SidebarSession? session, bool caretToEnd)
     {
+        _rebuildTimer?.Stop();
+        _rebuildCoalesced = false;
+        _lastStreamRebuildUtc = DateTime.MinValue;
         _selected = session;
         _draftText = "";
-        // Fresh blocks start empty: the next sync swaps everything in.
+        _notice = null; _noticeUtc = null;
+        // The identity check forces a sync even for an empty new session.
         _renderedLines = new List<(string Role, string Text, List<string> Images)>();
         _lastChangeKey = null;
         _ownScrolls = 0;

@@ -42,6 +42,7 @@ public sealed class DeviceAgentSettings
 
 public sealed class DeviceParticipantRequest
 {
+    [JsonPropertyName("provider"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Provider { get; set; } = null;
     [JsonPropertyName("groupID")] public string GroupID { get; set; } = "";
     [JsonPropertyName("action")] public string Action { get; set; } = "";
     [JsonPropertyName("target")] public string? Target { get; set; } = null;

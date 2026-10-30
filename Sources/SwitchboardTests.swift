@@ -119,12 +119,17 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(sb.deliverSwitchboard(from: target, to: sourceGlobal, text: "Remote answer", id: replyID, hop: 2, inReplyTo: tracked) == nil && pump { target.switchboardObligations.first(where: { $0.id == tracked })?.state == "resolved" && source.switchboardExpectations.first(where: { $0.id == tracked })?.answered == true }, "Remote correlated reply closes only after a persisted home receipt")
         target.pending.removeAll { $0.text.contains("Tracked remote question") }
         source.pending.removeAll { $0.text.contains("Remote answer") }
-        func request(_ action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, id: UUID? = nil) -> DeviceParticipantResponse? {
+        func request(_ action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, id: UUID? = nil) -> DeviceParticipantResponse? {
             var response: DeviceParticipantResponse?
-            Task { @MainActor in response = await a.requestParticipant(home: bid, action: action, target: target, title: title, settings: settings, id: id) }
+            Task { @MainActor in response = await a.requestParticipant(home: bid, action: action, target: target, title: title, settings: settings, provider: provider, id: id) }
             _ = pump { response != nil }
             return response
         }
+        let remoteCreation = UUID(), countBeforeSession = sb.sessions.count
+        let newSession = request("session.create", provider: "codex", id: remoteCreation)
+        let sameSession = request("session.create", provider: "codex", id: remoteCreation)
+        check(newSession?.outcome == "completed" && sameSession?.target == newSession?.target && sb.sessions.count == countBeforeSession + 1, "Remote provider creation is persisted and retry-idempotent")
+        check(request("session.create", provider: "shell")?.outcome == "rejected" && sb.sessions.count == countBeforeSession + 1, "Remote creation cannot supply arbitrary executable commands")
         let creationID = UUID(), initialCount = sb.sessions.count
         let created = request("agent.create", title: "Remote steward", id: creationID)
         let repeated = request("agent.create", title: "Remote steward", id: creationID)

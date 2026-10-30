@@ -128,7 +128,22 @@ struct PadRoot: View {
                     ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                         if home.online {
                         HStack { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green).lineLimit(1).help("Online: sessions run on " + home.deviceName); Text("remote").font(.caption).foregroundStyle(.secondary)
-                            if service.canHostAgent(home.deviceID) { Button { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("Create agent on " + home.deviceName) }
+                            if service.canCreateRemote(home.deviceID) || service.canHostAgent(home.deviceID) {
+                                Menu {
+                                    if service.canCreateRemote(home.deviceID) {
+                                        ForEach(["claude", "codex", "muse"], id: \.self) { provider in
+                                            Button("New " + provider.capitalized + " session") {
+                                                Task { @MainActor in
+                                                    let result = await service.requestParticipant(home: home.deviceID, action: "session.create", provider: provider)
+                                                    if result.outcome != "completed" { model.error = result.detail }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if service.canHostAgent(home.deviceID) { Button("New agent…") { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } }
+                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.caption2) } }
+                                .accessibilityLabel("Create session on " + home.deviceName)
+                            }
                         }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
                         ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in

@@ -417,13 +417,24 @@ public sealed partial class DeviceSyncService : IDisposable
     // Turn progress/completion fan-out: the holder's viewer gets a fresh
     // snapshot with a higher HomeSeq, which its sequence gate accepts.
     // Non-holders and lapsed leases drop inside SendTranscriptAsync.
+    private readonly ConcurrentDictionary<Guid, byte> _transcriptPushPending = new();
     private void PushTranscriptToHolder(ChatSession session)
     {
+        // Coalesce token bursts into a latest snapshot, independently of the
+        // two-second archive checkpoint. A trailing flush also delivers the
+        // last fragment when a provider pauses without completing its turn.
+        if (_leases.Holder(session.Id) is null || !_transcriptPushPending.TryAdd(session.Id, 0)) return;
+        _ = FlushTranscriptAsync(session);
+    }
+    private async Task FlushTranscriptAsync(ChatSession session)
+    {
+        await Task.Delay(75);
+        _transcriptPushPending.TryRemove(session.Id, out _);
+        if (_shutdown?.IsCancellationRequested != false || !_store.Sessions.Contains(session)) return;
         var holder = _leases.Holder(session.Id);
         if (holder is null) return;
         var peer = _peers.Values.FirstOrDefault(p => p.Hello?.DeviceID == holder.Value.Device);
-        if (peer is null) return;
-        _ = SendTranscriptAsync(peer, session);
+        if (peer is not null) await SendTranscriptAsync(peer, session);
     }
 
     // First launch with pre-group trust: deterministic legacy migration
@@ -643,7 +654,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
-        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
+        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-create-v1", "agent-host-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };

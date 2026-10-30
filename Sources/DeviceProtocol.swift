@@ -316,6 +316,7 @@ struct DeviceAgentSettings: Codable, Equatable {
     var discordShareSessionInformation: Bool? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
+    var provider: String? = nil
     var groupID: String
     var action: String
     var target: String? = nil

@@ -341,6 +341,7 @@ final class DeviceSyncService: ObservableObject {
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         #if os(macOS)
         hello.capabilities.append("session-close-v1")
+        hello.capabilities.append("session-create-v1")
         #endif
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
@@ -1763,6 +1764,9 @@ extension DeviceSyncService {
 }
 
 extension DeviceSyncService {
+    func canCreateRemote(_ home: String) -> Bool {
+        peerForHome(home)?.hello?.capabilities.contains("session-create-v1") == true
+    }
     func canCloseRemote(_ home: String) -> Bool {
         peerForHome(home)?.hello?.capabilities.contains("session-close-v1") == true
     }
@@ -1776,7 +1780,7 @@ extension DeviceSyncService {
         #endif
         return peerForHome(home)?.hello?.capabilities.contains("agent-host-v1") == true
     }
-    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
+    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
         guard let group = currentGroup?.id, acceptsParticipant(home: home, groupID: group), let peer = peerForHome(home),
               peer.hello?.capabilities.contains("participant-control-v1") == true else {
             return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline, outside this group, or needs an update.")
@@ -1784,7 +1788,7 @@ extension DeviceSyncService {
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
         }
-        let request = DeviceParticipantRequest(groupID: group, action: action, target: target, title: title, settings: settings)
+        let request = DeviceParticipantRequest(provider: provider, groupID: group, action: action, target: target, title: title, settings: settings)
         let durable = !["inspect", "agent.settings"].contains(action)
         let previous = participantIntents.first { $0.home == home && $0.request == request && ["pending", "uncertain"].contains($0.outcome) }
         let id = explicitID ?? previous?.id ?? UUID()
@@ -1886,6 +1890,11 @@ extension DeviceSyncService {
         do {
             let result: DeviceParticipantResponse
             switch request.action {
+            case "session.create":
+                guard let provider = request.provider, ["claude", "codex", "muse"].contains(provider),
+                      let entry = store.entries.first(where: { $0.engine == provider }) else { reject("This provider is not configured on home."); return true }
+                let newSession = store.create(entry, persist: false); created = newSession
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Session created on home. Choose 1, 2 or 3 to display it.", target: DeviceGlobalID(home: identity!.deviceID, session: newSession.id).string)
             case "agent.create":
                 let name = request.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Converse Steward"
                 guard !name.isEmpty, name.utf8.count <= 200 else { reject("Choose an agent name of 1–200 bytes."); return true }

@@ -54,6 +54,16 @@ public partial class App : Application
         {
             _window = new MainWindow();
             _window.Activate();
+            if (instanceSuffix.Length > 0 && Environment.GetEnvironmentVariable("CONVERSE_UI_CHECK") == "pane-reset")
+            {
+                try {
+                    await ((MainWindow)_window).RunPaneResetCheckAsync();
+                    File.WriteAllText(Path.Combine(testFolder!, "pane-reset-result.txt"), "PASS: nonempty to empty to nonempty, delayed refresh, return, and unassigned pane");
+                } catch (Exception ex) {
+                    File.WriteAllText(Path.Combine(testFolder!, "pane-reset-result.txt"), "FAIL: " + ex.Message);
+                }
+                _window.Close();
+            }
         }
         catch (Exception ex)
         {

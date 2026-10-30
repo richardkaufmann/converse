@@ -16,12 +16,16 @@
         <local:ActiveToBackgroundConverter x:Key="ActiveBg"/>
         <local:ActiveToForegroundConverter x:Key="ActiveFg"/>
         <DataTemplate x:Key="SidebarHeaderTemplate">
-            <StackPanel Padding="8,7,8,2" Opacity="{Binding Opacity}">
+            <Grid Padding="8,7,8,2" Opacity="{Binding Opacity}">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
                 <TextBlock Text="{Binding Title}" FontWeight="{Binding Weight}" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                 <TextBlock Text="{Binding Status}" FontSize="11" Visibility="{Binding HasStatus, Converter={StaticResource BoolToVis}}"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-            </StackPanel>
+              </StackPanel>
+              <Button Grid.Column="1" Content="+ ▾" Tag="{Binding}" Click="OnRemoteCreateMenu" Visibility="{Binding CanCreate, Converter={StaticResource BoolToVis}}" ToolTipService.ToolTip="Create a session on this device"/>
+            </Grid>
         </DataTemplate>
         <!-- Sessions nest under their home header; 1/2/3 take remote
              sessions as they place (Mac parity), so no separate Take. -->

@@ -296,14 +296,14 @@ public sealed class SessionStore
         new AgentEntry { Name = "Muse", Command = "muse", Engine = "muse", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
     };
 
-    public ChatSession Create(AgentEntry entry)
+    public ChatSession Create(AgentEntry entry, bool persist = true)
     {
         // Session-owned copy: the template reference must never be shared,
         // or a later Configure leaks across sessions and the template.
         var session = new ChatSession { Entry = entry.Copy(), Title = entry.Name };
         session.Messages.Add(new ChatMessage { Role = "system", Text = "", CreatedAt = DateTime.UtcNow });
         Sessions.Add(session);
-        Save();
+        if (persist) Save();
         return session;
     }
 
@@ -629,6 +629,7 @@ public sealed class SessionStore
                 break;
         }
         Changed?.Invoke();
+        TranscriptAdvanced?.Invoke(session);
     }
 
     private static void UpdateMuseText(string value, bool append, string itemId, ChatSession session)
@@ -918,8 +919,9 @@ public sealed class SessionStore
         {
             session.LastStreamSaveUtc = DateTime.UtcNow;
             Save();
-            TranscriptAdvanced?.Invoke(session);
         }
+        // Display progress must not wait for the two-second disk checkpoint.
+        TranscriptAdvanced?.Invoke(session);
     }
 
     private static string? GetString(JsonElement obj, string name) =>

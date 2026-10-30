@@ -13,7 +13,7 @@ namespace Converse.App;
 // sessions beneath their home, nothing else. Nearby undiscovered devices
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
-public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false) : SidebarItem(Key)
+public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false, bool CanCreate = false) : SidebarItem(Key)
 {
     public double Opacity => Offline ? 0.3 : 1;
     public bool HasStatus => Status.Length > 0;
@@ -563,7 +563,7 @@ public sealed partial class MainWindow : Window
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
             items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
-                home.Online ? "remote" : "", Offline: !home.Online));
+                home.Online ? "remote" : "", Offline: !home.Online, CanCreate: home.Online && (_devices.CanCreateRemote(home.DeviceID) || _devices.CanHostAgent(home.DeviceID))));
             if (!home.Online) continue;
             if (home.Rows.Count == 0)
                 items.Add(new SidebarSession("home:" + home.DeviceID + ":empty",
@@ -579,7 +579,7 @@ public sealed partial class MainWindow : Window
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
-            SidebarHeader h => h.Title + "|" + h.Status,
+            SidebarHeader h => h.Title + "|" + h.Status + "|" + h.CanCreate,
             SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace
                 + "|" + s.PActive + "|" + s.In1 + "|" + s.In2 + "|" + s.In3 + "|" + s.Engine + "|" + s.Model + "|" + s.IsAgent,
             _ => "",
@@ -660,6 +660,45 @@ public sealed partial class MainWindow : Window
         Refresh();
     }
 
+
+    internal async Task RunPaneResetCheckAsync()
+    {
+        // Only called by the isolated temp-profile UI test entry point.
+        var first = _store.Create(_store.Entries.First(e => e.Engine == "claude"));
+        first.Messages.Add(new ChatMessage { Role = "assistant", Text = "OLD SESSION SENTINEL" });
+        var fresh = _store.Create(_store.Entries.First(e => e.Engine == "codex"));
+        var pane = _panes[0];
+        void Show(ChatSession session) { _placements.Assign("local:" + session.Id, 1); Refresh(); }
+        void Require(bool ok, string label) { if (!ok) throw new InvalidOperationException(label); }
+        Show(first); Require(pane.VisibleMessageBlockCount == 1, "Nonempty fixture did not render");
+        Show(fresh); Require(pane.VisibleMessageBlockCount == 0, "Empty new session retained old transcript blocks");
+        await Task.Delay(300);
+        Require(pane.VisibleMessageBlockCount == 0, "Delayed render restored previous-session blocks");
+        fresh.Messages.Add(new ChatMessage { Role = "user", Text = "NEW SESSION SENTINEL" });
+        Refresh(); Require(pane.VisibleMessageBlockCount == 1, "New session content did not render");
+        Show(first); Require(pane.VisibleMessageBlockCount == 1, "Returning to prior session lost its transcript");
+        pane.ShowSession(null, true); Require(pane.VisibleMessageBlockCount == 0, "Unassigned pane retained transcript");
+    }
+
+    private void OnRemoteCreateMenu(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not SidebarHeader header || !header.Key.StartsWith("home:")) return;
+        var home = header.Key[5..]; var menu = new MenuFlyout();
+        foreach (var provider in new[] { "claude", "codex", "muse", "agent" })
+        {
+            if (provider == "agent" ? !_devices.CanHostAgent(home) : !_devices.CanCreateRemote(home)) continue;
+            var item = new MenuFlyoutItem { Text = provider == "agent" ? "New agent" : "New " + char.ToUpperInvariant(provider[0]) + provider[1..] + " session" };
+            item.Click += async (_, _) => {
+                button.IsEnabled = false;
+                try {
+                    var result = await _devices.RequestParticipantAsync(home, provider == "agent" ? "agent.create" : "session.create", title: provider == "agent" ? "New Agent" : null, provider: provider == "agent" ? null : provider);
+                    if (result.Outcome != "completed") await AgentNotice(result.Detail);
+                } finally { button.IsEnabled = true; Refresh(); }
+            };
+            menu.Items.Add(item);
+        }
+        menu.ShowAt(button);
+    }
 
     private async void OnNewSessionClick(object sender, RoutedEventArgs e)
     {
