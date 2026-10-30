@@ -4,22 +4,56 @@
 
 # Converse
 
-A Mac app that manages multiple conversations with Muse, Claude Code, and Codex: the immediacy of a shell with a normal, selectable Mac text window. You "converse" (sorry) with the coding tools, and they can also message each other.  You might like it if...
+Converse is **one app for every coding model, on every machine you own**. It gives Muse, Claude Code, and Codex the same normal, selectable, formatted text window — the immediacy of a shell, without pretending you're using a CRT from the 1970s. Muse has no native Mac experience; Converse is one. Sessions can live on your Mac, a Windows PC, a headless Linux box, or be driven from your iPad, and the models can message each other across all of it. You might like it if...
 
-* You really don't like pretending you're using a CRT from the 1970s.
 * You use multiple coding tools, or multiple accounts with one coding agent.
-* You have noticed how hard it is to build a switchboard where these tools talk to each other
-* You hate looking at raw markdown
+* You work on more than one machine and want one place where everything is visible.
+* You have noticed how hard it is to build a switchboard where these tools talk to each other.
+* You hate looking at raw markdown.
 
-It's a bit "opinionated" to match how I work.  Feel free to rip it off and make any changes you like.
+It's a bit "opinionated" to match how I work. Feel free to rip it off and make any changes you like.
 
 100% vibe-coded.
+
+📖 **Documentation:** this README is both the [GitHub front page](https://github.com/richardkaufmann/converse) and the in-app Help (searchable, offline, under **Help → Converse Help** on Mac). The two are the same text.
+
+## Feature overview
+
+### 1. One client for every coding model
+
+Converse drives **Muse, Claude Code, and Codex** through one native UI on Mac, Windows, and iPad, so every provider gets the same behaviors instead of each vendor's terminal quirks. Answers render as real, selectable Markdown — headings, lists, code, tables, links — with tool chatter hidden. Images paste in with ⌘V or the paperclip, and images the assistant produces appear inline in the conversation and travel to remote viewers.
+
+You type into the transcript itself, not a separate box: **Return** sends (or queues while a turn runs), **Inject now** interrupts and sends your queued prompt next, and drafts, queue, and attachments survive relaunch. Hover a session for its home, account, model, effort, access, and usage; hover a message number for its date and time; right-click any exchange to **copy that whole prompt or response** (formatted for rich-text targets, original Markdown for plain text). Prompt/response/export flows are built in — see [Export transcripts](#export-transcripts).
+
+Model parameters are yours, per conversation: **model**, **reasoning effort**, and **access/protection** (from read-only to bypass-permissions) sit in the footer and apply live, with catalogs read from each installed CLI rather than a frozen list. Account status (quota, context use) is one click away, and when a Claude or Codex session nears its context limit, a yellow **Compact** warning offers provider compaction at the session's home — with the transcript, draft, and images left intact. Local slash commands (`/model`, `/usage`, `/status`, `/login`, …) answer without spending model tokens.
+
+### 2. Converse Groups: one fabric across your machines
+
+Pair your devices into a **Converse Group** and every member sees every session, grouped under its home device. **Mac and Windows** are full participants (UI + sessions). **Linux** runs as a headless home (sessions only): the same Claude/Codex/Muse execution with no desktop, provisioned and maintained over SSH. **iPad** is a viewer/controller — models, logins, and working folders stay on their home machines.
+
+Press **1, 2, or 3** to *take* any session onto the screen in front of you — from your iPad, take a session from the Linux box in the closet and drive Claude there — or **P** to park it and let the work continue. Only one device displays a session at a time; the home arbitrates with fenced display epochs, so a stale viewer can never submit under an old lease. Drafts, queues, and attachments transfer with the pane. Disconnects leave home work running, and uncertain sends resolve with **Check home** instead of silent replay.
+
+Pairing is designed to be honest about trust: you compare an eight-part verification number on both devices and press Pair on each. Traffic is Noise-encrypted with device keys pinned after pairing. Group admission grants history access and tool control under home logins, and any member can admit the next device, so admit only devices you trust. Discovery works on a LAN via Bonjour; join-by-address covers VPN paths where discovery doesn't reach.
+
+### 3. Messaging: Tell, Ask, and cooperating webs of models
+
+Sessions can talk to each other — across machines, operating systems, and providers. Teach a session once (**Teach Session To Talk To Other Sessions**), then just say so in plain English: *"Ask WindowsClaude for its opinion on this design; iterate until you agree, then go build it."* The assistant discovers live session names and IDs, sends messages through the switchboard, and you watch the exchange unfold in both transcripts as compact traffic lines with status, direction, and an excerpt.
+
+There are two message kinds. **Tell** is one-way: it queues behind existing work (or interrupts with `tell-urgently`), never overwrites a draft, and asks for nothing back. **Ask** expects a correlated answer, blocker, or decline — a delivery acknowledgment does not count. Converse supervises asks: an unanswered request gets at most one corrective nudge, then watching agents are alerted. If two sessions deadlock with tells queued to each other, Converse injects one message once to break the tie — durably recorded, never replayed. Automatic chains stop after 100 hops; every delivery is deduplicated and visible, so a web of cooperating models stays inspectable instead of becoming a black box.
+
+### 4. Agents: sessions with initiative
+
+An agent is a session with a loop. It reads the coding sessions you explicitly select (scope starts empty and is re-checked before every use), assesses progress, injects prompts when needed, and reports back in its own conversation. It runs on a home device's own credentials — Meta Model API key in the Keychain — on a bounded interval with per-activation turn limits; failures pause the loop and show a yellow attention badge instead of spiraling.
+
+Agents reach beyond the app. They can search the web for current facts, watch a GitHub repository (stars, issues, PRs, downloads — **actual app users are not measured**), and answer questions in **Discord**, where anyone in a configured channel can mention the bot. Each run can generate **Muse Image** art that reflects current sentiment — new bugs might suggest cinematic horror; zero bugs, a peaceful chocolate orchard — shown in the agent's scoreboard window, an exportable HTML widget, or Discord on request. Voice works both ways: dictate a draft, or use **Start talking** for a hands-free spoken conversation with turn-by-turn replies. A phone bridge (**Jolly**) lets you address an agent from Meta AI and leave explicit outbox messages it can read. Credentials, execution, and scoreboard windows stay on the agent's home; the transcript is what travels.
+
+The rest of this document is the reference: setup first, then daily use, groups, messaging, agents, and internals.
 
 ## Download
 
 [Download the latest Mac preview](https://github.com/richardkaufmann/converse/releases/latest). Unzip, drag **Converse.app** into **Applications**, and open it. The universal download targets **macOS 14 or later**, on **Apple Silicon and Intel**. It is tested on an Apple Silicon Mac; older macOS versions and Intel hardware have not been tested directly.
 
-Version **0.4.4** and later releases are **Developer ID signed and notarized by Apple**. macOS shows its normal first-open confirmation. Earlier previews were ad-hoc signed. Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
+Current releases are **Developer ID signed and notarized by Apple**. macOS shows its normal first-open confirmation. Earlier previews were ad-hoc signed. Install and sign in to Muse, Claude Code, or Codex separately, then set a valid working directory in Converse Settings. No accounts, credentials or conversations are included in the download. You only need the CLIs you intend to use.
 
 ## First launch
 
@@ -81,6 +115,18 @@ A compact bottom status line shows the current state, model, reasoning effort, a
 
 The Mac's local time zone and send time are supplied as context to the assistant, and the child process receives the matching `TZ`. Local time is preferred unless another time zone is requested.
 
+### Account status
+
+The compact **Account** control follows Approvals in each local session footer. It shows the last reported context utilization and the highest reported account-limit percentage. Click for individual allowance windows, reset times, and refresh. Codex reports context from its last model call and account rate limits; Muse reports current-window and weekly allowances. Providers that do not expose a value show `?`, including API agents whose account allowance is not reported. These are observations, not guarantees of remaining capacity; account allowances may be shared with other sessions. A clock marks old, unknown-age, or expired observations. Refresh runs off the UI thread and does not send a model prompt.
+
+### Compact session context
+
+For retained Codex and Claude sessions hosted on Mac, **Compact** appears in yellow near the lower-right of the transcript when the latest provider observation is at least 80% of its reported context window. Observations older than ten minutes, unknown limits, cumulative billing totals, and observations from before a known compaction do not trigger a recommendation. A ten-minute cooldown prevents repeated recommendations immediately after compaction. The session-actions menu also offers manual compaction without a recommendation.
+
+Compaction runs at the session's home. If a turn is active, it waits for that turn to finish and runs before queued prompts; **Cancel compact** cancels that waiting request. The full displayed transcript, session identity, draft, and draft images stay intact. Provider compaction summarizes the model's working context and can omit details. Converse waits for a provider completion event; an acknowledgement alone is not success. Interrupted or unconfirmed compaction pauses queued input and is never automatically retried after restart.
+
+Mac and iPad remote viewers use the home's advertised capability and existing display lease. Older or unsupported homes do not show the action. Muse's native context usage events are recorded when supplied, but manual Muse compaction remains unavailable in this preview pending a verified host implementation. This feature does not change any provider's automatic compaction policy.
+
 ## Converse Groups
 
 Choose **Converse → Converse Groups…**, or **Converse Groups** below the sidebar sessions. **Create Group** gives this device a named group. On another device, find that group and press **Join**. Groups and their discovered devices are listed together; group names must be unique among the groups this device can see.
@@ -93,9 +139,40 @@ Each device belongs to at most one group. A canceled join keeps the previous gro
 
 Existing paired devices migrate into a default **Converse Group**, preserving their logins and sessions. Update every device to a groups-capable build. Names are display labels; separate LANs may independently create identically named groups, which retain distinct internal identities. [Protocol and verification details](docs/groups.md).
 
+
+### Linux homes
+
+Linux runs Converse as a headless service: real Claude/Codex/Muse sessions with no desktop and no Converse window. It joins a group through the same pairing flow, answered from another group member, and every member can then take its sessions into a pane. The daemon runs under a systemd user service (guarded cron loop as fallback), keeps execution, logins, files, and secrets on the Linux computer, and is provisioned and maintained over SSH — install, start/stop, session creation, secret storage, and explicit signed updates. Because there is no UI on the host, setup begins from another member: **Set up Linux** walks a trust-first SSH bootstrap (you type the host-key answer yourself; the app verifies the fingerprint before any automated step). Linux participates in the same Tell/Ask switchboard, so an agent or a Mac session can message a headless Linux session like any other. See [Linux home contract](docs/linux.md) for the full deployment and recovery model.
+
+### Returning to a displayed session
+
+After wake, reconnect or relaunch, a saved remote pane requests a conditional restore. The home grants a fresh display epoch only if nobody has taken it since that viewer last held it. A newer take remains authoritative even after its holder parks or disconnects, including across home restarts. Explicit P cancels restoration; 1/2/3 remain deliberate takeovers. Both ends need the `lease-resume-v1` capability; older homes still require a manual take. Draft conflicts and uncertain outgoing commands retain their existing review behavior.
+
+## Messaging between sessions
+
+Right-click a conversation row, or its Mac transcript, and choose **Teach Session To Talk To Other Sessions**. The option is also available for remote sessions on updated homes, including parked sessions; teaching queues instructions without taking over the pane. Converse queues an instruction prompt that teaches the assistant to interpret user requests such as “tell Reviewer to check the tests.” It discovers current names and IDs by emitting exactly one complete `converse` fenced JSON reply: `{"command":"list-sessions"}`. Converse queues a live JSON directory response to that session. No static directory is taught.
+
+Every switchboard command must be the assistant’s entire final reply: one `converse` fenced JSON block, with no prose before or after it. Surrounding prose makes the block discussion; no command runs and no delivery error appears.
+
+To deliver, the assistant emits `{"command":"tell","to":"SESSION-UUID","text":"message"}` in the same fence. `tell` queues behind existing work, starts when idle, and respects a paused queue. `tell-urgently` interrupts and delivers next, resuming a paused queue. Drafts and attachments stay intact. Parked sessions receive messages without changing pane placement. Both transcripts show sender, recipient and delivery ID; queued means accepted, not read or answered. No extra acknowledgment turn is generated.
+
+For a request that needs an answer, add `"replyExpected":true`. Reply with `"inReplyTo":"REQUEST-UUID"` and the original sender as `to`. The receiving home matches both the request ID and the authenticated sender; a delivery acknowledgment is not an answer. After a completed turn leaves a request unanswered, Converse allows 30 seconds, then makes at most one corrective injection. If that fails, agents watching either participant receive one attention notice. Human-paused queues and approval/input waits are left alone.
+
+If two sessions have ordinary tells queued to each other and neither has produced output for two minutes, Converse injects one existing message once. Both local sessions and updated group homes participate. Cross-home recovery uses fresh authenticated queue reports containing identities only, with one home elected to act. Recovery is recorded before interruption, survives restart, preserves drafts, and never replays the original tell. Older homes reject tracked requests explicitly; they continue accepting ordinary tells. This mechanism detects mutual waiting, not every kind of dependency cycle.
+
+Traffic appears as a single line with its status, arrow, peer and a short excerpt. Desktop hover shows the complete message; on iPad tap a transcript traffic line to open it. Copy/export retains the original text. Desktop message-number hover shows a recorded local date and time when that message has a saved timestamp; legacy messages without one are left undated.
+
+A recognizable whole-reply command from an untaught session gets a visible notice explaining how to enable messaging; nothing is sent. Bare command JSON also gets a formatting notice and never executes. Only successful, completed assistant turns from enabled sessions execute commands. Partial streams, tool output, prose examples and failed/interrupted replies do not. IDs are recorded with pending delivery before provider execution; restored queues remain paused. Self-messages, missing recipients and messages over 32 KB are rejected visibly. Automatic chains stop after 100 hops, including directory responses. Normal human input starts a fresh chain. The context menu also offers **Disable session messaging**. Teaching and disabling affect the sender; recipients can receive ordinary labeled input without being taught to send.
+
+### Messaging across homes
+
+`list-sessions` includes local sessions and remote sessions from the current group, labeled with their execution home and online/messaging state. Copy the directory’s exact ID: local UUIDs remain supported; remote IDs are `homeDeviceID/sessionUUID`. Both homes need this update for cross-device messaging. Older/unsupported homes are listed with messaging unavailable.
+
+Tells do not acquire a display lease. The recipient must have session messaging enabled on its home; ordinary tells preserve paused queues and drafts. Acceptance means **persisted in the recipient queue**, not read or answered. Duplicate delivery IDs do not enqueue twice. Offline/out-of-group targets fail visibly; an unconfirmed send is not automatically replayed. See [the wire contract](docs/participant-control.md) and [agent design](docs/agents.md).
+
 ## Agents and project scoreboards
 
-Mac agents are **sessions with initiative**: talk to them in a normal session pane, or let a bounded loop and opt-in file events initiate work. Use **New agent…** below the sidebar sessions or **Converse → New Agent…**. An agent appears under its execution home in Group, alongside its other sessions. It starts paused with no sessions selected. This rollout is **Mac-only**; Windows and iPad agent creation/control are deferred.
+Agents are **sessions with initiative**: talk to them in a normal session pane, or let a bounded loop and opt-in file events initiate work. Use **New agent…** below the sidebar sessions or **Converse → New Agent…**. An agent appears under its execution home in Group, alongside its other sessions. It starts paused with no sessions selected. Creation and control are available from Mac and Windows (including creating an agent on a remote home in the same group); the agent's execution, credentials, and scoreboard window stay on that home, which may also be a headless Linux server. iPad can view agent transcripts and use agent actions, but does not host agents.
 
 Choose this Mac or a capable online Mac in the current group as the home. The home runs the agent while Converse is open. Credentials, execution and its optional scoreboard window stay there when you take the transcript on another Mac. Leaving/changing groups removes old-group visibility and routing; queued messages are checked again before execution.
 
@@ -123,11 +200,25 @@ Optional [Muse Image](https://dev.meta.ai/docs/image-generation) art follows you
 
 On Mac, agents show a yellow caution badge in the sidebar whenever attention is requested, including while displayed in a pane. Hover puts that message first. The beachball means a check or prompt is actively running; a green loop symbol means periodic checks are enabled and waiting. The agent footer shows Thinking/Idle, loop state, interval, next check, and per-loop turn limit. **Agent actions → Loop controls…** opens controls for automatic checks, interval, maximum turns per loop, and scoreboard refresh every N scheduled loops (default 1). Enabling the loop schedules its first check one interval later. **Run once** queues a check and forces a scoreboard refresh without enabling the periodic loop. Turning the loop off leaves a current run alone. Between scoreboard refreshes, scheduled checks still produce conversation reports using timestamped cached repository metrics. Held queues still require **Resume queue**. Watched-session summaries include timestamped host activity so an active session is distinguished from historical unresolved bugs.
 
-### Messaging between Macs
+### Images and formatting in Discord
 
-`list-sessions` includes local sessions and remote sessions from the current group, labeled with their execution home and online/messaging state. Copy the directory’s exact ID: local UUIDs remain supported; remote IDs are `homeDeviceID/sessionUUID`. Both homes need this update for cross-device messaging. Older/unsupported homes are listed with messaging unavailable.
+Enable **Share scoreboard and mood image on Discord requests** in the agent's home setup to allow channel posters to request those images with a real bot mention: `@Converse show the scoreboard` or `@Converse show the current image`. The host uploads a PNG attachment containing only the saved mood art and, for a scoreboard, its measured cards and observation time. This does not expose transcripts, working notes or arbitrary files. Sharing defaults off and is checked again before delivery. Images use the same durable reply/nonce handling as text; an uncertain upload is never automatically repeated. The bot also needs **Attach Files** in the channel.
 
-Tells do not acquire a display lease. The recipient must have session messaging enabled on its home; ordinary tells preserve paused queues and drafts. Acceptance means **persisted in the recipient queue**, not read or answered. Duplicate delivery IDs do not enqueue twice. Offline/out-of-group targets fail visibly; an unconfirmed send is not automatically replayed. See [the wire contract](docs/participant-control.md) and [agent design](docs/agents.md).
+Discord replies retain supported Markdown; pipe tables become labelled records because Discord does not render GFM tables. The iPad transcript now renders block headings, lists and code, with tables presented as wrapping labelled records rather than raw Markdown.
+
+Agent schedules repeat until paused. **Maximum turns per loop** bounds each activation, rather than counting down future scheduled checks. The current engine completes one model response per activation (up to four hosted searches and 8,192 output tokens); it does not automatically continue itself. Existing exhausted agents remain paused, but can be enabled again without replenishing a lifetime counter. iPad Setup has explicit Save/Cancel and Save-and-run controls. Clipboard image paste and the Photos picker have separate buttons. On iPad, Command-V and the standard Paste menu also accept image-only clipboards when the session is editable.
+
+On iPad, the system **Paste** button accepts images from other apps; **Photos** opens the photo library. Startup and Take show the transcript tail unless you deliberately selected text or positioned an editing cursor. Scrolling pauses following for five idle seconds; selections hold your place. Pasted images are revealed automatically on Mac and iPad. Agent Setup reports failed saves in an alert and returns the home’s saved settings. Starting a loop or mention does not invalidate an open settings form.
+
+## Jolly (Mac)
+
+Choose **Converse → Jolly…** to choose the local agents that Jolly may address and leave an explicit message for the phone. Jolly uses the existing connector hostname and bearer authentication; its destination is now the Converse-owned bridge. Refresh the phone connector’s schema so it shows **Ask Converse**, then ask Jolly to list agents and address one by exact name or ID. With multiple possible destinations it asks which one; it never broadcasts or guesses.
+
+The bridge on loopback port 4691 persists requests with stable IDs. Retrying the same request ID returns the same status/result; changing its contents is rejected. Replies taking more than 20 seconds return pending with a pollable request ID. Agents use their saved per-activation turn limits and preserve typed drafts. Busy/paused agents report that condition without interrupting. An app restart marks interrupted work uncertain rather than automatically repeating it. Only agents on this bridge’s home Mac are directly listed; their existing authorized switchboard scope can include their group.
+
+Converse must be open to answer. The bridge stays available to say that the app is offline and to serve already-saved replies. It has no alternate backend. Retired connector operations return an explicit error. The bridge installer is an explicit operator step; building or running Converse does not reconfigure system services.
+
+The outbox contains only explicitly entered messages (up to 500 characters). Jolly reads **/v1/inbox** without consuming messages, then acknowledges received IDs through **/v1/inbox/ack**. Converse does not poll the phone inbox. This remains a pull mechanism, not a push into Muse conversations. Requests, replies and the outbox stay under Application Support/Converse/Jolly; credentials stay outside the app bundle and source tree.
 
 ## Export transcripts
 
@@ -209,6 +300,12 @@ For provider-only checks without a macOS GUI session, use `./test.sh --providers
 
 The checks use isolated temporary data and Muse's offline echo provider. They cover real Muse execution and session resumption, prompt quoting, persistence, image creation and image-only clipboard paste validation, interactive Muse completion and approval/question round trips, text editing and styling, Command-Return, input blocks, output cleanup, elapsed-time markers, clickable links, and Claude/Codex protocol fixtures. Claude and Codex checks do not make paid requests.
 
+### Isolated UI testing
+
+After building, run `python3 Tests/prepare_ui_qa.py` and open the app path it prints. The dedicated **Converse Isolated QA** app, copied offline provider fixture, data and working directory live under `~/Library/Application Support/Converse Developer QA`, outside Documents, Desktop and Downloads. The helper does not launch the app or request access to protected folders. It never copies real accounts, conversations or credentials, and refuses QA configurations that point outside its isolated folder or invoke live assistants. Rebuilding this ad-hoc QA app does not require Documents access. Keep UI testing in this app; the production app may legitimately ask for access when a user chooses a protected project folder.
+
+Provider identification marks are bundled from [Simple Icons 14.15.0](https://github.com/simple-icons/simple-icons/tree/14.15.0) under CC0. Their license and source notice are included with the app.
+
 ## How it works
 
 - **Muse:** `muse serve` over bidirectional JSON-RPC (MSP), resuming the retained session and using `turn/start`. Approval requests and questions are displayed above the transcript; decisions and answers go back on the same connection.
@@ -216,61 +313,6 @@ The checks use isolated temporary data and Muse's offline echo provider. They co
 - **Codex:** `codex exec --json`, resuming the returned thread ID.
 
 Each Muse turn opens an interactive host, which closes after the authoritative `turn/completed` event; Claude and Codex launch headless processes. Muse interruption uses `turn/interrupt`. If no completion arrives within five seconds, Converse stops that session’s local host, escalates to a forced exit after another five seconds if needed, and waits for the host to exit before resuming. Stop holds queued messages; Inject resumes them in the saved conversation without changing the current draft. Claude and Codex receive SIGINT, with SIGTERM after five seconds if needed; Converse waits for the old process and output stream to close before resuming the exact conversation with the replacement draft. It never starts a replacement concurrently with the interrupted turn. This gives consistent interruption behavior without depending on each CLI’s terminal key bindings. The CLI's own session store retains model context; Converse retains the visible transcript and draft. There is no idle terminal process. The interface uses AppKit's native text system, with a SwiftUI sidebar and controls.
-
-## Data
-
-Local data lives in `~/Library/Application Support/Converse/`:
-
-- `sessions.json`: assistant settings, transcripts, drafts, attachment paths, and saved delay markers.
-- `Attachments/`: persistent image files, so saved screenshots remain available after temporary files are cleared.
-
-The app uses the installed CLIs' authentication and permission configuration. Credentials, transcripts, and personal settings are not part of this repository.
-
-## Preview limitations
-
-Muse approval and question dialogs are supported. Approval buttons use the server’s exact labels, choice IDs, scope, and current requirement token. Questions support single choices, multiple choices, free text, and cancellation. Requests stay visible until Muse settles them; errors and stale decisions are shown and refreshed. Auto-review policy may resolve an action without asking you. The status line distinguishes approval waits, automatic review, retries, foreground completion with background checks, and terminal completion; waiting on your input shows no working spinner. Closing a window keeps the host alive.
-
-Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
-
-The downloadable release is the Mac app. The [iPad viewer/controller](iPad/README.md) is distributed through TestFlight. Windows has a separate implementation: current source includes provider icons, agent markers, guarded display restoration, and per-loop limits. Native context compaction and Discord bot execution currently require a Mac home; matching build numbers do not imply complete feature parity.
-
-See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); the vector-drawn sneaker icon is generated by [Sources/Icon.swift](Sources/Icon.swift).
-
-Read-only Muse status probing and retained usage aggregation are implemented in [Sources/MuseStatus.swift](Sources/MuseStatus.swift). The status probe has an eight-second timeout and exposes failures rather than fabricating values. The CLI quota bridge is in [Sources/MuseQuota.swift](Sources/MuseQuota.swift), has a fifteen-second timeout, and keeps terminal escape sequences out of the UI.
-
-The interactive Muse transport and request controls are in [Sources/MuseConnection.swift](Sources/MuseConnection.swift). Its wire shapes are checked against the installed CLI’s offline `muse schema generate-ts` export. `Tests/msp_fixture.py` checks the bidirectional approval/question exchange without model requests. Pasted images are saved as PNG; Muse receives both image content and the filename, while Claude/Codex receive the attachment paths through their adapters.
-
-Provider protocol references: [Codex app server](https://learn.chatgpt.com/docs/app-server) documents catalog and retained thread reads; [Claude Code environment variables](https://code.claude.com/docs/en/env-vars) documents separate `CLAUDE_CONFIG_DIR` stores. Installed CLI help and locally exported Codex schemas are the authority for accepted launch arguments. Provider fixtures reject any status query that attempts to resume a session or submit a prompt.
-
-## Session switchboard
-
-Right-click a conversation row, or its Mac transcript, and choose **Teach Session To Talk To Other Sessions**. The option is also available for remote sessions on updated homes, including parked sessions; teaching queues instructions without taking over the pane. Converse queues an instruction prompt that teaches the assistant to interpret user requests such as “tell Reviewer to check the tests.” It discovers current names and IDs by emitting exactly one complete `converse` fenced JSON reply: `{"command":"list-sessions"}`. Converse queues a live JSON directory response to that session. No static directory is taught.
-
-Every switchboard command must be the assistant’s entire final reply: one `converse` fenced JSON block, with no prose before or after it. Surrounding prose makes the block discussion; no command runs and no delivery error appears.
-
-To deliver, the assistant emits `{"command":"tell","to":"SESSION-UUID","text":"message"}` in the same fence. `tell` queues behind existing work, starts when idle, and respects a paused queue. `tell-urgently` interrupts and delivers next, resuming a paused queue. Drafts and attachments stay intact. Parked sessions receive messages without changing pane placement. Both transcripts show sender, recipient and delivery ID; queued means accepted, not read or answered. No extra acknowledgment turn is generated.
-
-For a request that needs an answer, add `"replyExpected":true`. Reply with `"inReplyTo":"REQUEST-UUID"` and the original sender as `to`. The receiving home matches both the request ID and the authenticated sender; a delivery acknowledgment is not an answer. After a completed turn leaves a request unanswered, Converse allows 30 seconds, then makes at most one corrective injection. If that fails, agents watching either participant receive one attention notice. Human-paused queues and approval/input waits are left alone.
-
-If two sessions have ordinary tells queued to each other and neither has produced output for two minutes, Converse injects one existing message once. Both local sessions and updated group homes participate. Cross-home recovery uses fresh authenticated queue reports containing identities only, with one home elected to act. Recovery is recorded before interruption, survives restart, preserves drafts, and never replays the original tell. Older homes reject tracked requests explicitly; they continue accepting ordinary tells. This mechanism detects mutual waiting, not every kind of dependency cycle.
-
-Traffic appears as a single line with its status, arrow, peer and a short excerpt. Desktop hover shows the complete message; on iPad tap a transcript traffic line to open it. Copy/export retains the original text. Desktop message-number hover shows a recorded local date and time when that message has a saved timestamp; legacy messages without one are left undated.
-
-A recognizable whole-reply command from an untaught session gets a visible notice explaining how to enable messaging; nothing is sent. Bare command JSON also gets a formatting notice and never executes. Only successful, completed assistant turns from enabled sessions execute commands. Partial streams, tool output, prose examples and failed/interrupted replies do not. IDs are recorded with pending delivery before provider execution; restored queues remain paused. Self-messages, missing recipients and messages over 32 KB are rejected visibly. Automatic chains stop after 100 hops, including directory responses. Normal human input starts a fresh chain. The context menu also offers **Disable session messaging**. Teaching and disabling affect the sender; recipients can receive ordinary labeled input without being taught to send.
-
-## Feedback
-
-Questions and ideas are welcome in [Discussions](https://github.com/richardkaufmann/converse/discussions). Please use the [bug-report form](https://github.com/richardkaufmann/converse/issues/new/choose) for problems. Pull requests are by invitation; see [contribution guidelines](CONTRIBUTING.md).
-
-## License
-
-Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).
-
-### Isolated UI testing
-
-After building, run `python3 Tests/prepare_ui_qa.py` and open the app path it prints. The dedicated **Converse Isolated QA** app, copied offline provider fixture, data and working directory live under `~/Library/Application Support/Converse Developer QA`, outside Documents, Desktop and Downloads. The helper does not launch the app or request access to protected folders. It never copies real accounts, conversations or credentials, and refuses QA configurations that point outside its isolated folder or invoke live assistants. Rebuilding this ad-hoc QA app does not require Documents access. Keep UI testing in this app; the production app may legitimately ask for access when a user chooses a protected project folder.
-
-Provider identification marks are bundled from [Simple Icons 14.15.0](https://github.com/simple-icons/simple-icons/tree/14.15.0) under CC0. Their license and source notice are included with the app.
 
 ### Session identity for embedded agents
 
@@ -292,38 +334,35 @@ Model, effort and permission menus remain editable during a running turn (a sett
 
 The developer installer uses `dockutil`, when available, to repair an obsolete Converse Dock shortcut while preserving its position, and verifies the target afterward. Local updates must verify both the installed app and its actual shortcut.
 
-## Jolly (Mac)
+## Data
 
-Choose **Converse → Jolly…** to choose the local agents that Jolly may address and leave an explicit message for the phone. Jolly uses the existing connector hostname and bearer authentication; its destination is now the Converse-owned bridge. Refresh the phone connector’s schema so it shows **Ask Converse**, then ask Jolly to list agents and address one by exact name or ID. With multiple possible destinations it asks which one; it never broadcasts or guesses.
+Local data lives in `~/Library/Application Support/Converse/`:
 
-The bridge on loopback port 4691 persists requests with stable IDs. Retrying the same request ID returns the same status/result; changing its contents is rejected. Replies taking more than 20 seconds return pending with a pollable request ID. Agents use their saved per-activation turn limits and preserve typed drafts. Busy/paused agents report that condition without interrupting. An app restart marks interrupted work uncertain rather than automatically repeating it. Only agents on this bridge’s home Mac are directly listed; their existing authorized switchboard scope can include their group.
+- `sessions.json`: assistant settings, transcripts, drafts, attachment paths, and saved delay markers.
+- `Attachments/`: persistent image files, so saved screenshots remain available after temporary files are cleared.
 
-Converse must be open to answer. The bridge stays available to say that the app is offline and to serve already-saved replies. It has no alternate backend. Retired connector operations return an explicit error. The bridge installer is an explicit operator step; building or running Converse does not reconfigure system services.
+The app uses the installed CLIs' authentication and permission configuration. Credentials, transcripts, and personal settings are not part of this repository.
 
-The outbox contains only explicitly entered messages (up to 500 characters). Jolly reads **/v1/inbox** without consuming messages, then acknowledges received IDs through **/v1/inbox/ack**. Converse does not poll the phone inbox. This remains a pull mechanism, not a push into Muse conversations. Requests, replies and the outbox stay under Application Support/Converse/Jolly; credentials stay outside the app bundle and source tree.
+## Preview limitations
 
-### Account status
+Muse approval and question dialogs are supported. Approval buttons use the server’s exact labels, choice IDs, scope, and current requirement token. Questions support single choices, multiple choices, free text, and cancellation. Requests stay visible until Muse settles them; errors and stale decisions are shown and refreshed. Auto-review policy may resolve an action without asking you. The status line distinguishes approval waits, automatic review, retries, foreground completion with background checks, and terminal completion; waiting on your input shows no working spinner. Closing a window keeps the host alive.
 
-The compact **Account** control follows Approvals in each local session footer. It shows the last reported context utilization and the highest reported account-limit percentage. Click for individual allowance windows, reset times, and refresh. Codex reports context from its last model call and account rate limits; Muse reports current-window and weekly allowances. Providers that do not expose a value show `?`, including API agents whose account allowance is not reported. These are observations, not guarantees of remaining capacity; account allowances may be shared with other sessions. A clock marks old, unknown-age, or expired observations. Refresh runs off the UI thread and does not send a model prompt.
+Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
 
-### Returning to a displayed session
+The downloadable release is the Mac app. The [iPad viewer/controller](iPad/README.md) is distributed through TestFlight. Windows has a separate native implementation sharing the same C# core: sidebar/panes, groups, switchboard messaging, agents, and a Set up Linux deployment manager. The Linux home is newer and still maturing: its deployment, admin, and recovery behavior is covered by automated tests and VM deployment, with interactive acceptance (live pairing walks, provider turns, recovery walkthroughs) still being exercised. Native context compaction and Discord bot execution currently require a Mac home; matching build numbers do not imply complete feature parity.
 
-After wake, reconnect or relaunch, a saved remote pane requests a conditional restore. The home grants a fresh display epoch only if nobody has taken it since that viewer last held it. A newer take remains authoritative even after its holder parks or disconnects, including across home restarts. Explicit P cancels restoration; 1/2/3 remain deliberate takeovers. Both ends need the `lease-resume-v1` capability; older homes still require a manual take. Draft conflicts and uncertain outgoing commands retain their existing review behavior.
+See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); the vector-drawn sneaker icon is generated by [Sources/Icon.swift](Sources/Icon.swift).
 
-### Images and formatting in Discord
+Read-only Muse status probing and retained usage aggregation are implemented in [Sources/MuseStatus.swift](Sources/MuseStatus.swift). The status probe has an eight-second timeout and exposes failures rather than fabricating values. The CLI quota bridge is in [Sources/MuseQuota.swift](Sources/MuseQuota.swift), has a fifteen-second timeout, and keeps terminal escape sequences out of the UI.
 
-Enable **Share scoreboard and mood image on Discord requests** in the agent's home setup to allow channel posters to request those images with a real bot mention: `@Converse show the scoreboard` or `@Converse show the current image`. The host uploads a PNG attachment containing only the saved mood art and, for a scoreboard, its measured cards and observation time. This does not expose transcripts, working notes or arbitrary files. Sharing defaults off and is checked again before delivery. Images use the same durable reply/nonce handling as text; an uncertain upload is never automatically repeated. The bot also needs **Attach Files** in the channel.
+The interactive Muse transport and request controls are in [Sources/MuseConnection.swift](Sources/MuseConnection.swift). Its wire shapes are checked against the installed CLI’s offline `muse schema generate-ts` export. `Tests/msp_fixture.py` checks the bidirectional approval/question exchange without model requests. Pasted images are saved as PNG; Muse receives both image content and the filename, while Claude/Codex receive the attachment paths through their adapters.
 
-Discord replies retain supported Markdown; pipe tables become labelled records because Discord does not render GFM tables. The iPad transcript now renders block headings, lists and code, with tables presented as wrapping labelled records rather than raw Markdown.
+Provider protocol references: [Codex app server](https://learn.chatgpt.com/docs/app-server) documents catalog and retained thread reads; [Claude Code environment variables](https://code.claude.com/docs/en/env-vars) documents separate `CLAUDE_CONFIG_DIR` stores. Installed CLI help and locally exported Codex schemas are the authority for accepted launch arguments. Provider fixtures reject any status query that attempts to resume a session or submit a prompt.
 
-Agent schedules repeat until paused. **Maximum turns per loop** bounds each activation, rather than counting down future scheduled checks. The current engine completes one model response per activation (up to four hosted searches and 8,192 output tokens); it does not automatically continue itself. Existing exhausted agents remain paused, but can be enabled again without replenishing a lifetime counter. iPad Setup has explicit Save/Cancel and Save-and-run controls. Clipboard image paste and the Photos picker have separate buttons. On iPad, Command-V and the standard Paste menu also accept image-only clipboards when the session is editable.
+## Feedback
 
-On iPad, the system **Paste** button accepts images from other apps; **Photos** opens the photo library. Startup and Take show the transcript tail unless you deliberately selected text or positioned an editing cursor. Scrolling pauses following for five idle seconds; selections hold your place. Pasted images are revealed automatically on Mac and iPad. Agent Setup reports failed saves in an alert and returns the home’s saved settings. Starting a loop or mention does not invalidate an open settings form.
+Questions and ideas are welcome in [Discussions](https://github.com/richardkaufmann/converse/discussions). Please use the [bug-report form](https://github.com/richardkaufmann/converse/issues/new/choose) for problems. Pull requests are by invitation; see [contribution guidelines](CONTRIBUTING.md).
 
-### Compact session context
+## License
 
-For retained Codex and Claude sessions hosted on Mac, **Compact** appears in yellow near the lower-right of the transcript when the latest provider observation is at least 80% of its reported context window. Observations older than ten minutes, unknown limits, cumulative billing totals, and observations from before a known compaction do not trigger a recommendation. A ten-minute cooldown prevents repeated recommendations immediately after compaction. The session-actions menu also offers manual compaction without a recommendation.
-
-Compaction runs at the session's home. If a turn is active, it waits for that turn to finish and runs before queued prompts; **Cancel compact** cancels that waiting request. The full displayed transcript, session identity, draft, and draft images stay intact. Provider compaction summarizes the model's working context and can omit details. Converse waits for a provider completion event; an acknowledgement alone is not success. Interrupted or unconfirmed compaction pauses queued input and is never automatically retried after restart.
-
-Mac and iPad remote viewers use the home's advertised capability and existing display lease. Older or unsupported homes do not show the action. Muse's native context usage events are recorded when supplied, but manual Muse compaction remains unavailable in this preview pending a verified host implementation. This feature does not change any provider's automatic compaction policy.
+Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).
