@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:recovery-ledger:v1",
+  "title": "Converse Linux recovery ledger v1",
+  "type": "object",
+  "required": [
+    "ledgerVersion",
+    "deviceID",
+    "sequence",
+    "updatedAt",
+    "counterFloors",
+    "commandReceipts",
+    "operations",
+    "membership",
+    "dissolvedGroupIDs",
+    "displayRestorations",
+    "updateEpisode"
+  ],
+  "properties": {
+    "ledgerVersion": { "const": 1 },
+    "deviceID": { "$ref": "#/$defs/deviceID" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "counterFloors": {
+      "type": "object",
+      "required": [
+        "nextBoot",
+        "nextHomeSeq",
+        "nextLeaseEpoch",
+        "nextMembershipGeneration"
+      ],
+      "properties": {
+        "nextBoot": { "$ref": "#/$defs/counter" },
+        "nextHomeSeq": { "$ref": "#/$defs/counter" },
+        "nextLeaseEpoch": { "$ref": "#/$defs/counter" },
+        "nextMembershipGeneration": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "commandReceipts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/commandReceipt" }
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operationRecord" }
+    },
+    "membership": {
+      "type": "object",
+      "required": ["generationFloors", "removedDeviceIDs"],
+      "properties": {
+        "generationFloors": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/deviceID" },
+          "additionalProperties": { "$ref": "#/$defs/counter" }
+        },
+        "removedDeviceIDs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/deviceID" }
+        }
+      }
+    },
+    "dissolvedGroupIDs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/uuid" }
+    },
+    "displayRestorations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/displayRestoration" }
+    },
+    "updateEpisode": {
+      "anyOf": [
+        { "$ref": "#/$defs/updateEpisode" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "deviceID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "counter": { "type": "integer", "minimum": 0 },
+    "globalSessionID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "nullableDateTime": {
+      "anyOf": [
+        { "type": "string", "format": "date-time" },
+        { "type": "null" }
+      ]
+    },
+    "commandReceipt": {
+      "type": "object",
+      "required": [
+        "commandID",
+        "sessionGlobalID",
+        "originDeviceID",
+        "state",
+        "acceptedAt",
+        "terminalAt",
+        "resultCode"
+      ],
+      "properties": {
+        "commandID": { "$ref": "#/$defs/uuid" },
+        "sessionGlobalID": { "$ref": "#/$defs/globalSessionID" },
+        "originDeviceID": { "$ref": "#/$defs/deviceID" },
+        "state": {
+          "enum": ["accepted", "started", "completed", "failed", "uncertain"]
+        },
+        "acceptedAt": { "type": "string", "format": "date-time" },
+        "terminalAt": { "$ref": "#/$defs/nullableDateTime" },
+        "resultCode": {
+          "anyOf": [
+            { "type": "string", "maxLength": 120 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "operationRecord": {
+      "type": "object",
+      "required": [
+        "operationID",
+        "kind",
+        "state",
+        "requestSHA256",
+        "episodeID",
+        "createdAt",
+        "updatedAt",
+        "terminalAt",
+        "resultCode"
+      ],
+      "properties": {
+        "operationID": { "$ref": "#/$defs/uuid" },
+        "kind": {
+          "enum": [
+            "update.activate",
+            "update.healthCommit",
+            "update.rollback",
+            "service.restart"
+          ]
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "running",
+            "draining_old_release",
+            "activating_new_release",
+            "probation_new_release",
+            "completed",
+            "aborted",
+            "failed",
+            "uncertain"
+          ]
+        },
+        "requestSHA256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "episodeID": {
+          "anyOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "terminalAt": { "$ref": "#/$defs/nullableDateTime" },
+        "resultCode": {
+          "anyOf": [
+            { "type": "string", "maxLength": 120 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "displayRestoration": {
+      "type": "object",
+      "required": [
+        "sessionGlobalID",
+        "lastAuthorizedOwnerDeviceID",
+        "takeGeneration",
+        "lastExecutionEpoch",
+        "restorationEligible",
+        "updatedAt"
+      ],
+      "properties": {
+        "sessionGlobalID": { "$ref": "#/$defs/globalSessionID" },
+        "lastAuthorizedOwnerDeviceID": {
+          "anyOf": [
+            { "$ref": "#/$defs/deviceID" },
+            { "type": "null" }
+          ]
+        },
+        "takeGeneration": { "$ref": "#/$defs/counter" },
+        "lastExecutionEpoch": { "$ref": "#/$defs/counter" },
+        "restorationEligible": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "updateEpisode": {
+      "type": "object",
+      "required": [
+        "episodeID",
+        "phase",
+        "fromReleaseID",
+        "toReleaseID",
+        "startedAt",
+        "updatedAt",
+        "explicitResolutionRequired",
+        "health"
+      ],
+      "properties": {
+        "episodeID": { "$ref": "#/$defs/uuid" },
+        "phase": {
+          "enum": [
+            "draining_old_release",
+            "activating_new_release",
+            "probation_new_release",
+            "committed",
+            "rolled_back",
+            "aborted"
+          ]
+        },
+        "fromReleaseID": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+        },
+        "toReleaseID": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+        },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "explicitResolutionRequired": { "type": "boolean" },
+        "health": { "enum": ["pending", "passed", "failed", "not_applicable"] }
+      }
+    }
+  }
+}

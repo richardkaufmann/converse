@@ -1,0 +1,34 @@
+{
+  "caseVersion": 1,
+  "name": "trust-captured-auth-expected",
+  "automation": "manual_gate_required",
+  "phase": "pty_host_key_trust",
+  "requestMayHaveBeenAccepted": false,
+  "executable": "ssh",
+  "argv": [
+    "ssh",
+    "-o", "StrictHostKeyChecking=ask",
+    "-o", "RequestTTY=no",
+    "-o", "PreferredAuthentications=none",
+    "-o", "PubkeyAuthentication=no",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "ForwardAgent=no",
+    "-o", "ForwardX11=no",
+    "-o", "ClearAllForwardings=yes",
+    "--",
+    "linux-home",
+    "true"
+  ],
+  "stdinFile": null,
+  "exitCode": 255,
+  "stdoutFile": "stdout.txt",
+  "stderrFile": "stderr.txt",
+  "expected": {
+    "classification": "trust_captured_verify_then_strict_preflight",
+    "validAdminEnvelope": false,
+    "adminOk": null,
+    "errorCode": null,
+    "nextAction": "verify_installed_fingerprint_then_strict_authenticated_preflight"
+  }
+}

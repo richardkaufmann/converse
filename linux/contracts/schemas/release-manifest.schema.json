@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:converse:linux:release-manifest:v1",
+  "title": "Converse Linux release manifest v1",
+  "type": "object",
+  "required": [
+    "manifestVersion",
+    "releaseID",
+    "product",
+    "productVersion",
+    "build",
+    "sourceCommit",
+    "createdAt",
+    "signingKeyID",
+    "protocols",
+    "artifact"
+  ],
+  "properties": {
+    "manifestVersion": { "const": 1 },
+    "releaseID": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "product": { "const": "Converse" },
+    "productVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "build": { "type": "integer", "minimum": 0 },
+    "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "signingKeyID": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "protocols": {
+      "type": "object",
+      "required": [
+        "deviceProtocolVersion",
+        "adminApiVersion",
+        "stateSchemaVersion",
+        "recoveryLedgerVersion"
+      ],
+      "properties": {
+        "deviceProtocolVersion": { "const": 1 },
+        "adminApiVersion": { "const": 1 },
+        "stateSchemaVersion": { "type": "integer", "minimum": 1 },
+        "recoveryLedgerVersion": { "const": 1 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["fileName", "operatingSystem", "architecture", "size", "sha256"],
+      "properties": {
+        "fileName": { "const": "converse" },
+        "operatingSystem": { "const": "linux" },
+        "architecture": { "enum": ["x64", "arm64"] },
+        "size": { "type": "integer", "minimum": 1, "maximum": 536870912 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}
