@@ -70,7 +70,7 @@ public sealed partial class MainWindow
         catch (Exception ex) { await AgentNotice(ex is ArgumentException ? ex.Message : "Could not create this agent. Check the home connection."); }
         finally { _agentDialogOpen = false; Refresh(); }
     }
-    private async Task AgentNotice(string text)
+    internal async Task AgentNotice(string text)
     {
         try { await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Agent", Content = text, CloseButtonText = "OK" }.ShowAsync(); } catch { }
     }

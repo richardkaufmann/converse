@@ -237,6 +237,7 @@ public sealed partial class ConversationPane : UserControl
             AttachButton.IsEnabled = false;
             ModelBox.IsEnabled = EffortBox.IsEnabled = AccessBox.IsEnabled = false; // WinUI 3 panels have no IsEnabled
             TakeButton.Visibility = Visibility.Collapsed;
+            AgentActionsButton.Visibility = Visibility.Collapsed;
             BusyRing.IsActive = false;
             // Force the empty sync: the cleared state may equal the tracked
             // state while blocks still show the old session.
@@ -249,6 +250,7 @@ public sealed partial class ConversationPane : UserControl
             UpdateHint();
             return;
         }
+        AgentActionsButton.Visibility = _selected.IsAgent ? Visibility.Visible : Visibility.Collapsed;
         PaneTitle.Text = _selected.Title + (_selected.IsAgent ? " 🕵️" : "");
         // Adopt the home draft only into an untouched tail; never over typing.
         // Stored drafts use \n; the draft box uses \r, so normalize on adopt.
@@ -313,6 +315,37 @@ public sealed partial class ConversationPane : UserControl
         RefreshSettings();
     }
 
+
+    private bool _agentActionBusy;
+    private void OnAgentActionsOpening(object sender, object e)
+    {
+        if (sender is not MenuFlyout menu) return;
+        menu.Items.Clear();
+        if (_selected is not { IsAgent: true } selected) return;
+        var local = selected.LocalSessionID is { } id ? _host.Store.Sessions.FirstOrDefault(s => s.Id == id) : null;
+        var online = local is not null || selected.GlobalID is { } gid && !_host.Devices.RemoteOffline.Contains(gid);
+        var setup = new MenuFlyoutItem { Text = "Agent Setup / Loop…", IsEnabled = online };
+        setup.Click += async (_, _) => await _host.OpenAgentSetup(selected);
+        menu.Items.Add(setup);
+        var run = new MenuFlyoutItem { Text = "Run once", IsEnabled = online && !_agentActionBusy && !SelectedBusy() };
+        run.Click += async (_, _) =>
+        {
+            if (_agentActionBusy) return;
+            _agentActionBusy = true;
+            try { await _host.RunAgentOnce(selected); }
+            catch { await _host.AgentNotice("Could not run the agent. Check the home connection before retrying."); }
+            finally { _agentActionBusy = false; }
+        };
+        menu.Items.Add(run);
+        var board = new MenuFlyoutItem { Text = "Scoreboard", IsEnabled = local?.Agent is not null || BannerStack.Children.OfType<Expander>().Any() };
+        board.Click += (_, _) =>
+        {
+            if (local is not null) _host.ShowAgentScoreboard(local);
+            else if (BannerStack.Children.OfType<Expander>().FirstOrDefault() is { } expander)
+            { expander.IsExpanded = true; BannerScroller.ChangeView(null, 0, null); }
+        };
+        menu.Items.Add(board);
+    }
 
     private bool SelectedBusy()
     {
@@ -1417,11 +1450,6 @@ public sealed partial class ConversationPane : UserControl
         BannerStack.Children.Clear();
         if (isAgent && _selected is { } selected)
         {
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-            var setup = new Button { Content = "Agent Setup / Loop" }; setup.Click += async (_, _) => await _host.OpenAgentSetup(selected); controls.Children.Add(setup);
-            var run = new Button { Content = "Run once" }; run.Click += async (_, _) => { run.IsEnabled = false; try { await _host.RunAgentOnce(selected); } finally { run.IsEnabled = true; } }; controls.Children.Add(run);
-            if (local is not null) { var show = new Button { Content = "Scoreboard" }; show.Click += (_, _) => _host.ShowAgentScoreboard(local); controls.Children.Add(show); }
-            BannerStack.Children.Add(controls);
             var attention = local?.Agent?.Attention ?? widget?.Attention ?? "";
             if (attention.Length > 0) BannerStack.Children.Add(new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Gold), Child = new TextBlock { Text = "⚠ " + attention, Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black), TextWrapping = TextWrapping.Wrap, Padding = new Thickness(8) } });
             if (widget is not null)

@@ -159,6 +159,9 @@ struct RemotePane: View {
     var leadingInset: CGFloat = 0
     @ObservedObject var store = Store.shared
     @StateObject private var composer = RemoteComposer()
+    @State private var scoreboardExpanded = false
+    @State private var agentActionBusy = false
+    @State private var agentActionError: String?
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
@@ -171,9 +174,22 @@ struct RemotePane: View {
             HStack(spacing: 8) {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
-                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent").font(.system(size: 15, weight: .medium))
+                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent").font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Text("on home Mac").font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+                if service.remoteRow(globalID: globalID)?.participantKind == "agent" || transcript?.engine == "agent" {
+                    Menu {
+                        Button("Agent Setup / Loop…") { AgentWindows.shared.remoteSetup(globalID) }
+                        Button("Run once") { runAgentOnce() }.disabled(agentActionBusy || transcript?.busy == true)
+                        Button("Scoreboard") { scoreboardExpanded = true }.disabled(transcript?.agentWidget == nil)
+                    } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .accessibilityLabel("Agent actions").help("Agent actions: setup, loop, run once and scoreboard")
+                        .disabled(offline)
+                        .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
+                            Button("OK", role: .cancel) { agentActionError = nil }
+                        } message: { Text(agentActionError ?? "") }
+                }
                 PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
@@ -192,9 +208,8 @@ struct RemotePane: View {
                 }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
-            if transcript?.engine == "agent" { Button("Agent Setup…") { AgentWindows.shared.remoteSetup(globalID) }.padding(6).disabled(offline) }
             if let widget = transcript?.agentWidget {
-                DisclosureGroup("Agent scoreboard") {
+                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = NSImage(contentsOf: file) { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 160) }
                         Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
@@ -324,6 +339,15 @@ struct RemotePane: View {
                     composer.sentText = ""; composer.sentHashes = []; composer.sentCommandID = nil
                 }
             }
+    }
+    func runAgentOnce() {
+        guard !agentActionBusy, let global = DeviceGlobalID(globalID) else { return }
+        agentActionBusy = true
+        Task { @MainActor in
+            let result = await service.requestParticipant(home: global.home, action: "agent.run", target: globalID)
+            agentActionBusy = false
+            if result.outcome != "completed" { agentActionError = result.detail }
+        }
     }
     func outboxText(_ record: DeviceOutboxRecord) -> String {
         switch record.outcome {

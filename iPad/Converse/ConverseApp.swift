@@ -164,17 +164,31 @@ struct PadPane: View {
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
     @State private var agentSetup = false
+    @State private var scoreboardExpanded = false
+    @State private var agentActionBusy = false
+    @State private var agentActionError: String?
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
-                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3)
-                Spacer()
-                if service.remoteRow(globalID: id)?.participantKind == "agent" {
-                    Button("Agent Setup / Loop") { agentSetup = true }
+                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
+                if service.remoteRow(globalID: id)?.participantKind == "agent" || snapshot?.engine == "agent" {
+                    Menu {
+                        Button("Agent Setup / Loop…") { agentSetup = true }
+                        Button("Run once") { runAgentOnce() }
+                            .disabled(agentActionBusy || snapshot?.busy == true)
+                        Button("Scoreboard") { scoreboardExpanded = true }
+                            .disabled(snapshot?.agentWidget == nil)
+                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                        .fixedSize().accessibilityLabel("Agent actions")
+                        .disabled(service.remoteOffline.contains(id))
                         .sheet(isPresented: $agentSetup) { if let global = DeviceGlobalID(id) { PadAgentPanel(home: global.home, target: id) } }
+                        .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
+                            Button("OK", role: .cancel) { agentActionError = nil }
+                        } message: { Text(agentActionError ?? "") }
                 }
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
@@ -192,7 +206,7 @@ struct PadPane: View {
                 }.padding(8).background(Color.yellow.opacity(0.3))
             }
             if let widget = snapshot?.agentWidget {
-                DisclosureGroup("Agent scoreboard") {
+                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = UIImage(contentsOfFile: file.path) { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
                         Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
@@ -292,6 +306,15 @@ struct PadPane: View {
             }
     }
     func command(_ action: String) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: action)) }
+    func runAgentOnce() {
+        guard !agentActionBusy, let global = DeviceGlobalID(id) else { return }
+        agentActionBusy = true
+        Task { @MainActor in
+            let result = await service.requestParticipant(home: global.home, action: "agent.run", target: id)
+            agentActionBusy = false
+            if result.outcome != "completed" { agentActionError = result.detail }
+        }
+    }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
         HStack(spacing: 8) {
             if let state = snapshot.compaction {
