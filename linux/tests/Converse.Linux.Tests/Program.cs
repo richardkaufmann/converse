@@ -23,6 +23,82 @@ string TempHome()
     return path;
 }
 
+string FindRepoRoot()
+{
+    var current = new DirectoryInfo(AppContext.BaseDirectory);
+    while (current is not null)
+    {
+        if (File.Exists(Path.Combine(current.FullName, "VERSION.json")) &&
+            Directory.Exists(Path.Combine(current.FullName, "linux", "contracts")))
+            return current.FullName;
+        current = current.Parent;
+    }
+    throw new DirectoryNotFoundException("Repository root not found.");
+}
+
+string StatusJson(string? deviceID, string supervisor = "systemd-user")
+{
+    var status = new System.Text.Json.Nodes.JsonObject
+    {
+        ["product"] = "Converse",
+        ["productVersion"] = "1.0.0",
+        ["build"] = 2,
+        ["sourceCommit"] = null,
+        ["architecture"] = CurrentArchitecture(),
+        ["device"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["deviceID"] = deviceID,
+            ["name"] = "linux-home",
+        },
+        ["protocols"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["deviceProtocolVersion"] = 1,
+            ["adminApiVersion"] = 1,
+            ["stateSchemaVersion"] = 1,
+            ["recoveryLedgerVersion"] = 1,
+        },
+        ["runtime"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["processState"] = deviceID is null ? "not_installed" : "running",
+            ["supervisor"] = supervisor,
+            ["startedAt"] = "2026-10-30T16:00:00Z",
+            ["admission"] = deviceID is null ? "closed_not_installed" : "open",
+        },
+        ["filesystem"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["installRoot"] = "/home/richard/.local/lib/converse",
+            ["stateRoot"] = "/home/richard/.local/state/converse",
+            ["configRoot"] = "/home/richard/.config/converse",
+            ["dataRoot"] = "/home/richard/.local/share/converse",
+        },
+        ["fabric"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["groupID"] = null,
+            ["groupName"] = null,
+            ["peerCount"] = 0,
+            ["connectedPeerCount"] = 0,
+        },
+        ["work"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["sessionCount"] = 0,
+            ["activeTurnCount"] = 0,
+            ["agentCount"] = 0,
+            ["scheduledRunCount"] = 0,
+            ["pendingCommandCount"] = 0,
+        },
+        ["release"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["currentReleaseID"] = "1.0.0-2-linux-test",
+            ["previousReleaseID"] = null,
+            ["stagedReleaseID"] = null,
+            ["updateEpisode"] = null,
+        },
+        ["secrets"] = new System.Text.Json.Nodes.JsonArray(),
+        ["capabilities"] = new System.Text.Json.Nodes.JsonArray("linux-home-v1", "admin-v1"),
+    };
+    return status.ToJsonString();
+}
+
 string CurrentArchitecture() => RuntimeInformation.OSArchitecture switch
 {
     Architecture.X64 => "x64",
@@ -415,6 +491,170 @@ try
             "Installer creates identity, recovery ledger, release link, and supervisor state");
     }
 
+    // GUI-side manager: exact fake-SSH argv, classifications, registry, bootstrap.
+    {
+        var repo = FindRepoRoot();
+        var caseRoot = Path.Combine(repo, "linux", "contracts", "fake-ssh", "status-ok");
+        using var caseDocument = JsonDocument.Parse(
+            await File.ReadAllTextAsync(Path.Combine(caseRoot, "case.json")));
+        var expectedArgv = caseDocument.RootElement.GetProperty("argv")
+            .EnumerateArray().Select(item => item.GetString() ?? "").ToArray();
+        checks.That(LinuxSshCommands.AutomatedSsh(
+                "linux-home", LinuxSshCommands.AdminRequest).SequenceEqual(expectedArgv),
+            "Windows manager uses the exact frozen automated SSH argv");
+
+        var registryFolder = TempHome();
+        var statusStdout = await File.ReadAllTextAsync(Path.Combine(caseRoot, "stdout.txt"));
+        var fake = new FakeLinuxProcessRunner
+        {
+            Handler = request =>
+            {
+                // The fixture request ID is fixed; bind the replayed response
+                // to the manager's fresh request ID before returning it.
+                var requestJson = System.Text.Json.Nodes.JsonNode.Parse(
+                    request.StandardInput ?? "{}")!.AsObject();
+                var response = System.Text.Json.Nodes.JsonNode.Parse(statusStdout)!.AsObject();
+                response["requestID"] = requestJson["requestID"]?.GetValue<string>();
+                // The status fixture exercises probation. For a strict
+                // status parse its identity and release fields are enough.
+                return new LinuxProcessResult(0, response.ToJsonString(), "");
+            },
+        };
+        var manager = new LinuxDeploymentManager(
+            new LinuxDeploymentRegistryStore(registryFolder), fake);
+        var strict = await manager.StrictStatusAsync("linux-home");
+        checks.That(strict.Success && strict.Value?.DeviceID ==
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+            "Manager parses the frozen status fixture through fake SSH");
+
+        fake.Handler = _ => new LinuxProcessResult(
+            255, "", "Host key verification failed.\n");
+        var changed = await manager.AdminAsync("linux-home", "status.get");
+        checks.That(changed.Classification == "ssh_host_key_changed",
+            "Manager classifies a changed SSH host key before admin parsing");
+
+        var operationID = Guid.NewGuid();
+        fake.Handler = _ => new LinuxProcessResult(
+            255, "", "Connection to linux-home closed by remote host.\n");
+        var uncertain = await manager.AdminAsync(
+            "linux-home", "update.activate",
+            new System.Text.Json.Nodes.JsonObject
+            {
+                ["releaseID"] = "1.0.0-2-linux-test",
+                ["drainTimeoutSeconds"] = 5,
+            }, operationID: operationID);
+        checks.That(uncertain.Classification == "ssh_disconnected_uncertain" &&
+                    uncertain.OperationID == operationID,
+            "Manager preserves the operation ID after an uncertain SSH disconnect");
+
+        checks.That(LinuxDeploymentManager.ValidateUploadPath(
+                        "/home/richard/.local/state/converse",
+                        "/home/richard/.local/state/converse/incoming/0123456789abcdef0123456789abcdef.tar.gz") &&
+                    !LinuxDeploymentManager.ValidateUploadPath(
+                        "/home/richard/.local/state/converse",
+                        "/home/richard/.local/state/converse/incoming/../escape.tar.gz"),
+            "Manager accepts only tokenized upload paths under the status state root");
+
+        var deployment = new LinuxDeployment
+        {
+            DisplayName = "Fixture Linux",
+            Ssh = new LinuxDeploymentSsh
+            {
+                Destination = "linux-home",
+                HostKeyFingerprintSHA256 = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            },
+            Remote = new LinuxDeploymentRemote
+            {
+                LinuxUser = "richard",
+                InstallRoot = "/home/richard/.local/lib/converse",
+                StateRoot = "/home/richard/.local/state/converse",
+                Supervisor = "systemd-user",
+            },
+            Converse = new LinuxDeploymentConverse
+            {
+                DeviceID = new string('a', 64),
+            },
+        };
+        manager.RegistryStore.Upsert(deployment);
+        var registryText = await File.ReadAllTextAsync(
+            Path.Combine(registryFolder, "linux-deployments.json"));
+        checks.That(new LinuxDeploymentRegistryStore(registryFolder).Deployments.Count == 1 &&
+                    !registryText.Contains("\"password\"", StringComparison.OrdinalIgnoreCase) &&
+                    !registryText.Contains("\"privateKey\"", StringComparison.OrdinalIgnoreCase) &&
+                    !registryText.Contains("\"verificationCode\"", StringComparison.OrdinalIgnoreCase),
+            "Deployment registry round-trips without credential or pairing fields");
+    }
+
+    {
+        var home = TempHome();
+        var sshDirectory = Path.Combine(home, ".ssh");
+        Directory.CreateDirectory(sshDirectory);
+        var knownHosts = Path.Combine(sshDirectory, "known_hosts");
+        await File.WriteAllTextAsync(knownHosts, "placeholder\n");
+        var keyBytes = Enumerable.Repeat((byte)7, 32).ToArray();
+        var expected = "SHA256:" + Convert.ToBase64String(
+            SHA256.HashData(keyBytes)).TrimEnd('=');
+        var bootstrap = Path.Combine(home, "converse-bootstrap");
+        await File.WriteAllTextAsync(bootstrap, "fake bootstrap");
+        var deviceID = new string('a', 64);
+        var installStatus = StatusJson(deviceID);
+        var fake = new FakeLinuxProcessRunner
+        {
+            Handler = request =>
+            {
+                if (request.FileName == "ssh" && request.Arguments.Contains("-G"))
+                {
+                    return new LinuxProcessResult(0,
+                        $"user richard\nhostname linux.example\nuserknownhostsfile {knownHosts}\nproxyjump none\n",
+                        "");
+                }
+                if (request.FileName == "ssh-keygen")
+                {
+                    return new LinuxProcessResult(0,
+                        $"linux.example ssh-ed25519 {Convert.ToBase64String(keyBytes)}\n", "");
+                }
+                if (request.FileName == "scp") return new LinuxProcessResult(0, "", "");
+                var remote = request.Arguments.LastOrDefault() ?? "";
+                if (remote == LinuxSshCommands.BootstrapPreflight)
+                    return new LinuxProcessResult(0, StatusJson(null) + "\n", "");
+                if (remote == LinuxSshCommands.BootstrapInstall)
+                    return new LinuxProcessResult(0, installStatus + "\n", "");
+                if (remote == LinuxSshCommands.AdminRequest)
+                {
+                    var requestJson = System.Text.Json.Nodes.JsonNode.Parse(
+                        request.StandardInput ?? "{}")!.AsObject();
+                    var response = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["adminApiVersion"] = 1,
+                        ["requestID"] = requestJson["requestID"]?.GetValue<string>(),
+                        ["ok"] = true,
+                        ["result"] = System.Text.Json.Nodes.JsonNode.Parse(installStatus),
+                        ["operation"] = null,
+                        ["error"] = null,
+                    };
+                    return new LinuxProcessResult(0, response.ToJsonString() + "\n", "");
+                }
+                return new LinuxProcessResult(0, "", "");
+            },
+        };
+        var manager = new LinuxDeploymentManager(
+            new LinuxDeploymentRegistryStore(Path.Combine(home, "registry")), fake);
+        var hostKey = await manager.VerifyInstalledHostKeyAsync("linux-home");
+        checks.That(hostKey?.FingerprintSHA256 == expected,
+            "Manager derives the installed SSH host-key fingerprint from known_hosts");
+
+        var result = await manager.BootstrapAsync(
+            "linux-home", "Fixture Linux", bootstrap);
+        var remoteCommands = fake.Requests
+            .Where(request => request.FileName == "ssh" && !request.Arguments.Contains("-G"))
+            .Select(request => request.Arguments.Last())
+            .ToList();
+        checks.That(result.Success && result.Value?.Converse.DeviceID == deviceID &&
+                    remoteCommands.All(command => LinuxSshCommands.FixedRemoteCommands.Contains(command)) &&
+                    manager.Deployments.Count == 1,
+            "Fake-SSH bootstrap uses only fixed remote commands and saves the deployment");
+    }
+
     // Real host and Unix-socket admin path.
     {
         var paths = new LinuxPaths(TempHome());
@@ -552,6 +792,19 @@ sealed class FakeRunner : IAgentRunner
 }
 
 sealed record CreatedBundle(string Path, string Sha256, long Size, ReleaseManifest Manifest);
+
+sealed class FakeLinuxProcessRunner : ILinuxProcessRunner
+{
+    public List<LinuxProcessRequest> Requests { get; } = new();
+    public required Func<LinuxProcessRequest, LinuxProcessResult> Handler { get; set; }
+
+    public Task<LinuxProcessResult> RunAsync(
+        LinuxProcessRequest request, CancellationToken cancellationToken = default)
+    {
+        Requests.Add(request);
+        return Task.FromResult(Handler(request));
+    }
+}
 
 sealed class FakeUpdateRuntime : ILinuxUpdateRuntime
 {

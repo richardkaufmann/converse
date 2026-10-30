@@ -85,6 +85,7 @@
         <MenuBar Grid.Row="0">
             <MenuBarItem Title="Converse">
                 <MenuFlyoutItem Text="Setup" Click="OnSetupClick"/>
+                <MenuFlyoutItem Text="Set up Linux…" Click="OnLinuxClick"/>
                 <MenuFlyoutItem Text="Converse Groups…" Click="OnGroupsClick"/>
                 <MenuFlyoutItem Text="Connect to Other Converses…" Click="OnConnectClick"/>
                 <MenuFlyoutSeparator/>

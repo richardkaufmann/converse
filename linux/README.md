@@ -18,10 +18,14 @@ Current contents cover the frozen contract and the first headless runtime:
 - `tests/Converse.Linux.Tests/`: maintained runtime, ledger, update,
   installer, and admin-socket checks
 
-The GUI managers are the next step. Passing these checks does not claim PTY or
-ConPTY host-key behavior, a production signed release, physical systemd/cron
-reboot behavior, or provider-login acceptance. Release staging deliberately
-fails closed until production Ed25519 public keys are embedded by the signed
+The Windows reference manager is in
+`windows/src/Converse.Core/LinuxManager.cs`,
+`windows/src/Converse.Core/LinuxDeploymentManager.cs`, and
+`windows/src/Converse.Windows/LinuxManagerWindows.cs`; the Mac manager remains
+coordinated follow-up work. Passing these checks does not claim PTY or ConPTY
+host-key behavior, a production signed release, physical systemd/cron reboot
+behavior, or provider-login acceptance. Release staging deliberately fails
+closed until production Ed25519 public keys are embedded by the signed
 release pipeline.
 
 Build a self-contained Linux executable:
