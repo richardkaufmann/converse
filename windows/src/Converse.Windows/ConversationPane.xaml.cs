@@ -1117,6 +1117,23 @@ public sealed partial class ConversationPane : UserControl
             hashes.Add(hash);
         }
         _notice = null;
+        // Attachment creation changes the height of the persistent draft,
+        // not the transcript messages, so SyncLines may legitimately no-op.
+        // Scroll once after layout, only for the draft the user attached to.
+        if (_selected?.Key == target.Key)
+        {
+            RefreshDraftImages();
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (_selected?.Key != target.Key) return;
+                TranscriptScroller.UpdateLayout();
+                _unreadUpdates = 0;
+                UpdateJumpButton(following: true);
+                var imageTop = DraftImagesScroller.TransformToVisual(TranscriptStack)
+                    .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+                OwnChangeView(TranscriptScroller, Math.Min(imageTop, TranscriptScroller.ScrollableHeight));
+            });
+        }
     }
 
     private void OnDraftKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)

@@ -66,7 +66,6 @@
                             ToolTipService.ToolTip="Show in pane 3 (takes remote sessions here)"/>
                     <Button Content="X" Click="OnCloseClick" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowClose, Converter={StaticResource BoolToVis}}"
-                            Background="#8C0F14" Foreground="White"
                             ToolTipService.ToolTip="Close session (keeps a recovery archive)"/>
                     <Button Content="X" Tag="{Binding}" FontSize="12" Width="30" Height="28" Padding="0"
                             Visibility="{Binding ShowGreyClose, Converter={StaticResource BoolToVis}}"

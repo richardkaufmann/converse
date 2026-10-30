@@ -1353,7 +1353,34 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         probe.Stop();
         var threw = false;
         try { await a.ConnectManualAsync("127.0.0.1", closedPort); } catch { threw = true; }
-        Check(!threw && a.LastOutcome.StartsWith("Could not reach"), "Refused manual connect reports instead of throwing");
+        Check(!threw && a.ConnectionNotice.StartsWith("Could not reach") && a.LastOutcome.Length == 0,
+            "Refused manual connect reports in connection UI, never the conversation footer");
+        var manualNotice = a.ConnectionNotice;
+        var changed = 0; a.Changed += () => changed++;
+        await a.ConnectAsync(Guid.NewGuid(), "127.0.0.1", closedPort, null, false, userInitiated: false);
+        Check(a.ConnectionNotice == manualNotice && a.LastOutcome.Length == 0 && changed == 0,
+            "Background reconnect failure does not overwrite notices or refresh session UI");
+        var homeRoot = Directory.CreateTempSubdirectory("converse-recovered-").FullName;
+        try
+        {
+            using var home = new DeviceSyncService(homeRoot, new SessionStore(homeRoot, new FakeRunner()), "Recovered home");
+            a.PairingConfirmation = _ => Task.FromResult(true);
+            await a.StartAsync(0); await home.StartAsync(closedPort);
+            await home.CreateGroupAsync("Recovery");
+            await a.ConnectAsync(Guid.NewGuid(), "127.0.0.1", closedPort, home.CurrentGroup!.Id, true, userInitiated: false);
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (home.GroupRequests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+            if (home.GroupRequests.Count > 0)
+            {
+                await home.ReviewGroupRequestAsync(home.GroupRequests[0]);
+                await home.ApproveGroupReviewAsync();
+            }
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (a.ConnectionNotice.Length > 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+            Check(a.Homes.GetValueOrDefault(home.DeviceId)?.Online == true && a.ConnectionNotice.Length == 0,
+                "Authenticated recovery clears the previous failure for that endpoint");
+        }
+        finally { Cleanup(homeRoot); }
     }
     finally { Cleanup(rRoot); }
 }

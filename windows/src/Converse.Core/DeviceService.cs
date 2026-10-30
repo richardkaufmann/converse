@@ -269,6 +269,8 @@ public sealed partial class DeviceSyncService : IDisposable
     public Dictionary<string, DeviceTranscriptPayload> RemoteTranscripts { get; } = new();
     public HashSet<string> RemoteOffline { get; } = new();
     public string LastOutcome { get; private set; } = "";
+    public string ConnectionNotice { get; private set; } = "";
+    private string? _failedConnectionEndpoint;
     public int ListeningPort { get; private set; }
     public event Action? Changed;
     public event Action<string>? RemoteViewDisplaced;
@@ -485,9 +487,10 @@ public sealed partial class DeviceSyncService : IDisposable
         await ConnectAsync(id, host, port, joiningGroupID, joiningGroupID is not null);
     }
 
-    private async Task ConnectAsync(Guid id, string host, int port, string? joiningGroupID, bool wantsJoin)
+    internal async Task ConnectAsync(Guid id, string host, int port, string? joiningGroupID, bool wantsJoin, bool userInitiated = true)
     {
-        if (port is < 1 or > 65535) { LastOutcome = "Port must be between 1 and 65535."; return; }
+        if (userInitiated) { ConnectionNotice = ""; _failedConnectionEndpoint = null; }
+        if (port is < 1 or > 65535) { if (userInitiated) ConnectionNotice = "Port must be between 1 and 65535."; return; }
         if (!_connecting.TryAdd(host + ":" + port, 0)) return;
         try
         {
@@ -497,8 +500,14 @@ public sealed partial class DeviceSyncService : IDisposable
             catch (SocketException ex)
             {
                 client.Dispose();
-                LastOutcome = $"Could not reach {host}:{port} ({ex.SocketErrorCode}).";
-                Changed?.Invoke();
+                // Offline group members are routine background work, not
+                // errors in whichever conversation happens to be displayed.
+                if (userInitiated)
+                {
+                    ConnectionNotice = $"Could not reach {host}:{port} ({ex.SocketErrorCode}).";
+                    _failedConnectionEndpoint = host + ":" + port;
+                    Changed?.Invoke();
+                }
                 return;
             }
             var peer = new Peer
@@ -822,6 +831,11 @@ public sealed partial class DeviceSyncService : IDisposable
         }
         catch { LastOutcome = "Could not save paired device. Control not granted."; peer.Client.Dispose(); return; }
         peer.TrustedReady = true;
+        if (_failedConnectionEndpoint == peer.ManualHost + ":" + peer.ManualPort)
+        {
+            ConnectionNotice = "";
+            _failedConnectionEndpoint = null;
+        }
         if (peer.ControlOnly)
         {
             _ = SendGroupStateAsync(peer);
@@ -903,7 +917,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 _ => DiscoveredEndpoint(device.DeviceID),
             };
             if (endpoint is not { } address) continue;
-            _ = ConnectAsync(Guid.NewGuid(), address.host, address.port, null, false);
+            _ = ConnectAsync(Guid.NewGuid(), address.host, address.port, null, false, userInitiated: false);
         }
         await Task.CompletedTask;
     }

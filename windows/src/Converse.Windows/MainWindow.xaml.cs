@@ -631,6 +631,10 @@ public sealed partial class MainWindow : Window
             CloseButtonText = "Cancel",
             XamlRoot = Content.XamlRoot,
         };
+        var closeStyle = new Style(typeof(Button));
+        closeStyle.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Microsoft.UI.Colors.DarkRed)));
+        closeStyle.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Microsoft.UI.Colors.White)));
+        dialog.PrimaryButtonStyle = closeStyle;
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         _placements.Park("local:" + localId);
         _placements.Save(_dataFolder);
@@ -740,10 +744,12 @@ public sealed partial class MainWindow : Window
         if (chosen is { } nearby)
         {
             await _devices.ConnectManualAsync(nearby.Host, nearby.Port);
-            return;
         }
-        if (result == ContentDialogResult.Primary && int.TryParse(portBox.Text, out var parsed))
+        else if (result == ContentDialogResult.Primary && int.TryParse(portBox.Text, out var parsed))
             await _devices.ConnectManualAsync(hostBox.Text.Trim(), parsed);
+        else return;
+        if (_devices.ConnectionNotice.Length > 0)
+            await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not connect", Content = _devices.ConnectionNotice, CloseButtonText = "OK" }.ShowAsync();
     }
 
 
@@ -816,7 +822,7 @@ public sealed partial class MainWindow : Window
         foreach (var group in _devices.AvailableGroups())
             signature.Append("|a:").Append(group.Id).Append(group.Name)
                 .Append(string.Join(",", _devices.GroupDevices(group).Select(d => d.DeviceID + d.Label)));
-        signature.Append("|s:").Append(_devices.ServiceStatus).Append(_devices.LastOutcome).Append(_groupsArmDissolve ?? "");
+        signature.Append("|s:").Append(_devices.ServiceStatus).Append(_devices.LastOutcome).Append(_devices.ConnectionNotice).Append(_groupsArmDissolve ?? "");
         var text = signature.ToString();
         if (text == _groupsSignature) return;
         _groupsSignature = text;
@@ -1011,6 +1017,7 @@ public sealed partial class MainWindow : Window
 
         if (_devices.ServiceStatus.Length > 0) panel.Children.Add(Note(_devices.ServiceStatus));
         if (_devices.LastOutcome.Length > 0) panel.Children.Add(Note(_devices.LastOutcome));
+        if (_devices.ConnectionNotice.Length > 0) panel.Children.Add(Note(_devices.ConnectionNotice));
     }
 
 
