@@ -1581,6 +1581,7 @@ final class ConversationTextView: NSTextView {
     var inputStart = 0
     var submit: (() -> Void)?
     var imagePaste: ((NSImage) -> Void)?
+    var droppedFileSourceDevice: String?
     override func keyDown(with event: NSEvent) {
         (enclosingScrollView as? ConversationScrollView)?.interaction()
         if event.keyCode == 53 { super.keyDown(with: event); return }
@@ -1613,6 +1614,51 @@ final class ConversationTextView: NSTextView {
         if item.action == #selector(paste(_:)), Self.clipboardImage(.general) != nil { return imagePaste != nil }
         return super.validateUserInterfaceItem(item)
     }
+    // Drops insert references; image paste continues to attach the image itself.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        let types = super.readablePasteboardTypes
+        return types.contains(.fileURL) ? types : types + [.fileURL]
+    }
+    static func quoteDroppedPath(_ path: String) -> String {
+        let plain = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
+        if path.unicodeScalars.allSatisfy({ plain.contains($0) }) { return path }
+        return "'" + path.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+    @discardableResult func insertDroppedFiles(from board: NSPasteboard) -> Bool {
+        guard isEditable else { return false }
+        let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let paths = urls.filter(\.isFileURL).map { $0.standardizedFileURL.path }
+        guard !paths.isEmpty else { return false }
+        window?.makeFirstResponder(self)
+        if selectedRange().location < inputStart {
+            setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
+        }
+        let text: String
+        if let device = droppedFileSourceDevice {
+            text = paths.map { "file from " + device + ": " + Self.quoteDroppedPath($0) }.joined(separator: "\n")
+        } else { text = paths.map(Self.quoteDroppedPath).joined(separator: " ") }
+        insertText(text + " ", replacementRange: selectedRange())
+        scrollRangeToVisible(selectedRange())
+        return true
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.types?.contains(.fileURL) == true {
+            return isEditable && sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
+        }
+        return super.draggingEntered(sender)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.types?.contains(.fileURL) == true {
+            return isEditable && sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
+        }
+        return super.draggingUpdated(sender)
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if sender.draggingPasteboard.types?.contains(.fileURL) == true {
+            return insertDroppedFiles(from: sender.draggingPasteboard)
+        }
+        return super.performDragOperation(sender)
+    }
     override func paste(_ sender: Any?) {
         if let image = Self.clipboardImage(.general) { imagePaste?(image); return }
         if selectedRange().location < inputStart { setSelectedRange(NSRange(location: (string as NSString).length, length: 0)) }
@@ -1627,6 +1673,7 @@ struct ScrollingConversation: NSViewRepresentable {
     @ObservedObject var session: Session
     var lineNumbers: Bool = true
     var inputEnabled: Bool = true
+    var droppedFileSourceDevice: String? = nil
     var onTeachSwitchboard: (() -> Void)? = nil
     var onSubmit: (() -> Void)? = nil
     var onDraftChanged: ((String) -> Void)? = nil
@@ -1639,6 +1686,7 @@ struct ScrollingConversation: NSViewRepresentable {
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.borderType = .noBorder; scroll.backgroundColor = NSColor.textBackgroundColor
         let text = ConversationTextView(frame: scroll.contentView.bounds)
+        text.droppedFileSourceDevice = droppedFileSourceDevice
         session.inputTextView = text
         text.minSize = NSSize(width: 0, height: 600)
         text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -1647,6 +1695,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.textContainer?.widthTracksTextView = true
         text.isEditable = true; text.isSelectable = true; text.isRichText = true
         text.importsGraphics = false; text.allowsUndo = true
+        text.registerForDraggedTypes([.fileURL])
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.textContainerInset = NSSize(width: 12, height: 12)
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
@@ -1681,6 +1730,7 @@ struct ScrollingConversation: NSViewRepresentable {
         scroll.rulersVisible = lineNumbers
         context.coordinator.draftChanged = onDraftChanged
         if let text = scroll.documentView as? ConversationTextView {
+            text.droppedFileSourceDevice = droppedFileSourceDevice
             text.isEditable = inputEnabled
             text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
@@ -2853,6 +2903,30 @@ func selfTest() {
     tableView.insertText("next input", replacementRange: tableView.selectedRange())
     let inputStyle = tableView.textStorage?.attribute(.paragraphStyle, at: tableView.inputStart, effectiveRange: nil) as? NSParagraphStyle
     check(tableSession.draft == "next input" && inputStyle?.textBlocks.isEmpty != false && inputStyle?.paragraphSpacing == 0, "Input after a rendered table stays outside cells and does not inherit message spacing")
+    let fileBoard = NSPasteboard.withUniqueName()
+    fileBoard.writeObjects([URL(fileURLWithPath: "/tmp/a folder/photo.png") as NSURL,
+                            URL(fileURLWithPath: "/tmp/report.txt") as NSURL])
+    let originalHistory = tableSession.messages
+    tableView.setSelectedRange(NSRange(location: 0, length: 1))
+    check(tableView.insertDroppedFiles(from: fileBoard) &&
+          tableSession.draft == "next input'/tmp/a folder/photo.png' /tmp/report.txt " &&
+          tableSession.messages == originalHistory && tableSession.attachments.isEmpty,
+          "File drops append absolute paths to draft, preserve history and do not attach images")
+    tableView.setSelectedRange(NSRange(location: tableView.inputStart, length: 4))
+    check(tableView.insertDroppedFiles(from: fileBoard) && tableSession.draft.hasPrefix("'/tmp/a folder/photo.png' /tmp/report.txt  input"),
+          "File drops replace only the selected draft text")
+    let beforeReadOnlyDrop = tableSession.draft
+    tableView.isEditable = false
+    check(!tableView.insertDroppedFiles(from: fileBoard) && tableSession.draft == beforeReadOnlyDrop,
+          "Read-only remote editor rejects file drops")
+    tableView.isEditable = true
+    tableView.droppedFileSourceDevice = "Richard-Air"
+    tableView.focusInput()
+    check(tableView.insertDroppedFiles(from: fileBoard) && tableSession.draft.hasSuffix("file from Richard-Air: '/tmp/a folder/photo.png'\nfile from Richard-Air: /tmp/report.txt "),
+          "Remote file drops identify the source device for every file")
+    check(ConversationTextView.quoteDroppedPath("/tmp/it's $(touch nope).txt") == "'/tmp/it'\"'\"'s $(touch nope).txt'",
+          "Dropped Mac paths quote apostrophes and shell metacharacters literally")
+    fileBoard.releaseGlobally()
     let copyBoard = NSPasteboard.withUniqueName()
     tableView.copyBlock(0, to: copyBoard)
     let copiedRTF = copyBoard.data(forType: .rtf).flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }

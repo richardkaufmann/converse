@@ -344,6 +344,7 @@ struct RemotePane: View {
                 Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
             ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
+                droppedFileSourceDevice: service.deviceNameOverride ?? service.identity?.deviceName ?? "Mac",
                 onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
                                   onDraftChanged: {

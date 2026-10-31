@@ -6,7 +6,8 @@
     <!-- One visible conversation (Mac SessionPane parity): header with the
          pane badge, banners, earlier paging, block transcript plus the
          persistent draft tail, action row, and model/effort/access. -->
-    <Grid PointerPressed="OnPanePointerPressed">
+    <Grid PointerPressed="OnPanePointerPressed" Background="Transparent"
+          AllowDrop="True" DragOver="OnFileDragOver" Drop="OnFileDrop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>

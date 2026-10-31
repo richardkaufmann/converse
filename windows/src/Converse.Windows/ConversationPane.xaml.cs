@@ -1151,6 +1151,79 @@ public sealed partial class ConversationPane : UserControl
         DraftBox.Document.Selection.CharacterFormat = format;
     }
 
+    private void OnFileDragOver(object sender, DragEventArgs e)
+    {
+        if (!e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems)) return;
+        e.Handled = true;
+        e.AcceptedOperation = !_pastePending && _selected is not null && InputAllowed()
+            ? Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy
+            : Windows.ApplicationModel.DataTransfer.DataPackageOperation.None;
+        e.DragUIOverride.Caption = "Insert file paths";
+        e.DragUIOverride.IsCaptionVisible = true;
+    }
+
+    private async void OnFileDrop(object sender, DragEventArgs e)
+    {
+        if (!e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems)) return;
+        e.Handled = true;
+        if (_pastePending || _selected is null || !InputAllowed()) return;
+        var deferral = e.GetDeferral();
+        var targetKey = _selected.Key;
+        var originalText = GetDraftText();
+        var start = DraftBox.Document.Selection.StartPosition;
+        var end = DraftBox.Document.Selection.EndPosition;
+        _pastePending = true;
+        try
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            if (!InsertDroppedPaths(items.Select(item => item.Path), targetKey, originalText, start, end))
+                throw new InvalidOperationException("Session or draft changed while reading the drop. Drop the files again.");
+            e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+        }
+        catch (Exception error) { _notice = "File drop failed: " + error.Message; }
+        finally { _pastePending = false; deferral.Complete(); _host.RequestRefresh(); }
+    }
+
+    internal bool InsertDroppedPaths(IEnumerable<string> paths, string targetKey, string originalText, int start, int end)
+    {
+        // Windows resolves storage items asynchronously: fence both destination
+        // and draft so a late drop cannot overwrite typing or another session.
+        if (_selected?.Key != targetKey || !InputAllowed() || GetDraftText() != originalText ||
+            DraftBox.Document.Selection.StartPosition != start || DraftBox.Document.Selection.EndPosition != end)
+            return false;
+        var files = paths.Where(path => !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path)).ToArray();
+        if (files.Length == 0) throw new InvalidOperationException("These items do not expose a local file path. Save them to disk first.");
+        var text = FormatDroppedPaths(files, _selected.LocalSessionID is null ? _host.Devices.DeviceName : null);
+        _host.FocusPane(this);
+        NormalizeDraftFormat();
+        DraftBox.Document.Selection.SetText(TextSetOptions.None, text);
+        var caret = DraftBox.Document.Selection.EndPosition;
+        DraftBox.Document.Selection.SetRange(caret, caret);
+        DraftBox.Focus(FocusState.Programmatic);
+        NormalizeDraftFormat();
+        return true;
+    }
+
+    internal void CheckFilePathDrop()
+    {
+        var key = _selected?.Key ?? throw new InvalidOperationException("No session for drop check");
+        var before = GetDraftText();
+        var start = DraftBox.Document.Selection.StartPosition;
+        var end = DraftBox.Document.Selection.EndPosition;
+        if (InsertDroppedPaths(new[] { @"C:\wrong.txt" }, "wrong-session", before, start, end) ||
+            InsertDroppedPaths(new[] { @"C:\wrong.txt" }, key, before + "changed", start, end))
+            throw new InvalidOperationException("Stale file drop changed the draft");
+        if (!InsertDroppedPaths(new[] { @"C:\a folder\photo.png", @"\\server\share\file.txt" }, key, before, start, end) ||
+            !GetDraftText().Contains("\"C:\\a folder\\photo.png\" \"\\\\server\\share\\file.txt\" "))
+            throw new InvalidOperationException("File paths were not inserted literally into the draft");
+        if (FormatDroppedPaths(new[] { @"C:\photo.png" }, "Windows VM") != "file from Windows VM: \"C:\\photo.png\" ")
+            throw new InvalidOperationException("Remote file drop lost source device provenance");
+    }
+
+    private static string FormatDroppedPaths(IEnumerable<string> paths, string? sourceDevice) =>
+        string.Join(sourceDevice is null ? " " : "\r", paths.Select(path =>
+            (sourceDevice is null ? "" : "file from " + sourceDevice + ": ") + "\"" + path + "\"")) + " ";
+
     private bool _pastePending;
 
     private async void OnDraftPaste(object sender, TextControlPasteEventArgs e)

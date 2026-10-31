@@ -685,6 +685,7 @@ public sealed partial class MainWindow : Window
             Require(pane.SettingsUseOverflow == overflow && pane.SettingsShowControls != overflow, "Settings overflow duplicates controls or fails to track pane width " + width);
         }
         pane.Width = double.NaN;
+        pane.CheckFilePathDrop();
         Require(Title == "Converse " + VersionBuild && !Title.Contains("Development"), "Window title omits bundled release version/build");
     }
 
