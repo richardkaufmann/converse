@@ -702,8 +702,8 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(claude.Count == 6 && claude.Any(o => o.Id == "manual") && claude.Any(o => o.Id == "bypassPermissions"),
         "Claude access matches CLI permission-mode vocabulary");
     var codex = Converse.Core.ChoicesCatalog.AccessFor("codex");
-    Check(codex.Count == 3 && codex[0].Id == "read-only",
-        "Codex access offers sandbox modes");
+    Check(codex.Select(o => o.Label).SequenceEqual(new[] { "Approve for me", "Full access" }),
+        "Codex permissions offer the supported user-facing runtime presets");
     var museEfforts = Converse.Core.ChoicesCatalog.EffortsFor("muse");
     Check(museEfforts.Contains("ultra") && museEfforts.Contains("none"),
         "Muse efforts match CLI reasoning-effort vocabulary");

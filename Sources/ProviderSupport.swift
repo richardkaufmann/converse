@@ -64,13 +64,22 @@ struct ProviderCommand {
             for directory in Set(images.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path }).sorted() { args += ["--add-dir", directory] }
         } else {
             args = ["exec"]
+            if choices.access == "codex:approve-for-me" { args += ["--approve-for-me"] }
+            if choices.access == "codex:full-access" { args += ["--dangerously-bypass-approvals-and-sandbox"] }
             if let remoteID { args += ["resume", remoteID] }
             args += ["--json", "--skip-git-repo-check"]
             if let model = choices.model { args += ["--model", model] }
             if let effort = choices.effort { args += ["-c", "model_reasoning_effort=\(toml(effort))"] }
             // Config overrides work for both exec and resume, whose flag sets differ.
-            if let access = choices.access { args += ["-c", "sandbox_mode=\(toml(access))"] }
-            if let approval = choices.approval { args += ["-c", "approval_policy=\(toml(approval))"] }
+            if choices.access == "codex:approve-for-me" {
+                args += ["-c", "sandbox_mode=\(toml("workspace-write"))", "-c", "approval_policy=\(toml("on-request"))", "-c", "approvals_reviewer=\(toml("auto_review"))"]
+            } else if choices.access == "codex:full-access" {
+                args += ["-c", "sandbox_mode=\(toml("danger-full-access"))", "-c", "approval_policy=\(toml("never"))"]
+            } else {
+                // Preserve older custom configurations; a named preset always replaces the entire mode.
+                if let access = choices.access { args += ["-c", "sandbox_mode=\(toml(access))"] }
+                if let approval = choices.approval { args += ["-c", "approval_policy=\(toml(approval))"] }
+            }
             for image in images { args += ["--image", image] }
         }
         return args
@@ -168,7 +177,9 @@ struct ProviderStatus {
         result.status.effort = thread["reasoningEffort"] as? String ?? config["model_reasoning_effort"] as? String ?? model?["defaultReasoningEffort"] as? String ?? "CLI default"
         result.status.access = config["sandbox_mode"] as? String ?? "CLI default"
         result.status.approval = config["approval_policy"] as? String
-        result.access = ["read-only", "workspace-write", "danger-full-access"].map { MuseAccessChoice(id: $0, label: $0, available: true) }
+        result.access = [MuseAccessChoice(id: "codex:ask", label: "Ask for approval (not yet supported in Converse)", available: false),
+                         MuseAccessChoice(id: "codex:approve-for-me", label: "Approve for me", available: true),
+                         MuseAccessChoice(id: "codex:full-access", label: "Full access", available: true)]
         if let path = thread["path"] as? String {
             for object in tailRecords(path: path) {
                 if object["type"] as? String == "compacted" {

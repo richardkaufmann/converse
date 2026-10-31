@@ -24,6 +24,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Converse.Core/Converse.Core.csproj" />
+    <Content Include="../../../VERSION.json" Link="Assets/VERSION.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../../Resources/ProviderLogos/*.png;../../../Resources/ProviderLogos/NOTICE.txt;../../../Resources/ProviderLogos/LICENSE.md">
       <Link>Assets/ProviderLogos/%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

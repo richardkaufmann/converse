@@ -30,6 +30,7 @@ public sealed partial class DeviceSyncService
     }
     private void SaveParticipants() => AtomicJson.Write(Path.Combine(_folder, "participant-intents.json"), _participantIntents);
     public bool CanCreateRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-create-v1") == true;
+    public bool CanRenameRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-rename-v1") == true;
     public bool CanCloseRemote(string home) => PeerForHome(home)?.Hello?.Capabilities.Contains("session-close-v1") == true;
     public bool CanHostAgent(string home) => home == DeviceId || PeerForHome(home)?.Hello?.Capabilities.Contains("agent-host-v1") == true;
     public async Task<DeviceParticipantResponse> RequestParticipantAsync(string home, string action, string? target = null, string? title = null, DeviceAgentSettings? settings = null, string? provider = null)
@@ -209,12 +210,18 @@ public sealed partial class DeviceSyncService
         }
         var old = session?.Agent is null ? null : JsonSerializer.SerializeToUtf8Bytes(session.Agent);
         var oldQueuePaused = session?.QueuePaused;
+        var oldTitle = session?.Title;
         var pending = session?.Pending.ToList(); ChatSession? created = null; bool run = false, widget = false;
         try
         {
             string detail;
             switch (request.Action)
             {
+                case "session.rename":
+                    var name = request.Title?.Trim() ?? "";
+                    if (session is null || name.Length == 0 || System.Text.Encoding.UTF8.GetByteCount(name) > 200)
+                        throw new ArgumentException("Choose a name of 1–200 bytes for an open session on this home.");
+                    session.Title = name; detail = "Session renamed on home."; break;
                 case "session.create":
                     if (request.Provider is not ("claude" or "codex" or "muse") || _store.Entries.FirstOrDefault(e => e.Engine == request.Provider) is not { } entry)
                         throw new ArgumentException("This provider is not configured on home.");
@@ -235,12 +242,14 @@ public sealed partial class DeviceSyncService
             if (session?.Agent is { } saved) response.Settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(saved.Settings));
             _store.ParticipantReceipts.Add(new ParticipantReceipt { Id = id, Origin = origin, Hash = hash, Response = response });
             _store.Save();
+            if (request.Action == "session.rename" && session is not null) PushTranscriptToHolder(session);
             if (run) _store.RunNext(session!);
             if (widget) AgentWidgetRequested?.Invoke(session!);
             return Task.FromResult(response);
         }
         catch (Exception e)
         {
+            if (request.Action == "session.rename" && session is not null && oldTitle is not null) session.Title = oldTitle;
             if (created is not null) _store.Sessions.Remove(created);
             if (session is not null && old is not null) { session.Agent = JsonSerializer.Deserialize<AgentConfig>(old); session.Pending = pending ?? new(); if (oldQueuePaused is { } paused) session.QueuePaused = paused; }
             _store.ParticipantReceipts.RemoveAll(r => r.Id == id);

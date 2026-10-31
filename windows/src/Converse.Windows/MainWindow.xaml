@@ -104,6 +104,7 @@
             </MenuBarItem>
             <MenuBarItem Title="Help">
                 <MenuFlyoutItem Text="Converse Help" Click="OnHelpClick"/>
+                <MenuFlyoutItem Text="About Converse…" Click="OnAboutClick"/>
             </MenuBarItem>
         </MenuBar>
         <Grid Grid.Row="1" SizeChanged="OnRootSizeChanged">

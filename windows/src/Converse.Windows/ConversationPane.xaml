@@ -116,9 +116,9 @@
             <Button x:Name="StopButton" Grid.Column="4" Content="Stop" Margin="8,0,0,0" Click="OnStopClick"/>
             <Button x:Name="SendButton" Grid.Column="5" Content="Send" Margin="8,0,0,0" Click="OnSendClick"/>
         </Grid>
-        <Grid Grid.Row="5" ColumnDefinitions="*,Auto">
-        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled">
-        <StackPanel x:Name="SettingsRow" Orientation="Horizontal" Spacing="6" Padding="8,0,8,8" VerticalAlignment="Center">
+        <Grid x:Name="SettingsContainer" Grid.Row="5" ColumnDefinitions="*,Auto" SizeChanged="OnSettingsLayoutChanged">
+        <ScrollViewer x:Name="SettingsScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled">
+        <StackPanel x:Name="SettingsRow" HorizontalAlignment="Left" SizeChanged="OnSettingsLayoutChanged" Orientation="Horizontal" Spacing="6" Padding="8,0,8,8" VerticalAlignment="Center">
             <TextBlock Text="Model:" VerticalAlignment="Center" FontSize="12"/>
             <ComboBox x:Name="ModelBox" Width="200" IsEditable="True" FontSize="12"
                       SelectionChanged="OnSettingChanged" GotFocus="OnModelGotFocus" LostFocus="OnModelCommitted"
@@ -126,10 +126,10 @@
             <TextBlock Text="Effort:" VerticalAlignment="Center" FontSize="12" Margin="6,0,0,0"/>
             <ComboBox x:Name="EffortBox" Width="130" FontSize="12" SelectionChanged="OnSettingChanged"/>
             <TextBlock Text="Access:" VerticalAlignment="Center" FontSize="12" Margin="6,0,0,0"/>
-            <ComboBox x:Name="AccessBox" Width="200" FontSize="12" SelectionChanged="OnSettingChanged"/>
+            <ComboBox x:Name="AccessBox" ToolTipService.ToolTip="Codex: Approve for me keeps sandboxing and uses automatic review; Full access disables the sandbox. Human approval prompts are not yet supported." Width="200" FontSize="12" SelectionChanged="OnSettingChanged"/>
         </StackPanel>
         </ScrollViewer>
-        <Button Grid.Column="1" Content="⋯" Margin="4,0,8,8" VerticalAlignment="Center" AutomationProperties.Name="Session settings" ToolTipService.ToolTip="Model, effort and restrictions">
+        <Button x:Name="SettingsOverflow" Grid.Column="1" Visibility="Collapsed" Content="⋯" Margin="4,0,8,8" VerticalAlignment="Center" AutomationProperties.Name="Session settings" ToolTipService.ToolTip="Model, effort and permissions. Codex human approval prompts are not yet supported.">
             <Button.Flyout><MenuFlyout Opening="OnSessionSettingsOpening"/></Button.Flyout>
         </Button>
         </Grid>

@@ -78,12 +78,15 @@ internal static class LinuxProgram
                 }
                 case "supervise":
                     return await SuperviseAsync(paths);
+                case "--about":
+                    Console.WriteLine($"Converse {product.Version} ({product.Build})\n© 2026 Richard Kaufmann\nLicensed under the Apache License, Version 2.0.\nhttps://github.com/richardkaufmann/converse");
+                    return 0;
                 case "--version":
                     Console.WriteLine($"{product.Version} ({product.Build})");
                     return 0;
                 default:
                     Console.Error.WriteLine(
-                        "Usage: converse [serve|admin-request|secret-stdin|offline-status|service-start|service-stop|bootstrap-receipt|preflight|install-self|supervise|--version]");
+                        "Usage: converse [serve|admin-request|secret-stdin|offline-status|service-start|service-stop|bootstrap-receipt|preflight|install-self|supervise|--version|--about]");
                     return 64;
             }
         }

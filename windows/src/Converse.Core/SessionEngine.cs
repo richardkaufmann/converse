@@ -81,7 +81,8 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] public int ActiveHop { get; set; }
 
     public Guid Id { get; set; } = Guid.NewGuid();
-    public string Title { get; set; } = "New session";
+    private string _title = "New session";
+    public string Title { get => _title; set => _title = string.IsNullOrWhiteSpace(value) ? "New session" : value; }
     public AgentEntry Entry { get; set; } = new();
     public List<ChatMessage> Messages { get; set; } = new();
     public List<PendingPrompt> Pending { get; set; } = new();
@@ -220,12 +221,20 @@ public static class TurnArguments
         else
         {
             args.Add("exec");
+            if (choices.Access == "codex:approve-for-me") args.Add("--approve-for-me");
+            if (choices.Access == "codex:full-access") args.Add("--dangerously-bypass-approvals-and-sandbox");
             if (session.RemoteID is not null) { args.Add("resume"); args.Add(session.RemoteID); }
             args.AddRange(new[] { "--json", "--skip-git-repo-check" });
             if (choices.Model is not null) { args.Add("--model"); args.Add(choices.Model); }
             if (choices.Effort is not null) { args.Add("-c"); args.Add("model_reasoning_effort=" + Toml(choices.Effort)); }
-            if (choices.Access is not null) { args.Add("-c"); args.Add("sandbox_mode=" + Toml(choices.Access)); }
-            if (choices.Approval is not null) { args.Add("-c"); args.Add("approval_policy=" + Toml(choices.Approval)); }
+            if (choices.Access == "codex:approve-for-me")
+                args.AddRange(new[] { "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"auto_review\"" });
+            else if (choices.Access == "codex:full-access")
+                args.AddRange(new[] { "-c", "sandbox_mode=\"danger-full-access\"", "-c", "approval_policy=\"never\"" });
+            else {
+                if (choices.Access is not null) { args.Add("-c"); args.Add("sandbox_mode=" + Toml(choices.Access)); }
+                if (choices.Approval is not null) { args.Add("-c"); args.Add("approval_policy=" + Toml(choices.Approval)); }
+            }
             foreach (var image in images) { args.Add("--image"); args.Add(image); }
         }
         return args;

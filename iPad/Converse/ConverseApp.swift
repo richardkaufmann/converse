@@ -25,6 +25,8 @@ struct PadRoot: View {
     @State private var agentTarget: PadAgentTarget?
     @State private var dragWidth: Double?
     @State private var closingTarget: DeviceSidebarRow?
+    @State private var aboutShown = false
+    @State private var renameTarget: DeviceSidebarRow?
     @State private var closeInFlight = Set<String>()
     var body: some View {
         GeometryReader { geometry in
@@ -48,10 +50,8 @@ struct PadRoot: View {
                             Button("Converse Groups…") { model.connectShown = true }
                             Button("Converse Help…") { model.helpShown = true }
                             Divider()
-                            Text("Converse " + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")")
-                            Text("Richard Kaufmann")
-                            Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!)
-                            Link("www.kaoslabs.app", destination: URL(string: "https://www.kaoslabs.app")!)
+                            Button("About Converse…") { aboutShown = true }
+                            Link("Converse README on GitHub", destination: ConverseAbout.readme)
                             Toggle("Line numbers", isOn: $model.lineNumbers)
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Converse menu")
                     }.padding(10)
@@ -109,6 +109,8 @@ struct PadRoot: View {
         } message: { _ in Text("Stops its work and removes the session from every viewer. A recovery snapshot stays on its home.") }
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
+            .sheet(isPresented: $aboutShown) { PadAbout() }
+            .sheet(item: $renameTarget) { PadRenameSession(row: $0) }
         .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
     }
@@ -163,6 +165,7 @@ struct PadRoot: View {
                             }.font(.system(size: 13)).padding(.vertical, 4).padding(.horizontal, 3)
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
                                 .contextMenu {
+                                    Button("Rename…") { renameTarget = row }.disabled(!home.online || !service.canRenameRemote(home.deviceID))
                                     Text(row.title); Text("Remote device: " + home.deviceName); Text("Account: " + (row.accountName ?? "Not reported")); Text("Model: " + row.model); Text(row.status)
                                     Button("Teach Session To Talk To Other Sessions") { service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }.disabled(!service.canTeachRemote(row.globalID))
                                     if row.participantKind == "agent" { Button("Agent Setup / Loop") { agentTarget = PadAgentTarget(home: home.deviceID, target: row.globalID) } }
@@ -355,18 +358,19 @@ struct PadPane: View {
         }
     }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) { remoteSettings(snapshot) }.fixedSize()
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { remoteSettings(snapshot); compactAction(snapshot) }.fixedSize(horizontal: true, vertical: false)
+            HStack {
+                Spacer(minLength: 0)
+                Menu { remoteSettings(snapshot); compactAction(snapshot) } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel("Session settings")
             }
-            Menu {
-                remoteSettings(snapshot)
-                if let state = snapshot.compaction {
-                    Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(state.phase != "available")
-                }
-            } label: { Image(systemName: "ellipsis.circle") }
-                .fixedSize().accessibilityLabel("Session settings")
         }.font(.caption).disabled(!model.canControl(id))
+    }
+    @ViewBuilder func compactAction(_ snapshot: DeviceTranscriptPayload) -> some View {
+        if let state = snapshot.compaction {
+            Button(snapshot.busy ? "Compact after this turn" : "Compact context") { command("compact") }.disabled(state.phase != "available")
+        }
     }
     @ViewBuilder func remoteSettings(_ snapshot: DeviceTranscriptPayload) -> some View {
         Menu(snapshot.model.isEmpty ? "Model: CLI default" : snapshot.model) {
@@ -386,10 +390,11 @@ struct PadPane: View {
                 Button(value) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "effort", effort: value)) }
             }
         }
-        Menu(snapshot.access.isEmpty ? "Restrictions: CLI default" : snapshot.access) {
+        Menu(snapshot.access.isEmpty ? "Permissions: CLI default" : (snapshot.accessOptions.first { $0.id == snapshot.access }?.label ?? snapshot.access)) {
             if snapshot.engine != "muse" {
             Button("CLI default") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access")) }
             }
+            if snapshot.engine == "codex" { Text("Ask for approval requires interactive Codex support") }
             ForEach(snapshot.accessOptions) { option in
                 Button(option.label) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "access", access: option.id)) }
             }

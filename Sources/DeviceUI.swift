@@ -142,6 +142,8 @@ struct RemoteSidebarRow: View {
     @State private var confirmingClose = false
     @State private var closing = false
     @State private var closeError: String?
+    @State private var renaming = false
+    @State private var renameText = ""
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if let account = row.accountName { text += "\nAccount: " + account }
@@ -174,10 +176,22 @@ struct RemoteSidebarRow: View {
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onHover { hover.setHovered($0) }
             .contextMenu {
+                Button("Rename…") { renameText = row.title; renaming = true }
+                    .disabled(!online || !DeviceSyncService.shared.canRenameRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
                 Button("Park conversation") { park() }
             }
+            .alert("Rename session", isPresented: $renaming) {
+                TextField("Session name", text: $renameText)
+                Button("Cancel", role: .cancel) { }
+                Button("Rename") {
+                    Task { @MainActor in
+                        let result = await DeviceSyncService.shared.renameRemoteSession(row.globalID, title: renameText)
+                        if result.outcome != "completed" { closeError = result.detail }
+                    }
+                }.disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || renameText.utf8.count > 200)
+            } message: { Text("Saves the name on its home for everyone in the group. The current viewer keeps control.") }
             .alert("Close ‘\(row.title)’ on \(homeName)?", isPresented: $confirmingClose) {
                 Button("Cancel", role: .cancel) { }
                 Button("Close session", role: .destructive) {
@@ -189,7 +203,7 @@ struct RemoteSidebarRow: View {
                     }
                 }
             } message: { Text("Stops its work and removes the session from every viewer. A recovery snapshot stays on its home.") }
-            .alert("Could not close session", isPresented: Binding(get: { closeError != nil }, set: { if !$0 { closeError = nil } })) {
+            .alert("Session operation failed", isPresented: Binding(get: { closeError != nil }, set: { if !$0 { closeError = nil } })) {
                 Button("OK") { closeError = nil }
             } message: { Text(closeError ?? "") }
     }
@@ -353,16 +367,17 @@ struct RemotePane: View {
                         Text(transcript.status).lineLimit(1)
                         if let account = transcript.accountName { Text(account).lineLimit(1) }
                         Spacer(minLength: 0)
-                        Menu {
-                            remoteSettings(transcript)
-                            if let state = transcript.compaction {
-                                Button("Compact context") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "compact")) }.disabled(state.phase != "available")
-                            }
-                        } label: { Image(systemName: "ellipsis.circle") }
-                            .fixedSize().accessibilityLabel("Session settings").help("Model, effort and restrictions on the home device")
                     }
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) { remoteSettings(transcript) }.fixedSize()
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 12) {
+                            remoteSettings(transcript)
+                            compactAction(transcript)
+                        }.fixedSize(horizontal: true, vertical: false)
+                        HStack {
+                            Spacer(minLength: 0)
+                            Menu { remoteSettings(transcript); compactAction(transcript) } label: { Image(systemName: "ellipsis.circle") }
+                                .accessibilityLabel("Session settings").help("Model, effort and restrictions on the home device")
+                        }
                     }
                 }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 4).disabled(!hasLease || offline)
 
@@ -401,6 +416,11 @@ struct RemotePane: View {
                 }
             }
     }
+    @ViewBuilder private func compactAction(_ snapshot: DeviceTranscriptPayload) -> some View {
+        if let state = snapshot.compaction {
+            Button("Compact") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "compact")) }.disabled(state.phase != "available")
+        }
+    }
     @ViewBuilder func remoteSettings(_ snapshot: DeviceTranscriptPayload) -> some View {
         Menu(snapshot.model.isEmpty ? "Model: CLI default" : snapshot.model) {
             if snapshot.engine != "muse" {
@@ -419,10 +439,11 @@ struct RemotePane: View {
                 Button(value) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "effort", effort: value)) }
             }
         }
-        Menu(snapshot.access.isEmpty ? "Restrictions: CLI default" : snapshot.access) {
+        Menu(snapshot.access.isEmpty ? "Permissions: CLI default" : (snapshot.accessOptions.first { $0.id == snapshot.access }?.label ?? snapshot.access)) {
             if snapshot.engine != "muse" {
             Button("CLI default") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access")) }
             }
+            if snapshot.engine == "codex" { Text("Ask for approval requires interactive Codex support") }
             ForEach(snapshot.accessOptions) { option in
                 Button(option.label) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "access", access: option.id)) }
             }

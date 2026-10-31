@@ -127,6 +127,13 @@ Compaction runs at the session's home. If a turn is active, it waits for that tu
 
 Mac and iPad remote viewers use the home's advertised capability and existing display lease. Older or unsupported homes do not show the action. Muse's native context usage events are recorded when supplied, but manual Muse compaction remains unavailable in this preview pending a verified host implementation. This feature does not change any provider's automatic compaction policy.
 
+### About and responsive controls
+
+Mac, iPad, and Windows have **About Converse** with the installed version/build, copyright, and Apache License 2.0 statement. Mac and Windows also show version/build in the main window title. On iPad, open **… → About Converse**; **Converse Help** always includes a link to the GitHub README. Linux prints the same information with `converse --about`.
+
+Model, effort, and access controls appear directly when the pane has room. In a narrow pane, a single **…** menu replaces them; it does not duplicate visible controls.
+
+
 ## Converse Groups
 
 Choose **Converse → Converse Groups…**, or **Converse Groups** below the sidebar sessions. **Create Group** gives this device a named group. On another device, find that group and press **Join**. Groups and their discovered devices are listed together; group names must be unique among the groups this device can see.
@@ -320,7 +327,7 @@ Each Muse turn opens an interactive host, which closes after the authoritative `
 
 ### Session identity for embedded agents
 
-Every user turn includes a local-context line with the **current session title**, Converse session ID, time zone and working folder. Titles use JSON string escaping. A rename appears on the next sent message, including queued messages when they are dispatched. Right-click a sidebar session → **Rename…** works while its agent is running; Settings → Models & sessions also offers Rename.
+Every user turn includes a local-context line with the **current session title**, Converse session ID, time zone and working folder. Titles use JSON string escaping. A rename appears on the next sent message, including queued messages when they are dispatched. Right-click a sidebar session (long-press on iPad) → **Rename…** works for local and remote sessions, even while running. Remote renaming saves at home and updates every viewer without taking the display lease. Blank names are rejected; image-only first prompts keep a default name. Settings → Models & sessions also offers Rename.
 
 For Claude Code, Converse publishes `~/.converse/sessions/<transcript-uuid>.json`. The UUID is Claude Code’s transcript filename (`<uuid>.jsonl` under the selected login’s `projects` directory), lowercased, rather than the window or title. The local-context line includes that UUID and the exact sidecar path so an agent can resolve its own seat without guessing from other sessions. New Claude sessions use the UUID passed to `--session-id`; resumed sessions use the reported transcript UUID.
 
@@ -351,7 +358,7 @@ The app uses the installed CLIs' authentication and permission configuration. Cr
 
 Muse approval and question dialogs are supported. Approval buttons use the server’s exact labels, choice IDs, scope, and current requirement token. Questions support single choices, multiple choices, free text, and cancellation. Requests stay visible until Muse settles them; errors and stale decisions are shown and refreshed. Auto-review policy may resolve an action without asking you. The status line distinguishes approval waits, automatic review, retries, foreground completion with background checks, and terminal completion; waiting on your input shows no working spinner. Closing a window keeps the host alive.
 
-Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Some tools provide their response only at turn completion.
+Claude and Codex still use headless adapters and do not yet support interactive approval/question dialogs. Authentication opens the CLI in Terminal; full CLI slash-command menus are not embedded. Explicit access and approval selections apply to each turn, including resumes. Codex exposes named **Approve for me** and **Full access** presets. Approve for me sets workspace-write, on-request, and the auto-review reviewer together; Full access sets danger-full-access and never together. Ask for approval requires the not-yet-integrated interactive app-server path and is not offered as a working mode. The obsolete `untrusted` choice is removed. Existing custom CLI configurations are preserved until you select a preset. Some tools provide their response only at turn completion.
 
 The downloadable release is the Mac app. The [iPad viewer/controller](iPad/README.md) is distributed through TestFlight. Windows has a separate native implementation sharing the same C# core: sidebar/panes, groups, switchboard messaging, agents, and a Set up Linux deployment manager. The Linux home is newer and still maturing: its deployment, admin, and recovery behavior is covered by automated tests and VM deployment, with interactive acceptance (live pairing walks, provider turns, recovery walkthroughs) still being exercised. Native context compaction and Discord bot execution currently require a Mac home; matching build numbers do not imply complete feature parity.
 

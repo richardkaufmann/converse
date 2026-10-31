@@ -3,6 +3,10 @@ import Foundation
 func sessionSetupSelfTests(_ check: (Bool, String) -> Void) {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-session-setup-" + UUID().uuidString)
     let store = Store(folder: root)
+    let blankSession = store.create(Entry(name: "Codex", command: "codex", directory: root.path, engine: "codex"))
+    blankSession.title = "  "
+    check(blankSession.title == "New conversation", "A session name cannot become blank through an image-only prompt or assignment")
+    store.sessions.removeAll { $0.id == blankSession.id }; store.save()
     let personal = store.makeLogin(engine: "claude", name: "Personal")
     let work = store.makeLogin(engine: "claude", name: "Work")
     let a = Entry(name: "Claude", command: "claude", directory: root.path, engine: "claude")
@@ -36,6 +40,15 @@ func sessionSetupSelfTests(_ check: (Bool, String) -> Void) {
     let choices = SessionChoices(model: "test", effort: "xhigh", access: "danger-full-access", approval: "never")
     let args = ProviderCommand.turnArguments(entry: codex, choices: choices, id: UUID(), remoteID: "retained", started: true, images: [])
     check(args.contains("sandbox_mode=\"danger-full-access\"") && args.contains("approval_policy=\"never\"") && args.contains("model_reasoning_effort=\"xhigh\""), "Codex sandbox, approval and reasoning controls remain independent on resume")
+    for mode in ["codex:approve-for-me", "codex:full-access"] {
+        let preset = ProviderCommand.turnArguments(entry: codex, choices: SessionChoices(access: mode, approval: "untrusted"), id: UUID(), remoteID: "retained", started: true, images: [])
+        check(!preset.contains(where: { $0.contains("untrusted") }) && !preset.contains(where: { $0.contains("sandbox_mode=\"codex:") }), "A named Codex mode replaces conflicting legacy policy without passing its UI ID to the CLI")
+        if mode == "codex:approve-for-me" {
+            check(preset.firstIndex(of: "--approve-for-me")! < preset.firstIndex(of: "resume")! && preset.contains("sandbox_mode=\"workspace-write\"") && preset.contains("approval_policy=\"on-request\"") && preset.contains("approvals_reviewer=\"auto_review\""), "Approve for me keeps the sandbox and selects automatic review on resumed turns")
+        } else {
+            check(preset.contains("sandbox_mode=\"danger-full-access\"") && preset.contains("approval_policy=\"never\""), "Full access selects both unrestricted sandbox and no approval prompts")
+        }
+    }
     let decoded = try! JSONDecoder().decode(SessionChoices.self, from: JSONEncoder().encode(choices))
     let legacy = try! JSONDecoder().decode(SessionChoices.self, from: Data("{}".utf8))
     check(decoded.approval == "never" && legacy.approval == nil, "Codex approval choice persists and old archives remain compatible")

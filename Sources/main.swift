@@ -66,7 +66,10 @@ final class Session: ObservableObject, Identifiable {
     let id: UUID
     @Published var entry: Entry
     @Published var agent: AgentConfig? = nil
-    @Published var title: String { didSet { if title != oldValue { titleUpdatedAt = Date(); identityChanged?() } } }
+    @Published var title: String { didSet {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { title = "New conversation" }
+        if title != oldValue { titleUpdatedAt = Date(); identityChanged?() }
+    } }
     var createdAt: Date
     var titleUpdatedAt: Date
     var identityChanged: (() -> Void)?
@@ -152,7 +155,7 @@ final class Session: ObservableObject, Identifiable {
     weak var inputTextView: ConversationTextView?
     init(_ saved: SavedSession) {
         createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
-        id = saved.id; entry = saved.entry; title = saved.title; messages = saved.messages; agent = saved.agent
+        id = saved.id; entry = saved.entry; title = saved.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New conversation" : saved.title; messages = saved.messages; agent = saved.agent
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -457,7 +460,7 @@ final class Store: ObservableObject {
         let images = s.attachments
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
-        if s.title == "New conversation" { s.title = String(text.prefix(45)) }
+        if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
@@ -1907,8 +1910,25 @@ struct Conversation: View {
                     Text("Last turn: " + session.toolStatus.usage)
                     Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { settingControls }.fixedSize(horizontal: true, vertical: false)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Menu { settingControls } label: { Image(systemName: "ellipsis.circle") }
+                            .accessibilityLabel("Session settings").help("Model, effort, restrictions and context")
+                    }
+                }.disabled(session.changingSetting)
+                AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
+                if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }
+                if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
+            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
+            }
+        }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
+    }
+    @ViewBuilder private var settingControls: some View {
                         Menu(session.toolStatus.model) {
                             if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "model") }; Divider() }
                             ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
@@ -1926,33 +1946,13 @@ struct Conversation: View {
                             if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "access") }; Divider() }
                             ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
                         }.menuStyle(.borderlessButton).fixedSize()
-                        if session.entry.engine == "codex" {
-                            Menu("Approvals: " + (session.toolStatus.approval ?? "CLI default")) {
-                                Button("CLI default") { store.setApproval(session, value: nil) }
-                                Button("Never") { store.setApproval(session, value: "never") }
-                                Button("On request") { store.setApproval(session, value: "on-request") }
-                                Button("Untrusted") { store.setApproval(session, value: "untrusted") }
-                            }.menuStyle(.borderlessButton).fixedSize()
-                                .help("Independent of sandbox access. Headless Codex cannot show interactive terminal approval prompts.")
-                        }
                         if session.compactionState != nil {
-                            Menu {
-                                Button(session.busy ? "Compact after this turn" : "Compact context") { _ = store.requestCompaction(session) }
-                                    .disabled(session.compacting || session.compactionRequested || session.changingSetting)
-                            } label: { Image(systemName: "ellipsis.circle") }.help("Session actions")
+                            Button("Compact") { _ = store.requestCompaction(session) }
+                                .disabled(session.compacting || session.compactionRequested || session.changingSetting)
+                                .help(session.busy ? "Compact after this turn" : "Compact context")
                         }
-                        AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
-                    }.disabled(session.changingSetting)
-                }
-                if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }
-                if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
-            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
-            }
-        }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
+
 }
 
 struct RootView: View {
@@ -2239,15 +2239,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc func showJolly() { MainActor.assumeIsolated { jollyController.show() } }
     @objc func showConverseHelp() { helpController.show() }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Preview", .credits: NSAttributedString(string: "Richard Kaufmann\nrichard@kaoslabs.app\nhttps://www.kaoslabs.app")]) }
+    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
     @objc func newWindow() { makeWindow(WindowState()) }
     private func makeWindow(_ state: WindowState) {
         state.setup = windows.isEmpty && !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
-        window.title = state.title; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = state.title + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
-        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         window.addTitlebarAccessoryViewController(title)
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
         if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }
@@ -2273,7 +2273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let (window, state) = windows.first(where: { $0.1.id == id }) else { return }
         configurationForm(title: "Rename window", values: [("Window name", state.title)]) { values in
             guard !values[0].isEmpty else { return }
-            Workspace.shared.rename(id, to: values[0]); window.title = state.title
+            Workspace.shared.rename(id, to: values[0]); window.title = state.title + " · " + ConverseAbout.versionBuild
             NSApp.changeWindowsItem(window, title: state.title, filename: false)
         }
     }

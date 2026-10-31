@@ -39,7 +39,12 @@ public static class ChoicesCatalog
             new ChoiceOption("dontAsk", "Don't ask (deny unapproved)"),
             new ChoiceOption("bypassPermissions", "Bypass permissions"),
         },
-        "codex" or "muse" => new[]
+        "codex" => new[]
+        {
+            new ChoiceOption("codex:approve-for-me", "Approve for me"),
+            new ChoiceOption("codex:full-access", "Full access"),
+        },
+        "muse" => new[]
         {
             new ChoiceOption("read-only", "read-only"),
             new ChoiceOption("workspace-write", "workspace-write"),

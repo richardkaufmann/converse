@@ -143,8 +143,7 @@ public sealed partial class MainWindow : Window
         });
         if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(enableDiscovery: true, loopbackOnly: false);
         _help = LoadHelp();
-        Title = "Converse" + (_help is null ? " (dev)" : " " + _help.AppVersion
-            + (_help.AppBuild.Length > 0 ? " (" + _help.AppBuild + ")" : ""));
+        Title = "Converse " + VersionBuild;
         for (var pane = 1; pane <= 3; pane++)
         {
             var view = new ConversationPane();
@@ -678,6 +677,14 @@ public sealed partial class MainWindow : Window
         Refresh(); Require(pane.VisibleMessageBlockCount == 1, "New session content did not render");
         Show(first); Require(pane.VisibleMessageBlockCount == 1, "Returning to prior session lost its transcript");
         pane.ShowSession(null, true); Require(pane.VisibleMessageBlockCount == 0, "Unassigned pane retained transcript");
+        Show(fresh);
+        foreach (var (width, overflow) in new[] { (1100.0, false), (340.0, true), (900.0, false) })
+        {
+            pane.Width = width; pane.UpdateLayout(); await Task.Delay(100);
+            Require(pane.SettingsUseOverflow == overflow && pane.SettingsShowControls != overflow, "Settings overflow duplicates controls or fails to track pane width " + width);
+        }
+        pane.Width = double.NaN;
+        Require(Title == "Converse " + VersionBuild && !Title.Contains("Development"), "Window title omits bundled release version/build");
     }
 
     private void OnRemoteCreateMenu(object sender, RoutedEventArgs e)
@@ -1078,6 +1085,26 @@ public sealed partial class MainWindow : Window
     }
 
 
+    private string VersionBuild
+    {
+        get {
+            try {
+                using var version = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Assets", "VERSION.json")));
+                return version.RootElement.GetProperty("version").GetString() + " (" + version.RootElement.GetProperty("build").ToString() + ")";
+            } catch { return _help is null ? "Development (0)" : _help.AppVersion + " (" + _help.AppBuild + ")"; }
+        }
+    }
+    private async void OnAboutClick(object sender, RoutedEventArgs e)
+    {
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(new TextBlock { Text = "Converse " + VersionBuild, FontSize = 20 });
+        content.Children.Add(new TextBlock { Text = "© 2026 Richard Kaufmann" });
+        content.Children.Add(new TextBlock { Text = "Licensed under the Apache License, Version 2.0.", TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(new HyperlinkButton { Content = "Apache License 2.0", NavigateUri = new Uri("https://github.com/richardkaufmann/converse/blob/main/LICENSE") });
+        content.Children.Add(new HyperlinkButton { Content = "README on GitHub", NavigateUri = new Uri("https://github.com/richardkaufmann/converse#readme") });
+        await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "About Converse", Content = content, CloseButtonText = "Done" }.ShowAsync();
+    }
+
     private async void OnRenameRow(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItem { Tag: SidebarSession row }) return;
@@ -1086,9 +1113,9 @@ public sealed partial class MainWindow : Window
         if (local is null && remote is null) return;
         try
         {
-            if (row.GlobalID is { } target && (!_devices.RemoteLeases.ContainsKey(target) || _devices.RemoteOffline.Contains(target)))
+            if (row.GlobalID is { } target && (DeviceGlobalID.Parse(target) is not { } reference || !_devices.CanRenameRemote(reference.Home)))
             {
-                await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Take the session first", Content = "Place this remote session in a pane and choose Take here, then rename it. Its current device keeps control until you do.", CloseButtonText = "OK" }.ShowAsync();
+                await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Home update needed", Content = "The home must be online and support remote renaming. You do not need to take the session.", CloseButtonText = "OK" }.ShowAsync();
                 return;
             }
             var name = new TextBox { Text = local?.Title ?? remote!.Title, MaxLength = 200, MinWidth = 320 };
@@ -1099,8 +1126,12 @@ public sealed partial class MainWindow : Window
             dialog.Opened += (_, _) => { name.Focus(FocusState.Programmatic); name.SelectAll(); };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             if (local is not null) { local.Title = name.Text.Trim(); _store.Save(); }
-            else if (row.GlobalID is { } globalId)
-                await _devices.SendRemoteCommandAsync(globalId, new DeviceCommandPayload { Action = "rename", Text = name.Text.Trim() });
+            else if (row.GlobalID is { } globalId && DeviceGlobalID.Parse(globalId) is { } global)
+            {
+                var result = await _devices.RequestParticipantAsync(global.Home, "session.rename", globalId, title: name.Text.Trim());
+                if (result.Outcome != "completed")
+                    await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not rename session", Content = result.Detail, CloseButtonText = "OK" }.ShowAsync();
+            }
             Refresh();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine("Rename dialog: " + ex.GetType().Name); }

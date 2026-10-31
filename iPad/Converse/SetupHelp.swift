@@ -61,8 +61,9 @@ struct PadHelp: View {
     var body: some View {
         NavigationStack {
             List {
+                Section { Link("Read the README on GitHub", destination: ConverseAbout.readme) }
                 if let book {
-                    Section { Text("Converse " + book.appVersion + " · Offline help from the README").font(.caption).foregroundStyle(.secondary) }
+                    Section { Text("Converse " + ConverseAbout.versionBuild + " · Offline help from the README").font(.caption).foregroundStyle(.secondary) }
                     ForEach(book.search(query)) { topic in
                         NavigationLink(topic.title) {
                             ScrollView {
@@ -74,6 +75,49 @@ struct PadHelp: View {
                 } else { Link("Read Converse Help on GitHub", destination: URL(string: "https://github.com/richardkaufmann/converse#readme")!) }
             }.searchable(text: $query, prompt: "Search Help").navigationTitle("Converse Help")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+struct PadAbout: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section { Text("Converse " + ConverseAbout.versionBuild).font(.headline) }
+                Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("Apache License 2.0", destination: ConverseAbout.licenseURL) }
+                Section { Link("README on GitHub", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
+            }.navigationTitle("About Converse")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+struct PadRenameSession: View {
+    let row: DeviceSidebarRow
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var saving = false
+    @State private var error = ""
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Session name", text: $name)
+                Text("Saves the name on its home for everyone in the group. The current viewer keeps control.").font(.caption)
+                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            }.navigationTitle("Rename session").onAppear { name = row.title }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Rename") {
+                            saving = true
+                            Task { @MainActor in
+                                let result = await DeviceSyncService.shared.renameRemoteSession(row.globalID, title: name)
+                                saving = false
+                                if result.outcome == "completed" { dismiss() } else { error = result.detail }
+                            }
+                        }.disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.count > 200)
+                    }
+                }
         }
     }
 }

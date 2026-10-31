@@ -657,6 +657,18 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
+    internal bool SettingsUseOverflow => SettingsOverflow.Visibility == Visibility.Visible;
+    internal bool SettingsShowControls => SettingsScroll.Visibility == Visibility.Visible;
+    private double _fullSettingsWidth;
+    private void OnSettingsLayoutChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (SettingsRow is null || SettingsContainer is null || SettingsOverflow is null || SettingsScroll is null) return;
+        if (SettingsScroll.Visibility == Visibility.Visible && SettingsRow.ActualWidth > 0) _fullSettingsWidth = SettingsRow.ActualWidth;
+        var narrow = _fullSettingsWidth > SettingsContainer.ActualWidth + 1;
+        SettingsOverflow.Visibility = narrow ? Visibility.Visible : Visibility.Collapsed;
+        SettingsScroll.Visibility = narrow ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     private void OnSessionSettingsOpening(object sender, object e)
     {
         if (sender is not MenuFlyout menu) return;

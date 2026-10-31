@@ -6,6 +6,15 @@ static class HeadlessSessionChecks
 {
     public static async Task Run(Action<bool, string> check, Func<DeviceSyncService, DeviceSyncService, Func<bool>, Task<bool>> join)
     {
+        foreach (var mode in new[] { "codex:approve-for-me", "codex:full-access" })
+        {
+            var preset = new ChatSession { Entry = new AgentEntry { Engine = "codex" }, RemoteID = "retained", Choices = new() { Access = mode, Approval = "untrusted" } };
+            var args = TurnArguments.For(preset, Array.Empty<string>());
+            check(!args.Any(a => a.Contains("untrusted") || a.Contains("sandbox_mode=\"codex:")), "Named Codex permissions replace conflicting legacy approval settings");
+            check(mode == "codex:approve-for-me"
+                ? args.IndexOf("--approve-for-me") < args.IndexOf("resume") && args.Contains("sandbox_mode=\"workspace-write\"") && args.Contains("approval_policy=\"on-request\"") && args.Contains("approvals_reviewer=\"auto_review\"")
+                : args.Contains("sandbox_mode=\"danger-full-access\"") && args.Contains("approval_policy=\"never\""), "Codex preset applies its whole permission mode on resumed turns");
+        }
         var calls = new List<string>();
         var catalog = await CodexModelCatalog.ReadAsync((method, args) =>
         {
@@ -52,6 +61,15 @@ static class HeadlessSessionChecks
         catalogReady.SetResult(catalog);
         check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.ModelOptions.Count == 2) && viewer.RemoteTranscripts[gid].EffortOptions.SequenceEqual(new[] { "ultra" }), "Headless snapshot sends live Codex models and selected-model effort levels to the viewer");
         check(await join(home, closer, () => closer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "A second group member can manage a headless home");
+        var originalLease = viewer.RemoteLeases[gid];
+        var rename = await closer.RequestParticipantAsync(home.DeviceId, "session.rename", gid, title: "Renamed remotely");
+        check(rename.Outcome == "completed" && session.Title == "Renamed remotely" && !closer.RemoteLeases.ContainsKey(gid), "A different group member renames without taking the current viewer lease");
+        check(await Until(() => viewer.RemoteTranscripts[gid].Title == "Renamed remotely" && viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == gid && r.Title == "Renamed remotely")) && viewer.RemoteLeases[gid].Equals(originalLease) && viewer.RemoteTranscripts[gid].Draft == "Preserve this draft", "Remote rename updates the existing pane and sidebar without changing its lease or draft");
+        check((await closer.RequestParticipantAsync(home.DeviceId, "session.rename", gid, title: "  ")).Outcome == "rejected" && session.Title == "Renamed remotely", "Remote rename rejects whitespace without changing the name");
+        var reloadedRename = new SessionStore(store.Folder, new FakeRunner());
+        check(reloadedRename.Sessions.Single(s => s.Id == session.Id).Title == "Renamed remotely", "Remote rename persists across restart");
+        var blank = JsonSerializer.Deserialize<ChatSession>("{\"Title\":\" \"}")!;
+        check(!string.IsNullOrWhiteSpace(blank.Title), "Legacy blank session names recover a usable default");
         session.LastStreamSaveUtc = DateTime.UtcNow;
         var streamed = new ChatMessage { Role = "assistant", Text = "" }; session.Messages.Add(streamed);
         var started = System.Diagnostics.Stopwatch.StartNew();

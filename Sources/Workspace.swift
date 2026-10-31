@@ -246,7 +246,10 @@ struct WindowTitle: View {
     @ObservedObject var workspace: Workspace
     let state: WindowState
     var body: some View {
-        Text(state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+        HStack(spacing: 8) {
+            Text(state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Text(ConverseAbout.versionBuild).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
+        }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             .help(state.title + "\nRight-click to rename this window")
             .contextMenu { Button("Rename window…") { AppDelegate.shared.renameWindow(state.id) } }

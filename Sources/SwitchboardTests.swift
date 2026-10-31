@@ -125,6 +125,14 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
             _ = pump { response != nil }
             return response
         }
+        let renameID = UUID(), priorTitle = target.title
+        let renamed = request("session.rename", target: gid, title: "Renamed remotely", id: renameID)
+        let renamedReplay = request("session.rename", target: gid, title: "Renamed remotely", id: renameID)
+        check(renamed?.outcome == "completed" && renamedReplay?.outcome == "completed" && target.title == "Renamed remotely" && !a.remoteLeases.keys.contains(gid), "Remote rename persists with a replayable receipt and needs no display lease")
+        check(request("session.rename", target: gid, title: "  ")?.outcome == "rejected" && target.title == "Renamed remotely", "Remote rename rejects a blank name without changing the session")
+        check(request("session.rename", target: DeviceGlobalID(home: aid, session: target.id).string, title: "Wrong home")?.outcome == "rejected", "Remote rename rejects a same-UUID foreign-home target")
+        check(Store(folder: sb.folder).sessions.first { $0.id == target.id }?.title == "Renamed remotely", "Remote rename survives an archive reload")
+        target.title = priorTitle; sb.save()
         let remoteCreation = UUID(), countBeforeSession = sb.sessions.count
         let newSession = request("session.create", provider: "codex", id: remoteCreation)
         let sameSession = request("session.create", provider: "codex", id: remoteCreation)

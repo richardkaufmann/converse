@@ -202,7 +202,7 @@ extension Store {
         guard !session.busy, !session.changingSetting else {
             throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "Finish or stop the current turn before changing its settings."])
         }
-        guard !title.isEmpty, !command.isEmpty, SetupCatalog.validDirectory(directory) else {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !command.isEmpty, SetupCatalog.validDirectory(directory) else {
             throw NSError(domain: "Converse", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use a nonempty title and command, and an existing working folder."])
         }
         let changed = session.entry.command != command || session.entry.directory != directory

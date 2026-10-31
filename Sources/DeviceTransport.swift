@@ -341,6 +341,7 @@ final class DeviceSyncService: ObservableObject {
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         #if os(macOS)
         hello.capabilities.append("session-close-v1")
+        hello.capabilities.append("session-rename-v1")
         hello.capabilities.append("session-create-v1")
         #endif
         hello.group = currentGroup
@@ -1767,6 +1768,15 @@ extension DeviceSyncService {
     func canCreateRemote(_ home: String) -> Bool {
         peerForHome(home)?.hello?.capabilities.contains("session-create-v1") == true
     }
+    func canRenameRemote(_ home: String) -> Bool {
+        peerForHome(home)?.hello?.capabilities.contains("session-rename-v1") == true
+    }
+    @MainActor func renameRemoteSession(_ target: String, title: String) async -> DeviceParticipantResponse {
+        guard let reference = DeviceGlobalID(target), canRenameRemote(reference.home) else {
+            return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline or needs an update for remote renaming.")
+        }
+        return await requestParticipant(home: reference.home, action: "session.rename", target: target, title: title)
+    }
     func canCloseRemote(_ home: String) -> Bool {
         peerForHome(home)?.hello?.capabilities.contains("session-close-v1") == true
     }
@@ -1881,6 +1891,9 @@ extension DeviceSyncService {
             return true
         }
         var created: Session?
+        let oldTitle = session?.title
+        let oldTitleDate = session?.titleUpdatedAt
+        let oldIdentityChanged = session?.identityChanged
         let oldQueuePaused = session?.queuePaused
         let oldConfig = session?.agent
         let oldPending = session?.pending
@@ -1890,6 +1903,13 @@ extension DeviceSyncService {
         do {
             let result: DeviceParticipantResponse
             switch request.action {
+            case "session.rename":
+                let name = request.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard let session, !name.isEmpty, name.utf8.count <= 200 else { reject("Choose a name of 1–200 bytes for an open session on this home."); return true }
+                // Persist the rename and receipt in one archive write, before publishing identity.
+                session.identityChanged = nil
+                session.title = name
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Session renamed on home.", target: request.target)
             case "session.create":
                 guard let provider = request.provider, ["claude", "codex", "muse"].contains(provider),
                       let entry = store.entries.first(where: { $0.engine == provider }) else { reject("This provider is not configured on home."); return true }
@@ -1919,9 +1939,17 @@ extension DeviceSyncService {
             }
             store.participantReceipts.append(ParticipantMutationReceipt(id: id, origin: origin, payloadHash: hash, response: result))
             try store.saveChecked(); send(result); publishSidebarIfChanged()
+            if request.action == "session.rename", let session {
+                session.identityChanged = oldIdentityChanged; store.syncIdentity(session)
+                for holder in peers.values where holder.leasedSessions.contains(session.id) { sendTranscript(to: holder, sessionID: session.id) }
+            }
             if let session, runAfterCommit { DispatchQueue.main.async { store.runNext(session) } }
             if let session, widgetAfterCommit, !isTestEnvironment { MainActor.assumeIsolated { AgentWindows.shared.widget(session) } }
         } catch {
+            if request.action == "session.rename", let session, let oldTitle {
+                session.title = oldTitle; if let oldTitleDate { session.titleUpdatedAt = oldTitleDate }
+                session.identityChanged = oldIdentityChanged
+            }
             if let created { store.sessions.removeAll { $0 === created } }
             if let session { session.agent = oldConfig; session.pending = oldPending ?? []; if let oldQueuePaused { session.queuePaused = oldQueuePaused }; if let oldModel { session.toolStatus.model = oldModel } }
             store.participantReceipts.removeAll { $0.id == id }
