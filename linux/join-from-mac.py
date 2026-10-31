@@ -117,6 +117,7 @@ def main():
         sys.exit("Pairing didn't reach the comparison step (state: " + binding["state"] + "). "
                  "Check that Linux can reach " + host + ":" + str(port) + ", then run this again.")
 
+    shown_binding = dict(binding)
     print("\nLinux shows this number:\n\n    " + binding["verificationCode"] + "\n")
     print("Compare ALL EIGHT parts with the number on the Mac. If they match, press Pair on the Mac.")
     answer = input("Do all eight parts match? Type yes to let " + linux_name + " join " + group_name + ": ")
@@ -126,7 +127,11 @@ def main():
         sys.exit("Canceled. " + linux_name + " did not join.")
     if binding["state"] != "awaiting_user":
         sys.exit("The pairing request is no longer waiting (state: " + binding["state"] + "). Run this again.")
-    admin(options.destination, linux_id, "pairing.join.confirm", {"binding": binding}, mutate=True)
+    # Never approve a replacement handshake after the user compared an older code.
+    # updatedAt is observation metadata; all other fields bind the shown prompt.
+    if any(binding.get(key) != value for key, value in shown_binding.items() if key != "updatedAt"):
+        sys.exit("The pairing changed while you compared the number. Run this again and compare the new number.")
+    admin(options.destination, linux_id, "pairing.join.confirm", {"binding": shown_binding}, mutate=True)
 
     for _ in range(60):
         fabric = admin(options.destination, linux_id, "status.get", {}).get("fabric") or {}
