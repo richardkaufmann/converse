@@ -2317,6 +2317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var paneObserver: AnyCancellable?
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
     private var quitting = false
+    private var quitReady = false
     var transcriptExporter: TranscriptExportController?
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
@@ -2399,7 +2400,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // SwiftUI's non-dismissable onboarding sheet must close before AppKit
         // can complete termination. The unfinished setup stays persisted.
         for (_, state) in windows { state.setup = false }
-        DispatchQueue.main.async { NSApp.terminate(sender) }
+        finishQuitAfterSheets(sender)
+    }
+    private func finishQuitAfterSheets(_ sender: Any?) {
+        guard !windows.contains(where: { $0.0.attachedSheet != nil }) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.finishQuitAfterSheets(sender) }
+            return
+        }
+        NSApp.terminate(sender)
     }
     @objc func showDeviceConnect() {
         guard Store.shared.setupCompleted else { showSetup(); return }
@@ -2531,7 +2539,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if quitting { return .terminateLater }
+        if quitReady { return .terminateNow }
+        if quitting { return .terminateCancel }
         let confirmed = Store.shared.requestApplicationQuit(confirm: { warning in
             let alert = NSAlert()
             alert.messageText = warning.title; alert.informativeText = warning.detail
@@ -2539,11 +2548,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return alert.runModal() == .alertSecondButtonReturn
         }, stopAgents: { MainActor.assumeIsolated { JollyRouter.shared.stop(store: .shared); AgentRuntime.shared.prepareForQuit() } })
         quitting = confirmed
-        guard confirmed else { return .terminateCancel }
-        DispatchQueue.main.async {
-            Store.shared.closeMuseHostsForQuit { sender.reply(toApplicationShouldTerminate: true) }
+        guard confirmed else {
+            if !Store.shared.setupCompleted { for (_, state) in windows { state.setup = true } }
+            return .terminateCancel
         }
-        return .terminateLater
+        guard Store.shared.sessions.contains(where: { $0.muse != nil }) else {
+            Store.shared.configurationAudit.record("quit_save_completed")
+            return .terminateNow
+        }
+        // Drain owned hosts on the ordinary run loop. NSTerminateLater enters
+        // an AppKit modal loop that can starve our main-queue shutdown callbacks.
+        Store.shared.closeMuseHostsForQuit { [weak self] in
+            self?.quitReady = true
+            sender.terminate(nil)
+        }
+        return .terminateCancel
     }
 }
 
