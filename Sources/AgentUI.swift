@@ -71,29 +71,28 @@ struct AgentSetupView: View {
                             Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request gets a fresh activation limit and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
                         }
                         Text("Sessions this agent may read and message · select explicitly").font(.headline)
-                        ScrollView {
-                            VStack(alignment: .leading) {
-                                ForEach(Store.shared.sessions.filter { $0.id != session.id }) { other in
-                                    Toggle(other.title, isOn: Binding(get: { settings.allows(local: other.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
-                                        settings.watchedSessions.removeAll { $0 == other.id }
-                                        if let home = DeviceSyncService.shared.localDeviceID { settings.watchedParticipants?.removeAll { $0 == DeviceGlobalID(home: home, session: other.id).string } }
-                                        if on { settings.watchedSessions.append(other.id) }
+                        // Keep the scope list in the form’s single scroll view so every row is reachable.
+                        VStack(alignment: .leading) {
+                            ForEach(Store.shared.sessions.filter { $0.id != session.id }) { other in
+                                Toggle(other.title, isOn: Binding(get: { settings.allows(local: other.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
+                                    settings.watchedSessions.removeAll { $0 == other.id }
+                                    if let home = DeviceSyncService.shared.localDeviceID { settings.watchedParticipants?.removeAll { $0 == DeviceGlobalID(home: home, session: other.id).string } }
+                                    if on { settings.watchedSessions.append(other.id) }
+                                }))
+                            }
+                            ForEach((settings.watchedParticipants ?? []).filter { !availableScope.contains($0) }, id: \.self) { id in
+                                Toggle("Unavailable selected participant · " + id, isOn: Binding(get: { true }, set: { if !$0 { settings.watchedParticipants?.removeAll { $0 == id } } })).font(.caption)
+                            }
+                            ForEach(DeviceSyncService.shared.participantHomes, id: \.deviceID) { home in
+                                Text(home.deviceName).font(.caption).foregroundStyle(.secondary)
+                                ForEach(home.rows) { row in
+                                    Toggle(row.title + (home.online ? "" : " · offline"), isOn: Binding(get: { settings.watchedParticipants?.contains(row.globalID) == true }, set: { on in
+                                        settings.watchedParticipants = (settings.watchedParticipants ?? []).filter { $0 != row.globalID }
+                                        if on { settings.watchedParticipants?.append(row.globalID) }
                                     }))
                                 }
-                                ForEach((settings.watchedParticipants ?? []).filter { !availableScope.contains($0) }, id: \.self) { id in
-                                    Toggle("Unavailable selected participant · " + id, isOn: Binding(get: { true }, set: { if !$0 { settings.watchedParticipants?.removeAll { $0 == id } } })).font(.caption)
-                                }
-                                ForEach(DeviceSyncService.shared.participantHomes, id: \.deviceID) { home in
-                                    Text(home.deviceName).font(.caption).foregroundStyle(.secondary)
-                                    ForEach(home.rows) { row in
-                                        Toggle(row.title + (home.online ? "" : " · offline"), isOn: Binding(get: { settings.watchedParticipants?.contains(row.globalID) == true }, set: { on in
-                                            settings.watchedParticipants = (settings.watchedParticipants ?? []).filter { $0 != row.globalID }
-                                            if on { settings.watchedParticipants?.append(row.globalID) }
-                                        }))
-                                    }
-                                }
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }.frame(height: 120)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .textFieldStyle(.roundedBorder)
                     if !error.isEmpty { Text(error).foregroundStyle(.red) }
