@@ -26,6 +26,7 @@ final class SupportNUXController: ObservableObject {
     }
     func choose(_ engine: String) {
         guard !checking, ["muse","claude","codex"].contains(engine) else { return }
+        guard session?.busy != true else { status = "The previous connection check is still stopping. Try again when it finishes."; return }
         timer?.invalidate(); waitingForLogin = false; installationURL = nil
         generation = UUID(); let token = generation
         selected = engine; checking = true; status = "Checking \(engine.capitalized)…"

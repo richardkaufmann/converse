@@ -41,6 +41,14 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     session.switchboardHop = 1; session.supportContinuation = false
     store.processAppSupport(session)
     check(session.messages.last?.text.contains("Blocked:") == true && session.pending.isEmpty, "Forwarded messages cannot activate app configuration or recursive support turns")
+    agent.supportTeachingVersion = AppSupport.version; agent.switchboardTurnStart = agent.messages.count
+    agent.messages.append(Message(role: "assistant", text: fenced))
+    let before = agent.messages.count
+    store.processAppSupport(agent)
+    check(agent.messages.count == before && agent.pending.isEmpty, "Native-agent prose cannot execute a command without its explicit appControl field")
+    agent.supportPendingCommand = AppSupportCommand(action: "inspect")
+    store.processAppSupport(agent)
+    check(agent.messages.count == before + 1 && agent.pending.count == 1, "Native-agent appControl executes through the same validated dispatcher")
     let profile = Entry(name: "Muse", command: "muse", directory: folder.path, engine: "muse", accountDirectory: folder.path + "/MuseLogin")
     let script = ProviderCommand.script(entry: profile, arguments: ["login"])
     check(script.contains("MUSE_AUTH_PATH") && script.contains("XDG_CONFIG_HOME") && script.contains("unset META_API_KEY"), "Support Muse login uses its own credential store rather than the production account")

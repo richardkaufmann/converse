@@ -155,7 +155,9 @@ extension Store {
               sessions.contains(where: { $0 === session }) else { return }
         let reply = session.messages.dropFirst(start).last { $0.role == "assistant" }
         guard let reply, !session.switchboardHandled.contains(reply.id) else { return }
-        let command = session.supportPendingCommand ?? (session.entry.engine == "codex" ? reply.finalReply : reply.text).flatMap(AppSupportCommand.parse)
+        // Native-agent prose is data inside its JSON envelope. Only the
+        // dedicated appControl field is executable for that runtime.
+        let command = session.agent != nil ? session.supportPendingCommand : (session.entry.engine == "codex" ? reply.finalReply : reply.text).flatMap(AppSupportCommand.parse)
         guard let command else { return }
         session.switchboardHandled.append(reply.id)
         let result: String
