@@ -9,6 +9,12 @@ struct AccountProfile: Codable, Identifiable, Equatable {
     var useDefaultStore: Bool? = nil
     static func defaults(dataFolder: URL) -> [AccountProfile] {
         let home = NSHomeDirectory()
+        if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
+            return ["muse", "codex", "claude"].map { engine in
+                AccountProfile(id: engine + "-default", name: engine.capitalized, engine: engine,
+                               directory: dataFolder.appendingPathComponent("PreviewAccounts/" + engine).path, useDefaultStore: false)
+            }
+        }
         return [AccountProfile(id: "muse-default", name: "Muse", engine: "muse", directory: ""),
                 AccountProfile(id: "codex-default", name: "Codex", engine: "codex", directory: home + "/.codex"),
                 AccountProfile(id: "claude-default", name: "Claude", engine: "claude", directory: home + "/.claude", useDefaultStore: true)]
@@ -24,6 +30,7 @@ struct PendingPrompt: Codable, Identifiable {
     var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
     var agentRunReserved: Bool? = nil
     var autonomous: Bool? = nil
+    var supportContinuation: Bool? = nil
     var agentLoopTick: Bool? = nil
     var id = UUID()
     var text: String
@@ -38,6 +45,9 @@ struct ProviderCommand {
         if entry.engine == "claude", entry.useDefaultAccountStore == true { setup += "unset CLAUDE_CONFIG_DIR; " }
         if let directory = entry.accountDirectory, !directory.isEmpty {
             let path = NSString(string: directory).expandingTildeInPath
+            if entry.engine == "muse" {
+                setup += "unset META_API_KEY; export XDG_CONFIG_HOME=\(quote(path + "/config")) XDG_DATA_HOME=\(quote(path + "/data")) XDG_CACHE_HOME=\(quote(path + "/cache")) MUSE_AUTH_PATH=\(quote(path + "/config/muse/auth.json")); "
+            }
             if entry.engine == "codex" { setup += "unset CODEX_ACCESS_TOKEN OPENAI_API_KEY; export CODEX_HOME=\(quote(path)); " }
             if entry.engine == "claude" { setup += "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR; \(entry.useDefaultAccountStore == true ? "" : "export CLAUDE_CONFIG_DIR=\(quote(path)); ")" }
         }

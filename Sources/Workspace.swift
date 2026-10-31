@@ -233,6 +233,8 @@ struct SidebarSession: View {
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }
                 }
+                Button("Teach Converse Setup & Control") { Store.shared.teachAppSupport(session) }
+                if session.supportTeachingVersion != nil { Button("Disable app control") { session.supportTeachingVersion = nil; Store.shared.save() } }
                 Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }
                 if session.switchboardEnabled { Button("Disable session messaging") { session.switchboardEnabled = false; Store.shared.save() } }
                 Button("Park conversation") { workspace.park(session.id) }

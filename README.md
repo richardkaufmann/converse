@@ -17,6 +17,16 @@ It's a bit "opinionated" to match how I work. Feel free to rip it off and make a
 
 📖 **Documentation:** this README is both the [GitHub front page](https://github.com/richardkaufmann/converse) and the in-app Help (searchable, offline, under **Help → Converse Help** on Mac). The two are the same text.
 
+## Converse App Support (Mac setup preview)
+
+The isolated **Converse Setup Preview** (build 81) starts with one **Converse App Support** session. Pick Meta Muse, Claude, or Codex; Converse opens that provider's native CLI login, then checks one short model response. Setup stays gated on failed, cancelled, missing, or timed-out authentication. The support session becomes available only after a successful model response. No additional setup questionnaire is required.
+
+The welcome message links to **README**, **Discord**, and **Connect the Meta Muse iPhone app** using in-app links. The last item opens Jolly, the connector to the Meta Muse phone app; it is distinct from pairing the native Converse iPhone/iPad viewer.
+
+Right-click a local session or agent and choose **Teach Converse Setup & Control** to enable the same help and app commands. Teaching survives restart and compaction. The assistant can inspect safe configuration, search installed Help, create a paused agent, configure its objective/repository/Discord channel/Jolly access, and open native setup controls for credentials and connection tests. App operations return explicit results; saving settings does not prove a connection works. No scheduled loop or speech is enabled by teaching. **Disable app control** revokes the capability.
+
+The preview uses a separate bundle identity, preferences, data folder, provider logins, Keychain services, device identity and listening port. It does not replace the normal app. See [the preview walkthrough](docs/NUX-PREVIEW.md).
+
 ## Feature overview
 
 ### 1. One client for your coding models

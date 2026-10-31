@@ -63,6 +63,16 @@ final class SetupProgress: ObservableObject {
 struct SetupView: View {
     @ObservedObject var store = Store.shared
     @ObservedObject var state: WindowState
+    var body: some View {
+        Group {
+            if store.setupCompleted { LegacySetupView(state: state) }
+            else { SupportNUXView(state: state) }
+        }.onChange(of: store.setupCompleted) { _, completed in if completed { state.setup = false } }
+    }
+}
+struct LegacySetupView: View {
+    @ObservedObject var store = Store.shared
+    @ObservedObject var state: WindowState
     @StateObject private var checks = SetupChecks()
     @StateObject private var progress = SetupProgress()
     private var step: Int { get { progress.step } nonmutating set { progress.step = newValue } }

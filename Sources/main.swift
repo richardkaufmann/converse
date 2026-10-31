@@ -61,9 +61,18 @@ struct SavedSession: Codable {
     var agent: AgentConfig? = nil
     var compactionInProgress: Bool? = nil
     var lastCompactedAt: Date? = nil
+    var supportTeachingVersion: Int? = nil
+    var supportAssistant: Bool? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
+    var supportTeachingVersion: Int? = nil
+    var supportAssistant = false
+    var supportProbeCompletion: ((Bool) -> Void)?
+    var supportPendingCommand: AppSupportCommand?
+    var supportActionCount = 0
+    var supportContinuation = false
+    var supportAutonomous = false
     @Published var entry: Entry
     @Published var agent: AgentConfig? = nil { didSet { if oldValue != agent { agentChanged?(oldValue, agent) } } }
     var agentChanged: ((AgentConfig?, AgentConfig?) -> Void)?
@@ -160,6 +169,7 @@ final class Session: ObservableObject, Identifiable {
     init(_ saved: SavedSession) {
         createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
         id = saved.id; entry = saved.entry; title = saved.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New conversation" : saved.title; messages = saved.messages; agent = saved.agent
+        supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -179,7 +189,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -440,7 +450,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -459,7 +469,8 @@ final class Store: ObservableObject {
     }
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
-        if success && !s.interrupted { processSwitchboard(s); switchboardTurnFinished(s) }
+        finishSupportProbe(s, success: success)
+        if success && !s.interrupted { processAppSupport(s); processSwitchboard(s); switchboardTurnFinished(s) }
         s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
@@ -472,7 +483,9 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false) {
+        guard s.entry.engine != "support" else { return }
+        if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
             s.probeError = Session.missingAgentSettings; s.status = "Agent setup required"; s.queuePaused = true
             return // Retain draft and attachments; never launch a CLI for an unconfigured agent.
@@ -490,6 +503,9 @@ final class Store: ObservableObject {
         s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.retryDetail = nil; s.settingNotice = ""
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
         let images = s.attachments
+        s.supportContinuation = supportContinuation; s.supportAutonomous = supportAutonomous || agentLoopTick || preservingAgentDraft != nil
+        if !supportContinuation { s.supportActionCount = 0 }
+        s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
@@ -506,6 +522,7 @@ final class Store: ObservableObject {
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = text
+        if s.supportTeachingVersion != nil { prompt += "\n\n" + AppSupport.instructions(agent: false) }
         if includesLocalContext {
             prompt += "\n\n" + localContext(s, directory: directory)
             let imageFolder = responseImageFolder(s)
@@ -777,6 +794,7 @@ final class Store: ObservableObject {
         }
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
+        guard s.entry.engine != "support" else { completion?(); return }
         guard !applicationQuitting else { completion?(); return }
         if s.isAgentSession {
             s.probeError = s.needsAgentSetup ? Session.missingAgentSettings : ""
@@ -1493,12 +1511,18 @@ final class ConversationTextView: NSTextView {
         return (copyBlocks[index].role == "user" ? "Copy this prompt" : "Copy this response", index)
     }
     @objc private func copyConversationBlock(_ sender: NSMenuItem) { copyBlock(sender.tag, to: .general) }
+    var teachApp: (() -> Void)?
+    @objc func teachAppConversation(_ sender: Any?) { teachApp?() }
     var teachSession: (() -> Void)?
     @objc func teachConversation(_ sender: Any?) { teachSession?() }
     func addTeachingItem(to menu: NSMenu) {
         guard teachSession != nil else { return }
         let item = NSMenuItem(title: "Teach Session To Talk To Other Sessions", action: #selector(teachConversation(_:)), keyEquivalent: "")
         item.target = self; menu.addItem(.separator()); menu.addItem(item)
+        if teachApp != nil {
+            let support = NSMenuItem(title: "Teach Converse Setup & Control", action: #selector(teachAppConversation(_:)), keyEquivalent: "")
+            support.target = self; menu.addItem(support)
+        }
     }
     func imageToolsItem(at character: Int) -> NSMenuItem? {
         guard let storage = textStorage, character >= 0, character < storage.length,
@@ -1705,6 +1729,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
         text.isEditable = inputEnabled
+        text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
@@ -1732,7 +1757,8 @@ struct ScrollingConversation: NSViewRepresentable {
         if let text = scroll.documentView as? ConversationTextView {
             text.droppedFileSourceDevice = droppedFileSourceDevice
             text.isEditable = inputEnabled
-            text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
+            text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
+        text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
             text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
@@ -1822,6 +1848,7 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
+            if let url, AppSupport.handleLink(url) { return true }
             if let url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
             return true
         }
@@ -2352,7 +2379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
         sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
-        sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(quitConverse(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
@@ -2368,13 +2395,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.helpMenu = h
         NSApp.registerUserInterfaceItemSearchHandler(helpController)
     }
+    @objc func quitConverse(_ sender: Any?) {
+        // SwiftUI's non-dismissable onboarding sheet must close before AppKit
+        // can complete termination. The unfinished setup stays persisted.
+        for (_, state) in windows { state.setup = false }
+        DispatchQueue.main.async { NSApp.terminate(sender) }
+    }
     @objc func showDeviceConnect() {
+        guard Store.shared.setupCompleted else { showSetup(); return }
         if windows.isEmpty { newWindow() }
         guard let (window, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last else { return }
         state.deviceConnect = true
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc func showSettings() {
+        guard Store.shared.setupCompleted else { showSetup(); return }
         if windows.isEmpty { newWindow() }
         (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settings = true
     }
@@ -2384,15 +2419,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
-    @objc func showJolly() { MainActor.assumeIsolated { jollyController.show() } }
+    @objc func showJolly() { guard Store.shared.setupCompleted else { helpController.show(topic: "jolly-mac", query: ""); return }; MainActor.assumeIsolated { jollyController.show() } }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
     @objc func newWindow() { makeWindow(WindowState()) }
     private func makeWindow(_ state: WindowState) {
-        state.setup = windows.isEmpty && !Store.shared.setupCompleted
+        state.setup = !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
-        window.title = state.title + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "Converse Setup Preview" : state.title) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
         title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         window.addTitlebarAccessoryViewController(title)
@@ -2431,7 +2466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Workspace.shared.assign(session.id, to: state.id, pane: pane)
         if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }
     }
-    @objc func newAgent() { MainActor.assumeIsolated { AgentWindows.shared.create() } }
+    @objc func newAgent() { guard Store.shared.setupCompleted else { showSetup(); return }; MainActor.assumeIsolated { AgentWindows.shared.create() } }
     @objc func restoreDeletedConversation() {
         guard let session = Store.shared.restoreDeleted() else { return }
         if windows.isEmpty { newWindow() }
@@ -2654,6 +2689,7 @@ func selfTest() {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh to run isolated tests.\n", stderr); exit(2) }
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
+    appSupportSelfTests(check)
     providerSelfTests(check)
     conversationLayoutSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
@@ -3145,6 +3181,10 @@ if CommandLine.arguments.contains("--provider-self-test") {
 }
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
+if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
+    let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse Setup Preview")
+    setenv("CONVERSE_DATA_DIR", isolated.path, 1)
+}
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate

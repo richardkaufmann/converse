@@ -137,7 +137,7 @@ struct AgentRepoSnapshot: Codable, Equatable {
 
 // No secret is part of the Codable session or exported widget.
 enum AgentSecrets {
-    static let service = "app.kaoslabs.Converse.Agent"
+    static let service = Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "app.kaoslabs.Converse.NUXPreview.Agent" : "app.kaoslabs.Converse.Agent"
     static func read(_ name: String) throws -> String? {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: name, kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne] as CFDictionary, &result)
@@ -188,6 +188,7 @@ enum AgentFailure: LocalizedError {
 struct AgentReply: Decodable {
     struct Tell: Decodable { var to: String; var text: String; var replyExpected: Bool?; var inReplyTo: UUID? }
     var reply: String
+    var appControl: AppSupportCommand?
     var attention: String?
     var artPrompt: String?
     var tell: [Tell]?

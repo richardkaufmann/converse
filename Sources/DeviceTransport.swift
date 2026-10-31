@@ -201,6 +201,7 @@ final class DeviceSyncService: ObservableObject {
         started = true
         do {
             let folder = storageFolder
+            if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true { deviceNameOverride = "Converse Setup Preview" }
             loadResumeEpochs()
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)
@@ -241,7 +242,7 @@ final class DeviceSyncService: ObservableObject {
         parameters.allowLocalEndpointReuse = true
         let requested = ProcessInfo.processInfo.environment["CONVERSE_DEVICE_PORT"].flatMap { Int($0) }.flatMap { (1...65535).contains($0) ? NWEndpoint.Port(rawValue: UInt16($0)) : nil } ?? Self.defaultPort
         #if os(macOS)
-        let listenPort = requested
+        let listenPort = Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? NWEndpoint.Port.any : requested
         #else
         let listenPort = NWEndpoint.Port.any
         _ = requested
