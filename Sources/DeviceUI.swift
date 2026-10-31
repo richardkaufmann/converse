@@ -86,7 +86,7 @@ struct DeviceSidebarSection: View {
                 ForEach(homes, id: \.deviceID) { home in
                     VStack(alignment: .leading, spacing: 0) {
                         HStack(spacing: 6) {
-                            Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(home.online ? 1 : 0.4)).lineLimit(1)
+                            Text(service.displayName(for: home.deviceID, fallback: home.deviceName)).fontWeight(.bold).foregroundStyle(Color.green.opacity(home.online ? 1 : 0.4)).lineLimit(1)
                             if home.online { Text("remote").font(.caption).foregroundStyle(.secondary) }
                             Spacer()
                             if home.online && (service.canCreateRemote(home.deviceID) || service.canHostAgent(home.deviceID)) {
@@ -102,10 +102,11 @@ struct DeviceSidebarSection: View {
                                     .help("Create a session on " + home.deviceName + " using its local login")
                             }
                         }.padding(.horizontal, 4).frame(height: 28)
-                            .help(home.online ? "Sessions run on " + home.deviceName + ". Choose 1, 2 or 3 to display one here." : "Offline. Sessions reappear when this device reconnects.")
+                            .help(service.deviceDetails(home.deviceID))
+                            .contextMenu { Button("Rename device…") { renameDeviceDisplay(service, id: home.deviceID) }.disabled(!service.canRenameDevice(home.deviceID)) }
                         if home.online {
                             ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
-                                RemoteSidebarRow(row: row, homeName: home.deviceName, online: true, showsModel: showsModel,
+                                RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel,
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
                                                  park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                                  assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
@@ -224,7 +225,7 @@ struct RemotePane: View {
     @State private var customModel = ""
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
     var homeName: String {
-        let name = DeviceGlobalID(globalID).flatMap { service.homes[$0.home]?.deviceName }?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = DeviceGlobalID(globalID).map { service.displayName(for: $0.home) }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         return name.flatMap { $0.isEmpty ? nil : $0 } ?? "home device"
     }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
@@ -344,7 +345,7 @@ struct RemotePane: View {
                 Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
             ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
-                droppedFileSourceDevice: service.deviceNameOverride ?? service.identity?.deviceName ?? "Mac",
+                droppedFileSourceDevice: service.identity.map { service.displayName(for: $0.deviceID) } ?? "Mac",
                 onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
                                   onDraftChanged: {
@@ -590,3 +591,21 @@ struct RemoteRequestView: View {
     }
 }
 
+
+// Display labels are group metadata, never operating-system hostnames or keys.
+func renameDeviceDisplay(_ service: DeviceSyncService, id: String) {
+    let alert = NSAlert()
+    alert.messageText = "Rename device in group"
+    alert.informativeText = "This display name is shared with the group. The device identity and pairing remain unchanged."
+    let field = NSTextField(string: service.displayName(for: id))
+    field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+    alert.accessoryView = field; alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+    alert.window.initialFirstResponder = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    do { try service.renameDeviceDisplayName(id, name: field.stringValue) }
+    catch {
+        let failure = NSAlert(); failure.messageText = "Could not rename device"
+        failure.informativeText = "Use a nonempty name up to 200 UTF-8 bytes, without control characters, for a current group member."
+        failure.runModal()
+    }
+}

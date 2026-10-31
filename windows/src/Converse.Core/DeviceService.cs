@@ -27,7 +27,10 @@ public sealed record TrustedDevice(
     [property: JsonPropertyName("removed")] bool? Removed = null,
     [property: JsonPropertyName("metadataGeneration")] ulong? MetadataGeneration = null,
     [property: JsonPropertyName("metadataBy")] string? MetadataBy = null,
-    [property: JsonPropertyName("groupID")] string? GroupID = null);
+    [property: JsonPropertyName("groupID")] string? GroupID = null,
+    [property: JsonPropertyName("displayName")] string? DisplayName = null,
+    [property: JsonPropertyName("displayNameGeneration")] ulong? DisplayNameGeneration = null,
+    [property: JsonPropertyName("displayNameBy")] string? DisplayNameBy = null);
 
 public sealed class DeviceTrustStore
 {
@@ -104,6 +107,9 @@ public sealed class DeviceTrustStore
                 MetadataGeneration = checked((old?.MetadataGeneration ?? 0) + 1),
                 MetadataBy = issuer ?? device.DeviceID,
                 GroupID = groupID,
+                DisplayName = active ? old?.DisplayName : null,
+                DisplayNameGeneration = active ? old?.DisplayNameGeneration : null,
+                DisplayNameBy = active ? old?.DisplayNameBy : null,
             };
             var next = _records.Where(d => d.DeviceID != device.DeviceID).Append(member).ToList();
             if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
@@ -134,6 +140,25 @@ public sealed class DeviceTrustStore
             _records = next;
         }
     }
+    public static bool ValidDisplayName(string name) => name.Length > 0 && name == name.Trim()
+        && System.Text.Encoding.UTF8.GetByteCount(name) <= 200 && !name.Any(char.IsControl);
+
+    public void RenameDisplay(string deviceId, string groupId, string name, string issuer)
+    {
+        lock (_gate)
+        {
+            name = name.Trim();
+            var old = _records.FirstOrDefault(d => d.DeviceID == deviceId && d.GroupID == groupId && d.Removed != true);
+            if (!ValidDisplayName(name) || old is null || (old.DisplayNameGeneration ?? 0) >= ulong.MaxValue - 2)
+                throw new InvalidDataException("Use a nonempty device name up to 200 UTF-8 bytes for a current group member.");
+            if (old.DisplayName == name) return;
+            var next = _records.Select(d => d.DeviceID == deviceId ? old with {
+                DisplayName = name, DisplayNameGeneration = (old.DisplayNameGeneration ?? 0) + 1, DisplayNameBy = issuer
+            } : d).ToList();
+            Save(next); _records = next;
+        }
+    }
+
     public bool Merge(IReadOnlyList<TrustedDevice> incoming)
     {
         lock (_gate)
@@ -142,6 +167,8 @@ public sealed class DeviceTrustStore
                 || DeviceBlob.DeviceIdForPublicKey(d.PublicKey) != d.DeviceID
                 || (d.GroupID is not null && !Guid.TryParse(d.GroupID, out _))
                 || System.Text.Encoding.UTF8.GetByteCount(d.Name) > 200
+                || (d.DisplayName is not null && !ValidDisplayName(d.DisplayName))
+                || (d.DisplayNameGeneration ?? 0) >= ulong.MaxValue - 1 || (d.DisplayNameBy?.Length ?? 0) > 64
                 || (d.MetadataBy?.Length ?? 0) > 64 || (d.MetadataGeneration ?? 0) >= ulong.MaxValue - 1
                 || (d.ChangedBy?.Length ?? 0) > 64 || (d.LastHost?.Length ?? 0) > 253 || d.LastPort is < 1 or > 65535
                 || (d.Generation ?? 0) >= ulong.MaxValue - 1)) throw new InvalidDataException("Invalid membership");
@@ -157,17 +184,26 @@ public sealed class DeviceTrustStore
                     || ((member.Removed == true) == (old.Removed == true) && string.CompareOrdinal(member.ChangedBy ?? "", old.ChangedBy ?? "") > 0)));
                 if (newer) { next[index] = member; changed = true; }
                 else if ((member.Generation ?? 0) == (old.Generation ?? 0) && (member.Removed == true) == (old.Removed == true)
-                    && (member.ChangedBy ?? "") == (old.ChangedBy ?? "") && old.PublicKey.AsSpan().SequenceEqual(member.PublicKey)
-                    && ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0)
-                    || ((member.MetadataGeneration ?? 0) == (old.MetadataGeneration ?? 0)
-                    && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0)))
+                    && (member.ChangedBy ?? "") == (old.ChangedBy ?? "") && old.GroupID == member.GroupID && old.PublicKey.AsSpan().SequenceEqual(member.PublicKey))
                 {
+                    if ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0)
+                    || ((member.MetadataGeneration ?? 0) == (old.MetadataGeneration ?? 0)
+                    && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0)) {
                     next[index] = old with
                     {
                         Name = member.Name, LastHost = member.LastHost, LastPort = member.LastPort,
                         MetadataGeneration = member.MetadataGeneration, MetadataBy = member.MetadataBy,
                     };
                     changed = true;
+                    }
+                    if ((member.DisplayNameGeneration ?? 0) > (old.DisplayNameGeneration ?? 0)
+                        || ((member.DisplayNameGeneration ?? 0) == (old.DisplayNameGeneration ?? 0)
+                        && string.CompareOrdinal(member.DisplayNameBy ?? "", old.DisplayNameBy ?? "") > 0))
+                    {
+                        next[index] = next[index] with { DisplayName = member.DisplayName,
+                            DisplayNameGeneration = member.DisplayNameGeneration, DisplayNameBy = member.DisplayNameBy };
+                        changed = true;
+                    }
                 }
             }
             if (next.Count > 512) throw new InvalidDataException("Fabric roster limit");
@@ -185,7 +221,7 @@ public sealed class DeviceTrustStore
         { "deviceID", "DeviceID", "name", "Name", "publicKey", "PublicKey", "pairedAt", "PairedAt",
           "lastHost", "LastHost", "lastPort", "LastPort", "generation", "Generation", "changedBy", "ChangedBy",
           "removed", "Removed", "metadataGeneration", "MetadataGeneration", "metadataBy", "MetadataBy",
-          "groupID", "GroupID" };
+          "groupID", "GroupID", "displayName", "DisplayName", "displayNameGeneration", "DisplayNameGeneration", "displayNameBy", "DisplayNameBy" };
     private void Save(List<TrustedDevice> devices)
     {
         System.Text.Json.Nodes.JsonArray existing = new();
@@ -223,6 +259,9 @@ public sealed class DeviceTrustStore
             if (device.MetadataGeneration is not null) entry["metadataGeneration"] = device.MetadataGeneration.Value;
             if (device.MetadataBy is not null) entry["metadataBy"] = device.MetadataBy;
             if (device.GroupID is not null) entry["groupID"] = device.GroupID;
+            if (device.DisplayName is not null) entry["displayName"] = device.DisplayName;
+            if (device.DisplayNameGeneration is not null) entry["displayNameGeneration"] = device.DisplayNameGeneration.Value;
+            if (device.DisplayNameBy is not null) entry["displayNameBy"] = device.DisplayNameBy;
             next.Add(entry);
         }
         foreach (var (id, entry) in byId)
@@ -453,6 +492,29 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public bool LocallyRemoved =>
         Trust.Records.FirstOrDefault(d => d.DeviceID == DeviceId)?.Removed == true;
+
+    public string DisplayName(string id, string? fallback = null)
+    {
+        var record = Trust.Devices.FirstOrDefault(d => d.DeviceID == id && d.GroupID == CurrentGroup?.Id);
+        return record?.DisplayName ?? fallback ?? (id == DeviceId ? DeviceName : Homes.GetValueOrDefault(id)?.DeviceName ?? record?.Name ?? id[..Math.Min(id.Length, 8)]);
+    }
+    public bool CanRenameDevice(string id) => CurrentGroup is not null && !LocallyRemoved
+        && Trust.Devices.Any(d => d.DeviceID == id && d.GroupID == CurrentGroup.Id);
+    public async Task RenameDeviceDisplayNameAsync(string id, string name)
+    {
+        if (!CanRenameDevice(id)) throw new InvalidOperationException("Device is not a current group member.");
+        Trust.RenameDisplay(id, CurrentGroup!.Id, name, DeviceId);
+        RefreshGroupMembers(); await BroadcastFabricAsync();
+    }
+    public string DeviceDetails(string id)
+    {
+        var record = Trust.Devices.FirstOrDefault(d => d.DeviceID == id && d.GroupID == CurrentGroup?.Id);
+        var local = id == DeviceId;
+        var reported = local ? DeviceName : Homes.GetValueOrDefault(id)?.DeviceName ?? record?.Name ?? "Unknown";
+        var status = local ? "This device" : Homes.GetValueOrDefault(id)?.Online == true ? "Online" : "Offline";
+        var endpoint = record?.LastHost is { } host ? "\nLast address: " + host + (record.LastPort is { } port ? ":" + port : "") : "";
+        return DisplayName(id, reported) + "\nReported name: " + reported + "\n" + status + "\nGroup: " + (CurrentGroup?.Name ?? "None") + "\nDevice ID: " + id + endpoint;
+    }
 
     // Remote homes exist only for current-group members; leaving all
     // groups hides every remote session without touching local work.
@@ -1083,11 +1145,11 @@ public sealed partial class DeviceSyncService : IDisposable
         var members = Trust.Devices.Where(d => d.GroupID == group.Id && d.DeviceID != DeviceId)
             .OrderBy(d => d.Name.ToLowerInvariant()).ThenBy(d => d.DeviceID, StringComparer.Ordinal).ToList();
         foreach (var device in members)
-            rows.Add((device.DeviceID, device.Name + " [" + device.DeviceID[..8] + "]"));
+            rows.Add((device.DeviceID, (device.DisplayName ?? device.Name) + " [" + device.DeviceID[..8] + "]"));
         // Swift parity: this device appears only under its current group,
         // never under left groups or strangers' advertisements.
         if (group.Id == CurrentGroup?.Id)
-            rows.Add((DeviceId, DeviceName + " [this device]"));
+            rows.Add((DeviceId, DisplayName(DeviceId) + " [this device]"));
         lock (DiscoveredDevices)
         {
             PruneDiscovery();

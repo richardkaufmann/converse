@@ -555,6 +555,27 @@ extension DeviceSyncService {
             broadcastFabric()
         } catch { lastOutcome = "Could not forget device: " + error.localizedDescription }
     }
+    func displayName(for id: String, fallback: String? = nil) -> String {
+        let record = trustStore?.devices.first { $0.deviceID == id && $0.groupID == currentGroup?.id }
+        return record?.displayName ?? fallback ?? (id == identity?.deviceID ? deviceName : homes[id]?.deviceName ?? record?.name ?? String(id.prefix(8)))
+    }
+    func canRenameDevice(_ id: String) -> Bool {
+        currentGroup != nil && !locallyRemoved && trustStore?.devices.contains { $0.deviceID == id && $0.groupID == currentGroup?.id } == true
+    }
+    func renameDeviceDisplayName(_ id: String, name: String) throws {
+        guard canRenameDevice(id), let group = currentGroup, let identity, let trustStore else { throw CocoaError(.coderInvalidValue) }
+        try trustStore.renameDisplay(deviceID: id, groupID: group.id, name: name, issuer: identity.deviceID)
+        refreshGroupMembers(); broadcastFabric(); objectWillChange.send()
+    }
+    func deviceDetails(_ id: String) -> String {
+        let record = trustStore?.devices.first { $0.deviceID == id && $0.groupID == currentGroup?.id }
+        let local = id == identity?.deviceID
+        let reported = local ? deviceName : homes[id]?.deviceName ?? record?.name ?? "Unknown"
+        let status = local ? "This device" : homes[id]?.online == true ? "Online" : "Offline"
+        let endpoint = record?.lastHost.map { "\nLast address: " + $0 + (record?.lastPort.map { ":" + String($0) } ?? "") } ?? ""
+        return displayName(for: id, fallback: reported) + "\nReported name: " + reported + "\n" + status +
+            "\nGroup: " + (currentGroup?.name ?? "None") + "\nDevice ID: " + id + endpoint
+    }
     private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
         guard peer.alive, var keys = peer.keys else { return }
         do {
@@ -1458,12 +1479,12 @@ extension DeviceSyncService {
     func groupDevices(_ id: String) -> [GroupDeviceLabel] {
         let members = trustStore?.devices.filter { $0.groupID == id && $0.deviceID != identity?.deviceID } ?? []
         var labels: [String: String] = [:]
-        for member in members { labels[member.deviceID] = member.name + " [" + String(member.deviceID.prefix(8)) + "]" }
+        for member in members { labels[member.deviceID] = (member.displayName ?? member.name) + " [" + String(member.deviceID.prefix(8)) + "]" }
         for device in discovered where device.group?.id == id {
             let key = device.deviceID ?? members.first(where: { device.name.hasSuffix("[" + String($0.deviceID.prefix(8)) + "]") })?.deviceID ?? device.id
             if labels[key] == nil { labels[key] = device.name }
         }
-        if currentGroup?.id == id, let identity { labels[identity.deviceID] = deviceName + " (this device)" }
+        if currentGroup?.id == id, let identity { labels[identity.deviceID] = displayName(for: identity.deviceID) + " (this device)" }
         return labels.map { GroupDeviceLabel(id: $0.key, name: $0.value) }.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
     }
     func canJoinGroup(_ id: String) -> Bool { discovered.contains { $0.group?.id == id } && currentGroup?.id != id && pairingPrompt == nil }

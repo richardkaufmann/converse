@@ -13,7 +13,8 @@ namespace Converse.App;
 // sessions beneath their home, nothing else. Nearby undiscovered devices
 // live only in the Connect dialog, never inline with conversations.
 public abstract record SidebarItem(string Key);
-public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false, bool CanCreate = false) : SidebarItem(Key)
+public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false, bool CanCreate = false,
+    string? DeviceID = null, string Details = "", bool CanRename = false) : SidebarItem(Key)
 {
     public double Opacity => Offline ? 0.3 : 1;
     public bool HasStatus => Status.Length > 0;
@@ -543,6 +544,29 @@ public sealed partial class MainWindow : Window
     }
 
 
+    private async void OnRenameDevice(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem item || item.Tag is not SidebarHeader header || header.DeviceID is not { } id) return;
+        var input = new TextBox { Text = _devices.DisplayName(id), PlaceholderText = "Device display name" };
+        var error = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed) };
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(input);
+        content.Children.Add(new TextBlock { Text = "Shared with the group. Device identity, pairing and operating-system name stay unchanged.", TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(error);
+        var dialog = new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Rename device in group", Content = content,
+            PrimaryButtonText = "Save", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
+        dialog.PrimaryButtonClick += (_, args) => {
+            if (DeviceTrustStore.ValidDisplayName(input.Text.Trim())) return;
+            args.Cancel = true; error.Text = "Use a nonempty name up to 200 UTF-8 bytes, without control characters.";
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try { await _devices.RenameDeviceDisplayNameAsync(id, input.Text); }
+        catch (Exception failure) {
+            await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not rename device", Content = failure.Message, CloseButtonText = "OK" }.ShowAsync();
+        }
+        Refresh();
+    }
+
     private void RefreshSidebar()
     {
         var items = new List<SidebarItem>();
@@ -551,7 +575,8 @@ public sealed partial class MainWindow : Window
         if (_devices.CurrentGroup is { } current)
             items.Add(new SidebarHeader("group", "Group: " + current.Name,
                 _devices.Trust.Devices.Count(d => d.GroupID == current.Id) + " member(s)"));
-        items.Add(new SidebarHeader("local", "This PC", _store.Sessions.Count + " session(s)"));
+        items.Add(new SidebarHeader("local", _devices.DisplayName(_devices.DeviceId) + " · this device", _store.Sessions.Count + " session(s)",
+            DeviceID: _devices.DeviceId, Details: _devices.DeviceDetails(_devices.DeviceId), CanRename: _devices.CanRenameDevice(_devices.DeviceId)));
         foreach (var session in _store.Sessions)
             items.Add(new SidebarSession("local:" + session.Id, (!string.IsNullOrEmpty(session.Agent?.Attention) ? "⚠ " : session.Busy ? "● " : "") + session.Title,
                 session.Agent?.LoopStatus ?? session.Entry.Name + " · " + session.Status, null, session.Id, ShowPark: true, ShowClose: true, ShowPlace: true,
@@ -562,8 +587,9 @@ public sealed partial class MainWindow : Window
                 Engine: session.Entry.Engine, Model: session.Choices.Model ?? "", IsAgent: session.Agent is not null));
         foreach (var home in _devices.Homes.Values.OrderBy(h => h.DeviceName))
         {
-            items.Add(new SidebarHeader("home:" + home.DeviceID, home.DeviceName,
-                home.Online ? "remote" : "", Offline: !home.Online, CanCreate: home.Online && (_devices.CanCreateRemote(home.DeviceID) || _devices.CanHostAgent(home.DeviceID))));
+            items.Add(new SidebarHeader("home:" + home.DeviceID, _devices.DisplayName(home.DeviceID, home.DeviceName),
+                home.Online ? "remote" : "", Offline: !home.Online, CanCreate: home.Online && (_devices.CanCreateRemote(home.DeviceID) || _devices.CanHostAgent(home.DeviceID)),
+                DeviceID: home.DeviceID, Details: _devices.DeviceDetails(home.DeviceID), CanRename: _devices.CanRenameDevice(home.DeviceID)));
             if (!home.Online) continue;
             if (home.Rows.Count == 0)
                 items.Add(new SidebarSession("home:" + home.DeviceID + ":empty",
@@ -579,7 +605,7 @@ public sealed partial class MainWindow : Window
         }
         var signature = string.Join("\n", items.Select(i => i.Key + "|" + (i switch
         {
-            SidebarHeader h => h.Title + "|" + h.Status + "|" + h.CanCreate,
+            SidebarHeader h => h.Title + "|" + h.Status + "|" + h.CanCreate + "|" + h.Details + "|" + h.CanRename,
             SidebarSession s => s.Title + "|" + s.Subtitle + "|" + s.ShowPark + "|" + s.ShowClose + "|" + s.ShowPlace
                 + "|" + s.PActive + "|" + s.In1 + "|" + s.In2 + "|" + s.In3 + "|" + s.Engine + "|" + s.Model + "|" + s.IsAgent,
             _ => "",
@@ -686,6 +712,13 @@ public sealed partial class MainWindow : Window
         }
         pane.Width = double.NaN;
         pane.CheckFilePathDrop();
+        await _devices.CreateGroupAsync("Device label UI fixture");
+        var originalDeviceName = _devices.DeviceName;
+        await _devices.RenameDeviceDisplayNameAsync(_devices.DeviceId, "QA desktop label");
+        RefreshSidebar();
+        var deviceHeader = ((IEnumerable<SidebarItem>)Sidebar.ItemsSource).OfType<SidebarHeader>().Single(h => h.Key == "local");
+        Require(deviceHeader.Title == "QA desktop label · this device" && deviceHeader.CanRename && deviceHeader.Details.Contains(_devices.DeviceId)
+            && deviceHeader.Details.Contains(originalDeviceName) && _devices.DeviceName == originalDeviceName, "Device display label or hover identity is wrong");
         Require(Title == "Converse " + VersionBuild && !Title.Contains("Development"), "Window title omits bundled release version/build");
     }
 

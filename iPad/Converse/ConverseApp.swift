@@ -22,7 +22,7 @@ struct ConversePadApp: App {
             CommandGroup(replacing: .newItem) {
                 Menu("New session on") {
                     ForEach(Array(model.service.homes.values).filter { $0.online && model.service.canCreateRemote($0.deviceID) }.sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
-                        Menu(home.deviceName) {
+                        Menu(model.service.displayName(for: home.deviceID, fallback: home.deviceName)) {
                             ForEach(["claude", "codex", "muse"], id: \.self) { provider in
                                 Button(provider.capitalized) {
                                     Task { @MainActor in
@@ -36,7 +36,7 @@ struct ConversePadApp: App {
                 }
                 Menu("New agent on") {
                     ForEach(Array(model.service.homes.values).filter { $0.online && model.service.canHostAgent($0.deviceID) }.sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
-                        Button(home.deviceName) { model.newAgentHome = home.deviceID }
+                        Button(model.service.displayName(for: home.deviceID, fallback: home.deviceName)) { model.newAgentHome = home.deviceID }
                     }
                 }
             }
@@ -65,8 +65,9 @@ struct PadRoot: View {
     @State private var phoneSessionsShown = false
     @State private var phoneDestination: String?
     @State private var keyboardShown = false
+    @ObservedObject private var phoneKeyboard: PhoneKeyboardController
     private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
-    init(model: PadModel) { self.model = model; self.service = model.service }
+    init(model: PadModel) { self.model = model; self.service = model.service; self.phoneKeyboard = model.phoneKeyboard }
     var body: some View {
         GeometryReader { geometry in
             if isPhone {
@@ -178,12 +179,19 @@ struct PadRoot: View {
             HStack {
                 Text("Converse").font(.headline)
                 Spacer()
-                if keyboardShown {
-                    Button { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) } label: {
-                        Image(systemName: "keyboard.chevron.compact.down").frame(width: 44, height: 44)
-                    }.accessibilityLabel("Hide keyboard")
-                }
-                Button { phoneSessionsShown = true } label: {
+                let visible = model.state.placements.indices.filter { model.state.placements[$0] != nil }
+                let selected = visible.contains(model.focusedPane) ? model.focusedPane : visible.first
+                let session = selected.flatMap { model.state.placements[$0] }
+                Button {
+                    if phoneKeyboard.isRequested { phoneKeyboard.hide() }
+                    else if let session { phoneKeyboard.show(session) }
+                } label: {
+                    Label(phoneKeyboard.isRequested ? "Hide keyboard" : "Show keyboard",
+                          systemImage: phoneKeyboard.isRequested ? "keyboard.chevron.compact.down" : "keyboard")
+                        .font(.subheadline).frame(minHeight: 44)
+                }.disabled(!phoneKeyboard.isRequested && !(session.map { model.canControl($0) } ?? false))
+                    .accessibilityIdentifier("phone-keyboard-toggle")
+                Button { phoneKeyboard.hide(); phoneSessionsShown = true } label: {
                     Image(systemName: "rectangle.stack").foregroundStyle(.secondary).frame(width: 44, height: 44)
                 }.accessibilityLabel("Choose sessions and app options")
             }.padding(.horizontal, 12)
@@ -205,22 +213,29 @@ struct PadRoot: View {
                     ForEach(assigned, id: \.self) { pane in
                         let id = model.state.placements[pane]!
                         if pane != assigned.first { Divider().overlay(Color.secondary.opacity(0.3)) }
-                        if (keyboardShown || availableHeight < 500) && pane != focused {
+                        let collapsed = (phoneKeyboard.isRequested || keyboardShown || availableHeight < 500) && pane != focused
+                        VStack(spacing: 0) {
+                        if collapsed {
                             Button {
-                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                 model.focusedPane = pane
+                                phoneKeyboard.select(id)
                             } label: {
                                 HStack {
                                     Text(String(pane + 1)).font(.caption.bold())
                                     Text(service.remoteRow(globalID: id)?.title ?? "Session").lineLimit(1)
+                                    PadSessionActivity(id: id, service: service)
                                     Spacer()
                                     Image(systemName: "chevron.up.chevron.down").font(.caption)
                                 }.padding(.horizontal, 12).frame(minHeight: 44)
                             }.buttonStyle(.plain).accessibilityLabel("Show " + (service.remoteRow(globalID: id)?.title ?? "session"))
-                        } else {
-                            PadPane(id: id, pane: pane, model: model)
-                                .frame(maxHeight: .infinity)
                         }
+                        // Keep the native editor mounted during focus changes. Removing
+                        // it here also removes its first responder and hides the keyboard.
+                        PadPane(id: id, pane: pane, model: model)
+                            .frame(maxHeight: .infinity)
+                            .frame(height: collapsed ? 0 : nil)
+                            .clipped().allowsHitTesting(!collapsed).accessibilityHidden(collapsed)
+                        }.frame(maxHeight: collapsed ? nil : .infinity)
                     }
                 }
             }
@@ -241,7 +256,7 @@ struct PadRoot: View {
                     if let group = service.currentGroup { Text(group.name + " group").font(.title2.weight(.semibold)).foregroundStyle(Color.accentColor).padding(.top, 6).help("Devices sharing sessions in " + group.name) }
                     ForEach((service.currentGroup == nil ? [] : Array(service.homes.values)).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                         if home.online {
-                        HStack { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green).lineLimit(1).help("Online: sessions run on " + home.deviceName); Text("remote").font(.caption).foregroundStyle(.secondary)
+                        HStack { DeviceDisplayLabel(service: service, deviceID: home.deviceID, fallback: home.deviceName).fontWeight(.bold).foregroundStyle(Color.green).lineLimit(1); Text("remote").font(.caption).foregroundStyle(.secondary)
                             if service.canCreateRemote(home.deviceID) || service.canHostAgent(home.deviceID) {
                                 Menu {
                                     if service.canCreateRemote(home.deviceID) {
@@ -281,7 +296,7 @@ struct PadRoot: View {
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
                                 .accessibilityElement(children: .contain)
                         }
-                        } else { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(0.4)).help("Offline. Sessions reappear when this device reconnects.").padding(.top, 10) }
+                        } else { DeviceDisplayLabel(service: service, deviceID: home.deviceID, fallback: home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(0.4)).padding(.top, 10) }
                     }
                     if service.homes.isEmpty { Text("Join a Converse group to see its devices and sessions.").font(.callout).foregroundStyle(.secondary).padding(10) }
                 }.padding(.horizontal, 5)
@@ -309,7 +324,7 @@ struct PhoneSessionPicker: View {
                     Text("Select up to two sessions. Two sessions stack vertically. Deselecting parks the display; work continues on its home.").font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(Array(service.homes.values).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
-                    Section(home.deviceName + (home.online ? "" : " · offline")) {
+                    Section {
                         ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
                             let selected = model.state.placements.contains(row.globalID)
                             Button { model.togglePhoneSession(row.globalID) } label: {
@@ -339,6 +354,11 @@ struct PhoneSessionPicker: View {
                                 }
                             }
                         }
+                    } header: {
+                        HStack {
+                            DeviceDisplayLabel(service: service, deviceID: home.deviceID, fallback: home.deviceName)
+                            if !home.online { Text("offline") }
+                        }
                     }
                 }
                 Section("Converse") {
@@ -351,6 +371,25 @@ struct PhoneSessionPicker: View {
             }.navigationTitle("Sessions")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+// Turn state comes from the home, including turns producing no text yet.
+struct PadSessionActivity: View {
+    let id: String
+    @ObservedObject var service: DeviceSyncService
+    var body: some View {
+        let snapshot = service.remoteTranscripts[id]
+        let row = service.remoteRow(globalID: id)
+        let offline = service.remoteOffline.contains(id) || DeviceGlobalID(id).flatMap { service.homes[$0.home] }?.online == false
+        if !offline && (snapshot?.busy ?? row?.busy ?? false) {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Working").font(.caption)
+            }.fixedSize().accessibilityElement(children: .ignore)
+                .accessibilityLabel("Working. " + (snapshot?.status ?? row?.status ?? ""))
+                .accessibilityIdentifier("session-working")
         }
     }
 }
@@ -376,6 +415,7 @@ struct PadPane: View {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
                 PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(UIDevice.current.userInterfaceIdiom == .phone ? .headline : .title3).lineLimit(1).truncationMode(.tail)
+                PadSessionActivity(id: id, service: service)
                 Spacer(minLength: 0)
                 Button { sessionActions = service.remoteRow(globalID: id) } label: {
                     Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
@@ -438,7 +478,9 @@ struct PadPane: View {
                           edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 }, imageTools: { originalHash, bytes in
                               let existing = originalHash.flatMap { model.draft(id).hashes.contains($0) ? $0 : nil }
                               if let hash = existing ?? model.attach(id, data: bytes) { imageToolsHash = hash; imageTools = true }
-                          }, didFocus: { model.focusedPane = pane })
+                          }, didFocus: { model.focusedPane = pane; if UIDevice.current.userInterfaceIdiom == .phone { model.phoneKeyboard.select(id) } },
+                          phoneKeyboard: UIDevice.current.userInterfaceIdiom == .phone ? model.phoneKeyboard : nil,
+                          keyboardSession: id)
                 .overlay(alignment: .bottomTrailing) {
                     if let state = snapshot?.compaction, state.visible {
                         Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }
@@ -597,7 +639,7 @@ struct PadSessionActions: View {
                 }
                 Section("Session") {
                     LabeledContent("Name", value: row.title)
-                    LabeledContent("Home", value: service.homes[home]?.deviceName ?? "Unavailable")
+                    LabeledContent("Home", value: service.displayName(for: home))
                     LabeledContent("Account", value: row.accountName ?? "Not reported")
                     LabeledContent("Model", value: row.model)
                     LabeledContent("Status when opened", value: row.status)

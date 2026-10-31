@@ -15,7 +15,7 @@ struct PadAgentPanel: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section { Text("Runs on \(service.homes[home]?.deviceName ?? "its home computer") while Converse is open there. API keys stay on that computer.").font(.caption) }
+                Section { Text("Runs on \(service.displayName(for: home, fallback: service.homes[home]?.deviceName ?? "its home computer")) while Converse is open there. API keys stay on that computer.").font(.caption) }
                 if target == nil {
                     TextField("Agent name", text: $title)
                     Button("Create Agent") { perform("agent.create") }.disabled(working || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -57,7 +57,7 @@ struct PadAgentPanel: View {
                     }
                     Section("Sessions this agent may read and message") {
                         ForEach(service.participantHomes, id: \.deviceID) { host in
-                            Text(host.deviceName).font(.caption)
+                            Text(service.displayName(for: host.deviceID, fallback: host.deviceName)).font(.caption)
                             ForEach(host.rows.filter { $0.globalID != target }) { row in
                                 Toggle(row.title, isOn: Binding(get: { settings?.watched.contains(row.globalID) == true }, set: { selected in
                                     settings?.watched.removeAll { $0 == row.globalID }

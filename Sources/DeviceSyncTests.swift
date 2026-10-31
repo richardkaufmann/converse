@@ -718,6 +718,36 @@ func fabricTrustSelfTests(_ check: (Bool, String) -> Void) {
         check(b.devices.first?.lastHost == "192.0.2.5" && b.devices.first?.generation == membership.generation, "Equal-admission-rank metadata refresh converges independently")
         check(DeviceTrustStore.boundedName(String(repeating: "🙂", count: 60)) == String(repeating: "🙂", count: 50), "Fabric names truncate at the same 200 UTF-8 byte boundary on all platforms")
 
+        let aliases = try DeviceTrustStore(folder: root.appendingPathComponent("aliases"))
+        let replica = try DeviceTrustStore(folder: root.appendingPathComponent("replica"))
+        let group = UUID().uuidString.lowercased()
+        try aliases.pin(deviceID: id, name: "Reported OS name", publicKey: key, issuer: "a", groupID: group)
+        _ = try replica.merge(aliases.records)
+        let original = aliases.records[0]
+        try aliases.renameDisplay(deviceID: id, groupID: group, name: "Studio Mac", issuer: "a")
+        _ = try replica.merge(aliases.records)
+        check(replica.records[0].displayName == "Studio Mac" && replica.records[0].name == original.name && replica.records[0].publicKey == original.publicKey && replica.records[0].generation == original.generation,
+              "Group display rename syncs without changing hostname, keys or admission")
+        try replica.pin(deviceID: id, name: "OS renamed itself", publicKey: key, host: "192.0.2.10", issuer: "b", allowAdmission: false, groupID: group)
+        _ = try aliases.merge(replica.records)
+        check(aliases.records[0].displayName == "Studio Mac", "Reconnect endpoint and hostname refresh preserves group display name")
+        var legacy = aliases.records[0]; legacy.displayName = nil; legacy.displayNameGeneration = nil; legacy.displayNameBy = nil; legacy.metadataGeneration = 50
+        _ = try aliases.merge([legacy])
+        check(aliases.records[0].displayName == "Studio Mac", "Older metadata without display fields cannot erase a group label")
+        try aliases.renameDisplay(deviceID: id, groupID: group, name: "Alpha", issuer: "a")
+        try replica.renameDisplay(deviceID: id, groupID: group, name: "Zulu", issuer: "z")
+        let concurrentA = aliases.records, concurrentB = replica.records
+        _ = try aliases.merge(concurrentB); _ = try replica.merge(concurrentA)
+        check(aliases.records[0].displayName == "Zulu" && replica.records[0].displayName == "Zulu", "Concurrent display renames converge deterministically")
+        check(try DeviceTrustStore(folder: root.appendingPathComponent("aliases")).records[0].displayName == "Zulu", "Group display name survives restart")
+        let beforeInvalidName = aliases.records
+        do { try aliases.renameDisplay(deviceID: id, groupID: group, name: " \n ", issuer: "a"); check(false, "Blank device display name rejected") }
+        catch { check(aliases.records == beforeInvalidName, "Blank device display name rejected without changes") }
+        try replica.forget(deviceID: id, issuer: "z"); _ = try replica.merge(concurrentA)
+        check(replica.devices.isEmpty, "A stale display rename cannot resurrect a removed device")
+        try aliases.pin(deviceID: id, name: "Reported OS name", publicKey: key, issuer: "a", groupID: UUID().uuidString.lowercased())
+        check(aliases.records[0].displayName == nil, "Display aliases do not leak into a different group")
+
         var invalid = a.records[0]; invalid.deviceID = String(repeating: "0", count: 64)
         let before = b.records
         do { _ = try b.merge([invalid]); check(false, "Fabric rejects identity/key mismatch") }

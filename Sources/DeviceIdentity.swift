@@ -75,6 +75,9 @@ struct TrustedDevice: Codable, Equatable, Identifiable {
     var metadataGeneration: UInt64? = nil
     var metadataBy: String? = nil
     var groupID: String? = nil
+    var displayName: String? = nil
+    var displayNameGeneration: UInt64? = nil
+    var displayNameBy: String? = nil
 }
 
 final class DeviceTrustStore {
@@ -112,7 +115,9 @@ final class DeviceTrustStore {
         var next = records.filter { $0.deviceID != deviceID }
         next.append(TrustedDevice(deviceID: deviceID, name: name, publicKey: publicKey, pairedAt: active ? old!.pairedAt : Date(), lastHost: host ?? old?.lastHost, lastPort: port ?? old?.lastPort,
                                   generation: active ? old!.generation : try nextGeneration(), changedBy: active ? old!.changedBy : issuer ?? deviceID, removed: false,
-                                  metadataGeneration: (old?.metadataGeneration ?? 0) + 1, metadataBy: issuer ?? deviceID, groupID: groupID))
+                                  metadataGeneration: (old?.metadataGeneration ?? 0) + 1, metadataBy: issuer ?? deviceID, groupID: groupID,
+                                  displayName: active ? old?.displayName : nil, displayNameGeneration: active ? old?.displayNameGeneration : nil,
+                                  displayNameBy: active ? old?.displayNameBy : nil))
         guard next.count <= 512 else { throw CocoaError(.coderInvalidValue) }
         try save(next); records = next
     }
@@ -122,10 +127,27 @@ final class DeviceTrustStore {
         let next = records.filter { $0.deviceID != deviceID } + [record]
         try save(next); records = next
     }
+    static func validDisplayName(_ value: String) -> Bool {
+        !value.isEmpty && value == value.trimmingCharacters(in: .whitespacesAndNewlines) && value.utf8.count <= 200 &&
+            !value.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+    }
+    func renameDisplay(deviceID: String, groupID: String, name: String, issuer: String) throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.validDisplayName(name), let index = records.firstIndex(where: { $0.deviceID == deviceID && $0.groupID == groupID && $0.removed != true }),
+              (records[index].displayNameGeneration ?? 0) < UInt64.max - 2 else { throw CocoaError(.coderInvalidValue) }
+        if records[index].displayName == name { return }
+        var next = records
+        next[index].displayName = name
+        next[index].displayNameGeneration = (records[index].displayNameGeneration ?? 0) + 1
+        next[index].displayNameBy = issuer
+        try save(next); records = next
+    }
     // Called ONLY after transport authentication of an existing member. All
     // members may admit/remove members; this is intentionally transitive trust.
     // Versioned removals prevent a stale offline roster from resurrecting one.
     func merge(_ incoming: [TrustedDevice]) throws -> Bool {
+        guard incoming.allSatisfy({ ($0.displayName == nil || Self.validDisplayName($0.displayName!)) &&
+            ($0.displayNameGeneration ?? 0) < UInt64.max - 1 && ($0.displayNameBy?.count ?? 0) <= 64 }) else { throw CocoaError(.coderInvalidValue) }
         guard incoming.count <= 512, incoming.allSatisfy({ ($0.groupID == nil || UUID(uuidString: $0.groupID!) != nil) && $0.publicKey.count == 32 && DeviceBlob.sha256Hex($0.publicKey) == $0.deviceID && $0.name.utf8.count <= 200 && ($0.metadataBy?.count ?? 0) <= 64 && ($0.metadataGeneration ?? 0) < UInt64.max - 1 && ($0.changedBy?.count ?? 0) <= 64 && ($0.lastHost?.count ?? 0) <= 253 && ($0.lastPort == nil || (1...65535).contains($0.lastPort!)) && ($0.generation ?? 0) < UInt64.max - 1 }) else { throw CocoaError(.coderInvalidValue) }
         var next = records
         for record in incoming {
@@ -134,12 +156,18 @@ final class DeviceTrustStore {
                 let newRank = (record.generation ?? 0, record.removed == true ? 1 : 0, record.changedBy ?? "")
                 let oldRank = (old.generation ?? 0, old.removed == true ? 1 : 0, old.changedBy ?? "")
                 if newRank > oldRank { next[index] = record }
-                else if newRank == oldRank, record.publicKey == old.publicKey,
-                        (record.metadataGeneration ?? 0, record.metadataBy ?? "") > (old.metadataGeneration ?? 0, old.metadataBy ?? "") {
+                else if newRank == oldRank, record.publicKey == old.publicKey, record.groupID == old.groupID {
+                    if (record.metadataGeneration ?? 0, record.metadataBy ?? "") > (old.metadataGeneration ?? 0, old.metadataBy ?? "") {
                     // Hint freshness is independent of admission authority.
                     // No amount of metadata churn can beat a tombstone.
                     next[index].name = record.name; next[index].lastHost = record.lastHost; next[index].lastPort = record.lastPort
                     next[index].metadataGeneration = record.metadataGeneration; next[index].metadataBy = record.metadataBy
+                    }
+                    if (record.displayNameGeneration ?? 0, record.displayNameBy ?? "") > (old.displayNameGeneration ?? 0, old.displayNameBy ?? "") {
+                        next[index].displayName = record.displayName
+                        next[index].displayNameGeneration = record.displayNameGeneration
+                        next[index].displayNameBy = record.displayNameBy
+                    }
                 }
             } else { next.append(record) }
         }

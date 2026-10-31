@@ -98,6 +98,28 @@ stores are bounded; invalid IDs, oversized names and mismatched immutable group
 definitions are rejected. Existing `fabric.members` carries only the current
 group's records. Discovery and join-pending connections never convey sessions.
 
+## Device display names
+
+A group member can rename any active member's display label. Hover a desktop
+sidebar device heading for the reported name, stable device ID, group and
+connection details; its context menu opens the rename editor. Mobile uses a
+long-press, including the phone session picker and Groups member list.
+
+`fabric.members` carries optional `displayName`, `displayNameGeneration` and
+`displayNameBy` fields on each trusted-device record. The label has a separate
+monotonic counter and issuer tie-break from endpoint/hostname metadata, so a
+reconnect or an older peer's hostname refresh cannot undo a rename. Concurrent
+edits converge by counter and then device ID. Labels persist atomically and
+reconcile when offline members reconnect. Membership tombstones still dominate;
+a fresh admission into another group resets the old group's label. The original
+`name`, public key and device ID retain their existing protocol meanings.
+
+Swift and C# trust-store tests cover persistence, reconnects, old-peer metadata,
+concurrent edits, removals, invalid names and group isolation. The mobile interop
+test renames one of four independent mobile members and checks propagation to
+all four through an isolated Mac home. Windows' isolated native sidebar check
+verifies the label and hover details without changing the OS-reported name.
+
 ## Verification
 
 `--groups-self-test` uses isolated files and real loopback Noise connections.

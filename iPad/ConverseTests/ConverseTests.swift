@@ -6,6 +6,100 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testPhonePaneCollapseKeepsEditorAndKeyboardFocus() async throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "a", count: 64)
+        let ids = (0..<2).map { _ in DeviceGlobalID(home: home, session: UUID()).string }
+        for (index, id) in ids.enumerated() {
+            model.state.placements[index] = id
+            model.state.drafts[id] = PadDraft(text: "Stable draft \(index)", dirty: true)
+            service.remoteLeases[id] = UInt64(index + 1)
+        }
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: PadRoot(model: model)); window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { model.phoneKeyboard.hide(); window.isHidden = true }
+        func editors(_ root: UIView) -> [TailTextView] {
+            (root as? TailTextView).map { [$0] } ?? root.subviews.flatMap { editors($0) }
+        }
+        try await Task.sleep(for: .milliseconds(200)); host.view.layoutIfNeeded()
+        let original = editors(host.view)
+        let first = try XCTUnwrap(original.first { $0.text.contains("Stable draft 0") })
+        let second = try XCTUnwrap(original.first { $0.text.contains("Stable draft 1") })
+        model.phoneKeyboard.show(ids[0])
+        try await Task.sleep(for: .milliseconds(200)); host.view.layoutIfNeeded()
+        XCTAssertTrue(first.isFirstResponder)
+        XCTAssertTrue(editors(host.view).contains { $0 === second }, "Collapsed editor must remain mounted")
+        second.prepareKeyboardTouch(at: .zero)
+        try await Task.sleep(for: .milliseconds(200)); host.view.layoutIfNeeded()
+        XCTAssertTrue(second.isFirstResponder, "Focus must survive SwiftUI collapse and expansion")
+        XCTAssertTrue(editors(host.view).contains { $0 === first })
+        XCTAssertEqual(model.phoneKeyboard.target, ids[1])
+        XCTAssertEqual(second.keyboardDismissMode, .none)
+        model.phoneKeyboard.hide()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(second.isFirstResponder)
+        XCTAssertEqual(model.draft(ids[0]).text, "Stable draft 0")
+        XCTAssertEqual(model.draft(ids[1]).text, "Stable draft 1")
+    }
+    func testPhoneKeyboardExplicitShowHideAndPaneTransfer() async throws {
+        let keyboard = PhoneKeyboardController()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIViewController(); window.rootViewController = host; window.makeKeyAndVisible()
+        defer { keyboard.hide(); window.isHidden = true }
+        let first = TailTextView.native(), second = TailTextView.native()
+        var parents: [PadTranscript] = []
+        var coordinators: [PadTranscript.Coordinator] = []
+        for (index, view) in [first, second].enumerated() {
+            let session = String(index)
+            let parent = PadTranscript(messages: [], draft: "Draft " + session, images: [:], editable: true, lineNumbers: false,
+                                       edit: { _ in XCTFail("Keyboard controls must not edit or send drafts") }, send: { XCTFail("Unexpected send") }, attach: { _ in },
+                                       phoneKeyboard: keyboard, keyboardSession: session)
+            let coordinator = PadTranscript.Coordinator(parent); parents.append(parent); coordinators.append(coordinator)
+            view.frame = CGRect(x: 0, y: CGFloat(index * 220), width: 390, height: 210)
+            view.explicitPhoneKeyboard = true; view.delegate = coordinator; host.view.addSubview(view)
+            parent.update(view, coordinator: coordinator)
+        }
+        XCTAssertFalse(keyboard.isRequested)
+        keyboard.select("1")
+        XCTAssertFalse(keyboard.isRequested, "Switching while reading must not summon the keyboard")
+        keyboard.show("0")
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(first.isFirstResponder); XCTAssertEqual(keyboard.target, "0")
+        keyboard.select("1")
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(second.isFirstResponder); XCTAssertFalse(first.isFirstResponder)
+        XCTAssertEqual(keyboard.target, "1", "Old editor's end-editing must not cancel new focus")
+        keyboard.hide()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(first.isFirstResponder); XCTAssertFalse(second.isFirstResponder); XCTAssertFalse(keyboard.isRequested)
+        XCTAssertEqual(first.text, "Draft 0"); XCTAssertEqual(second.text, "Draft 1")
+        second.isEditable = false
+        keyboard.show("1")
+        XCTAssertFalse(keyboard.isRequested, "Cannot summon input for a read-only remote session")
+        XCTAssertEqual(parents.count, coordinators.count) // Keep delegates alive throughout UIKit focus transfer.
+    }
+    func testPhoneHistoryTouchDoesNotStartEditingButDraftTouchDoes() {
+        let view = TailTextView.native()
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 500)
+        view.font = .systemFont(ofSize: 16)
+        view.text = "Historical message\n\nEditable draft"
+        view.historyLength = ("Historical message\n\n" as NSString).length
+        view.explicitPhoneKeyboard = true
+        let parent = PadTranscript(messages: [], draft: "Editable draft", images: [:], editable: true, lineNumbers: false,
+                                   edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+        view.layoutIfNeeded()
+        for (offset, allowed) in [(2, false), (view.historyLength + 2, true)] {
+            let position = view.position(from: view.beginningOfDocument, offset: offset)!
+            let rect = view.caretRect(for: position)
+            view.prepareKeyboardTouch(at: CGPoint(x: rect.midX, y: rect.midY))
+            XCTAssertEqual(coordinator.textViewShouldBeginEditing(view), allowed)
+        }
+        view.explicitPhoneKeyboard = false; view.allowKeyboardActivation = false
+        XCTAssertTrue(coordinator.textViewShouldBeginEditing(view), "iPad keeps its existing editing behavior")
+    }
     func testFourMobileDevicesJoinOneGroupWithDistinctPersistentIdentities() async throws {
         guard let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with the isolated Mac group sponsor") }
         var mobiles: [DeviceSyncService] = []
@@ -25,6 +119,14 @@ final class ConverseTests: XCTestCase {
         try await eventually("Four mobile identities coexist") { mobiles.allSatisfy { $0.trusted.count >= 4 } }
         XCTAssertEqual(Set(mobiles.compactMap { $0.identity?.deviceID }).count, 4)
         XCTAssertEqual(Set(mobiles.compactMap(\.deviceNameOverride)).count, 4)
+        let renamedID = try XCTUnwrap(mobiles[1].identity?.deviceID)
+        let reportedName = mobiles[1].deviceNameOverride
+        try mobiles[0].renameDeviceDisplayName(renamedID, name: "Pocket phone")
+        try await eventually("Group display label reaches all four mobile viewers") {
+            mobiles.allSatisfy { $0.displayName(for: renamedID) == "Pocket phone" }
+        }
+        XCTAssertEqual(mobiles[1].deviceNameOverride, reportedName)
+        XCTAssertEqual(mobiles[1].identity?.deviceID, renamedID)
         let group = try XCTUnwrap(mobiles.first?.currentGroup)
         for mobile in mobiles {
             let reloadedIdentity = try DeviceIdentity.loadOrCreate(folder: mobile.storageFolder, useKeychain: false)
@@ -85,6 +187,7 @@ final class ConverseTests: XCTestCase {
             model.state.placements[index] = id
             model.state.drafts[id] = PadDraft(text: "Session \(index + 1) draft stays intact", dirty: true)
             service.remoteLeases[id] = UInt64(index + 1)
+            service.remoteTranscripts[id] = DeviceTranscriptPayload(globalID: id, homeSeq: 1, epoch: UInt64(index + 1), messages: [], draft: model.draft(id).text, draftVersion: 1, busy: index == 0, status: index == 0 ? "Working" : "Ready", title: index == 0 ? "Converse Development" : "Claude VM", engine: index == 0 ? "codex" : "claude")
         }
         let expected = model.state.drafts.mapValues(\.text)
         for size in [CGSize(width: 390, height: 844), CGSize(width: 844, height: 390)] {

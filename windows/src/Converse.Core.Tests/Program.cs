@@ -1247,6 +1247,39 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Cleanup(dir);
 }
 
+// Group display labels replicate independently of OS names and trust metadata.
+{
+    var root = Directory.CreateTempSubdirectory("converse-display-names-").FullName;
+    try {
+        var a = new DeviceTrustStore(Path.Combine(root, "a"));
+        var b = new DeviceTrustStore(Path.Combine(root, "b"));
+        var key = new byte[32]; var id = DeviceBlob.DeviceIdForPublicKey(key); var group = Guid.NewGuid().ToString("d");
+        a.Pin(new TrustedDevice(id, "Reported OS name", key, null, null), "a", groupID: group);
+        b.Merge(a.Records); var original = a.Records.Single();
+        a.RenameDisplay(id, group, "Studio PC", "a"); b.Merge(a.Records);
+        Check(b.Records.Single().DisplayName == "Studio PC" && b.Records.Single().Name == original.Name
+            && b.Records.Single().Generation == original.Generation && b.Records.Single().PublicKey.SequenceEqual(key),
+            "Device display rename preserves hostname, identity and admission");
+        b.Pin(new TrustedDevice(id, "OS renamed itself", key, "192.0.2.10", 1234), "b", false, group);
+        a.Merge(b.Records);
+        Check(a.Records.Single().DisplayName == "Studio PC", "Reconnect does not overwrite display alias");
+        a.Merge(new[] { a.Records.Single() with { DisplayName = null, DisplayNameGeneration = null, DisplayNameBy = null, MetadataGeneration = 50 } });
+        Check(a.Records.Single().DisplayName == "Studio PC", "Legacy metadata lacking display fields cannot erase alias");
+        a.RenameDisplay(id, group, "Alpha", "a"); b.RenameDisplay(id, group, "Zulu", "z");
+        var left = a.Records; var right = b.Records; a.Merge(right); b.Merge(left);
+        Check(a.Records.Single().DisplayName == "Zulu" && b.Records.Single().DisplayName == "Zulu", "Concurrent device labels converge");
+        Check(new DeviceTrustStore(Path.Combine(root, "a")).Records.Single().DisplayName == "Zulu", "Device display labels persist across restart");
+        var wire = DeviceJson.Encode(a.Records);
+        var decoded = DeviceJson.Decode<List<TrustedDevice>>(wire);
+        Check(decoded.Single().DisplayName == "Zulu" && System.Text.Encoding.UTF8.GetString(wire).Contains("displayNameGeneration"), "Display metadata uses Swift-compatible wire keys");
+        try { a.RenameDisplay(id, group, " ", "a"); Check(false, "Blank device display name rejected"); }
+        catch (InvalidDataException) { Check(a.Records.Single().DisplayName == "Zulu", "Blank display name rejected without mutation"); }
+        b.Forget(id, "z"); b.Merge(left); Check(b.Devices.Count == 0, "Display rename cannot resurrect a removed group member");
+        a.Pin(new TrustedDevice(id, "Reported OS name", key, null, null), "a", true, Guid.NewGuid().ToString("d"));
+        Check(a.Records.Single().DisplayName is null, "Device display alias stays scoped to its group");
+    } finally { Cleanup(root); }
+}
+
 // Join codes match: the joiner's prompt equals the sponsor's live review code.
 {
     var homeRoot = Directory.CreateTempSubdirectory("converse-codeeq-").FullName;

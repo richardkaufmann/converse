@@ -2126,8 +2126,9 @@ struct RootView: View {
                         }
                         VStack(alignment: .leading, spacing: 0) {
                             HStack {
-                                Text((devices.identity?.deviceName ?? "This Mac") + " • this device").fontWeight(.bold).foregroundStyle(Color.green)
-                                    .help("Sessions run on this Mac, even when displayed elsewhere.")
+                                Text((devices.identity.map { devices.displayName(for: $0.deviceID) } ?? "This Mac") + " • this device").fontWeight(.bold).foregroundStyle(Color.green)
+                                    .help(devices.identity.map { devices.deviceDetails($0.deviceID) } ?? "This Mac")
+                                    .contextMenu { if let id = devices.identity?.deviceID { Button("Rename device…") { renameDeviceDisplay(devices, id: id) }.disabled(!devices.canRenameDevice(id)) } }
                                 Spacer()
                                 Menu {
                                     ForEach(store.assistantFamilies, id: \.self) { engine in

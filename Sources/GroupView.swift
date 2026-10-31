@@ -1,5 +1,47 @@
 import SwiftUI
 
+struct DeviceDisplayLabel: View {
+    @ObservedObject var service: DeviceSyncService
+    let deviceID: String
+    var fallback: String = "Device"
+    @State private var renaming = false
+    var body: some View {
+        Text(service.displayName(for: deviceID, fallback: fallback))
+            .help(service.deviceDetails(deviceID))
+            .contextMenu {
+                Button("Rename device…") { renaming = true }.disabled(!service.canRenameDevice(deviceID))
+            }
+            .sheet(isPresented: $renaming) { DeviceDisplayNameEditor(service: service, deviceID: deviceID) }
+    }
+}
+
+struct DeviceDisplayNameEditor: View {
+    @ObservedObject var service: DeviceSyncService
+    let deviceID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var error = ""
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Display name", text: $name)
+                Text("Shared with this group. Device identity, pairing, and the operating-system name stay unchanged.").font(.caption).foregroundStyle(.secondary)
+                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            }.padding().frame(minWidth: 280, minHeight: 200)
+                .navigationTitle("Rename device")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            do { try service.renameDeviceDisplayName(deviceID, name: name); dismiss() }
+                            catch { self.error = "Use a nonempty name up to 200 UTF-8 bytes, without control characters, for a current group member." }
+                        }
+                    }
+                }
+        }.onAppear { name = service.displayName(for: deviceID) }
+    }
+}
+
 // Identical admission UI on Mac and iPad; cryptographic code remains tied to
 // the joiner's existing Noise connection even when another member reviews.
 struct ConverseGroupsView: View {
@@ -53,7 +95,7 @@ struct ConverseGroupsView: View {
                                         Button("Dissolve", role: .destructive) { confirmDissolve = true }
                                     } else { Button("Join") { service.joinGroup(group) }.disabled(!service.canJoinGroup(group.id)) }
                                 }
-                                ForEach(service.groupDevices(group.id)) { device in Text(device.name).font(.callout).padding(.leading, 16) }
+                                ForEach(service.groupDevices(group.id)) { device in DeviceDisplayLabel(service: service, deviceID: device.id, fallback: device.name).font(.callout).padding(.leading, 16) }
                                 if service.groupDevices(group.id).isEmpty { Text("No member currently discovered nearby.").font(.caption).foregroundStyle(.secondary) }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
                         }

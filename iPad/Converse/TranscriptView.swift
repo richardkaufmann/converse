@@ -2,7 +2,71 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Editing intent belongs to the phone workspace, not to a transient pane view.
+final class PhoneKeyboardController: ObservableObject {
+    @Published private(set) var target: String?
+    private final class Editor { weak var view: TailTextView?; init(_ view: TailTextView) { self.view = view } }
+    private var editors: [String: Editor] = [:]
+    var isRequested: Bool { target != nil }
+    func register(_ view: TailTextView, session: String) {
+        guard editors[session]?.view !== view else { return }
+        editors[session] = Editor(view)
+        if target == session { focus(session) }
+    }
+    func unregister(_ view: TailTextView, session: String) {
+        guard editors[session]?.view === view else { return }
+        editors.removeValue(forKey: session)
+        if target == session { hide() }
+    }
+    func show(_ session: String) {
+        guard let view = editors[session]?.view, view.isEditable else { return }
+        target = session; focus(session)
+    }
+    private func focus(_ session: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.target == session, let view = self.editors[session]?.view,
+                  view.window != nil, view.isEditable else { return }
+            view.allowKeyboardActivation = true
+            view.focusDraft()
+            view.becomeFirstResponder()
+        }
+    }
+    func hide() {
+        target = nil
+        for editor in editors.values {
+            editor.view?.allowKeyboardActivation = false
+            editor.view?.resignFirstResponder()
+        }
+    }
+    func select(_ session: String) {
+        guard isRequested, target != session else { return }
+        if editors[session]?.view?.isEditable == true { show(session) } else { hide() }
+    }
+    func beganEditing(_ session: String) { target = session }
+    func endedEditing(_ session: String) {
+        // Focus transfer ends the old editor after the new target is chosen.
+        // It must not turn a deliberate pane switch into a keyboard dismissal.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.target == session, self.editors[session]?.view?.isFirstResponder != true else { return }
+            self.target = nil
+        }
+    }
+}
+
 final class TailTextView: UITextView {
+    var explicitPhoneKeyboard = false
+    var allowKeyboardActivation = false
+    var selectPane: (() -> Void)?
+    func prepareKeyboardTouch(at point: CGPoint) {
+        guard explicitPhoneKeyboard else { return }
+        selectPane?()
+        guard let position = closestPosition(to: point) else { allowKeyboardActivation = false; return }
+        allowKeyboardActivation = offset(from: beginningOfDocument, to: position) >= historyLength
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = touches.first { prepareKeyboardTouch(at: touch.location(in: self)) }
+        super.touchesBegan(touches, with: event)
+    }
     var send: (() -> Void)?
     var insertingNewline = false
     var pastingText = false
@@ -233,18 +297,24 @@ struct PadTranscript: UIViewRepresentable {
     var pasteError: (String) -> Void = { _ in }
     var imageTools: ((String?, Data) -> Void)? = nil
     var didFocus: () -> Void = {}
+    var phoneKeyboard: PhoneKeyboardController? = nil
+    var keyboardSession: String = ""
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
         view.backgroundColor = .systemBackground; view.textColor = .label
         view.isEditable = editable; view.isSelectable = true; view.alwaysBounceVertical = true
         view.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 24, right: 10)
-        view.keyboardDismissMode = .interactive; view.returnKeyType = .send
+        view.keyboardDismissMode = phoneKeyboard == nil ? .interactive : .none; view.returnKeyType = .send
+        view.explicitPhoneKeyboard = phoneKeyboard != nil
         view.autocorrectionType = .yes; view.smartQuotesType = .no; view.smartDashesType = .no
         view.accessibilityLabel = "Conversation. History followed by editable draft"
         view.send = send
         context.coordinator.view = view
         return view
+    }
+    static func dismantleUIView(_ view: TailTextView, coordinator: Coordinator) {
+        coordinator.parent.phoneKeyboard?.unregister(view, session: coordinator.parent.keyboardSession)
     }
     func updateUIView(_ view: TailTextView, context: Context) { update(view, coordinator: context.coordinator) }
     func update(_ view: TailTextView, coordinator c: Coordinator) {
@@ -253,7 +323,9 @@ struct PadTranscript: UIViewRepresentable {
         if acquired && !c.explicitSelection { c.follow.resume(); view.pendingViewport = .bottom; view.setNeedsLayout() }
         c.view = view
         c.parent = self; view.send = send; view.removeDraftImage = editable ? removeImage : nil
+        view.selectPane = didFocus
         if view.isEditable != editable { view.isEditable = editable }
+        phoneKeyboard?.register(view, session: keyboardSession)
         guard !c.updating else { return }
         view.gutter.isHidden = !lineNumbers
         let leftInset: CGFloat = lineNumbers ? 48 : 10
@@ -494,7 +566,17 @@ struct PadTranscript: UIViewRepresentable {
         deinit { idleResume?.cancel() }
         func scheduleResume() { idleResume?.cancel() }
         func resumeIfIdle() { /* No timer-driven scrolling. */ }
-        func textViewDidBeginEditing(_ textView: UITextView) { parent.didFocus() }
+        func textViewShouldBeginEditing(_ textView: UITextView) -> Bool {
+            guard let view = textView as? TailTextView else { return parent.editable }
+            return parent.editable && (!view.explicitPhoneKeyboard || view.allowKeyboardActivation)
+        }
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            parent.didFocus()
+            parent.phoneKeyboard?.beganEditing(parent.keyboardSession)
+        }
+        func textViewDidEndEditing(_ textView: UITextView) {
+            parent.phoneKeyboard?.endedEditing(parent.keyboardSession)
+        }
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !updating else { return }
             explicitSelection = textView.selectedRange.length > 0 || (textView.isFirstResponder && textView.selectedRange.location < textView.textStorage.length)

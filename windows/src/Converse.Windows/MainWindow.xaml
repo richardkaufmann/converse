@@ -16,7 +16,10 @@
         <local:ActiveToBackgroundConverter x:Key="ActiveBg"/>
         <local:ActiveToForegroundConverter x:Key="ActiveFg"/>
         <DataTemplate x:Key="SidebarHeaderTemplate">
-            <Grid Padding="8,7,8,2" Opacity="{Binding Opacity}">
+            <Grid Padding="8,7,8,2" Opacity="{Binding Opacity}" ToolTipService.ToolTip="{Binding Details}">
+              <Grid.ContextFlyout><MenuFlyout>
+                <MenuFlyoutItem Text="Rename device…" Tag="{Binding}" Click="OnRenameDevice" Visibility="{Binding CanRename, Converter={StaticResource BoolToVis}}"/>
+              </MenuFlyout></Grid.ContextFlyout>
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel>
                 <TextBlock Text="{Binding Title}" FontWeight="{Binding Weight}" FontSize="12"

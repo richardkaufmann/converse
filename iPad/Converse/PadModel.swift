@@ -21,6 +21,7 @@ struct PadState: Codable {
 
 final class PadModel: ObservableObject {
     let service: DeviceSyncService
+    let phoneKeyboard = PhoneKeyboardController()
     @Published var state = PadState()
     @Published var conflicts: Set<String> = []
     @Published var error = ""

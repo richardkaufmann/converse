@@ -1193,7 +1193,7 @@ public sealed partial class ConversationPane : UserControl
             return false;
         var files = paths.Where(path => !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path)).ToArray();
         if (files.Length == 0) throw new InvalidOperationException("These items do not expose a local file path. Save them to disk first.");
-        var text = FormatDroppedPaths(files, _selected.LocalSessionID is null ? _host.Devices.DeviceName : null);
+        var text = FormatDroppedPaths(files, _selected.LocalSessionID is null ? _host.Devices.DisplayName(_host.Devices.DeviceId) : null);
         _host.FocusPane(this);
         NormalizeDraftFormat();
         DraftBox.Document.Selection.SetText(TextSetOptions.None, text);
