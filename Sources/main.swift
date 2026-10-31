@@ -3119,15 +3119,16 @@ func selfTest() {
     s.draft = "saved draft"; store.save()
     let loaded = Store()
     check(loaded.sessions.contains { $0.id == s.id && $0.draft == "saved draft" && $0.messages.count == s.messages.count }, "Transcript and draft survive reload")
-    let localProbe = Session(SavedSession(id: s.id, entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), title: "Probe", messages: [], draft: "/usage", attachments: [], remoteID: nil, started: true))
+    var probeEntry = s.entry; probeEntry.command = "muse"
+    let localProbe = Session(SavedSession(id: s.id, entry: probeEntry, title: "Probe", messages: [], draft: "/usage", attachments: [], remoteID: nil, started: true))
     store.send(localProbe)
     let probeDeadline = Date().addingTimeInterval(12)
     while localProbe.probingStatus && Date() < probeDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     check(!localProbe.busy && !localProbe.probingStatus && localProbe.process == nil && localProbe.messages.last?.text.contains("Session total: 0 in / 0 out") == true, "Real read-only Muse session query and local /usage work without a turn")
     do {
-        let changed = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .effort("max"), serverArguments: ["--provider", "echo"])
+        let changed = try MuseStatusProbe.query(entry: probeEntry, sessionID: s.id.uuidString, change: .effort("max"), serverArguments: ["--provider", "echo"])
         check(changed.status.effort == "max", "Real Muse setter persists session effort without a model turn")
-        let access = try MuseStatusProbe.query(entry: Entry(name: "Muse", command: "muse", directory: NSTemporaryDirectory(), engine: "muse"), sessionID: s.id.uuidString, change: .access(":read-only"), serverArguments: ["--provider", "echo"])
+        let access = try MuseStatusProbe.query(entry: probeEntry, sessionID: s.id.uuidString, change: .access(":read-only"), serverArguments: ["--provider", "echo"])
         check(access.status.access.lowercased().contains("read"), "Real Muse permission-profile setter persists access without a model turn")
     } catch { check(false, "Muse session effort setter: " + error.localizedDescription) }
     _ = NSApplication.shared

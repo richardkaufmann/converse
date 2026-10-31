@@ -36,7 +36,7 @@ struct MuseQuota {
         var attributes = termios()
         if tcgetattr(slave, &attributes) == 0 { cfmakeraw(&attributes); _ = tcsetattr(slave, TCSANOW, &attributes) }
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        process.arguments = ["-q", "/dev/null", "/bin/zsh", "-lc", "exec " + entry.command + " --no-session-log"]
+        process.arguments = ["-q", "/dev/null", "/bin/zsh", "-lc", ProviderCommand.script(entry: entry, arguments: ["--no-session-log"])]
         let cwd = NSString(string: entry.directory).expandingTildeInPath
         if FileManager.default.fileExists(atPath: cwd) { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         var env = ProcessInfo.processInfo.environment

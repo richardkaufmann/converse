@@ -56,8 +56,7 @@ final class MuseConnection {
     init(sessionID: String) { self.sessionID = sessionID.lowercased() }
     func start(entry: Entry, arguments: [String] = [], completion: @escaping (Result<[String: Any], Error>) -> Void) {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let quote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        process.arguments = ["-lc", "exec " + entry.command + " serve " + arguments.map(quote).joined(separator: " ")]
+        process.arguments = ["-lc", ProviderCommand.script(entry: entry, arguments: ["serve"] + arguments)]
         process.currentDirectoryURL = URL(fileURLWithPath: NSString(string: entry.directory).expandingTildeInPath)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")

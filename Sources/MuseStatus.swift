@@ -36,8 +36,7 @@ struct MuseStatusProbe {
     }
     static func query(entry: Entry, sessionID: String, change: MuseSettingChange? = nil, serverArguments: [String] = [], timeoutInterval: TimeInterval = 8, terminationGrace: TimeInterval = 1) throws -> Result {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let quotedArguments = serverArguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
-        process.arguments = ["-lc", "exec " + entry.command + " serve " + quotedArguments]
+        process.arguments = ["-lc", ProviderCommand.script(entry: entry, arguments: ["serve"] + serverArguments)]
         let cwd = NSString(string: entry.directory).expandingTildeInPath
         if FileManager.default.fileExists(atPath: cwd) { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         var env = ProcessInfo.processInfo.environment
@@ -108,7 +107,8 @@ struct MuseStatusProbe {
         }
         let catalog = (try? rpc(12, "model/list", [:])) ?? [:]
         let profiles = (try? rpc(13, "permissionProfile/list", [:])) ?? [:]
-        let configRoot = env["XDG_CONFIG_HOME"] ?? (NSHomeDirectory() + "/.config")
+        let accountRoot = entry.accountDirectory.flatMap { $0.isEmpty ? nil : NSString(string: $0).expandingTildeInPath }
+        let configRoot = accountRoot.map { $0 + "/config" } ?? env["XDG_CONFIG_HOME"] ?? (NSHomeDirectory() + "/.config")
         let configURL = URL(fileURLWithPath: configRoot).appendingPathComponent("muse/settings.json")
         let config = (try? Data(contentsOf: configURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         var read: [String: Any] = [:]
