@@ -13,6 +13,7 @@ struct ImageSegment {
     let pixels: [UInt8]
     let area: Int
     let outline: CGImage
+    let boundary: CGPath?
     let tint: CGImage
     let anchor: CGPoint
     init(_ wire: DeviceImageSegment) throws {
@@ -35,9 +36,45 @@ struct ImageSegment {
                 edge[i * 4] = 255; edge[i * 4 + 1] = 150; edge[i * 4 + 3] = 255
             }
         } }
+        boundary = Self.boundaryPath(pixels, width: b.width, height: b.height)
         outline = try Self.rgbaImage(edge, width: b.width, height: b.height)
         tint = try Self.rgbaImage(fill, width: b.width, height: b.height)
         anchor = CGPoint(x: b.x + nearest % b.width, y: b.y + nearest / b.width)
+    }
+    // Merge adjacent mask edges into vector runs. Stroke after scaling, so an
+    // outline remains visible when a large screenshot is fitted into the sheet.
+    // Highly fragmented masks retain the bounded raster fallback.
+    private static func boundaryPath(_ pixels: [UInt8], width: Int, height: Int) -> CGPath? {
+        let path = CGMutablePath()
+        var runs = 0
+        func inside(_ x: Int, _ y: Int) -> Bool {
+            x >= 0 && x < width && y >= 0 && y < height && pixels[y * width + x] != 0
+        }
+        for y in 0...height {
+            var start: Int?
+            for x in 0...width {
+                let edge = x < width && inside(x, y - 1) != inside(x, y)
+                if edge && start == nil { start = x }
+                if !edge, let first = start {
+                    path.move(to: CGPoint(x: first, y: y)); path.addLine(to: CGPoint(x: x, y: y))
+                    start = nil; runs += 1
+                    if runs > 100_000 { return nil }
+                }
+            }
+        }
+        for x in 0...width {
+            var start: Int?
+            for y in 0...height {
+                let edge = y < height && inside(x - 1, y) != inside(x, y)
+                if edge && start == nil { start = y }
+                if !edge, let first = start {
+                    path.move(to: CGPoint(x: x, y: first)); path.addLine(to: CGPoint(x: x, y: y))
+                    start = nil; runs += 1
+                    if runs > 100_000 { return nil }
+                }
+            }
+        }
+        return path
     }
     func contains(x: Int, y: Int) -> Bool {
         let b = wire.region, x = x - wire.region.x, y = y - wire.region.y
@@ -107,10 +144,21 @@ struct SegmentPicker: View {
                     Image(decorative: image, scale: 1).resizable().frame(width: CGFloat(image.width) * ratio, height: CGFloat(image.height) * ratio)
                     ForEach(segments.indices, id: \.self) { i in
                         let s = segments[i], b = s.wire.region
-                        if selected.contains(i) {
-                            Image(decorative: s.tint, scale: 1).resizable().frame(width: CGFloat(b.width) * ratio, height: CGFloat(b.height) * ratio).offset(x: CGFloat(b.x) * ratio, y: CGFloat(b.y) * ratio).allowsHitTesting(false)
+                        Image(decorative: s.tint, scale: 1).resizable().frame(width: CGFloat(b.width) * ratio, height: CGFloat(b.height) * ratio)
+                            .opacity(selected.contains(i) ? 1 : 0.45)
+                            .offset(x: CGFloat(b.x) * ratio, y: CGFloat(b.y) * ratio).allowsHitTesting(false)
+                        if let boundary = s.boundary {
+                            Canvas { context, _ in
+                                let path = Path(boundary).applying(CGAffineTransform(a: ratio, b: 0, c: 0, d: ratio, tx: CGFloat(b.x) * ratio, ty: CGFloat(b.y) * ratio))
+                                context.stroke(path, with: .color(.black), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                                context.stroke(path, with: .color(selected.contains(i) ? .yellow : .cyan), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                            }.frame(width: CGFloat(image.width) * ratio, height: CGFloat(image.height) * ratio).allowsHitTesting(false)
+                        } else {
+                            Image(decorative: s.outline, scale: 1).resizable().interpolation(.none)
+                                .frame(width: CGFloat(b.width) * ratio, height: CGFloat(b.height) * ratio)
+                                .shadow(color: .black, radius: 1).shadow(color: .white, radius: 1)
+                                .offset(x: CGFloat(b.x) * ratio, y: CGFloat(b.y) * ratio).allowsHitTesting(false)
                         }
-                        Image(decorative: s.outline, scale: 1).resizable().interpolation(.none).frame(width: CGFloat(b.width) * ratio, height: CGFloat(b.height) * ratio).offset(x: CGFloat(b.x) * ratio, y: CGFloat(b.y) * ratio).allowsHitTesting(false)
                     }
                 }.contentShape(Rectangle()).onTapGesture { point in
                     let hits = segments.indices.filter { segments[$0].contains(x: Int(point.x / ratio), y: Int(point.y / ratio)) }
@@ -119,9 +167,13 @@ struct SegmentPicker: View {
                     ForEach(segments.indices, id: \.self) { i in
                         let s = segments[i]
                         Button { toggle(i) } label: {
-                            Text("\(i + 1)").font(.caption.bold()).foregroundStyle(.white).padding(5).background(selected.contains(i) ? Color.orange : Color.black.opacity(0.75), in: Capsule())
+                            Text("\(i + 1)").font(.callout.bold()).monospacedDigit()
+                                .foregroundStyle(selected.contains(i) ? .black : .white)
+                                .frame(minWidth: 30, minHeight: 30)
+                                .background(selected.contains(i) ? Color.yellow : Color.black, in: Capsule())
+                                .overlay(Capsule().stroke(.white, lineWidth: 2)).shadow(color: .black.opacity(0.7), radius: 2)
                         }.buttonStyle(.plain).accessibilityLabel("Segment \(i + 1): \(s.wire.label), \(selected.contains(i) ? "selected" : "not selected")")
-                            .offset(x: max(0, min(CGFloat(image.width) * ratio - 28, s.anchor.x * ratio - 12)), y: max(0, min(CGFloat(image.height) * ratio - 28, s.anchor.y * ratio - 12)))
+                            .offset(x: max(0, min(CGFloat(image.width) * ratio - 34, s.anchor.x * ratio - 15)), y: max(0, min(CGFloat(image.height) * ratio - 34, s.anchor.y * ratio - 15)))
                     }
                 }
             }.frame(height: 320)

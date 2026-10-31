@@ -23,6 +23,10 @@ import AppKit
         } }
         let cg = try ImageSegment.rgbaImage(source, width: 20, height: 10)
         let prepared = try ImageSegment.prepare(wires)
+        let ring: [UInt8] = [1,1,1, 1,0,1, 1,1,1]
+        let ringSegment = try ImageSegment(DeviceImageSegment(region: DeviceImageRegion(x: 0, y: 0, width: 3, height: 3, imageWidth: 3, imageHeight: 3), label: "ring", mask: SAMMask.encode(ring, width: 3, height: 3)))
+        let boundary = ringSegment.boundary!.copy(strokingWithWidth: 0.1, lineCap: .butt, lineJoin: .miter, miterLimit: 2)
+        check(boundary.contains(CGPoint(x: 0, y: 1.5)) && boundary.contains(CGPoint(x: 1, y: 1.5)) && !boundary.contains(CGPoint(x: 1.5, y: 1.5)) && !boundary.contains(CGPoint(x: 0.5, y: 0.5)), "Segment outline follows outer edges and interior holes without outlining solid interiors")
         let union = try ImageSegment.export(cg, segments: prepared + prepared, crop: false)
         let bytes = Array(union.dataProvider!.data! as Data)
         check(union.width == 20 && union.height == 10 && bytes[(3 * 20 + 2) * 4 + 3] == 128 && bytes[0] == 0 && bytes[3] == 0, "Copy keeps original canvas, masks background, and does not double alpha for overlap")

@@ -265,6 +265,36 @@ final class ConverseTests: XCTestCase {
         XCTAssertFalse(model.addImageNotes(id, hash: "image", epoch: 7, notes: "Removed image"))
         XCTAssertEqual(model.draft(id).text, saved)
     }
+    func testSegmentOutlinesStayVisibleOnReducedPreview() async throws {
+        let width = 600, height = 1200
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        var mask = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height { for x in 0..<width {
+            let index = y * width + x
+            rgba[index * 4] = UInt8((x / 25 + y / 25).isMultiple(of: 2) ? 35 : 125)
+            rgba[index * 4 + 1] = UInt8((x / 25).isMultiple(of: 2) ? 130 : 190)
+            rgba[index * 4 + 2] = 30
+            let dx = Double(x - 300) / 190, dy = Double(y - 600) / 120
+            if dx * dx + dy * dy < 1 { mask[index] = 1 }
+        } }
+        let image = try ImageSegment.rgbaImage(rgba, width: width, height: height)
+        let item = try ImageSegment(DeviceImageSegment(region: DeviceImageRegion(x: 0, y: 0, width: width, height: height, imageWidth: width, imageHeight: height), label: "test object", mask: SAMMask.encode(mask, width: width, height: height)))
+        XCTAssertNotNil(item.boundary)
+        for selected: Set<Int> in [[], [0]] {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 600, height: 600)); window.overrideUserInterfaceStyle = .light
+            let host = UIHostingController(rootView: SegmentPicker(image: image, segments: [item], selected: .constant(selected)).padding())
+            window.rootViewController = host; window.isHidden = false
+            try await Task.sleep(for: .milliseconds(200)); host.view.layoutIfNeeded()
+            let screenshot = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+            let attachment = XCTAttachment(image: screenshot); attachment.name = "Segment contrast " + (selected.isEmpty ? "candidate" : "selected"); attachment.lifetime = .keepAlways; add(attachment)
+            window.isHidden = true
+        }
+        // The thicker preview boundary must not bleed into exported pixels.
+        let exported = try ImageSegment.export(image, segments: [item], crop: false)
+        let bytes = Array(exported.dataProvider!.data! as Data)
+        XCTAssertEqual(bytes[(600 * width + 300) * 4 + 1], rgba[(600 * width + 300) * 4 + 1])
+        XCTAssertEqual(bytes[3], 0)
+    }
     func testImageToolsPanelAtNarrowWidth() async throws {
         let service = try service(), model = PadModel(service: service)
         let id = DeviceGlobalID(home: String(repeating: "a", count: 64), session: UUID()).string
