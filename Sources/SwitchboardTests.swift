@@ -29,6 +29,13 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     check(source.messages.last?.text.contains("messaging is disabled") == true && source.pending.isEmpty, "Bare JSON commands from untaught sessions receive a notice without executing")
     store.teachSwitchboard(source)
     check(source.switchboardEnabled && source.pending.last?.text.contains("list-sessions") == true && source.pending.last?.text.contains("tell <name>") == true && source.draft == "source draft", "Teach enables messaging and queues dynamic lookup instructions without overwriting draft")
+    let agent = store.createAgent(title: "Teaching fixture")
+    agent.queuePaused = true; agent.draft = "Keep my agent draft"
+    let config = agent.agent
+    store.teachSwitchboard(agent)
+    check(agent.pending.count == 1 && agent.pending[0].text.contains("tell array") && agent.pending[0].text.contains("inReplyTo") && !agent.pending[0].text.contains("```converse"), "Teaching an agent preserves its structured response format and correlated reply rules")
+    check(agent.queuePaused && agent.draft == "Keep my agent draft" && agent.agent == config, "Teaching does not change agent scope, configuration, draft or paused queue")
+    store.sessions.removeAll { $0 === agent }
     source.pending = []
     reply("{\"command\":\"list-sessions\"}")
     check(source.pending.isEmpty && source.messages.last?.text.contains("fenced JSON block") == true, "Taught sessions get a formatting notice for bare command JSON")

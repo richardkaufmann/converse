@@ -43,6 +43,29 @@ final class TailTextView: UITextView {
     private var previousContentHeight: CGFloat = 0
     override init(frame: CGRect, textContainer: NSTextContainer?) { super.init(frame: frame, textContainer: textContainer) }
     required init?(coder: NSCoder) { super.init(coder: coder) }
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        var rect = super.caretRect(for: position)
+        // An attachment can make its line hundreds of points high. The edit
+        // caret should still look like a text caret when that line is clicked.
+        let height = (typingAttributes[.font] as? UIFont ?? .systemFont(ofSize: 16)).lineHeight
+        if rect.height > height { rect.origin.y = rect.maxY - height; rect.size.height = height }
+        return rect
+    }
+    func focusDraft() {
+        guard isEditable else { return }
+        selectedRange = NSRange(location: textStorage.length, length: 0)
+        typingAttributes = PadTranscript.draftAttributes((text as NSString).substring(from: min(historyLength, textStorage.length)))
+        revealEditedSelection()
+    }
+    func revealEditedSelection() {
+        guard isEditable else { return }
+        if selectedRange.location == textStorage.length && selectedRange.length == 0 {
+            if let coordinator = delegate as? PadTranscript.Coordinator {
+                coordinator.explicitSelection = false; coordinator.follow.resume()
+            }
+            pendingViewport = .bottom; setNeedsLayout(); layoutIfNeeded()
+        } else { scrollRangeToVisible(selectedRange) }
+    }
     static func native() -> TailTextView {
         let storage = NSTextStorage()
         let layout = NSLayoutManager(); layout.allowsNonContiguousLayout = false; storage.addLayoutManager(layout)
@@ -50,6 +73,9 @@ final class TailTextView: UITextView {
         container.widthTracksTextView = true; layout.addTextContainer(container)
         let view = TailTextView(frame: .zero, textContainer: container)
         layout.allowsNonContiguousLayout = false
+        // Keep each link's own foreground color: traffic is orange, draft is
+        // blue. UIKit's default link attributes otherwise repaint both blue.
+        view.linkTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue]
         view.pasteConfiguration = UIPasteConfiguration(acceptableTypeIdentifiers: [UTType.text.identifier, UTType.image.identifier])
         return view
     }
@@ -106,6 +132,7 @@ final class TailTextView: UITextView {
         guard isEditable else { return }
         if markedTextRange != nil { unmarkText(); return }
         if modifiers.contains(.command) || modifiers.contains(.shift) {
+            if selectedRange.location < historyLength { focusDraft() }
             let location = max(historyLength, min(selectedRange.location, textStorage.length))
             let length = min(selectedRange.length, textStorage.length - location)
             let coordinator = delegate as? PadTranscript.Coordinator
@@ -133,14 +160,14 @@ final class TailTextView: UITextView {
     override func insertText(_ text: String) {
         guard isEditable else { return }
         if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
-        if selectedRange.location < historyLength { selectedRange = NSRange(location: textStorage.length, length: 0) }
+        if selectedRange.location < historyLength { focusDraft() }
         super.insertText(text)
     }
     override func replace(_ range: UITextRange, withText text: String) {
         guard isEditable else { return }
         if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
         if offset(from: beginningOfDocument, to: range.start) < historyLength {
-            selectedRange = NSRange(location: textStorage.length, length: 0)
+            focusDraft()
             if !text.isEmpty { insertText(text) }; return
         }
         super.replace(range, withText: text)
@@ -273,6 +300,9 @@ struct PadTranscript: UIViewRepresentable {
             if body.length == 0 && message.imageHashes.isEmpty { continue }
             if prompt { body.addAttribute(.font, value: UIFont.italicSystemFont(ofSize: 16), range: NSRange(location: 0, length: body.length)) }
             body.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: body.length))
+            body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { link, range, _ in
+                if link != nil { body.addAttribute(.foregroundColor, value: UIColor.link, range: range) }
+            }
             let start = result.length
             if TranscriptStyle.isTraffic(message.text) { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
             result.append(body)
@@ -308,10 +338,9 @@ struct PadTranscript: UIViewRepresentable {
         }
         c.historyLength = result.length
         view.historyLength = result.length
-        result.append(NSAttributedString(string: draft, attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft)]))
+        result.append(NSAttributedString(string: draft, attributes: Self.draftAttributes(draft)))
         view.textStorage.setAttributedString(result)
         view.configureDraftImageButtons()
-        view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(draft), .paragraphStyle: NSParagraphStyle.default]
         if first { view.selectedRange = NSRange(location: result.length, length: 0) }
         else if let relative {
             let position = min(result.length, c.historyLength + relative)
@@ -322,6 +351,9 @@ struct PadTranscript: UIViewRepresentable {
             let position = max(0, min(result.length, previousSelection.location + moved))
             view.selectedRange = NSRange(location: position, length: min(previousSelection.length, result.length - position))
         }
+        // Moving the selection can inherit the preceding summary's truncating
+        // paragraph/link attributes, especially when the draft is empty.
+        view.typingAttributes = Self.draftAttributes(draft)
         if nearBottom { view.pendingViewport = .bottom }
         else if let character = visibleCharacter, let distance = visibleDistance, let old = anchorMessage,
                 let new = c.messageRanges.first(where: { $0.id == old.id }) {
@@ -333,6 +365,10 @@ struct PadTranscript: UIViewRepresentable {
         // History changes invalidate the undo stack's character offsets.
         // Clearing it also prevents undo from modifying protected history.
         view.undoManager?.removeAllActions(); c.updating = false
+    }
+    static func draftAttributes(_ text: String) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
+        return [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(text), .paragraphStyle: paragraph]
     }
     static func separator() -> NSAttributedString { NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.label]) }
     // UIKit has no NSTextTable. Render tables as wrapping, labelled records
@@ -464,9 +500,13 @@ struct PadTranscript: UIViewRepresentable {
         }
         init(_ parent: PadTranscript) { self.parent = parent }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            guard !updating, parent.editable else { return false }
+            guard !updating, parent.editable, view.isEditable else { return false }
             guard range.location >= historyLength else {
-                view.selectedRange = NSRange(location: view.textStorage.length, length: 0); return false
+                if let tail = view as? TailTextView {
+                    tail.focusDraft()
+                    if !text.isEmpty { tail.insertText(text) }
+                }
+                return false
             }
             if TailTextView.isReturn(text) {
                 // Hardware Command-Return goes through insertText too; use
@@ -481,10 +521,15 @@ struct PadTranscript: UIViewRepresentable {
             follow.interaction(now: now()); scheduleResume()
             let text = (view.text as NSString).substring(from: historyLength)
             lastDraft = text
-            let color = PadPalette.draft(text)
-            view.textStorage.addAttribute(.foregroundColor, value: color, range: NSRange(location: historyLength, length: view.textStorage.length - historyLength))
-            view.typingAttributes = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: NSParagraphStyle.default]
+            // Normalize plain editable text after typing or rich paste. Never
+            // let a history link or a pasted clipping style enter the draft.
+            let range = NSRange(location: historyLength, length: view.textStorage.length - historyLength)
+            updating = true
+            view.textStorage.setAttributes(PadTranscript.draftAttributes(text), range: range)
+            view.typingAttributes = PadTranscript.draftAttributes(text)
+            updating = false
             (view as? TailTextView)?.gutter.setNeedsDisplay()
+            (view as? TailTextView)?.revealEditedSelection()
             parent.edit(text)
         }
     }

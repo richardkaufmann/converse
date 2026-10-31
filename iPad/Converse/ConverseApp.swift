@@ -26,7 +26,7 @@ struct PadRoot: View {
     @State private var dragWidth: Double?
     @State private var closingTarget: DeviceSidebarRow?
     @State private var aboutShown = false
-    @State private var renameTarget: DeviceSidebarRow?
+    @State private var sessionActions: DeviceSidebarRow?
     @State private var closeInFlight = Set<String>()
     var body: some View {
         GeometryReader { geometry in
@@ -34,12 +34,10 @@ struct PadRoot: View {
             HStack(spacing: 0) {
                 if !model.state.sidebarHidden {
                     sidebar.frame(width: width)
-                    Rectangle().fill(.separator).frame(width: 5).contentShape(Rectangle())
-                        .gesture(DragGesture().onChanged { value in
-                            if dragWidth == nil { dragWidth = width }
-                            model.state.sidebarWidth = min(geometry.size.width * 0.5, max(120, (dragWidth ?? width) + value.translation.width))
-                        }.onEnded { _ in dragWidth = nil; model.persist() })
-                        .accessibilityLabel("Resize conversation sidebar")
+                    PadSidebarDivider(drag: { delta in
+                        if dragWidth == nil { dragWidth = width }
+                        model.state.sidebarWidth = min(geometry.size.width * 0.5, max(120, (dragWidth ?? width) + delta))
+                    }, end: { dragWidth = nil; model.persist() }).frame(width: PadSidebarDivider.width)
                 }
                 VStack(spacing: 0) {
                     HStack {
@@ -73,7 +71,7 @@ struct PadRoot: View {
                                 Button("Show sessions") { model.state.sidebarHidden = false; model.persist() }.buttonStyle(.borderedProminent)
                             }
                         }
-                    } else if geometry.size.width - (model.state.sidebarHidden ? 0 : width) >= CGFloat(assigned.count) * 360 {
+                    } else if geometry.size.width - (model.state.sidebarHidden ? 0 : width + PadSidebarDivider.width) >= CGFloat(assigned.count) * 360 {
                         HStack(spacing: 0) {
                             ForEach(assigned, id: \.self) { pane in
                                 if pane != assigned.first { Divider() }
@@ -110,7 +108,7 @@ struct PadRoot: View {
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
             .sheet(isPresented: $aboutShown) { PadAbout() }
-            .sheet(item: $renameTarget) { PadRenameSession(row: $0) }
+            .sheet(item: $sessionActions) { row in PadSessionActions(row: row, park: { model.park(row.globalID) }) }
         .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
     }
@@ -154,7 +152,10 @@ struct PadRoot: View {
                             HStack(spacing: 3) {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
-                                PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading)
+                                Button { sessionActions = row } label: {
+                                    PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                }.buttonStyle(.plain).accessibilityLabel("Actions for " + row.title)
+                                    .simultaneousGesture(LongPressGesture().onEnded { _ in sessionActions = row })
                                 PadProviderLogo(engine: row.engine).frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
@@ -164,14 +165,6 @@ struct PadRoot: View {
                                 }.frame(width: 132).fixedSize(horizontal: true, vertical: false).disabled(!home.online)
                             }.font(.system(size: 13)).padding(.vertical, 4).padding(.horizontal, 3)
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
-                                .contextMenu {
-                                    Button("Rename…") { renameTarget = row }.disabled(!home.online || !service.canRenameRemote(home.deviceID))
-                                    Text(row.title); Text("Remote device: " + home.deviceName); Text("Account: " + (row.accountName ?? "Not reported")); Text("Model: " + row.model); Text(row.status)
-                                    Button("Teach Session To Talk To Other Sessions") { service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }.disabled(!service.canTeachRemote(row.globalID))
-                                    if row.participantKind == "agent" { Button("Agent Setup / Loop") { agentTarget = PadAgentTarget(home: home.deviceID, target: row.globalID) } }
-                                    if let warning = row.attention, !warning.isEmpty { Text(warning) }
-                                    Button("Park") { model.park(row.globalID) }
-                                }
                                 .accessibilityElement(children: .contain)
                         }
                         } else { Text(home.deviceName).fontWeight(.bold).foregroundStyle(Color.green.opacity(0.4)).help("Offline. Sessions reappear when this device reconnects.").padding(.top, 10) }
@@ -195,10 +188,8 @@ struct PadPane: View {
     @ObservedObject private var service = DeviceSyncService.shared
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
-    @State private var agentSetup = false
+    @State private var sessionActions: DeviceSidebarRow?
     @State private var scoreboardExpanded = false
-    @State private var agentActionBusy = false
-    @State private var agentActionError: String?
     @State private var editingModel = false
     @State private var customModel = ""
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
@@ -209,21 +200,13 @@ struct PadPane: View {
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
                 PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
-                if service.remoteRow(globalID: id)?.participantKind == "agent" || snapshot?.engine == "agent" {
-                    Menu {
-                        Button("Agent Setup / Loop…") { agentSetup = true }
-                        Button("Run once") { runAgentOnce() }
-                            .disabled(agentActionBusy || snapshot?.busy == true)
-                        Button("Scoreboard") { scoreboardExpanded = true }
-                            .disabled(snapshot?.agentWidget == nil)
-                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
-                        .fixedSize().accessibilityLabel("Agent actions")
-                        .disabled(service.remoteOffline.contains(id))
-                        .sheet(isPresented: $agentSetup) { if let global = DeviceGlobalID(id) { PadAgentPanel(home: global.home, target: id) } }
-                        .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
-                            Button("OK", role: .cancel) { agentActionError = nil }
-                        } message: { Text(agentActionError ?? "") }
-                }
+                Button { sessionActions = service.remoteRow(globalID: id) } label: {
+                    Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+                }.fixedSize().accessibilityLabel("Session actions")
+                    .disabled(service.remoteRow(globalID: id) == nil)
+                    .sheet(item: $sessionActions) { row in
+                        PadSessionActions(row: row, park: { model.park(id) }, showScoreboard: snapshot?.agentWidget == nil ? nil : { scoreboardExpanded = true })
+                    }
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
             Divider()
@@ -348,15 +331,6 @@ struct PadPane: View {
             }
     }
     func command(_ action: String) { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: action)) }
-    func runAgentOnce() {
-        guard !agentActionBusy, let global = DeviceGlobalID(id) else { return }
-        agentActionBusy = true
-        Task { @MainActor in
-            let result = await service.requestParticipant(home: global.home, action: "agent.run", target: id)
-            agentActionBusy = false
-            if result.outcome != "completed" { agentActionError = result.detail }
-        }
-    }
     func settings(_ snapshot: DeviceTranscriptPayload) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) { remoteSettings(snapshot); compactAction(snapshot) }.fixedSize(horizontal: true, vertical: false)
@@ -401,6 +375,121 @@ struct PadPane: View {
         }
     }
 
+}
+
+
+// A snapshot-backed sheet keeps actions stationary while sidebar/status updates
+// arrive. Native context menus rebuilt from live row text can move under a pointer.
+struct PadSessionActions: View {
+    let row: DeviceSidebarRow
+    var park: () -> Void
+    var showScoreboard: (() -> Void)? = nil
+    @ObservedObject private var service = DeviceSyncService.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var renameShown = false
+    @State private var agentSetupShown = false
+    @State private var teachingID: UUID?
+    @State private var running = false
+    @State private var error: String?
+    private var home: String { DeviceGlobalID(row.globalID)?.home ?? "" }
+    private var isAgent: Bool { row.participantKind == "agent" || row.engine == "agent" }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Actions") {
+                    Button("Rename…") { renameShown = true }.disabled(!service.canRenameRemote(home))
+                    Button("Teach / Refresh Switchboard Instructions") {
+                        teachingID = service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard"))
+                        if teachingID == nil { error = "Could not queue instructions. Check that the session's home is connected." }
+                    }.disabled(!service.canTeachRemote(row.globalID) || teachingID != nil)
+                    if isAgent {
+                        Button("Agent Setup / Loop…") { agentSetupShown = true }.disabled(!service.canHostAgent(home))
+                        Button("Run once") { runAgent() }.disabled(running || service.remoteRow(globalID: row.globalID)?.busy == true || !service.canHostAgent(home))
+                        Button("Scoreboard") { showScoreboard?(); dismiss() }.disabled(showScoreboard == nil)
+                    }
+                    Button("Park") { park(); dismiss() }
+                }
+                Section {
+                    Text("Teaching queues the current rules on home and preserves your draft. Close this panel and use Inject now on the queued instructions to interrupt a busy turn.")
+                    if teachingID != nil { Text("Instructions requested. Check the session queue for delivery.").foregroundStyle(.secondary) }
+                }
+                Section("Session") {
+                    LabeledContent("Name", value: row.title)
+                    LabeledContent("Home", value: service.homes[home]?.deviceName ?? "Unavailable")
+                    LabeledContent("Account", value: row.accountName ?? "Not reported")
+                    LabeledContent("Model", value: row.model)
+                    LabeledContent("Status when opened", value: row.status)
+                    if let warning = row.attention, !warning.isEmpty { Text(warning) }
+                }
+            }
+            .navigationTitle("Session actions").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(isPresented: $renameShown) { PadRenameSession(row: row) }
+            .sheet(isPresented: $agentSetupShown) { PadAgentPanel(home: home, target: row.globalID) }
+            .alert("Session action failed", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+                Button("OK", role: .cancel) { error = nil }
+            } message: { Text(error ?? "") }
+        }
+    }
+    private func runAgent() {
+        running = true
+        Task { @MainActor in
+            let result = await service.requestParticipant(home: home, action: "agent.run", target: row.globalID)
+            running = false
+            if result.outcome != "completed" { error = result.detail }
+        }
+    }
+}
+
+
+struct PadSidebarDivider: UIViewRepresentable {
+    static let width: CGFloat = 22
+    var drag: (CGFloat) -> Void
+    var end: () -> Void
+    func makeUIView(context: Context) -> PadResizeHandle { PadResizeHandle() }
+    func updateUIView(_ view: PadResizeHandle, context: Context) { view.drag = drag; view.end = end }
+}
+
+final class PadResizeHandle: UIView, UIPointerInteractionDelegate {
+    var drag: (CGFloat) -> Void = { _ in }
+    var end: () -> Void = {}
+    private var highlighted = false
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .secondarySystemBackground
+        addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
+        addInteraction(UIPointerInteraction(delegate: self))
+        isAccessibilityElement = true; accessibilityLabel = "Resize conversation sidebar"
+        accessibilityHint = "Drag left or right to resize"; accessibilityTraits = .adjustable
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ rect: CGRect) {
+        UIColor.separator.setFill(); UIRectFill(CGRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height))
+        (highlighted ? UIColor.systemBlue : UIColor.secondaryLabel).setFill()
+        UIBezierPath(roundedRect: CGRect(x: bounds.midX - 2, y: bounds.midY - 22, width: 4, height: 44), cornerRadius: 2).fill()
+    }
+    @objc private func pan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed: highlighted = true; drag(gesture.translation(in: window).x)
+        case .ended, .cancelled, .failed: highlighted = false; end()
+        default: break
+        }
+        setNeedsDisplay()
+    }
+    override func accessibilityIncrement() { drag(20); end() }
+    override func accessibilityDecrement() { drag(-20); end() }
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        let arrow = UIBezierPath()
+        let points: [CGPoint] = [CGPoint(x: -14, y: 0), CGPoint(x: -7, y: -6), CGPoint(x: -7, y: -2), CGPoint(x: 7, y: -2), CGPoint(x: 7, y: -6), CGPoint(x: 14, y: 0), CGPoint(x: 7, y: 6), CGPoint(x: 7, y: 2), CGPoint(x: -7, y: 2), CGPoint(x: -7, y: 6)]
+        arrow.move(to: points[0]); points.dropFirst().forEach { arrow.addLine(to: $0) }; arrow.close()
+        return UIPointerStyle(shape: UIPointerShape.path(arrow), constrainedAxes: [])
+    }
+    func pointerInteraction(_ interaction: UIPointerInteraction, willEnter region: UIPointerRegion, animator: UIPointerInteractionAnimating) {
+        highlighted = true; setNeedsDisplay()
+    }
+    func pointerInteraction(_ interaction: UIPointerInteraction, willExit region: UIPointerRegion, animator: UIPointerInteractionAnimating) {
+        highlighted = false; setNeedsDisplay()
+    }
 }
 
 

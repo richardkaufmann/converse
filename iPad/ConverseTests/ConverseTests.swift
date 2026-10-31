@@ -6,6 +6,72 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testDraftWrapsAfterTrafficDuringTypingPasteAndResize() throws {
+        let message = DeviceWireMessage(id: UUID(), role: "user", text: "[Converse message from Reviewer · session abc · delivery def · hop 1/100]\nPlease review this change")
+        var edited = ""
+        var parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { edited = $0 }, send: {}, attach: { _ in })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 280, height: 500)
+        let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        let text = String(repeating: "Draft must wrap and remain editable. ", count: 12)
+        view.insertText(text)
+        coordinator.textViewDidChange(view)
+        XCTAssertEqual(edited, text)
+        func checkWrap() throws {
+            view.layoutManager.ensureLayout(for: view.textContainer)
+            let range = NSRange(location: view.historyLength, length: (text as NSString).length)
+            let style = try XCTUnwrap(view.textStorage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle)
+            XCTAssertEqual(style.lineBreakMode, .byWordWrapping)
+            XCTAssertNil(view.textStorage.attribute(.link, at: range.location, effectiveRange: nil), "Draft must not inherit the traffic link")
+            XCTAssertGreaterThan(view.lineTop(at: NSMaxRange(range) - 1), view.lineTop(at: range.location) + 40, "Native layout must use several lines")
+            let glyphs = view.layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            view.layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, glyphRange, _ in
+                XCTAssertEqual(view.layoutManager.truncatedGlyphRange(inLineFragmentForGlyphAt: glyphRange.location).location, NSNotFound)
+            }
+        }
+        try checkWrap()
+        // A rich paste can supply a truncating paragraph and a link of its own.
+        let clipped = NSMutableParagraphStyle(); clipped.lineBreakMode = .byTruncatingTail
+        view.textStorage.addAttributes([.paragraphStyle: clipped, .link: URL(string: "https://example.com")!], range: NSRange(location: view.historyLength, length: (text as NSString).length))
+        coordinator.textViewDidChange(view)
+        try checkWrap()
+        parent.draft = text
+        parent.messages.append(DeviceWireMessage(id: UUID(), role: "assistant", text: "New home output"))
+        view.frame.size.width = 180
+        parent.update(view, coordinator: coordinator)
+        try checkWrap()
+        XCTAssertEqual((view.text as NSString).substring(from: view.historyLength), text)
+    }
+    func testTrafficLinksKeepTheirColorInLightAndDarkMode() async throws {
+        let message = DeviceWireMessage(id: UUID(), role: "user", text: "[Converse message from Reviewer · session abc · delivery def · hop 1/100]\nPlease review this change")
+        let parent = PadTranscript(messages: [message], draft: "My typing", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 280, height: 500)
+        let coordinator = PadTranscript.Coordinator(parent)
+        parent.update(view, coordinator: coordinator)
+        XCTAssertNotNil(view.textStorage.attribute(.link, at: 0, effectiveRange: nil), "Tap must still open full message details")
+        let traffic = try XCTUnwrap(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor)
+        let draft = try XCTUnwrap(view.textStorage.attribute(.foregroundColor, at: view.historyLength, effectiveRange: nil) as? UIColor)
+        XCTAssertNil(view.linkTextAttributes[.foregroundColor], "UIKit must not override traffic with its default blue link color")
+        for mode in [UIUserInterfaceStyle.light, .dark] {
+            let traits = UITraitCollection(userInterfaceStyle: mode)
+            XCTAssertEqual(traffic.resolvedColor(with: traits), PadPalette.traffic.resolvedColor(with: traits))
+            XCTAssertNotEqual(traffic.resolvedColor(with: traits), draft.resolvedColor(with: traits))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 280, height: 200))
+            window.overrideUserInterfaceStyle = mode
+            let controller = UIViewController(); window.rootViewController = controller
+            let sample = TailTextView.native(); sample.backgroundColor = .systemBackground
+            sample.frame = window.bounds; controller.view.addSubview(sample)
+            window.isHidden = false
+            parent.update(sample, coordinator: PadTranscript.Coordinator(parent))
+            try await Task.sleep(for: .milliseconds(100))
+            sample.layoutIfNeeded()
+            let screenshot = UIGraphicsImageRenderer(bounds: sample.bounds).image { sample.layer.render(in: $0.cgContext) }
+            let attachment = XCTAttachment(image: screenshot)
+            attachment.name = "Switchboard summary and draft — " + (mode == .dark ? "dark" : "light")
+            attachment.lifetime = .keepAlways; add(attachment)
+            window.isHidden = true
+        }
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
@@ -225,9 +291,54 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(sends, 1)
         view.insertingNewline = true
         XCTAssertTrue(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 13, length: 0), replacementText: "\n"))
-        coordinator.textViewDidChange(view); XCTAssertEqual(edits, "draft")
+        coordinator.textViewDidChange(view); XCTAssertEqual(edits, "draftx", "Typing in history redirects the character into the draft")
         coordinator.parent.editable = false
         XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 13, length: 0), replacementText: "x"))
+    }
+    func testTypingFromHistoryRevealsDraftWithoutChangingHistory() {
+        let history = String(repeating: "History remains protected.\n", count: 80)
+        var edited = ""
+        let parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: history)], draft: "draft", images: [:], editable: true, lineNumbers: true, edit: { edited = $0 }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 320, height: 200); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        let protectedText = (view.text as NSString).substring(to: view.historyLength)
+        view.setContentOffset(.zero, animated: false); view.selectedRange = NSRange(location: 1, length: 5)
+        coordinator.explicitSelection = true; coordinator.follow.pause(now: 0)
+        view.insertText("x")
+        XCTAssertEqual(edited, "draftx")
+        XCTAssertEqual((view.text as NSString).substring(to: view.historyLength), protectedText)
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1)
+        XCTAssertTrue(coordinator.follow.following)
+        view.setContentOffset(.zero, animated: false); view.selectedRange = NSRange(location: 1, length: 5)
+        XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: view.selectedRange, replacementText: " pasted words"))
+        XCTAssertEqual(edited, "draftx pasted words", "UIKit replacement redirects without losing the first character")
+        XCTAssertEqual((view.text as NSString).substring(to: view.historyLength), protectedText)
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1)
+        view.isEditable = false; view.setContentOffset(.zero, animated: false); view.selectedRange = NSRange(location: 1, length: 0)
+        view.insertText("blocked")
+        XCTAssertEqual(edited, "draftx pasted words"); XCTAssertEqual(view.contentOffset.y, 0)
+    }
+    func testAttachmentCaretAndResizeHandle() throws {
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 400, height: 500)
+        let attachment = NSTextAttachment(); attachment.bounds = CGRect(x: 0, y: 0, width: 200, height: 300)
+        let content = NSMutableAttributedString(attachment: attachment)
+        content.append(NSAttributedString(string: "\nDraft", attributes: PadTranscript.draftAttributes("Draft")))
+        view.textStorage.setAttributedString(content); view.layoutManager.ensureLayout(for: view.textContainer)
+        for offset in [0, 1] {
+            let position = try XCTUnwrap(view.position(from: view.beginningOfDocument, offset: offset))
+            let caret = view.caretRect(for: position)
+            XCTAssertGreaterThan(caret.height, 0)
+            XCTAssertLessThanOrEqual(caret.height, UIFont.systemFont(ofSize: 16).lineHeight + 1, "Clicking an image must not create an image-height caret")
+        }
+        let handle = PadResizeHandle(frame: CGRect(x: 0, y: 0, width: PadSidebarDivider.width, height: 500))
+        let pointer = try XCTUnwrap(handle.interactions.compactMap { $0 as? UIPointerInteraction }.first)
+        XCTAssertNotNil(handle.pointerInteraction(pointer, styleFor: UIPointerRegion(rect: handle.bounds, identifier: nil)))
+        XCTAssertGreaterThanOrEqual(handle.bounds.width, 20)
+        var width: CGFloat = 200; var saves = 0
+        handle.drag = { width += $0 }; handle.end = { saves += 1 }
+        handle.accessibilityIncrement(); XCTAssertEqual(width, 220)
+        handle.accessibilityDecrement(); XCTAssertEqual(width, 200); XCTAssertEqual(saves, 2)
     }
     func testSnapshotEchoPreservesDraftSelectionAndOrangeStyle() {
         let first = DeviceWireMessage(id: UUID(), role: "assistant", text: "First reply")

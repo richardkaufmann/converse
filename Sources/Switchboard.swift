@@ -3,6 +3,10 @@ import Foundation
 // A complete, deliberately marked assistant reply is the only executable surface.
 // Tool output, quoted prose, partial streams and old transcripts are never scanned.
 struct SwitchboardCommand: Decodable {
+    static let agentTeaching = """
+    [Converse switchboard instructions]
+    Continue using the agent response JSON object required by your runtime, with a tell array for messages. Do not use converse command fences or list-sessions; use exact watched-session IDs from the supplied evidence and stay within your configured scope. Tell is one-way: omit replyExpected or set it false. Ask uses replyExpected:true and expects an answer, blocker, or explicit decline. To answer a request, include a tell to the sender with inReplyTo set to the request UUID. A transport acknowledgement is not an answer. Do not send receipt-only tells. Recovery notices do not create new reply obligations. Refreshing these instructions does not resolve outstanding requests; answer those with the matching inReplyTo. If the target is outside your scope, explain the blocker to the human. No urgent interruption capability is granted.
+    """
     static let conversationPolicy = "Switchboard: interpret “tell <session> <message>” as a one-way tell; no reply or receipt turn is requested. Interpret “ask <session> <question>” as ask: a correlated answer, blocker, or decline is expected. A transport acknowledgement is not an answer. Use exact IDs from list-sessions. Commands execute only as the ENTIRE final reply in a converse JSON fence: {\"command\":\"ask\",\"to\":\"ID\",\"text\":\"question\"} (use command tell for one-way messages). Reply to a request with tell and inReplyTo set to its request UUID; do not ask merely to acknowledge receipt. Legacy tell with replyExpected:true also requests an answer."
     let command: String
     var to: String?
@@ -30,6 +34,10 @@ extension Store {
     }
     func teachSwitchboard(_ s: Session) {
         s.switchboardEnabled = true
+        if s.entry.engine == "agent" {
+            enqueueSwitchboard(s, text: SwitchboardCommand.agentTeaching)
+            return
+        }
         let prompt = """
         [Converse switchboard instructions]
         This session can now send messages to other Converse sessions. Your session ID is \(s.id.uuidString).

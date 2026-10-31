@@ -308,7 +308,7 @@ public sealed partial class DeviceSyncService
     public void TeachSwitchboard(ChatSession session)
     {
         session.MessagingEnabled = true;
-        session.Pending.Add(new PendingPrompt { Text = SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nYour entire final reply must be exactly one converse fenced JSON block, without prose before or after it. Otherwise it is discussion and sends nothing. Discover IDs using ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same whole-reply fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
+        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nYour entire final reply must be exactly one converse fenced JSON block, without prose before or after it. Otherwise it is discussion and sends nothing. Discover IDs using ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same whole-reply fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
         _store.Save(); _store.RunNext(session);
     }
     private async Task ProcessParticipantReplyAsync(ChatSession source, string reply)

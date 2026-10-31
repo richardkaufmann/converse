@@ -47,6 +47,11 @@ static class AgentChecks
             store.Sessions.Remove(sender); store.Sessions.Remove(receiver);
             var agent = store.CreateAgent("Agent fixture");
             agent.MessagingEnabled = true;
+            agent.QueuePaused = true; agent.Draft = "Keep my agent draft";
+            home.TeachSwitchboard(agent);
+            check(agent.Pending.Count == 1 && agent.Pending[0].Text.Contains("tell array") && agent.Pending[0].Text.Contains("inReplyTo") && !agent.Pending[0].Text.Contains("```converse"), "Agent teaching preserves structured response format and correlated replies");
+            check(agent.QueuePaused && agent.Draft == "Keep my agent draft" && agent.Agent!.Settings.Watched.Count == 0 && !agent.Agent.CanSchedule, "Teaching does not change agent scope, draft or paused loop");
+            agent.Pending.Clear(); agent.Draft = ""; agent.QueuePaused = false;
             check(agent.Agent!.Settings.Watched.Count == 0 && !agent.Agent.CanSchedule, "New Windows agent starts paused with empty explicit scope");
             var calls = 0; string input = "";
             home.Agents.ReadSecret = _ => "test-only-not-a-real-key";
