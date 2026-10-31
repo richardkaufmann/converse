@@ -223,6 +223,10 @@ struct RemotePane: View {
     @State private var editingModel = false
     @State private var customModel = ""
     var transcript: DeviceTranscriptPayload? { service.remoteTranscripts[globalID] }
+    var homeName: String {
+        let name = DeviceGlobalID(globalID).flatMap { service.homes[$0.home]?.deviceName }?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.flatMap { $0.isEmpty ? nil : $0 } ?? "home device"
+    }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
     var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first { $0.payload.action == "submit" } }
@@ -235,7 +239,8 @@ struct RemotePane: View {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
                 SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent").font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
-                Text("on home Mac").font(.caption).foregroundStyle(.secondary)
+                Text("on " + homeName).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail).help("This session runs on " + homeName + ".")
                 Spacer(minLength: 0)
                 if service.remoteRow(globalID: globalID)?.participantKind == "agent" || transcript?.engine == "agent" {
                     Menu {
@@ -473,8 +478,7 @@ struct RemotePane: View {
         guard let transcript, let epoch = service.remoteLeases[globalID], transcript.epoch == epoch else { return }
         let key = globalID + "@" + String(epoch)
         guard force || composer.hydratedKey != key else { return }
-        let home = DeviceGlobalID(globalID).flatMap { service.homes[$0.home]?.deviceName } ?? "home device"
-        composer.hydrate(text: transcript.draft, hashes: transcript.draftImageHashes ?? [], key: key, origin: home + " (version " + String(transcript.draftVersion) + ")")
+        composer.hydrate(text: transcript.draft, hashes: transcript.draftImageHashes ?? [], key: key, origin: homeName + " (version " + String(transcript.draftVersion) + ")")
         for hash in composer.blobHashes where service.blobReady[hash] != true { service.queryBlob(globalID: globalID, hash: hash) }
         if let record = pendingRecord { composer.sentCommandID = record.commandID; composer.sentText = record.payload.text ?? ""; composer.sentHashes = record.payload.blobHashes }
     }
