@@ -1507,15 +1507,49 @@ final class ConversationTextView: NSTextView {
         let item = NSMenuItem(title: "Teach Session To Talk To Other Sessions", action: #selector(teachConversation(_:)), keyEquivalent: "")
         item.target = self; menu.addItem(.separator()); menu.addItem(item)
     }
+    func imageToolsItem(at character: Int) -> NSMenuItem? {
+        guard let storage = textStorage, character >= 0, character < storage.length,
+              let attachment = storage.attribute(.attachment, at: character, effectiveRange: nil) as? NSTextAttachment,
+              let image = attachment.fileWrapper?.regularFileContents.flatMap({ NSImage(data: $0) }) ?? attachment.image else { return nil }
+        let item = NSMenuItem(title: "Image tools · Describe / SAM…", action: #selector(openImageTools(_:)), keyEquivalent: "")
+        item.target = self; item.representedObject = image.copy() as? NSImage
+        return item
+    }
+    @objc private func openImageTools(_ sender: NSMenuItem) {
+        guard let image = sender.representedObject as? NSImage else { return }
+        MacImageToolsWindow.show(image: image, canApply: { [weak self] in self?.window != nil && self?.isEditable == true }, addNotes: { [weak self] notes in
+            guard let self, self.isEditable else { return }
+            self.focusInput()
+            self.insertText((self.string.hasSuffix("\n") ? "" : "\n\n") + "Image notes:\n" + notes, replacementRange: self.selectedRange())
+        }, addImage: { [weak self] image in
+            guard let self, self.isEditable else { return }; self.imagePaste?(image)
+        })
+    }
+    @objc private func saveImageToPhotos(_ sender: NSMenuItem) {
+        guard let image = sender.representedObject as? NSImage else { return }
+        PhotoImageShare.save(image)
+    }
+    override func orderFrontSharingServicePicker(_ sender: Any?) {
+        // NSTextView otherwise shares an attributed-text/HTML wrapper, which
+        // Photos silently ignores even when the selection is just an image.
+        if selectedRange().length == 1, let image = imageToolsItem(at: selectedRange().location)?.representedObject as? NSImage {
+            PhotoImageShare.showPicker(image, from: self)
+        } else { super.orderFrontSharingServicePicker(sender) }
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         addTeachingItem(to: menu)
-        guard let layout = layoutManager, let container = textContainer, !copyBlocks.isEmpty else { return menu }
+        guard let layout = layoutManager, let container = textContainer else { return menu }
         var point = convert(event.locationInWindow, from: nil)
         point.x -= textContainerOrigin.x; point.y -= textContainerOrigin.y
         let glyph = layout.glyphIndex(for: point, in: container)
         let character = glyph < layout.numberOfGlyphs ? layout.characterIndexForGlyph(at: glyph) : (string as NSString).length
         guard glyph < layout.numberOfGlyphs else { return menu }
+        if layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(point), let tools = imageToolsItem(at: character) {
+            menu.insertItem(.separator(), at: 0); menu.insertItem(tools, at: 0)
+            let save = NSMenuItem(title: "Save Image to Photos", action: #selector(saveImageToPhotos(_:)), keyEquivalent: "")
+            save.target = self; save.representedObject = tools.representedObject; menu.insertItem(save, at: 1)
+        }
         let line = layout.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
         guard point.y >= line.minY && point.y < line.maxY, let action = copyAction(at: character) else { return menu }
         let item = NSMenuItem(title: action.title, action: #selector(copyConversationBlock(_:)), keyEquivalent: "")
@@ -1777,8 +1811,20 @@ struct ScrollingConversation: NSViewRepresentable {
             @discardableResult func image(_ path: String) -> Bool {
                 guard let img = NSImage(contentsOfFile: path) else { return false }
                 let attachment = NSTextAttachment(); attachment.image = img
+                // Share extensions need actual image bytes and a filename;
+                // a display-only attachment is not a portable image file.
+                if let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                    attachment.fileWrapper = FileWrapper(regularFileWithContents: png)
+                    attachment.fileWrapper?.preferredFilename = "Converse-image.png"
+                }
                 let scale = min(1, 480 / max(img.size.width, 1), 260 / max(img.size.height, 1))
                 attachment.bounds = NSRect(x: 0, y: 0, width: img.size.width * scale, height: img.size.height * scale)
+                // A file-backed AppKit attachment uses its cell's size, rather
+                // than NSTextAttachment.bounds, for layout. Keep full pixels
+                // in the wrapper but constrain the on-screen preview.
+                let preview = img.copy() as! NSImage
+                preview.size = attachment.bounds.size
+                attachment.attachmentCell = NSTextAttachmentCell(imageCell: preview)
                 if document.length > 0 && !document.string.hasSuffix("\n") { append("\n") }
                 document.append(NSAttributedString(attachment: attachment)); return true
             }
@@ -2815,7 +2861,9 @@ func selfTest() {
     store.attach(s, image: image)
     check(s.attachments.count == 1 && FileManager.default.fileExists(atPath: s.attachments[0]), "Pasted image saved as PNG")
     let imageDraft = store.create(entry)
-    store.attach(imageDraft, image: image); store.attach(imageDraft, image: image)
+    let largeImage = NSImage(size: NSSize(width: 1600, height: 1200))
+    largeImage.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 1600, height: 1200).fill(); largeImage.unlockFocus()
+    store.attach(imageDraft, image: image); store.attach(imageDraft, image: largeImage)
     let imagePaths = imageDraft.attachments
     imageDraft.messages = [Message(role: "assistant", text: "Historical image", images: [imagePaths[0]])]
     imageDraft.draft = "Keep this text"
@@ -2823,6 +2871,17 @@ func selfTest() {
     let imageCoordinator = ScrollingConversation.Coordinator(imageDraft)
     imageEditor.imageRemove = { path in store.removeDraftImage(imageDraft, path: path); imageCoordinator.render(imageEditor) }
     imageCoordinator.render(imageEditor)
+    var renderedImageLocations: [Int] = []
+    imageEditor.textStorage?.enumerateAttribute(.attachment, in: NSRange(location: 0, length: imageEditor.textStorage!.length)) { value, range, _ in
+        guard let attachment = value as? NSTextAttachment else { return }
+        renderedImageLocations.append(range.location)
+        check(attachment.fileWrapper?.preferredFilename?.hasSuffix(".png") == true && attachment.fileWrapper?.regularFileContents.flatMap { NSImage(data: $0) } != nil, "Transcript image sharing carries a decodable PNG file with a filename")
+        check((attachment.attachmentCell?.cellSize().width ?? 1000) <= 480 && (attachment.attachmentCell?.cellSize().height ?? 1000) <= 260, "Named image attachments keep bounded transcript previews")
+        check(imageEditor.imageToolsItem(at: range.location)?.representedObject is NSImage, "Image tools target the clicked historical or draft attachment")
+    }
+    check(renderedImageLocations.count == 3 && imageEditor.imageToolsItem(at: imageEditor.inputStart) == nil, "Image menu is present for history and both draft images, never plain draft text")
+    let normalizedImage = try! MacImageSource.normalized(image)
+    check(NSBitmapImageRep(data: normalizedImage)?.pixelsWide == 16, "Image tools normalize a captured image without changing its dimensions unnecessarily")
     check(imageEditor.draftImageButtons.count == 2 && imageEditor.draftImages.allSatisfy { $0.location < imageEditor.inputStart }, "Only draft image previews receive native remove buttons; historical images remain protected")
     check(imageEditor.messageLabels.map(\.number) == [1] && imageEditor.messageLabels[0].location < imageEditor.inputStart, "Historical images share their message number and draft attachment previews remain unnumbered")
     imageEditor.setSelectedRange(NSRange(location: imageEditor.inputStart + 3, length: 0))

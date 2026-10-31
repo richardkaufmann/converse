@@ -6,6 +6,21 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testImageToolsMenuForHistoryAndDraftOnly() {
+        let parent = PadTranscript(messages: [], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in }, imageTools: { _, _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        let view = TailTextView.native()
+        let attachment = NSTextAttachment()
+        attachment.image = UIGraphicsImageRenderer(size: CGSize(width: 12, height: 12)).image { c in UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 12, height: 12)) }
+        view.textStorage.append(NSAttributedString(attachment: attachment))
+        view.textStorage.append(NSAttributedString(string: "text"))
+        view.textStorage.append(NSAttributedString(attachment: attachment))
+        XCTAssertNotNil(coordinator.imageToolsAction(view, range: NSRange(location: 0, length: 1)))
+        XCTAssertNotNil(coordinator.imageToolsAction(view, range: NSRange(location: 5, length: 1)))
+        XCTAssertNil(coordinator.imageToolsAction(view, range: NSRange(location: 1, length: 1)))
+        coordinator.parent.editable = false
+        XCTAssertNil(coordinator.imageToolsAction(view, range: NSRange(location: 0, length: 1)))
+    }
     func testBuiltAppDeclaresPhotoSavePermission() throws {
         // Check the packaged host, not a source-file string: UIKit supplies
         // Save Image for transcript attachments and TCC aborts without this.

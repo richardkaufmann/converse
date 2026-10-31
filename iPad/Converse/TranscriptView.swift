@@ -231,6 +231,7 @@ struct PadTranscript: UIViewRepresentable {
     var attach: (Data) -> Void
     var removeImage: (String) -> Void = { _ in }
     var pasteError: (String) -> Void = { _ in }
+    var imageTools: ((String?, Data) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
@@ -314,6 +315,7 @@ struct PadTranscript: UIViewRepresentable {
                 attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * ratio, height: image.size.height * ratio)
                 if result.length > 0 && !result.string.hasSuffix("\n") { result.append(Self.separator()) }
                 result.append(NSAttributedString(attachment: attachment))
+                result.addAttribute(NSAttributedString.Key("Converse.imageHash"), value: hash, range: NSRange(location: result.length - 1, length: 1))
             }
             guard result.length > start else { continue }
             let last = result.length - 1
@@ -334,7 +336,8 @@ struct PadTranscript: UIViewRepresentable {
             let ratio = min(1, max(100, view.bounds.width - view.textContainerInset.left - view.textContainerInset.right - 10) / image.size.width, 260 / image.size.height)
             attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * ratio, height: image.size.height * ratio)
             view.draftImages.append((result.length, hash))
-            result.append(NSAttributedString(attachment: attachment)); result.append(Self.separator())
+            result.append(NSAttributedString(attachment: attachment))
+                result.addAttribute(NSAttributedString.Key("Converse.imageHash"), value: hash, range: NSRange(location: result.length - 1, length: 1)); result.append(Self.separator())
         }
         c.historyLength = result.length
         view.historyLength = result.length
@@ -448,6 +451,25 @@ struct PadTranscript: UIViewRepresentable {
         weak var view: TailTextView?
         var updating = false
         var trafficDetails: [String: String] = [:]
+        func imageToolsAction(_ textView: UITextView, range: NSRange) -> UIAction? {
+            guard parent.editable, parent.imageTools != nil, range.location < textView.textStorage.length,
+                  let attachment = textView.textStorage.attribute(.attachment, at: range.location, effectiveRange: nil) as? NSTextAttachment,
+                  let bytes = attachment.image?.pngData() else { return nil }
+            let hash = textView.textStorage.attribute(NSAttributedString.Key("Converse.imageHash"), at: range.location, effectiveRange: nil) as? String
+            let title = hash.map { parent.draftImageHashes.contains($0) } == true ? "Image tools · Describe / SAM…" : "Use in draft · Image tools…"
+            return UIAction(title: title, image: UIImage(systemName: "wand.and.stars")) { [weak self] _ in
+                guard let self, self.parent.editable else { return }
+                self.parent.imageTools?(hash, bytes)
+            }
+        }
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let action = imageToolsAction(textView, range: range) else { return nil }
+            return UIMenu(children: [action] + suggestedActions)
+        }
+        func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
+            guard let action = imageToolsAction(textView, range: textItem.range) else { return nil }
+            return UITextItem.MenuConfiguration(menu: UIMenu(children: [action] + defaultMenu.children))
+        }
         func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
             guard URL.scheme == "converse-traffic" else { return true }
             guard let full = trafficDetails[URL.lastPathComponent] else { return false }

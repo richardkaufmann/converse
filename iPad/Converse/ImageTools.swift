@@ -18,7 +18,8 @@ struct PadImageTools: View {
     @State private var lastRequest: DeviceImageAssistRequest?
     @State private var operationID = UUID()
     @State private var uncertain = false
-    init(id: String, model: PadModel) { self.id = id; self.model = model; self.service = model.service }
+    let initialHash: String?
+    init(id: String, model: PadModel, initialHash: String? = nil) { self.id = id; self.model = model; self.service = model.service; self.initialHash = initialHash }
     var image: UIImage? { service.blobCache[selected].flatMap { UIImage(contentsOfFile: $0.path) } }
     var valid: Bool { model.canApplyImageResult(id, hash: selected, epoch: epoch) }
     var region: DeviceImageRegion? { regions.indices.contains(selectedRegion) ? regions[selectedRegion] : nil }
@@ -77,7 +78,7 @@ struct PadImageTools: View {
                 }.padding()
             }.navigationTitle("Image tools")
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
-                .onAppear { if selected.isEmpty { selected = model.draft(id).hashes.first ?? ""; epoch = service.remoteLeases[id] } }
+                .onAppear { if selected.isEmpty { selected = initialHash ?? model.draft(id).hashes.first ?? ""; epoch = service.remoteLeases[id] } }
                 .onChange(of: selected) { _, _ in point = nil; notes = ""; described = false; regions = []; status = ""; uncertain = false }
         }
     }

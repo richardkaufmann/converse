@@ -49,11 +49,15 @@ Agents reach beyond the app. They can search the web for current facts, watch a 
 
 Converse also integrates with **Meta's Muse mobile app and its avatar, Jolly**. From Jolly on your phone you can address a Converse agent by name, ask what your coding sessions are doing, and leave requests it picks up on your Mac — your desktop coding workspace, reachable from Meta's personal assistant. Credentials and execution stay on the agent's home; its transcript and scoreboard data travel to viewers. Native scoreboard windows and HTML export are desktop features.
 
-### Image tools on iPad
+### Image tools on Mac and iPad
 
 After attaching or pasting an image, tap the **wand** beside the image count. **Describe image** uses Muse Spark to draft notes you can edit before adding them to the current prompt. Or tap an object in the preview and choose **Find region · SAM** to inspect a highlighted region, then add its crop as another attachment. The original stays attached. Nothing sends until you press Send.
 
-These tools work with any session provider. This first version requires an updated **Mac home** with a Meta API key saved in Agent Setup; Windows/Linux image processing is not yet available. Processing sends the selected attachment to Meta, using the home's credentials. SAM selects geometry; Spark writes descriptions. SAM's first-version selection is a rectangular crop, not a transparent cutout. If a request times out, **Check result** queries the same operation without paying for another run.
+On Mac, right-click any transcript image or unsent attachment and choose **Image tools · Describe / SAM…**. Processing uses the Meta key saved on that Mac. On iPad, the image menu also offers **Use in draft · Image tools…**, which attaches a copy of a historical image and opens the same tools. Neither action submits a prompt.
+
+On Mac, **Save Image to Photos** hands a named PNG to Photos and reports success or failure. Successful import on the Mac is separate from iCloud synchronization to other devices.
+
+These tools work with any session provider. The iPad version requires an updated **Mac home** with a Meta API key saved in Agent Setup; Windows/Linux image processing is not yet available. Processing sends the selected attachment to Meta, using the home's credentials. SAM selects geometry; Spark writes descriptions. SAM's first-version selection is a rectangular crop, not a transparent cutout. If a request times out, **Check result** queries the same operation without paying for another run.
 
 In **Agent Setup**, the separate **Scoreboard art direction** field controls subject, style, colors and humor. It is saved independently of success criteria and passed directly to Muse Image. A changed direction requests new art on the next scoreboard refresh, even if the mood is unchanged. Save and run once to try it; automatic runs remain governed by the existing loop settings.
 

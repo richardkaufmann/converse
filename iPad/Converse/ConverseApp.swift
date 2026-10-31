@@ -189,6 +189,7 @@ struct PadPane: View {
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
     @State private var imageTools = false
+    @State private var imageToolsHash: String?
     @State private var sessionActions: DeviceSidebarRow?
     @State private var scoreboardExpanded = false
     @State private var editingModel = false
@@ -259,7 +260,10 @@ struct PadPane: View {
             }
             if let snapshot, snapshot.offset > 0 { Button("Load \(snapshot.offset) earlier messages") { service.requestEarlier(globalID: id) }.font(.caption).padding(4) }
             PadTranscript(messages: snapshot?.messages ?? [], draft: model.draft(id).text, images: service.blobCache, draftImageHashes: model.draft(id).hashes, editable: model.canControl(id), lineNumbers: model.lineNumbers, displayEpoch: service.remoteLeases[id],
-                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 })
+                          edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 }, imageTools: { originalHash, bytes in
+                              let existing = originalHash.flatMap { model.draft(id).hashes.contains($0) ? $0 : nil }
+                              if let hash = existing ?? model.attach(id, data: bytes) { imageToolsHash = hash; imageTools = true }
+                          })
                 .overlay(alignment: .bottomTrailing) {
                     if let state = snapshot?.compaction, state.visible {
                         Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }
@@ -294,7 +298,7 @@ struct PadPane: View {
                 PhotosPicker(selection: $photo, matching: .images) { Image(systemName: "photo") }.accessibilityLabel("Choose image from Photos")
                 Button { importing = true } label: { Image(systemName: "paperclip") }.accessibilityLabel("Attach image file")
                 if !model.draft(id).hashes.isEmpty {
-                    Button { imageTools = true } label: { Image(systemName: "wand.and.stars") }.accessibilityLabel("Image tools")
+                    Button { imageToolsHash = nil; imageTools = true } label: { Image(systemName: "wand.and.stars") }.accessibilityLabel("Image tools")
                     Text("\(model.draft(id).hashes.count) images").font(.caption)
                     Button("Clear images") { model.clearImages(id) }.font(.caption)
                 }
@@ -323,7 +327,7 @@ struct PadPane: View {
                     if photo == value { photo = nil }
                 }
             }
-            .sheet(isPresented: $imageTools) { PadImageTools(id: id, model: model) }
+            .sheet(isPresented: $imageTools) { PadImageTools(id: id, model: model, initialHash: imageToolsHash) }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.image]) { result in
                 do {
                     let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
