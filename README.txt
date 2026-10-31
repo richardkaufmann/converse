@@ -1,21 +1,21 @@
-Converse — macOS preview 0.4.4
+Converse — macOS 0.5.58 (83)
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
 This release is Developer ID signed and notarized by Apple.
 Drag Converse.app to Applications. Install and sign in to your assistant CLIs separately.
 macOS shows its normal confirmation when first opening a downloaded app.
-The source and build script are included; no Xcode project or third-party dependencies are required. This preview was built and tested on this Mac with its installed macOS SDK.
+Source and build instructions: https://github.com/richardkaufmann/converse
+The app was built and tested on an Apple Silicon Mac; Intel hardware is not independently tested.
 
 FIRST LAUNCH
-The setup guide lets you select one or more assistants, follow CLI installation
-links, check each CLI, choose a working folder, and sign in to named accounts.
-Default accounts reuse existing CLI logins. Add another account for a separate
-sign-in. Sign in opens Terminal; finish its browser/terminal flow and return here.
-Muse reuses its own CLI login. Choose an assistant and account to create a first
-session; creating it sends no prompt. Check CLI confirms installation, not sign-in.
-Converse > Setup reopens setup. Set up later skips it. Existing accounts,
-commands, sessions and drafts survive upgrades unchanged.
+New installations start with Converse App Support. Pick Meta Muse, Claude, or
+Codex. Converse opens the provider's CLI login, then confirms a model response
+before continuing. Install the chosen CLI first if it is missing.
+App Support learns app setup/control and the switchboard, then welcomes you
+with links to Help and guides for sessions, agents, Discord and Groups.
+Existing installations retain their sessions, accounts, drafts and paired-device
+identity. Converse > Setup reopens the assistant/account wizard.
 
 USE
 Click + beside an assistant to start a separate conversation.

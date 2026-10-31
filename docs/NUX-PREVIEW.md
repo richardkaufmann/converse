@@ -1,6 +1,6 @@
 # Converse Setup Preview
 
-This is a Mac-only build82 prototype, not a production update or a TestFlight release.
+The isolated Mac preview validated onboarding in build82. The same onboarding and teaching flow ships in the normal Mac app starting with **0.5.58 (83)**. Windows and mobile onboarding have not yet been ported. This separate preview remains available for testing without touching production data.
 
 Build with:
 

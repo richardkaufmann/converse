@@ -17,9 +17,9 @@ It's a bit "opinionated" to match how I work. Feel free to rip it off and make a
 
 📖 **Documentation:** this README is both the [GitHub front page](https://github.com/richardkaufmann/converse) and the in-app Help (searchable, offline, under **Help → Converse Help** on Mac). The two are the same text.
 
-## Converse App Support (Mac setup preview)
+## Converse App Support (Mac)
 
-The isolated **Converse Setup Preview** (build 82) starts with one **Converse App Support** session. Pick Meta Muse, Claude, or Codex; Converse opens that provider's native CLI login, then checks one short model response. Setup stays gated on failed, cancelled, missing, or timed-out authentication. The support session becomes available only after a successful model response. No additional setup questionnaire is required.
+Starting with Mac **0.5.58 (83)**, a new installation starts with one **Converse App Support** session. Pick Meta Muse, Claude, or Codex; Converse opens that provider's native CLI login, then checks one short model response. Setup stays gated on failed, cancelled, missing, or timed-out authentication. The support session becomes available only after a successful model response. No additional setup questionnaire is required.
 
 Successful onboarding teaches App Support both app setup/control and the switchboard. It clears the login and teaching text from view before showing the support reply; the learned context remains intact.
 
@@ -27,7 +27,7 @@ The welcome message links to **README**, **Discord**, and **Connect the Meta Mus
 
 Right-click a local session or agent and choose **Teach Converse Setup & Control** to enable the same help and app commands. Teaching survives restart and compaction. The assistant can inspect safe configuration, search installed Help, create a paused agent, configure its objective/repository/Discord channel/Jolly access, and open native setup controls for credentials and connection tests. App operations return explicit results; saving settings does not prove a connection works. No scheduled loop or speech is enabled by teaching. **Disable app control** revokes the capability.
 
-The preview uses a separate bundle identity, preferences, data folder, provider logins, Keychain services, device identity and listening port. It does not replace the normal app. See [the preview walkthrough](docs/NUX-PREVIEW.md).
+Existing installations retain their sessions, accounts and layout; upgrading does not rerun first-launch setup. The separate **Converse Setup Preview** remains available for isolated onboarding tests. See [the preview walkthrough](docs/NUX-PREVIEW.md).
 
 ## Set up your first coding session
 
@@ -42,7 +42,7 @@ A **coding session** is a conversation with Muse, Claude Code, or Codex, connect
 
 You have a working coding session when the assistant responds about the intended project, using the intended login and home computer. A provider being installed is not enough; the first successful response confirms the connection.
 
-To have this session cooperate with others, choose **Teach Session To Talk To Other Sessions** from its context menu. Then ask naturally: “Ask Code Review to review this change.” App Support receives switchboard teaching automatically in the updated setup preview. Each ordinary coding session still has its own teaching choice.
+To have this session cooperate with others, choose **Teach Session To Talk To Other Sessions** from its context menu. Then ask naturally: “Ask Code Review to review this change.” App Support receives switchboard teaching automatically during Mac onboarding. Each ordinary coding session still has its own teaching choice.
 
 ## Set up your first agent
 
@@ -154,7 +154,7 @@ Current releases are **Developer ID signed and notarized by Apple**. macOS shows
 
 ## First launch
 
-Setup opens automatically for a new installation. The **Mac setup preview** uses the provider-gated App Support flow described above; it does not offer Set up later. The earlier setup wizard in production builds through 80 uses these steps:
+Setup opens automatically for a new installation. Mac **0.5.58 (83)** and later use the provider-gated App Support flow described above; it does not offer Set up later. Existing users reopening Setup, and older builds, use the assistant/account wizard:
 
 1. Choose one or more assistants, follow the official CLI installation links, and use **Check CLI** to verify installation. Choose an existing project folder (or keep `~` for your home folder).
 2. Reuse an existing CLI login or use **Sign in…** to open the selected CLI’s login flow in Terminal. Add another named Codex or Claude account for an independent sign-in. Muse reuses its CLI login. Credentials stay in the CLI’s stores.
@@ -519,8 +519,8 @@ These are handled by Converse without sending a prompt or spending model tokens:
 | `/status` | Refresh and display all session details |
 | `/stop` | Interrupt the current turn |
 | `/login` | Choose an existing login, create a new login, or sign in again; uses the same picker as session creation |
-| `/clear` | Mac setup preview: hide the current transcript without resetting model context or teaching |
-| `/unclear` | Mac setup preview: restore the hidden transcript |
+| `/clear` | Mac: hide the current transcript without resetting model context or teaching |
+| `/unclear` | Mac: restore the hidden transcript |
 | `/help` | Show local command help |
 
 Muse queries run automatically when a conversation is opened. Read-only metadata commands do not change model, permissions or effort. `/usage` additionally invokes the built-in CLI usage view to fetch subscription quota; it never submits a model request. The status pickers, by contrast, explicitly update the selected conversation's model, effort or access profile. Muse uses its durable setters. Codex and Claude save per-conversation overrides and pass them on each subsequent turn, including resumed turns. CLI defaults are labeled when the CLI does not report a resolved effort. Claude and Codex also refresh their model catalogs and account/session metadata without submitting a model prompt. These commands do not implement the full CLI slash-command menus. Unrecognized commands remain ordinary prompts.
