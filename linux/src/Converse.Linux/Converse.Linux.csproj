@@ -7,8 +7,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <Version>0.5.54</Version>
-    <InformationalVersion>0.5.54+79</InformationalVersion>
+    <Version>0.5.55</Version>
+    <InformationalVersion>0.5.55+80</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute" Condition="'$(ConverseSourceCommit)' != ''">

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 enum PaneSizing {
     static let modelColumnThreshold: CGFloat = 360
@@ -48,12 +49,15 @@ enum PaneSizing {
         guard let inner = split(in: outer.arrangedSubviews[1]), inner.arrangedSubviews.count == paneCount else { return false }
         inner.layoutSubtreeIfNeeded()
         let sizes = widths(available: inner.bounds.width - CGFloat(paneCount - 1) * inner.dividerThickness, weights: weights.count == paneCount ? weights : Array(repeating: 1, count: paneCount))
-        var position: CGFloat = 0
+        var position: CGFloat = 0, positions: [CGFloat] = []
         for index in 0..<(paneCount - 1) {
-            position += sizes[index]
-            inner.setPosition(position, ofDividerAt: index)
+            position += sizes[index]; positions.append(position)
             position += inner.dividerThickness
         }
+        // Moving a divider can be constrained by its neighbour's old position.
+        // Clear space from both directions before considering the layout done.
+        for index in positions.indices.reversed() { inner.setPosition(positions[index], ofDividerAt: index) }
+        for index in positions.indices { inner.setPosition(positions[index], ofDividerAt: index) }
         return true
     }
 }
@@ -76,6 +80,7 @@ final class WindowPaneLayout {
     private var revision = 0
     private var lastExpandedSidebar: CGFloat = 340
     private var restoreSidebarCap: CGFloat?
+    private var countChangeSidebar: CGFloat?
     private var observers: [NSObjectProtocol] = []
     init(window: NSWindow) {
         self.window = window
@@ -90,7 +95,7 @@ final class WindowPaneLayout {
     func setSidebarCollapsed(_ collapsed: Bool) {
         guard collapsed != sidebarCollapsed else { return }
         if collapsed, let window { lastExpandedSidebar = PaneSizing.sidebarWidth(in: window) ?? preferredSidebar }
-        sidebarCollapsed = collapsed
+        sidebarCollapsed = collapsed; countChangeSidebar = nil
         updateMinimumWidth()
         if !collapsed, let window {
             let width = window.contentRect(forFrameRect: window.frame).width
@@ -99,17 +104,26 @@ final class WindowPaneLayout {
         }
         schedule()
     }
-    private func updateMinimumWidth() {
+    private func updateMinimumWidth(preservingSidebar: CGFloat? = nil) {
         guard let window else { return }
-        window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed), height: 540)
+        let base = Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed)
+        let preserved = (preservingSidebar ?? 0) + max(310, CGFloat(max(0, paneCount)) * PaneSizing.minimumPane) + 12
+        window.contentMinSize = NSSize(width: max(base, preserved), height: 540)
         let size = window.contentRect(forFrameRect: window.frame).size
         if size.width < window.contentMinSize.width { window.setContentSize(NSSize(width: window.contentMinSize.width, height: max(540, size.height))) }
     }
     func setPaneCount(_ count: Int) {
-        guard count != paneCount, window != nil else { return }
-        if count > paneCount && paneCount >= 0 && !sidebarCollapsed { sidebarLimit = min(sidebarLimit, PaneSizing.compactSidebar) }
+        guard count != paneCount, let window else { return }
+        // Capture the displayed sidebar before SwiftUI replaces its pane tree.
+        // Rapid count changes retain this same width through intermediate layouts.
+        if paneCount >= 0 { countChangeSidebar = countChangeSidebar ?? (sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.sidebarWidth(in: window) ?? lastSidebar) }
+        pending = true
         paneCount = count; weights = Array(repeating: 1, count: count)
-        updateMinimumWidth()
+        updateMinimumWidth(preservingSidebar: countChangeSidebar)
+        if let width = countChangeSidebar, !sidebarCollapsed {
+            preferredSidebar = width; referenceWidth = window.contentRect(forFrameRect: window.frame).width
+            sidebarLimit = 480; restoreSidebarCap = nil
+        }
         schedule()
     }
     private func windowResized() {
@@ -117,7 +131,8 @@ final class WindowPaneLayout {
         schedule()
     }
     private func dividerChanged() {
-        guard !applying, !pending, let window, let outer = PaneSizing.split(in: window.contentView) else { return }
+        guard !applying, let window, let outer = PaneSizing.split(in: window.contentView) else { return }
+        if pending { schedule(); return }
         let width = window.contentRect(forFrameRect: window.frame).width
         guard abs(width - lastWidth) < 0.5 else { schedule(); return }
         guard outer.arrangedSubviews.count == 2 else { return }
@@ -137,15 +152,21 @@ final class WindowPaneLayout {
     private func arrange(_ token: Int, attempts: Int) {
         guard token == revision, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
-        let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
+        let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : countChangeSidebar ?? PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
         applying = true
         let success = PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights)
         applying = false
-        if !success && attempts > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.arrange(token, attempts: attempts - 1) }; return
+        if !success {
+            if attempts > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.arrange(token, attempts: attempts - 1) } }
+            // A remote pane can mount after these short retries. Its native
+            // layout notification will retry; do not adopt intermediate widths.
+            return
         }
         lastWidth = width; lastSidebar = PaneSizing.sidebarWidth(in: window) ?? sidebar
-        restoreSidebarCap = nil
+        restoreSidebarCap = nil; countChangeSidebar = nil
+        // The temporary growth floor protects the sidebar during the count
+        // transition; later manual window resizing keeps its usual minimum.
+        window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed), height: 540)
         pending = false
     }
 }
@@ -178,10 +199,10 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - 420) < 2, "A manually chosen sidebar width returns after shrinking and enlarging")
     let removed = inner.arrangedSubviews.last!; inner.removeArrangedSubview(removed); removed.removeFromSuperview()
     layout.setPaneCount(2); settle()
-    check(abs(sizes()[0] - sizes()[1]) < 2, "Removing a pane balances the surviving native panes")
+    check(abs(sizes()[0] - sizes()[1]) < 2 && abs((PaneSizing.sidebarWidth(in: window) ?? 0) - 420) < 2, "Removing a pane balances survivors without changing the sidebar")
     let left = PaneSizing.sidebarWidth(in: window) ?? 0
     inner.addArrangedSubview(NSView()); layout.setPaneCount(3); settle()
-    check((sizes().max()! - sizes().min()!) < 2 && (PaneSizing.sidebarWidth(in: window) ?? 999) <= PaneSizing.compactSidebar + 1 && left > PaneSizing.compactSidebar, "Adding a pane balances all panes and compacts a wide sidebar")
+    check((sizes().max()! - sizes().min()!) < 2 && abs((PaneSizing.sidebarWidth(in: window) ?? 0) - left) < 2, "Adding a pane balances all panes without changing the sidebar")
     let expandedSidebar = PaneSizing.sidebarWidth(in: window) ?? 0
     let savedPreference = layout.preferredSidebar, savedWeights = layout.weights
     layout.setSidebarCollapsed(true); settle()
@@ -191,5 +212,64 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 999) - PaneSizing.collapsedSidebar) < 2 && layout.weights == savedWeights, "A collapsed sidebar stays minimized during resizing and preserves session-pane proportions")
     layout.setSidebarCollapsed(false); settle()
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - expandedSidebar) < 2, "The pin restores the previous native sidebar width after resizing")
+    window.close()
+    swiftUIPaneCountSelfTests(check)
+}
+
+private final class PaneCountFixture: ObservableObject {
+    @Published var count = 1
+}
+private struct PaneCountFixtureView: View {
+    @ObservedObject var fixture: PaneCountFixture
+    var body: some View {
+        HSplitView {
+            Text("Sidebar").frame(minWidth: 160, idealWidth: 420, maxWidth: 480, maxHeight: .infinity)
+            HSplitView {
+                ForEach(0..<fixture.count, id: \.self) { i in
+                    Text("Session \(i)").frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }.frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+func swiftUIPaneCountSelfTests(_ check: (Bool, String) -> Void) {
+    let fixture = PaneCountFixture()
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 700), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = NSHostingView(rootView: PaneCountFixtureView(fixture: fixture))
+    let layout = WindowPaneLayout(window: window)
+    func settle() { window.contentView?.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.25)) }
+    func inner() -> NSSplitView? { PaneSizing.split(in: window.contentView).flatMap { $0.arrangedSubviews.count == 2 ? PaneSizing.split(in: $0.arrangedSubviews[1]) : nil } }
+    func widths() -> [CGFloat] { inner()?.arrangedSubviews.map { $0.frame.width } ?? [] }
+    layout.setPaneCount(1); settle()
+    PaneSizing.split(in: window.contentView)?.setPosition(420, ofDividerAt: 0); settle()
+    let sidebar = PaneSizing.sidebarWidth(in: window) ?? 0
+    for count in [2, 3, 2, 1, 0, 2, 3] {
+        // Like @Published's willSet delivery: scheduling sees the old SwiftUI tree.
+        layout.setPaneCount(count); fixture.count = count; settle()
+        let sizes = widths()
+        check(sizes.count == count && (sizes.max() ?? 0) - (sizes.min() ?? 0) < 2 && abs((PaneSizing.sidebarWidth(in: window) ?? 0) - sidebar) < 2,
+              "SwiftUI count change to \(count) equalizes panes and preserves sidebar (panes: \(sizes), sidebar: \(PaneSizing.sidebarWidth(in: window) ?? -1))")
+        if count > 1 { inner()?.setPosition(280, ofDividerAt: 0); settle() }
+    }
+    layout.setPaneCount(1); fixture.count = 1; settle()
+    layout.setPaneCount(3)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+    fixture.count = 3; settle()
+    check(widths().count == 3 && (widths().max() ?? 0) - (widths().min() ?? 0) < 2 && abs((PaneSizing.sidebarWidth(in: window) ?? 0) - sidebar) < 2,
+          "A delayed SwiftUI pane mount still equalizes after the initial sizing retries")
+    inner()?.setPosition(280, ofDividerAt: 0); settle()
+    let before = widths(); layout.setPaneCount(3); settle()
+    check(zip(widths(), before).allSatisfy { abs($0 - $1) < 2 }, "Same-count updates preserve manually dragged pane widths")
+    layout.setPaneCount(2); fixture.count = 2; settle()
+    window.setContentSize(NSSize(width: 1000, height: 700)); settle()
+    PaneSizing.split(in: window.contentView)?.setPosition(420, ofDividerAt: 0); settle()
+    let narrowSidebar = PaneSizing.sidebarWidth(in: window) ?? 0
+    layout.setPaneCount(3); fixture.count = 3; settle()
+    check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - narrowSidebar) < 2 && widths().allSatisfy { $0 >= 219 } && (widths().max() ?? 0) - (widths().min() ?? 0) < 2,
+          "Adding a pane to a narrow window grows the window instead of stealing sidebar width")
+    window.setContentSize(NSSize(width: 834, height: 700)); settle()
+    check(window.contentRect(forFrameRect: window.frame).width < 900 && widths().allSatisfy { $0 >= 219 }, "Count-change sidebar protection does not prevent later manual window shrinking")
     window.close()
 }

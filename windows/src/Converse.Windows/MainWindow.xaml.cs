@@ -380,6 +380,7 @@ public sealed partial class MainWindow : Window
     // every refresh unloads the panes and drops keyboard focus mid-word,
     // which reads as "can't type into any pane".
     private string _paneLayoutSig = "";
+    private int _visiblePaneCount;
 
     private void RefreshPanes()
     {
@@ -387,10 +388,9 @@ public sealed partial class MainWindow : Window
         var occupied = new[] { 1, 2, 3 }.Where(pane => _placements.KeyIn(pane) is not null).ToList();
         if (_focusedPane < 1 || _placements.KeyIn(_focusedPane) is null)
             _focusedPane = occupied.Count > 0 ? occupied[0] : 0;
-        // Occupancy and assignments only: focus changes tint badges in
-        // place and must never rebuild the tree (see above).
-        var sig = string.Join(",", occupied) + "|keys="
-            + string.Join(",", occupied.Select(pane => _placements.KeyIn(pane)));
+        // Visible slots only: session replacement and focus changes update
+        // the existing panes without rebuilding the column tree.
+        var sig = string.Join(",", occupied);
         if (sig != _paneLayoutSig)
         {
             _paneLayoutSig = sig;
@@ -421,9 +421,12 @@ public sealed partial class MainWindow : Window
     // Windows adjustment affordance — GridSplitter would need the
     // Community Toolkit). Columns carry a minimum so a drag can never
     // squeeze a pane shut; user widths survive refreshes until the next
-    // occupancy change resets to equal shares.
+    // count change resets to equal shares; slot moves preserve widths.
     private void RebuildPaneColumns(List<int> occupied)
     {
+        var previousWidths = PaneHost.ColumnDefinitions.Where((_, index) => index % 2 == 0).Select(column => column.Width).ToArray();
+        var preserveWidths = _visiblePaneCount == occupied.Count && previousWidths.Length == occupied.Count;
+        _visiblePaneCount = occupied.Count;
         PaneHost.Children.Clear();
         PaneHost.ColumnDefinitions.Clear();
         if (occupied.Count == 0)
@@ -438,7 +441,7 @@ public sealed partial class MainWindow : Window
         {
             PaneHost.ColumnDefinitions.Add(new ColumnDefinition
             {
-                Width = new GridLength(1, GridUnitType.Star),
+                Width = preserveWidths ? previousWidths[column / 2] : new GridLength(1, GridUnitType.Star),
                 MinWidth = 280,
             });
             var view = _panes[pane - 1];
@@ -712,6 +715,27 @@ public sealed partial class MainWindow : Window
         }
         pane.Width = double.NaN;
         pane.CheckFilePathDrop();
+        var third = _store.Create(_store.Entries.First(e => e.Engine == "codex"));
+        var sidebarBefore = SidebarColumn.Width;
+        void LayoutNow() { PaneHost.UpdateLayout(); }
+        void EqualPanes(int count) {
+            LayoutNow();
+            var widths = PaneHost.ColumnDefinitions.Where((_, index) => index % 2 == 0).Select(c => c.ActualWidth).ToArray();
+            Require(widths.Length == count && widths.Max() - widths.Min() < 2, "Pane count change did not equalize widths");
+            Require(SidebarColumn.Width.Equals(sidebarBefore), "Pane count change moved the sidebar");
+        }
+        _placements.Assign("local:" + first.Id, 2); Refresh(); await Task.Delay(100); EqualPanes(2);
+        PaneHost.ColumnDefinitions[0].Width = new GridLength(2, GridUnitType.Star);
+        PaneHost.ColumnDefinitions[2].Width = new GridLength(1, GridUnitType.Star);
+        _placements.Assign("local:" + third.Id, 1); Refresh();
+        Require(PaneHost.ColumnDefinitions[0].Width.Value == 2, "Replacing a session reset its pane width");
+        _placements.Assign("local:" + fresh.Id, 3); Refresh(); await Task.Delay(100); EqualPanes(3);
+        PaneHost.ColumnDefinitions[0].Width = new GridLength(2, GridUnitType.Star);
+        _placements.Park("local:" + first.Id); Refresh(); await Task.Delay(100); EqualPanes(2);
+        PaneHost.ColumnDefinitions[0].Width = new GridLength(2, GridUnitType.Star);
+        _placements.Assign("local:" + fresh.Id, 2); Refresh();
+        Require(PaneHost.ColumnDefinitions[0].Width.Value == 2, "Moving slots at the same pane count reset widths");
+
         await _devices.CreateGroupAsync("Device label UI fixture");
         var originalDeviceName = _devices.DeviceName;
         await _devices.RenameDeviceDisplayNameAsync(_devices.DeviceId, "QA desktop label");
