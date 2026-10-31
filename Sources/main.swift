@@ -1542,11 +1542,16 @@ final class ConversationTextView: NSTextView {
             support.target = self; menu.addItem(support)
         }
     }
-    func imageToolsItem(at character: Int) -> NSMenuItem? {
+    func imageToolsItem(at character: Int, hasMetaKey: Bool? = nil) -> NSMenuItem? {
         guard let storage = textStorage, character >= 0, character < storage.length,
               let attachment = storage.attribute(.attachment, at: character, effectiveRange: nil) as? NSTextAttachment,
               let image = attachment.fileWrapper?.regularFileContents.flatMap({ NSImage(data: $0) }) ?? attachment.image else { return nil }
-        let item = NSMenuItem(title: "Image tools · Describe / SAM…", action: #selector(openImageTools(_:)), keyEquivalent: "")
+        let hasMetaKey = hasMetaKey ?? !((try? AgentSecrets.read("meta")) ?? "").isEmpty
+        // A nil action also keeps AppKit's automatic menu validation from
+        // re-enabling this item when the required credential is absent.
+        let item = NSMenuItem(title: "Image tools · Describe / SAM…", action: hasMetaKey ? #selector(openImageTools(_:)) : nil, keyEquivalent: "")
+        item.isEnabled = hasMetaKey
+        item.toolTip = hasMetaKey ? nil : "Meta API key required"
         item.target = self; item.representedObject = image.copy() as? NSImage
         return item
     }
@@ -1572,7 +1577,7 @@ final class ConversationTextView: NSTextView {
     override func orderFrontSharingServicePicker(_ sender: Any?) {
         // NSTextView otherwise shares an attributed-text/HTML wrapper, which
         // Photos silently ignores even when the selection is just an image.
-        if selectedRange().length == 1, let image = imageToolsItem(at: selectedRange().location)?.representedObject as? NSImage {
+        if selectedRange().length == 1, let image = imageToolsItem(at: selectedRange().location, hasMetaKey: true)?.representedObject as? NSImage {
             PhotoImageShare.showPicker(image, from: self)
         } else { super.orderFrontSharingServicePicker(sender) }
     }
@@ -3037,9 +3042,18 @@ func selfTest() {
         renderedImageLocations.append(range.location)
         check(attachment.fileWrapper?.preferredFilename?.hasSuffix(".png") == true && attachment.fileWrapper?.regularFileContents.flatMap { NSImage(data: $0) } != nil, "Transcript image sharing carries a decodable PNG file with a filename")
         check((attachment.attachmentCell?.cellSize().width ?? 1000) <= 480 && (attachment.attachmentCell?.cellSize().height ?? 1000) <= 260, "Named image attachments keep bounded transcript previews")
-        check(imageEditor.imageToolsItem(at: range.location)?.representedObject is NSImage, "Image tools target the clicked historical or draft attachment")
+        check(imageEditor.imageToolsItem(at: range.location, hasMetaKey: false)?.representedObject is NSImage, "Image tools target the clicked historical or draft attachment")
     }
     check(renderedImageLocations.count == 3 && imageEditor.imageToolsItem(at: imageEditor.inputStart) == nil, "Image menu is present for history and both draft images, never plain draft text")
+    if let location = renderedImageLocations.first {
+        let menu = NSMenu()
+        let unavailable = imageEditor.imageToolsItem(at: location, hasMetaKey: false)!
+        menu.addItem(unavailable); menu.update()
+        check(!unavailable.isEnabled && unavailable.toolTip == "Meta API key required" && unavailable.representedObject is NSImage, "Missing Meta key keeps image tools disabled after menu validation, with a tooltip and image sharing intact")
+        let available = imageEditor.imageToolsItem(at: location, hasMetaKey: true)!
+        menu.addItem(available); menu.update()
+        check(available.isEnabled && available.action != nil && available.toolTip == nil, "Image tools are available when a Meta key is configured")
+    }
     let preparedCount = imageCoordinator.imagePreparationCount
     imageDraft.messages.append(Message(role: "assistant", text: "Streaming update"))
     imageCoordinator.render(imageEditor)
