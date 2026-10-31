@@ -30,8 +30,13 @@ struct ExportSession: Identifiable {
     let id: UUID
     let title: String
     let provider: String
-    let messages: [Message]
+    var messages: [Message]
+    var remoteID: String? = nil
     init(_ session: Session) { id = session.id; title = session.title; provider = session.entry.name; messages = session.messages }
+    init(row: DeviceSidebarRow, home: String, id: UUID) {
+        self.id = id; title = row.title + " · " + home; provider = row.assistant
+        messages = []; remoteID = row.globalID
+    }
 }
 final class TranscriptExportSelection: ObservableObject {
     let sessions: [ExportSession]
@@ -144,27 +149,72 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             panel.nameFieldStringValue = format.fileName(panel.nameFieldStringValue)
         }
         let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
+            guard response == .OK, let url = panel.url else { completed?(); return }
+            Task { @MainActor in
             defer { completed?() }
-            guard response == .OK, let url = panel.url else { return }
+            let progress = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 90), styleMask: [.titled], backing: .buffered, defer: false)
+            progress.isReleasedWhenClosed = false
+            progress.title = "Exporting conversations"
+            progress.contentView = NSHostingView(rootView: ProgressView("Reading selected transcripts and images…").padding())
+            progress.center(); progress.makeKeyAndOrderFront(nil)
+            defer { progress.close() }
             do {
+                var sessions: [ExportSession] = [], images: [String: Data] = [:]
+                for chosen in selection.chosen {
+                    let loaded = try await Self.load(chosen, includeImages: selection.format == .html)
+                    sessions.append(loaded.0); images.merge(loaded.1) { old, _ in old }
+                }
                 let document: String
                 switch selection.format {
-                case .html: document = try TranscriptExport.html(sessions: selection.chosen, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: Self.imageData)
-                case .text: document = try TranscriptExport.text(sessions: selection.chosen, order: selection.order, content: selection.content)
+                case .html: document = try TranscriptExport.html(sessions: sessions, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: { images[$0] ?? Self.imageData($0) })
+                case .text: document = try TranscriptExport.text(sessions: sessions, order: selection.order, content: selection.content)
                 }
                 try document.write(to: url, atomically: true, encoding: .utf8)
             } catch {
                 let alert = NSAlert(); alert.messageText = "Could not export conversations"; alert.informativeText = error.localizedDescription; alert.runModal()
             }
         }
+        }
         if let window { panel.beginSheetModal(for: window, completionHandler: finish) }
         else { panel.begin(completionHandler: finish) }
     }
     func panel(_ sender: Any, validate url: URL) throws {
         guard !selection.selected.isEmpty else { throw TranscriptExport.error("Select at least one session to export.") }
-        guard selection.chosen.contains(where: { $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || !$0.images.isEmpty) } }) else {
+        guard selection.chosen.contains(where: { $0.remoteID != nil || $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || !$0.images.isEmpty) } }) else {
             throw TranscriptExport.error("There are no submitted messages matching these options.")
         }
+    }
+    @MainActor static func load(_ session: ExportSession, includeImages: Bool, service: DeviceSyncService = .shared) async throws -> (ExportSession, [String: Data]) {
+        guard let id = session.remoteID, let global = DeviceGlobalID(id) else { return (session, [:]) }
+        var q = DeviceExportRequest(), messages: [DeviceWireMessage] = []
+        while true {
+            let response = await service.requestParticipant(home: global.home, action: "session.export", target: id, exportRequest: q)
+            guard response.outcome == "completed", response.target == id, let page = response.exportPage,
+                  page.offset == messages.count, page.total >= messages.count, page.total <= 1_000_000,
+                  q.fingerprint == nil || q.fingerprint == page.fingerprint,
+                  q.total == nil || q.total == page.total else { throw TranscriptExport.error(session.title + ": " + response.detail) }
+            guard !page.messages.isEmpty || messages.count == page.total, messages.count + page.messages.count <= page.total else { throw TranscriptExport.error("Invalid export page from " + session.title) }
+            messages += page.messages
+            if messages.count == page.total { break }
+            q = DeviceExportRequest(offset: messages.count, total: page.total, fingerprint: page.fingerprint)
+        }
+        var images: [String: Data] = [:]
+        if includeImages {
+            for hash in Set(messages.flatMap(\.imageHashes)).sorted() {
+                var data = Data(), total: Int?
+                while total == nil || data.count < total! {
+                    let response = await service.requestParticipant(home: global.home, action: "session.export", target: id, exportRequest: DeviceExportRequest(offset: data.count, imageHash: hash))
+                    guard response.outcome == "completed", response.target == id, let chunk = response.exportImage, let size = response.exportImageTotal,
+                          size > 0, size <= 25_000_000, total == nil || total == size, !chunk.isEmpty, chunk.count <= 262144, data.count + chunk.count <= size else { throw TranscriptExport.error(session.title + ": could not export an attached image. " + response.detail) }
+                    total = size; data.append(chunk)
+                }
+                guard DeviceBlob.sha256Hex(data) == hash, let bitmap = NSBitmapImageRep(data: data), let png = bitmap.representation(using: .png, properties: [:]) else { throw TranscriptExport.error("Remote image failed integrity validation.") }
+                images["remote-image-" + hash + ".png"] = png
+            }
+        }
+        var result = session
+        result.messages = messages.map { Message(id: $0.id, role: $0.role, text: $0.text, images: $0.imageHashes.map { "remote-image-" + $0 + ".png" }, createdAt: $0.createdAt) }
+        return (result, images)
     }
     static func imageData(_ path: String) -> Data? {
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
@@ -177,7 +227,11 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
 extension AppDelegate {
     @objc func exportTranscripts() {
         if let exporter = transcriptExporter { exporter.panel.makeKeyAndOrderFront(nil); return }
-        let exporter = TranscriptExportController(sessions: Store.shared.sessions.map(ExportSession.init))
+        let service = DeviceSyncService.shared
+        let remote = service.homes.values.sorted { $0.deviceName < $1.deviceName }.flatMap { home in
+            home.rows.map { ExportSession(row: $0, home: home.deviceName, id: service.placementID(forGlobal: $0.globalID)) }
+        }
+        let exporter = TranscriptExportController(sessions: Store.shared.sessions.map(ExportSession.init) + remote)
         transcriptExporter = exporter
         exporter.completed = { [weak self] in self?.transcriptExporter = nil }
         exporter.show(for: windows.first(where: { $0.0.isKeyWindow })?.0 ?? windows.last?.0)

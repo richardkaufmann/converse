@@ -61,7 +61,8 @@ struct PadHelp: View {
     var body: some View {
         NavigationStack {
             List {
-                Section { Link("Read the README on GitHub", destination: ConverseAbout.readme) }
+                Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+                    Text("This repository is private. Sign into GitHub with an authorized account to open it. The same documentation is available offline below.").font(.caption).foregroundStyle(.secondary) }
                 if let book {
                     Section { Text("Converse " + ConverseAbout.versionBuild + " · Offline help from the README").font(.caption).foregroundStyle(.secondary) }
                     ForEach(book.search(query)) { topic in
@@ -86,7 +87,7 @@ struct PadAbout: View {
             Form {
                 Section { Text("Converse " + ConverseAbout.versionBuild).font(.headline) }
                 Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("Apache License 2.0", destination: ConverseAbout.licenseURL) }
-                Section { Link("README on GitHub", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
+                Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
             }.navigationTitle("About Converse")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }

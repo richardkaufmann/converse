@@ -96,7 +96,7 @@ public sealed partial class DeviceSyncService
         {
             var request = DeviceJson.Decode<DeviceParticipantRequest>(bytes);
             if (request.GroupID != group.Id) return true;
-            var admitted = request.Action is "inspect" or "agent.settings" || TryBeginExternalWork();
+            var admitted = request.Action is "inspect" or "agent.settings" or "session.export" || TryBeginExternalWork();
             DeviceParticipantResponse response;
             try
             {
@@ -104,7 +104,7 @@ public sealed partial class DeviceSyncService
                     ? await HandleAgentRequestAsync(hello.DeviceID, id, request)
                     : new DeviceParticipantResponse { GroupID = group.Id, Outcome = "rejected", Detail = "This home is draining for an update. Nothing was created or queued." };
             }
-            finally { if (admitted && request.Action is not ("inspect" or "agent.settings")) EndExternalWork(); }
+            finally { if (admitted && request.Action is not ("inspect" or "agent.settings" or "session.export")) EndExternalWork(); }
             await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = "participant.response", CommandID = id, Payload = DeviceJson.Encode(response) });
             return true;
         }
@@ -177,12 +177,43 @@ public sealed partial class DeviceSyncService
         return widget;
     }
     public event Action<ChatSession>? AgentWidgetRequested;
+    internal DeviceParticipantResponse ExportTranscript(ChatSession? session, DeviceParticipantRequest request)
+    {
+        DeviceParticipantResponse Reject(string text) => new() { GroupID = CurrentGroup?.Id ?? "", Outcome = "rejected", Detail = text, Target = request.Target };
+        if (session is null || request.ExportRequest is not { } q || q.Offset < 0) return Reject("Invalid export target or offset.");
+        try
+        {
+            var messages = session.Messages.Where(m => m.Role is "user" or "assistant").ToList();
+            if (q.ImageHash is { } hash)
+            {
+                var path = messages.SelectMany(m => m.Images).Where(File.Exists).FirstOrDefault(p => ImageHash(p) == hash);
+                if (path is null) return Reject("Image unavailable in this transcript.");
+                using var file = File.OpenRead(path);
+                if (file.Length > 25_000_000 || q.Offset > file.Length) return Reject("Image is too large or offset is invalid.");
+                file.Position = q.Offset;
+                var chunk = new byte[(int)Math.Min(262144, file.Length - q.Offset)]; file.ReadExactly(chunk);
+                return new() { GroupID = CurrentGroup?.Id ?? "", Outcome = "completed", Detail = "Export image chunk.", Target = request.Target, ExportImage = chunk, ExportImageTotal = (int)file.Length };
+            }
+            var total = q.Total ?? messages.Count;
+            if (total < 0 || total > messages.Count || q.Offset > total) return Reject("Transcript changed; export again.");
+            var snapshot = messages.Take(total).ToList();
+            var fingerprint = DeviceBlob.Sha256Hex(DeviceJson.Encode(snapshot));
+            if (q.Fingerprint is not null && q.Fingerprint != fingerprint) return Reject("Transcript changed while exporting; try again when the turn finishes.");
+            var result = new DeviceParticipantResponse { GroupID = CurrentGroup?.Id ?? "", Outcome = "completed", Detail = "Read-only transcript export.", Target = request.Target,
+                ExportPage = new() { Title = session.Title, Provider = session.Entry.Name, Offset = q.Offset, Total = total, Fingerprint = fingerprint,
+                    Messages = snapshot.Skip(q.Offset).Take(20).Select(m => new DeviceWireMessage { Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt, ImageHashes = m.Images.Where(File.Exists).Select(ImageHash).ToArray() }).ToList() } };
+            return DeviceJson.Encode(result).Length <= 2_000_000 ? result : Reject("A message is too large for remote export.");
+        }
+        catch { return Reject("Could not read transcript for export."); }
+    }
+
     private Task<DeviceParticipantResponse> HandleAgentRequestAsync(string origin, Guid id, DeviceParticipantRequest request)
     {
         var group = CurrentGroup?.Id ?? "";
         DeviceParticipantResponse Result(string outcome, string detail, ChatSession? session = null) => new() { GroupID = group, Outcome = outcome, Detail = detail, Target = session is null ? request.Target : new DeviceGlobalID(DeviceId, session.Id).ToString() };
         var target = request.Target is null ? null : DeviceGlobalID.Parse(request.Target);
         var session = target?.Home == DeviceId ? _store.Sessions.FirstOrDefault(s => s.Id == target.Value.Session) : null;
+        if (request.Action == "session.export") return Task.FromResult(ExportTranscript(session, request));
         if (request.Action == "inspect") return Task.FromResult(session is null ? Result("rejected", "Target is not on this home.") : new DeviceParticipantResponse { GroupID = group, Outcome = "completed", Detail = "Home evidence snapshot.", Target = request.Target, Evidence = Evidence(DeviceId, session) });
         if (request.Action == "agent.settings") return Task.FromResult(session?.Agent is not { } c ? Result("rejected", "Target is not an agent.") : new DeviceParticipantResponse { GroupID = group, Outcome = "completed", Detail = "Credentials stay on home.", Target = request.Target, Settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(c.Settings)) });
         var hash = DeviceBlob.Sha256Hex(DeviceJson.Encode(request));

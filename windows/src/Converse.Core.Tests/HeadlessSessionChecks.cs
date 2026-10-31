@@ -62,6 +62,15 @@ static class HeadlessSessionChecks
         check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.ModelOptions.Count == 2) && viewer.RemoteTranscripts[gid].EffortOptions.SequenceEqual(new[] { "ultra" }), "Headless snapshot sends live Codex models and selected-model effort levels to the viewer");
         check(await join(home, closer, () => closer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "A second group member can manage a headless home");
         var originalLease = viewer.RemoteLeases[gid];
+        var exportMessages = session.Messages;
+        session.Messages = Enumerable.Range(0, 45).Select(i => new ChatMessage { Role = "assistant", Text = $"Export {i}" }).ToList();
+        var firstExport = home.ExportTranscript(session, new() { Target = gid, ExportRequest = new() });
+        var lastExport = home.ExportTranscript(session, new() { Target = gid, ExportRequest = new() { Offset = 40, Total = firstExport.ExportPage?.Total, Fingerprint = firstExport.ExportPage?.Fingerprint } });
+        check(firstExport.ExportPage?.Messages.Count == 20 && lastExport.ExportPage?.Messages.Count == 5 && lastExport.ExportPage.Total == 45, "Remote export pages the complete transcript without a display lease");
+        session.Messages[0].Text = "Changed during export";
+        check(home.ExportTranscript(session, new() { Target = gid, ExportRequest = new() { Offset = 20, Total = firstExport.ExportPage?.Total, Fingerprint = firstExport.ExportPage?.Fingerprint } }).Outcome == "rejected", "Remote export rejects mixed snapshots when an existing message changes");
+        check(home.ExportTranscript(session, new() { Target = gid, ExportRequest = new() { ImageHash = new string('a', 64) } }).Outcome == "rejected", "Remote export cannot fetch an image outside the selected transcript");
+        session.Messages = exportMessages;
         var rename = await closer.RequestParticipantAsync(home.DeviceId, "session.rename", gid, title: "Renamed remotely");
         check(rename.Outcome == "completed" && session.Title == "Renamed remotely" && !closer.RemoteLeases.ContainsKey(gid), "A different group member renames without taking the current viewer lease");
         check(await Until(() => viewer.RemoteTranscripts[gid].Title == "Renamed remotely" && viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == gid && r.Title == "Renamed remotely")) && viewer.RemoteLeases[gid].Equals(originalLease) && viewer.RemoteTranscripts[gid].Draft == "Preserve this draft", "Remote rename updates the existing pane and sidebar without changing its lease or draft");

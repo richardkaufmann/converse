@@ -434,7 +434,7 @@ final class ConverseTests: XCTestCase {
         handle.accessibilityIncrement(); XCTAssertEqual(width, 220)
         handle.accessibilityDecrement(); XCTAssertEqual(width, 200); XCTAssertEqual(saves, 2)
     }
-    func testSnapshotEchoPreservesDraftSelectionAndOrangeStyle() {
+    func testSnapshotEchoPreservesDraftSelectionAndBlueStyle() {
         let first = DeviceWireMessage(id: UUID(), role: "assistant", text: "First reply")
         var parent = PadTranscript(messages: [first], draft: "tell Muse hello", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
         let coordinator = PadTranscript.Coordinator(parent)
@@ -446,7 +446,7 @@ final class ConverseTests: XCTestCase {
         parent.update(view, coordinator: coordinator)
         XCTAssertEqual(view.selectedRange, NSRange(location: coordinator.historyLength + 5, length: 4))
         XCTAssertEqual((view.text as NSString).substring(from: coordinator.historyLength), "tell Muse hello")
-        XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: coordinator.historyLength, effectiveRange: nil) as? UIColor, PadPalette.traffic)
+        XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: coordinator.historyLength, effectiveRange: nil) as? UIColor, UIColor.systemBlue)
         XCTAssertTrue(view.gutter.isHidden == false)
     }
     func testNativeReturnSendsWithoutInsertingLineBreaks() {
@@ -539,7 +539,7 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(result.cgImage?.width, image.cgImage?.width); XCTAssertEqual(result.cgImage?.height, image.cgImage?.height)
         XCTAssertEqual(view.textStorage.string, "Keep this")
     }
-    func testFollowResumesAfterFiveIdleSecondsAndHonorsSelectionAndTake() {
+    func testReadingNeverTimesOutAndHonorsSelectionAndTake() {
         var clock: TimeInterval = 100
         var parent = PadTranscript(messages: [DeviceWireMessage(id: UUID(), role: "assistant", text: String(repeating: "Long history\n", count: 150))], draft: "draft", images: [:], editable: true, lineNumbers: true, displayEpoch: 1, edit: { _ in }, send: {}, attach: { _ in })
         let coordinator = PadTranscript.Coordinator(parent); coordinator.now = { clock }
@@ -550,8 +550,9 @@ final class ConverseTests: XCTestCase {
         view.setContentOffset(CGPoint(x: 0, y: 100), animated: false); coordinator.recordScroll(view)
         clock += 4; coordinator.resumeIfIdle()
         XCTAssertEqual(view.contentOffset.y, 100, accuracy: 1)
-        clock += 1; coordinator.resumeIfIdle()
-        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height, accuracy: 1)
+        clock += 3600; coordinator.resumeIfIdle()
+        parent.update(view, coordinator: coordinator); view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, 100, accuracy: 1, "Idle refresh never scrolls even with the cursor at the tail")
         view.selectedRange = NSRange(location: 10, length: 5)
         coordinator.textViewDidChangeSelection(view)
         view.setContentOffset(CGPoint(x: 0, y: 100), animated: false)

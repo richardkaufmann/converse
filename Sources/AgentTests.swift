@@ -15,6 +15,7 @@ import Foundation
         var oversized = art.wire(home: String(repeating: "a", count: 64)); oversized.artDirection = String(repeating: "x", count: 4001)
         do { try art.apply(oversized); check(false, "Art direction size limit") } catch { check(true, "Art direction size limit rejects before settings mutation") }
     } catch { check(false, "Art direction regression: " + error.localizedDescription) }
+    imageAssistSelfTests(check)
     agentScheduleSelfTests(check)
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)

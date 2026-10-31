@@ -88,52 +88,37 @@ struct MacImageTools: View {
     let canApply: () -> Bool
     let addNotes: (String) -> Void
     let addImage: (NSImage) -> Void
-    @State private var point: CGPoint?
+    @State private var concept = ""
     @State private var notes = ""
     @State private var described = false
-    @State private var regions: [DeviceImageRegion] = []
-    @State private var chosen = 0
+    @State private var segments: [ImageSegment] = []
+    @State private var selected = Set<Int>()
     @State private var busy = false
     @State private var status = ""
-    private var bitmap: NSBitmapImageRep { NSBitmapImageRep(data: data)! }
-    private var region: DeviceImageRegion? { regions.indices.contains(chosen) ? regions[chosen] : nil }
+    private var cgImage: CGImage { NSBitmapImageRep(data: data)!.cgImage! }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Use Meta image tools with any session model. Processing uses the Meta API key saved on this Mac. Review results before adding them to your draft. The original image stays unchanged.")
-                GeometryReader { space in
-                    let ratio = min(space.size.width / CGFloat(bitmap.pixelsWide), space.size.height / CGFloat(bitmap.pixelsHigh))
-                    ZStack(alignment: .topLeading) {
-                        Image(nsImage: NSImage(data: data)!).resizable().frame(width: CGFloat(bitmap.pixelsWide) * ratio, height: CGFloat(bitmap.pixelsHigh) * ratio)
-                        if let box = region {
-                            Rectangle().stroke(.orange, lineWidth: 3).background(.orange.opacity(0.15)).frame(width: CGFloat(box.width) * ratio, height: CGFloat(box.height) * ratio).offset(x: CGFloat(box.x) * ratio, y: CGFloat(box.y) * ratio).allowsHitTesting(false)
-                        }
-                        if let point {
-                            Circle().fill(.orange).overlay(Circle().stroke(.white, lineWidth: 2)).frame(width: 12, height: 12).offset(x: point.x * ratio - 6, y: point.y * ratio - 6).allowsHitTesting(false)
-                        }
-                    }.contentShape(Rectangle()).onTapGesture { location in
-                        guard !busy else { return }
-                        point = CGPoint(x: max(0, min(CGFloat(bitmap.pixelsWide - 1), location.x / ratio)), y: max(0, min(CGFloat(bitmap.pixelsHigh - 1), location.y / ratio)))
-                        regions = []; chosen = 0
-                    }
-                }.frame(height: 300)
-                Text("Click an object, then Find region. SAM currently offers a rectangular crop.").font(.caption)
+                Text("Meta image tools work with any session model. Find Segments sends this image to Meta using this Mac's saved API key. Review before adding to your draft.")
+                SegmentPicker(image: cgImage, segments: segments, selected: $selected).disabled(busy)
+                TextField("Discover objects — or describe what to find", text: $concept).textFieldStyle(.roundedBorder).disabled(busy)
+                Text("Leave blank to discover up to six object types with Spark, then segment them with SAM. A description searches SAM directly.").font(.caption).foregroundStyle(.secondary)
                 HStack {
+                    Button("Find Segments") { run("segments") }.buttonStyle(.borderedProminent)
                     Button("Describe image · Spark") { run("describe") }
-                    Button("Find region · SAM") { run("focus") }.disabled(point == nil)
                 }.disabled(busy)
-                if busy { ProgressView("Processing…") }
+                if busy { ProgressView("Finding objects can take a minute…") }
                 if !status.isEmpty { Text(status).foregroundStyle(.secondary).textSelection(.enabled) }
+                if !segments.isEmpty {
+                    HStack {
+                        Button("Add selected to draft") { export(copy: false) }
+                        Button("Copy selected") { export(copy: true) }
+                    }.disabled(busy || selected.isEmpty)
+                    Text("Add creates separate transparent PNG cutouts. Copy preserves the original canvas and positions with everything else transparent.").font(.caption).foregroundStyle(.secondary)
+                }
                 if described {
                     TextEditor(text: $notes).frame(minHeight: 120).border(.secondary.opacity(0.4))
                     Button("Add notes to draft") { apply { addNotes(notes) } }.disabled(busy || notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                if !regions.isEmpty {
-                    if regions.count > 1 { Picker("Region", selection: $chosen) { ForEach(regions.indices, id: \.self) { Text("Region \($0 + 1)").tag($0) } } }
-                    Button("Add focused crop to draft") {
-                        guard let box = region, let cg = bitmap.cgImage?.cropping(to: CGRect(x: box.x, y: box.y, width: box.width, height: box.height)) else { return }
-                        apply { addImage(NSImage(cgImage: cg, size: .zero)) }
-                    }.disabled(busy)
                 }
             }.padding()
         }.frame(minWidth: 400, minHeight: 480)
@@ -142,18 +127,34 @@ struct MacImageTools: View {
         guard canApply() else { status = "This session is no longer editable here. Return to its pane before adding the result."; return }
         action(); status = "Added to the draft. Nothing was sent."
     }
+    private func export(copy: Bool) {
+        do {
+            let chosen = selected.sorted().compactMap { segments.indices.contains($0) ? segments[$0] : nil }
+            if copy {
+                let png = try ImageSegment.png(ImageSegment.export(cgImage, segments: chosen, crop: false))
+                NSPasteboard.general.clearContents()
+                guard NSPasteboard.general.setData(png, forType: .png) else { throw ImageAssistError.invalid("Could not copy the PNG.") }
+                status = "Copied a transparent PNG in the original positions."
+            } else {
+                let images = try chosen.map { NSImage(cgImage: try ImageSegment.export(cgImage, segments: [$0], crop: true), size: .zero) }
+                apply { images.forEach(addImage) }
+            }
+        } catch { status = error.localizedDescription }
+    }
     private func run(_ operation: String) {
         guard !busy else { return }
         busy = true; status = ""
-        let request = DeviceImageAssistRequest(hash: DeviceBlob.sha256Hex(data), operation: operation, epoch: 0, x: point.map { Int($0.x) }, y: point.map { Int($0.y) })
+        let request = DeviceImageAssistRequest(hash: DeviceBlob.sha256Hex(data), operation: operation, epoch: 0, concept: concept)
         Task { @MainActor in
             defer { busy = false }
             do {
                 guard let key = try AgentSecrets.read("meta"), !key.isEmpty else { throw ImageAssistError.invalid("Add a Meta API key in Agent Setup on this Mac first.") }
                 let result = try await AgentAPI().assistImage(data, request: request, key: key)
                 if let text = result.notes { notes = text; described = true }
-                regions = result.regions; chosen = 0
-                status = "Review the result before adding it."
+                if let wire = result.segments {
+                    segments = try await Task.detached { try ImageSegment.prepare(wire) }.value; selected = []
+                }
+                status = result.summary ?? "Review the result before adding it."
             } catch { status = "Image processing failed: " + error.localizedDescription + " No automatic retry was made." }
         }
     }

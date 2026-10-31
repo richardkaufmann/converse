@@ -274,7 +274,6 @@ struct PadTranscript: UIViewRepresentable {
             c.follow.pause(now: c.now()); c.scheduleResume()
         }
         if first || addedImage || (acquired && !c.explicitSelection) { c.follow.resume() }
-        _ = c.follow.resumeIfIdle(now: c.now(), selecting: c.explicitSelection, scrolling: view.isDragging || view.isDecelerating)
         let nearBottom = c.follow.following && !c.explicitSelection || addedImage || first
         let visibleCharacter = view.visibleCharacter()
         let visibleDistance = visibleCharacter.map { view.lineTop(at: $0) - previousOffset }
@@ -492,17 +491,8 @@ struct PadTranscript: UIViewRepresentable {
         var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
         private var idleResume: DispatchWorkItem?
         deinit { idleResume?.cancel() }
-        func scheduleResume() {
-            idleResume?.cancel()
-            guard !follow.following else { return }
-            let work = DispatchWorkItem { [weak self] in self?.resumeIfIdle() }
-            idleResume = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowState.idleDelay, execute: work)
-        }
-        func resumeIfIdle() {
-            guard let view, follow.resumeIfIdle(now: now(), selecting: explicitSelection || view.markedTextRange != nil, scrolling: view.isDragging || view.isDecelerating) else { return }
-            view.pendingViewport = .bottom; view.setNeedsLayout(); view.layoutIfNeeded()
-        }
+        func scheduleResume() { idleResume?.cancel() }
+        func resumeIfIdle() { /* No timer-driven scrolling. */ }
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !updating else { return }
             explicitSelection = textView.selectedRange.length > 0 || (textView.isFirstResponder && textView.selectedRange.location < textView.textStorage.length)

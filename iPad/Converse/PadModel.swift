@@ -25,6 +25,8 @@ final class PadModel: ObservableObject {
     @Published var error = ""
     @Published var connectShown = false
     @Published var helpShown = false
+    @Published var aboutShown = false
+    @Published var newAgentHome: String?
     @Published var lineNumbers = true
     @Published var focusedPane = 0
     private var edits: [String: DispatchWorkItem] = [:]

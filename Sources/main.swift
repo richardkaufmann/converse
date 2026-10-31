@@ -1347,16 +1347,7 @@ final class ConversationScrollView: NSScrollView {
         if selecting && followState.following { followState.pause(now: ProcessInfo.processInfo.systemUptime) }
         scheduleResume()
     }
-    private func scheduleResume() {
-        idleResume?.cancel()
-        guard !followState.following else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            if self.followState.resumeIfIdle(now: ProcessInfo.processInfo.systemUptime, selecting: self.selecting, scrolling: self.liveScrolling) { self.jumpToLatest() }
-        }
-        idleResume = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowState.idleDelay, execute: work)
-    }
+    private func scheduleResume() { idleResume?.cancel() }
     @objc private func startedScrolling() { liveScrolling = true; recordScroll() }
     @objc private func scrolled() { recordScroll() }
     @objc private func endedScrolling() { liveScrolling = false; recordScroll() }
@@ -1388,9 +1379,6 @@ final class ConversationScrollView: NSScrollView {
         tiling = true; defer { tiling = false }
         super.tile()
         (documentView as? ConversationTextView)?.fitDocumentHeight()
-        if followState.following && !selecting, let text = documentView as? ConversationTextView, contentView.bounds.height > 0 {
-            text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0))
-        }
         refreshLatest()
     }
 }
@@ -1522,7 +1510,12 @@ final class ConversationTextView: NSTextView {
     }
     @objc private func openImageTools(_ sender: NSMenuItem) {
         guard let image = sender.representedObject as? NSImage else { return }
-        MacImageToolsWindow.show(image: image, canApply: { [weak self] in self?.window != nil && self?.isEditable == true }, addNotes: { [weak self] notes in
+        let sessionID = (delegate as? ScrollingConversation.Coordinator)?.session.id
+        let canApply: () -> Bool = { [weak self] in
+            guard let self, self.window != nil, self.isEditable, let sessionID else { return false }
+            return (self.delegate as? ScrollingConversation.Coordinator)?.session.id == sessionID
+        }
+        MacImageToolsWindow.show(image: image, canApply: canApply, addNotes: { [weak self] notes in
             guard let self, self.isEditable else { return }
             self.focusInput()
             self.insertText((self.string.hasSuffix("\n") ? "" : "\n\n") + "Image notes:\n" + notes, replacementRange: self.selectedRange())
@@ -1832,7 +1825,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let scroll = text.enclosingScrollView
             let origin = scroll?.contentView.bounds.origin ?? .zero
             let nativeScroll = scroll as? ConversationScrollView
-            let follow = nativeScroll?.prepareForRender(first: firstRender) ?? (firstRender || (scroll.map { $0.contentView.bounds.maxY >= text.bounds.height - 200 } ?? true))
+            let follow = (firstRender || historyChanged) && (nativeScroll?.prepareForRender(first: firstRender) ?? true)
             if !firstRender && historyChanged { nativeScroll?.outputArrived() }
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
@@ -2507,11 +2500,11 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     check(renamedText.string == cleanText.string && renamedText.string.contains("Let's get Linux up and into the group"), "An earlier resolved name change cannot leak history into or truncate the next prompt")
     var following = TranscriptFollowState()
     following.scroll(nearBottom: false, now: 10); following.outputArrived()
-    check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output for at least five idle seconds")
+    check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output without a deadline")
     following.interaction(now: 14)
-    check(!following.resumeIfIdle(now: 18.9, selecting: false, scrolling: false), "New user input resets the idle-resume deadline")
+    check(!following.resumeIfIdle(now: 18.9, selecting: false, scrolling: false), "Non-typing interaction does not resume following")
     check(!following.resumeIfIdle(now: 19, selecting: true, scrolling: false) && !following.resumeIfIdle(now: 19, selecting: false, scrolling: true), "Idle following never resumes while selecting text or actively scrolling")
-    check(following.resumeIfIdle(now: 19, selecting: false, scrolling: false) && following.following && following.unreadUpdates == 0, "Idle resume follows latest and clears the unread-update count")
+    check(!following.resumeIfIdle(now: 3600, selecting: false, scrolling: false) && !following.following && following.unreadUpdates == 1, "Even an hour idle never moves a paused viewport or clears unread output")
     following.scroll(nearBottom: false, now: 20); following.outputArrived(); following.scroll(nearBottom: true, now: 21)
     check(following.following && following.unreadUpdates == 0, "Scrolling back near the bottom resumes following immediately")
     let entry = Entry(name: "Layout fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")
@@ -2787,7 +2780,7 @@ func selfTest() {
     store.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"Unique block"},{"type":"text","text":"Unique block"}]}}"#, session: blocks, responseID: blocksID)
     check(blocks.messages[0].text == "Unique block", "Claude deduplication includes text already accepted in the same assistant event")
     check(MarkdownText.renderedOffset(in: "plain\nNext", utf16Offset: 6) == 6 && MarkdownText.renderedOffset(in: "plainNext", utf16Offset: 5) == 5 && MarkdownText.renderedOffset(in: "é😀Next", utf16Offset: 3) == 3, "Rendered delay offsets preserve existing newlines and UTF-16 character positions")
-    check(TranscriptStyle.isTraffic(#"{"command":"tell","text":"hi"}"#) && TranscriptStyle.isTraffic("tell Muse hello") && TranscriptStyle.isTraffic("[Converse message from Muse · session test]\nhello") && !TranscriptStyle.isTraffic("Please explain JSON objects") && !TranscriptStyle.isTraffic("{invalid}"), "Orange traffic classification covers JSON, tells and incoming envelopes without recoloring ordinary prose")
+    check(!TranscriptStyle.isTraffic("tell me about the rain in Spain") && !TranscriptStyle.isTraffic("tell Muse hello") && !TranscriptStyle.isTraffic(#"{"command":"tell","text":"hi"}"#) && TranscriptStyle.isTraffic("[Converse message from Muse · session test]\nhello"), "Only structured switchboard traffic is orange; ordinary tell prose and JSON stay normal")
     store.updateReportedStatus(["payload": ["models": [["model": "test-model", "input_tokens": 120, "output_tokens": 30]], "reasoning_effort": "high", "approval_mode": "on-request"]], session: exact)
     check(exact.toolStatus.model == "test-model" && exact.toolStatus.effort == "high" && exact.toolStatus.access == "on-request" && exact.toolStatus.usage == "120 in / 30 out", "Status reflects reported model, effort, access and usage")
     let probeConfig: [String: Any] = ["model": "saved-model", "model_reasoning_efforts": ["retained-model": "max"]]

@@ -332,6 +332,7 @@ struct DeviceParticipantRequest: Codable, Equatable {
     var title: String? = nil
     var settings: DeviceAgentSettings? = nil
     var imageAssist: DeviceImageAssistRequest? = nil
+    var exportRequest: DeviceExportRequest? = nil
 }
 struct DeviceParticipantEvidence: Codable {
     var globalID: String
@@ -348,6 +349,9 @@ struct DeviceParticipantResponse: Codable {
     var evidence: DeviceParticipantEvidence? = nil
     var settings: DeviceAgentSettings? = nil
     var imageAssist: DeviceImageAssistResult? = nil
+    var exportPage: DeviceExportPage? = nil
+    var exportImage: Data? = nil
+    var exportImageTotal: Int? = nil
 }
 struct ParticipantMutationReceipt: Codable {
     var id: UUID
@@ -379,4 +383,20 @@ struct DeviceQueueWatch: Codable {
 struct DeviceQueueWatchReport: Codable {
     var groupID: String
     var entries: [DeviceQueueWatch]
+}
+
+// Read-only export: no display lease, no draft, no mutation receipt.
+struct DeviceExportRequest: Codable, Equatable {
+    var offset: Int = 0
+    var total: Int? = nil
+    var fingerprint: String? = nil
+    var imageHash: String? = nil
+}
+struct DeviceExportPage: Codable {
+    var title: String
+    var provider: String
+    var offset: Int
+    var total: Int
+    var fingerprint: String
+    var messages: [DeviceWireMessage]
 }

@@ -1,7 +1,7 @@
 import Foundation
 
-// Clock-injected policy: incoming output never extends a user's reading
-// timeout. Only scroll/keyboard/selection interaction does.
+// Reading has no timeout. Output may follow only while following is enabled;
+// typing, Jump to latest, or scrolling back down explicitly resumes it.
 struct TranscriptFollowState {
     private(set) var following = true
     private(set) var unreadUpdates = 0
@@ -16,8 +16,7 @@ struct TranscriptFollowState {
     mutating func outputArrived() { if !following { unreadUpdates += 1 } }
     mutating func resume() { following = true; unreadUpdates = 0 }
     mutating func resumeIfIdle(now: TimeInterval, selecting: Bool, scrolling: Bool) -> Bool {
-        guard !following, !selecting, !scrolling, now - lastInteractionAt >= Self.idleDelay else { return false }
-        resume(); return true
+        return false // Elapsed time alone must never move the viewport.
     }
 }
 
@@ -76,14 +75,7 @@ enum TranscriptStyle {
         return (value as NSString).length
     }
     static func isTraffic(_ source: String) -> Bool {
-        let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("[Converse message from ") || text.hasPrefix("[Converse switchboard ") || text.hasPrefix("Switchboard:") { return true }
-        if text.range(of: "^tell(?:-urgently)?\\s+\\S+\\s+", options: [.regularExpression, .caseInsensitive]) != nil { return true }
-        if text.hasPrefix("```converse\n") { return true }
-        var json = text
-        if json.hasPrefix("```json\n"), json.hasSuffix("```") { json = String(json.dropFirst(8).dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard json.hasPrefix("{") || json.hasPrefix("["), let data = json.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) else { return false }
-        return value is [String: Any] || value is [Any]
+        trafficSummary(source) != nil
     }
 }
 

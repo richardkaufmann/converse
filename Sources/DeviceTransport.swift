@@ -341,7 +341,7 @@ final class DeviceSyncService: ObservableObject {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
-        hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "agent-art-direction-v1"])
+        hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "image-segments-v1", "transcript-export-v1", "agent-art-direction-v1"])
         #endif
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         #if os(macOS)
@@ -1795,7 +1795,7 @@ extension DeviceSyncService {
         #endif
         return peerForHome(home)?.hello?.capabilities.contains("agent-host-v1") == true
     }
-    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, imageAssist: DeviceImageAssistRequest? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
+    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, imageAssist: DeviceImageAssistRequest? = nil, exportRequest: DeviceExportRequest? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
         guard let group = currentGroup?.id, acceptsParticipant(home: home, groupID: group), let peer = peerForHome(home),
               peer.hello?.capabilities.contains("participant-control-v1") == true else {
             return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline, outside this group, or needs an update.")
@@ -1803,14 +1803,20 @@ extension DeviceSyncService {
         if action == "image.assist" && peer.hello?.capabilities.contains("image-assist-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Image tools require an updated Mac home in this first version.")
         }
+        if action == "session.export" && peer.hello?.capabilities.contains("transcript-export-v1") != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update this session's home app to export its full transcript remotely.")
+        }
+        if imageAssist?.operation == "segments" && peer.hello?.capabilities.contains("image-segments-v1") != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the Mac home to use multi-object segmentation.")
+        }
         if !(settings?.artDirection ?? "").isEmpty && peer.hello?.capabilities.contains("agent-art-direction-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving scoreboard art direction.")
         }
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
         }
-        let request = DeviceParticipantRequest(provider: provider, groupID: group, action: action, target: target, title: title, settings: settings, imageAssist: imageAssist)
-        let durable = !["inspect", "agent.settings"].contains(action)
+        let request = DeviceParticipantRequest(provider: provider, groupID: group, action: action, target: target, title: title, settings: settings, imageAssist: imageAssist, exportRequest: exportRequest)
+        let durable = !["inspect", "agent.settings", "session.export"].contains(action)
         let previous = participantIntents.first { $0.home == home && $0.request == request && ["pending", "uncertain"].contains($0.outcome) }
         let id = explicitID ?? previous?.id ?? UUID()
         if let old = participantIntents.first(where: { $0.id == id }), old.home != home || old.request != request {
@@ -1871,6 +1877,32 @@ extension DeviceSyncService {
         // Resolve with a separate binding; never match a same-UUID foreign home.
         let global = request.target.flatMap(DeviceGlobalID.init)
         let session = global.flatMap { reference in reference.home == identity?.deviceID ? store.sessions.first(where: { $0.id == reference.session }) : nil }
+        if request.action == "session.export" {
+            guard let session, let q = request.exportRequest, q.offset >= 0 else { reject("Invalid export target or offset."); return true }
+            do {
+                let messages = session.messages.filter { ["user", "assistant"].contains($0.role) }
+                if let hash = q.imageHash {
+                    guard messages.flatMap(\.images).contains(where: { imageHash(path: $0) == hash }), let path = blobPaths[hash],
+                          let size = try URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                          size <= 25_000_000, q.offset <= size else { reject("Image unavailable in this transcript."); return true }
+                    let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: path)); defer { try? file.close() }
+                    try file.seek(toOffset: UInt64(q.offset))
+                    let chunk = try file.read(upToCount: 262144) ?? Data()
+                    send(DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Export image chunk.", target: request.target, exportImage: chunk, exportImageTotal: size)); return true
+                }
+                let total = q.total ?? messages.count
+                guard total >= 0, total <= messages.count, q.offset <= total else { reject("Transcript changed; export again."); return true }
+                let snapshot = Array(messages.prefix(total))
+                let fingerprint = DeviceBlob.sha256Hex(try DeviceCanonical.encode(snapshot))
+                guard q.fingerprint == nil || q.fingerprint == fingerprint else { reject("Transcript changed while exporting; try again when the turn finishes."); return true }
+                let page = DeviceExportPage(title: session.title, provider: session.entry.name, offset: q.offset, total: total, fingerprint: fingerprint,
+                    messages: snapshot.dropFirst(q.offset).prefix(20).map { wireMessage($0) })
+                let response = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Read-only transcript export.", target: request.target, exportPage: page)
+                guard try JSONEncoder().encode(response).count <= 2_000_000 else { reject("A message is too large for remote export."); return true }
+                send(response)
+            } catch { reject("Could not read transcript for export.") }
+            return true
+        }
         if request.action == "inspect" {
             guard let session, let global else { reject("Target is closed or belongs to another home."); return true }
             let evidence = DeviceParticipantEvidence(globalID: global.string, title: session.title, busy: session.busy, status: session.status,
@@ -1890,7 +1922,7 @@ extension DeviceSyncService {
         if request.action == "image.assist" {
             guard let session, let global, let operation = request.imageAssist,
                   leases?.validate(session: session.id, device: origin, epoch: operation.epoch) == true,
-                  ["describe", "focus"].contains(operation.operation),
+                  ["describe", "focus", "segments"].contains(operation.operation),
                   (draftAttachments[session.id.uuidString] ?? []).contains(operation.hash),
                   let path = blobPaths[operation.hash], let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)),
                   DeviceBlob.sha256Hex(bytes) == operation.hash else { reject("Take this session and wait for the attachment to be stored on home before using image tools."); return true }

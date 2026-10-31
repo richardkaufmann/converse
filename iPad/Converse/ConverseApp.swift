@@ -14,6 +14,41 @@ struct ConversePadApp: App {
                     else if value == .active { model.foreground() }
                 }
         }
+        .commands {
+            CommandGroup(replacing: .appInfo) { Button("About Converse…") { model.aboutShown = true } }
+            CommandGroup(replacing: .appSettings) {
+                Button("Converse Groups / Setup…") { model.connectShown = true }.keyboardShortcut(",")
+            }
+            CommandGroup(replacing: .newItem) {
+                Menu("New session on") {
+                    ForEach(Array(model.service.homes.values).filter { $0.online && model.service.canCreateRemote($0.deviceID) }.sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
+                        Menu(home.deviceName) {
+                            ForEach(["claude", "codex", "muse"], id: \.self) { provider in
+                                Button(provider.capitalized) {
+                                    Task { @MainActor in
+                                        let result = await model.service.requestParticipant(home: home.deviceID, action: "session.create", provider: provider)
+                                        if result.outcome != "completed" { model.error = result.detail }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Menu("New agent on") {
+                    ForEach(Array(model.service.homes.values).filter { $0.online && model.service.canHostAgent($0.deviceID) }.sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
+                        Button(home.deviceName) { model.newAgentHome = home.deviceID }
+                    }
+                }
+            }
+            CommandMenu("View") {
+                Toggle("Show sidebar", isOn: Binding(get: { !model.state.sidebarHidden }, set: { model.state.sidebarHidden = !$0; model.persist() }))
+                Toggle("Message numbers", isOn: $model.lineNumbers)
+            }
+            CommandGroup(replacing: .help) {
+                Button("Converse Help…") { model.helpShown = true }.keyboardShortcut("?")
+                Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+            }
+        }
     }
 }
 
@@ -25,7 +60,6 @@ struct PadRoot: View {
     @State private var agentTarget: PadAgentTarget?
     @State private var dragWidth: Double?
     @State private var closingTarget: DeviceSidebarRow?
-    @State private var aboutShown = false
     @State private var sessionActions: DeviceSidebarRow?
     @State private var closeInFlight = Set<String>()
     var body: some View {
@@ -48,8 +82,8 @@ struct PadRoot: View {
                             Button("Converse Groups…") { model.connectShown = true }
                             Button("Converse Help…") { model.helpShown = true }
                             Divider()
-                            Button("About Converse…") { aboutShown = true }
-                            Link("Converse README on GitHub", destination: ConverseAbout.readme)
+                            Button("About Converse…") { model.aboutShown = true }
+                            Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
                             Toggle("Line numbers", isOn: $model.lineNumbers)
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Converse menu")
                     }.padding(10)
@@ -107,8 +141,11 @@ struct PadRoot: View {
         } message: { _ in Text("Stops its work and removes the session from every viewer. A recovery snapshot stays on its home.") }
         .sheet(isPresented: $model.connectShown) { PadConnect(model: model) }
         .sheet(isPresented: $model.helpShown) { PadHelp() }
-            .sheet(isPresented: $aboutShown) { PadAbout() }
+            .sheet(isPresented: $model.aboutShown) { PadAbout() }
             .sheet(item: $sessionActions) { row in PadSessionActions(row: row, park: { model.park(row.globalID) }) }
+        .sheet(isPresented: Binding(get: { model.newAgentHome != nil }, set: { if !$0 { model.newAgentHome = nil } })) {
+            if let home = model.newAgentHome { PadAgentPanel(home: home, target: nil) }
+        }
         .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
     }

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/converse-icon.png" width="160" alt="Converse high-top tennis shoe icon">
+  <img src="docs/converse-icon.png" width="160" alt="Converse robot logo">
 </p>
 
 # Converse
@@ -51,13 +51,13 @@ Converse also integrates with **Meta's Muse mobile app and its avatar, Jolly**. 
 
 ### Image tools on Mac and iPad
 
-After attaching or pasting an image, tap the **wand** beside the image count. **Describe image** uses Muse Spark to draft notes you can edit before adding them to the current prompt. Or tap an object in the preview and choose **Find region · SAM** to inspect a highlighted region, then add its crop as another attachment. The original stays attached. Nothing sends until you press Send.
+After attaching or pasting an image, tap the **wand** beside the image count. **Describe image** uses Muse Spark to draft notes you can edit before adding them to the current prompt. Choose **Find Segments** to discover objects, or enter a short description to find matching objects. Blank discovery uses Muse Spark to identify up to six object types, then Meta’s hosted `sam-3.1` segments each type. A typed description goes directly to SAM. Tap/click a segment or its numbered badge to select it, type numbers and press Toggle, or use All / None. **Add selected to draft** creates separate tightly cropped PNG cutouts. **Copy selected** creates one transparent PNG at the original image dimensions and object positions. The original stays attached. Nothing sends until you press Send.
 
 On Mac, right-click any transcript image or unsent attachment and choose **Image tools · Describe / SAM…**. Processing uses the Meta key saved on that Mac. On iPad, the image menu also offers **Use in draft · Image tools…**, which attaches a copy of a historical image and opens the same tools. Neither action submits a prompt.
 
 On Mac, **Save Image to Photos** hands a named PNG to Photos and reports success or failure. Successful import on the Mac is separate from iCloud synchronization to other devices.
 
-These tools work with any session provider. The iPad version requires an updated **Mac home** with a Meta API key saved in Agent Setup; Windows/Linux image processing is not yet available. Processing sends the selected attachment to Meta, using the home's credentials. SAM selects geometry; Spark writes descriptions. SAM's first-version selection is a rectangular crop, not a transparent cutout. If a request times out, **Check result** queries the same operation without paying for another run.
+These tools work with any session provider. The iPad version requires an updated **Mac home** with a Meta API key saved in Agent Setup; Windows/Linux image processing is not yet available. Processing sends the selected attachment to Meta, using the home's credentials. SAM selects geometry; Spark writes descriptions. Cutouts preserve alpha; background pixels are transparent, including holes inside objects. Discovery is bounded and may miss objects; overlapping duplicate masks are merged. It runs only when you press Find Segments. The binary mask decoder is adapted from Meta’s parser and distributed under the included SAM License (`Resources/ThirdParty/SAM-LICENSE.txt`). If a request times out, **Check result** queries the same operation without paying for another run.
 
 In **Agent Setup**, the separate **Scoreboard art direction** field controls subject, style, colors and humor. It is saved independently of success criteria and passed directly to Muse Image. A changed direction requests new art on the next scoreboard refresh, even if the mood is unchanged. Save and run once to try it; automatic runs remain governed by the existing loop settings.
 
@@ -116,7 +116,7 @@ The Mac sidebar groups sessions by device, with an alphabetized, indented list u
 - Images returned by an assistant appear in the conversation and travel to remote panes. Converse asks the assistant to save output images in its session output folder and return Markdown image references. Local output images and public HTTPS image URLs are copied into bounded PNG attachments on the session’s home computer and travel to viewers. HTTPS downloads use no saved cookies or credentials, enforce byte/pixel limits, and reject private-network destinations and redirects. While loading, or if loading fails, a web image’s caption remains a clickable link. Code examples and paths outside the permitted output folders are not imported.
 - The **message numbers** checkbox controls the transcript gutter. Each visible message receives one number in a single sequence: prompt numbers are blue and response numbers are grey. Wrapped lines, paragraphs, images, and the editable draft do not add numbers. Numbers from Mac homes continue through history paging. The checkbox defaults on and remembers your choice.
 - Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
-- Scrolling up pauses following. **Jump to latest** shows the number of new output updates and immediately returns to the tail. Following also resumes near the bottom or after five seconds without input or scrolling; it never resumes while text is selected. New output does not reset that idle period.
+- Scrolling up pauses following. **Jump to latest** shows the number of new output updates and immediately returns to the tail. There is no idle timeout: leaving the cursor at the tail does not pull you away from older text. Typing in that pane or pressing Jump to latest returns to the draft. New output follows only when you have not paused following by scrolling up or selecting history.
 - Remote drafts identify the home device and version they were restored from. If a lease refresh supplies a different draft while you have unsent edits, choose **Keep my draft** or **Use home draft**; Converse preserves your local text and images until you choose.
 
 On iPad, an empty display in an existing group explains how to take a session using its sidebar buttons; joining is offered only when no group is selected.
@@ -420,7 +420,7 @@ Discord replies retain supported Markdown; pipe tables become labelled records b
 
 Agent schedules repeat until paused. **Maximum turns per loop** bounds each activation, rather than counting down future scheduled checks. The current engine completes one model response per activation (up to four hosted searches and 8,192 output tokens); it does not automatically continue itself. Existing exhausted agents remain paused, but can be enabled again without replenishing a lifetime counter. iPad Setup has explicit Save/Cancel and Save-and-run controls. Clipboard image paste and the Photos picker have separate buttons. On iPad, Command-V and the standard Paste menu also accept image-only clipboards when the session is editable.
 
-On iPad, the system **Paste** button accepts images from other apps; **Photos** opens the photo library. Startup and Take show the transcript tail unless you deliberately selected text or positioned an editing cursor. Scrolling pauses following for five idle seconds; selections hold your place. Pasted images are revealed automatically on Mac and iPad. Agent Setup reports failed saves in an alert and returns the home’s saved settings. Starting a loop or mention does not invalidate an open settings form.
+On iPad, the system **Paste** button accepts images from other apps; **Photos** opens the photo library. Startup and Take show the transcript tail unless you deliberately selected text or positioned an editing cursor. Scrolling up pauses following indefinitely; idle refreshes and timers never pull you back down. Pasted images are revealed automatically on Mac and iPad. Agent Setup reports failed saves in an alert and returns the home’s saved settings. Starting a loop or mention does not invalidate an open settings form.
 
 ## Jolly (Mac)
 
@@ -434,7 +434,10 @@ The outbox contains only explicitly entered messages (up to 500 characters). Jol
 
 ## Export transcripts
 
-Choose **File → Export…**. In the standard Mac save dialog, check one, several, or all sessions; choose **Interleaved by time** or **One after the other**, **Prompts**, **Responses**, or **Both**, and whether to include line numbers. The export is a snapshot of submitted messages when the dialog opens; drafts, tool activity, and account configuration are excluded.
+Remote transcript export from the Mac **File → Export…** lists local and remote sessions, labeled by home. Updated homes provide the complete submitted transcript and images through a read-only export; no display ownership is taken and drafts remain private. If a home is offline, too old, or the transcript changes during paging, export reports the problem rather than writing an incomplete file.
+
+
+Choose **File → Export…**. In the standard Mac save dialog, check one, several, or all sessions; choose **Interleaved by time** or **One after the other**, **Prompts**, **Responses**, or **Both**, and whether to include line numbers. Local transcripts are captured when the dialog opens; remote transcripts are read when you export; drafts, tool activity, and account configuration are excluded.
 
 Choose **HTML** for one portable file with formatted headings, emphasis, code, tables, links, and embedded attachment images. Open it in a browser to read or print. Choose **Text** for a UTF-8 `.txt` file preserving original Markdown and listing attached image filenames; line numbers are disabled for Text. New messages retain their creation times. Older messages without recorded timestamps are labeled **Time unavailable** and appear after timed messages in their original session order when interleaved.
 
@@ -500,7 +503,7 @@ open .build/Converse.app
 
 Keep your checkout outside Documents, Desktop and Downloads (for example, `~/Developer/Converse`) to avoid macOS protected-folder prompts during development. Builds go into `.build`; use `CONVERSE_APP_OUTPUT=/path/to/Converse.app` to choose another destination. The build refuses to replace a running app because changing an ad-hoc signature can invalidate its privacy permissions.
 
-The build generates the sneaker artwork with a plain circular badge and creates `.build/Converse.app`. When exactly one valid Developer ID Application identity is installed, builds use it automatically with hardened runtime and a secure timestamp. If several are installed, select one with `CONVERSE_SIGN_IDENTITY` (certificate SHA-1 or full name). Without a Developer ID identity, local builds use an ad-hoc signature; `CONVERSE_SIGN_IDENTITY=-` explicitly requests one. Local builds are not automatically notarized. Generated app and icon bundles are excluded from Git; their source is included.
+The build derives app icons from the supplied [logo master](Resources/Branding/Converse-Logo.jpeg) and creates `.build/Converse.app`. When exactly one valid Developer ID Application identity is installed, builds use it automatically with hardened runtime and a secure timestamp. If several are installed, select one with `CONVERSE_SIGN_IDENTITY` (certificate SHA-1 or full name). Without a Developer ID identity, local builds use an ad-hoc signature; `CONVERSE_SIGN_IDENTITY=-` explicitly requests one. Local builds are not automatically notarized. Generated app and icon bundles are excluded from Git; their source is included.
 
 Install and authenticate the assistant CLIs separately. Configure each entry with the matching adapter; Converse uses Muse’s interactive MSP host and the other adapters’ headless modes. Command lines run through your login shell. Homebrew and `~/.local/bin` are included in the executable search path.
 
@@ -569,7 +572,7 @@ Claude and Codex still use headless adapters and do not yet support interactive 
 
 The downloadable release is the Mac app. The [iPad viewer/controller](iPad/README.md) is distributed through TestFlight. Windows has a separate native implementation sharing the same C# core: sidebar/panes, groups, switchboard messaging, agents, and a Set up Linux deployment manager. The Linux home is newer and still maturing: its deployment, admin, and recovery behavior is covered by automated tests and VM deployment, with interactive acceptance (live pairing walks, provider turns, recovery walkthroughs) still being exercised. Native context compaction and Discord bot execution currently require a Mac home; matching build numbers do not imply complete feature parity.
 
-See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); the vector-drawn sneaker icon is generated by [Sources/Icon.swift](Sources/Icon.swift).
+See [README.txt](README.txt) for additional usage notes. App and adapter implementation is in [Sources/main.swift](Sources/main.swift); platform icons are generated from the shared logo master by [Sources/Icon.swift](Sources/Icon.swift).
 
 Read-only Muse status probing and retained usage aggregation are implemented in [Sources/MuseStatus.swift](Sources/MuseStatus.swift). The status probe has an eight-second timeout and exposes failures rather than fabricating values. The CLI quota bridge is in [Sources/MuseQuota.swift](Sources/MuseQuota.swift), has a fifteen-second timeout, and keeps terminal escape sequences out of the UI.
 
@@ -584,3 +587,5 @@ Questions and ideas are welcome in [Discussions](https://github.com/richardkaufm
 ## License
 
 Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+The SAM mask codec in [Sources/SAMMask.swift](Sources/SAMMask.swift) is adapted from Meta’s parser and is distributed under the [SAM License](Resources/ThirdParty/SAM-LICENSE.txt), included with the Mac and iPad apps. Provider-logo notices are in [Resources/ProviderLogos](Resources/ProviderLogos/).

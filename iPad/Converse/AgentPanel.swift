@@ -49,7 +49,7 @@ struct PadAgentPanel: View {
                         Toggle("Generate mood art", isOn: field(\.generateArt))
                         TextField("Scoreboard art direction", text: Binding(get: { settings?.artDirection ?? "" }, set: { settings?.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
                         Text("Subject, style, colors or humor. Applied directly to artwork on the next scoreboard refresh. Separate from the objective and success criteria. Requires an updated home.").font(.caption)
-                        Toggle("Speak on home", isOn: field(\.speak))
+                        Text("Scheduled runs are silent. Start talking is available on a Mac viewing the agent.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow Discord alerts", isOn: field(\.discord))
                         Toggle("Share session information", isOn: Binding(get: { settings?.discordShareSessionInformation == true }, set: { settings?.discordShareSessionInformation = $0 }))
                         Text("Shares this agent’s recent conversation, working notes and scoreboard only in a verified private Discord channel.").font(.caption)

@@ -132,6 +132,22 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
             _ = pump { response != nil }
             return response
         }
+        let beforeExport = target.messages
+        target.messages = (0..<45).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Export message \($0)", createdAt: Date(timeIntervalSince1970: Double($0))) }
+        let exportPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")!
+        let exportFile = root.appendingPathComponent("export.png"); try exportPNG.write(to: exportFile)
+        target.messages[0].images = [exportFile.path]
+        let exportReceipts = sb.participantReceipts.count
+        var exportResult: (ExportSession, [String: Data])?, exportFailure: String?, exportDone = false
+        let exportRow = a.homes[bid]!.rows.first { $0.globalID == gid }!
+        Task { @MainActor in
+            do { exportResult = try await TranscriptExportController.load(ExportSession(row: exportRow, home: "Remote home", id: a.placementID(forGlobal: gid)), includeImages: true, service: a) }
+            catch { exportFailure = error.localizedDescription }; exportDone = true
+        }
+        _ = pump { exportDone }
+        check(exportDone && exportFailure == nil && exportResult?.0.messages.count == 45 && exportResult?.1.count == 1 && exportResult?.0.messages.last?.createdAt == Date(timeIntervalSince1970: 44), "Remote export fetches every page, original timestamps, and hash-verified image data")
+        check(a.remoteLeases.isEmpty && b.remoteLeases.isEmpty && target.draft == "Unsent human draft" && sb.participantReceipts.count == exportReceipts, "Read-only export needs no display lease, changes no draft, and writes no mutation receipts")
+        target.messages = beforeExport
         let renameID = UUID(), priorTitle = target.title
         let renamed = request("session.rename", target: gid, title: "Renamed remotely", id: renameID)
         let renamedReplay = request("session.rename", target: gid, title: "Renamed remotely", id: renameID)
