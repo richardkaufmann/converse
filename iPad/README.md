@@ -1,8 +1,18 @@
-# Converse for iPad
+# Converse for iPhone and iPad
 
-The iPad app is a viewer/controller for sessions homed on a Mac (and, after interoperability testing, Windows). Models, CLI logins, working folders and execution stay on their home computer. No CLI or vendor API key is installed on the iPad.
+The universal iOS app is a viewer/controller for sessions homed on a Mac (and, after interoperability testing, Windows). Models, CLI logins, working folders and execution stay on their home computer. No CLI or vendor API key is installed on the iPad.
 
 The single-scene SwiftUI app uses the same physical protocol, Noise crypto, Keychain identity, trust, lease, outbox and draft-store source files as the Mac. Its Xcode project references `../Sources`; the existing Mac `swiftc` build stays intact. `VERSION.json` stamps both apps, and `scripts/build-help.py` builds the same offline README Help artifact on both platforms.
+
+## iPhone layout
+
+The same app and pairing protocol now support iPhone. Portrait is the primary layout: one session fills the screen; selecting a second stacks the two vertically. The quiet stacked-rectangles button in the top bar has a 44-point touch target and opens **Sessions**. Check or uncheck up to two sessions, grouped by home. Unchecking parks that display without stopping work on the home. A third session cannot silently replace one already selected.
+
+The sheet also contains New session, Groups / Pair a computer, Help, About, message numbers and the private GitHub README link. Per-session actions remain in each pane's ellipsis button. There is no permanently visible phone sidebar. The iPad retains its sidebar and three-pane layout.
+
+Opening the software keyboard gives the editing session the available height and collapses the other session to a tappable title strip. Hide the keyboard to return to the two-session stack. Landscape remains supported; short windows show one expanded session and the other title strip to preserve readable transcript space. Drafts, selected sessions and device identity survive backgrounding through the existing stores and lease recovery protocol.
+
+Each fresh mobile installation has a stable default label such as **Converse iPhone · A1B2C3** or **Converse iPad · D4E5F6**, while an explicitly configured device name takes precedence. Pairing uses cryptographic device identity, never the display name; multiple phones and tablets can join the same group. Taking the same session on another device still follows the existing exclusive display-lease rules.
 
 ## Install wirelessly
 

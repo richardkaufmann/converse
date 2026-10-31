@@ -16,6 +16,7 @@ struct PadState: Codable {
     var sidebarWidth: Double = 300
     var sidebarHidden = false
     var drafts: [String: PadDraft] = [:]
+    var defaultDeviceName: String? = nil
 }
 
 final class PadModel: ObservableObject {
@@ -37,7 +38,11 @@ final class PadModel: ObservableObject {
     init(service: DeviceSyncService = .shared) {
         self.service = service
         if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(PadState.self, from: data), saved.placements.count == 3 { state = saved }
-        service.deviceNameOverride = UserDefaults.standard.string(forKey: "deviceName") ?? "Converse iPad"
+        if state.defaultDeviceName == nil {
+            state.defaultDeviceName = Self.mobileDeviceName(phone: UIDevice.current.userInterfaceIdiom == .phone, identifier: service.identity?.deviceID ?? UUID().uuidString)
+            persist()
+        }
+        service.deviceNameOverride = UserDefaults.standard.string(forKey: "deviceName") ?? state.defaultDeviceName
         service.isPlaced = { [weak self] id in self?.state.placements.contains(id) == true }
         service.onRemotePark = { [weak self] id in self?.removePlacement(id) }
         observer = service.objectWillChange.sink { [weak self] in
@@ -53,6 +58,9 @@ final class PadModel: ObservableObject {
         }
 
     }
+    static func mobileDeviceName(phone: Bool, identifier: String) -> String {
+        "Converse " + (phone ? "iPhone" : "iPad") + " · " + identifier.prefix(6).uppercased()
+    }
     func persist() {
         do {
             try FileManager.default.createDirectory(at: service.storageFolder, withIntermediateDirectories: true)
@@ -65,6 +73,16 @@ final class PadModel: ObservableObject {
         removePlacement(id)
         state.placements[pane] = id; focusedPane = pane; persist()
         service.acquireRemote(globalID: id)
+    }
+    func constrainPhonePlacements() {
+        let extra = state.placements.compactMap { $0 }.dropFirst(2)
+        for id in extra { park(id) }
+    }
+    func togglePhoneSession(_ id: String) {
+        if state.placements.contains(id) { park(id); return }
+        guard state.placements.compactMap({ $0 }).count < 2,
+              let pane = state.placements.firstIndex(where: { $0 == nil }) else { return }
+        assign(id, pane: pane)
     }
     func removePlacement(_ id: String) {
         for index in state.placements.indices where state.placements[index] == id { state.placements[index] = nil }
@@ -195,7 +213,10 @@ final class PadModel: ObservableObject {
         for id in state.drafts.keys { flush(id) }; persist(); service.suspendViewer(); hydratedEpochs = [:]
         if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
     }
-    func foreground() { service.resumeViewer() } // Saved displays resume conditionally after the home reconnects.
+    func foreground() {
+        if UIDevice.current.userInterfaceIdiom == .phone { constrainPhonePlacements() }
+        service.resumeViewer()
+    } // Saved displays resume conditionally after the home reconnects.
 }
 
 enum PadImage {

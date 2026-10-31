@@ -4,7 +4,7 @@
 
 # Converse
 
-Converse is **one app for Muse, Claude Code, and Codex across your machines**. It gives Muse, Claude Code, and Codex the same normal, selectable, formatted text window — the immediacy of a shell, without pretending you're using a CRT from the 1970s. Sessions can live on your Mac, a Windows PC, a headless Linux box, or be driven from your iPad, and the models can message each other across all of it. You might like it if...
+Converse is **one app for Muse, Claude Code, and Codex across your machines**. It gives Muse, Claude Code, and Codex the same normal, selectable, formatted text window — the immediacy of a shell, without pretending you're using a CRT from the 1970s. Sessions can live on your Mac, a Windows PC, a headless Linux box, or be driven from your iPhone or iPad, and the models can message each other across all of it. You might like it if...
 
 * You use multiple coding tools, or multiple accounts with one coding agent.
 * You work on more than one machine and want one place where everything is visible.
@@ -21,7 +21,7 @@ It's a bit "opinionated" to match how I work. Feel free to rip it off and make a
 
 ### 1. One client for your coding models
 
-Converse drives **Muse, Claude Code, and Codex** through one native UI on Mac, Windows, and iPad, so every provider gets the same behaviors instead of each vendor's terminal quirks. Answers render as real, selectable Markdown — headings, lists, code, tables, links — with tool chatter hidden. Images paste in with ⌘V on Mac/iPad or Ctrl+V on Windows, or attach through the attachment controls, and images the assistant produces appear inline in the conversation and travel to remote viewers.
+Converse drives **Muse, Claude Code, and Codex** through one native UI on Mac, Windows, iPhone, and iPad, so every provider gets the same behaviors instead of each vendor's terminal quirks. Answers render as real, selectable Markdown — headings, lists, code, tables, links — with tool chatter hidden. Images paste in with ⌘V on Mac/iPad or Ctrl+V on Windows, or attach through the attachment controls, and images the assistant produces appear inline in the conversation and travel to remote viewers.
 
 You type at the end of the conversation: **Return** sends (or queues while a turn runs), **Inject now** interrupts and sends your queued prompt next, and drafts, queue, and attachments survive relaunch. Hover a session for its home, account, model, effort, access, and usage; hover a message number for its date and time; right-click any exchange to **copy that whole prompt or response** (formatted for rich-text targets, original Markdown for plain text). Prompt/response/export flows are built in — see [Export transcripts](#export-transcripts).
 
@@ -29,9 +29,11 @@ Model parameters are yours, per conversation: **model**, **reasoning effort**, a
 
 ### 2. Converse Groups: one fabric across your machines
 
-Pair your devices into a **Converse Group** and every member sees every session, grouped under its home device. **Mac and Windows** are full participants (UI + sessions). **Linux** runs as a headless home (sessions only): the same Claude/Codex/Muse execution with no desktop, provisioned and maintained over SSH. **iPad** is a viewer/controller — models, logins, and working folders stay on their home machines.
+Pair your devices into a **Converse Group** and every member sees every session, grouped under its home device. **Mac and Windows** are full participants (UI + sessions). **Linux** runs as a headless home (sessions only): the same Claude/Codex/Muse execution with no desktop, provisioned and maintained over SSH. **iPhone and iPad** are viewers/controllers — models, logins, and working folders stay on their home machines.
 
 Press **1, 2, or 3** to *take* any session onto the screen in front of you — from your iPad, create a session on the Linux box in the closet and drive Claude, Codex, or Muse there — or **P** to park it and let the work continue. Only one device displays a session at a time; the home arbitrates with fenced display epochs, so a stale viewer can never submit under an old lease. Drafts, queues, and attachments transfer with the pane. Disconnects leave home work running, and uncertain sends resolve with **Check home** instead of silent replay.
+
+On iPhone, choose one or two sessions with the subtle **stacked-rectangles** button. Two sessions stack vertically; opening the keyboard gives the focused session the available space and reduces the other to a tappable title strip. The session picker also contains pairing, Help, About, and remote session creation. iPad retains its wider sidebar and three-pane layout. A group can contain several iPhones and iPads: each installation has its own device identity and saved layout, with a distinct default name that you can change. Taking the same session from another device still transfers its display lease.
 
 Pairing is designed to be honest about trust: you compare an eight-part verification number on both devices and press Pair on each. Traffic is Noise-encrypted with device keys pinned after pairing. Group admission grants history access and tool control under home logins, and any member can admit the next device, so admit only devices you trust. Discovery works on a LAN via Bonjour; join-by-address covers VPN paths where discovery doesn't reach.
 

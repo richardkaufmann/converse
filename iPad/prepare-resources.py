@@ -22,7 +22,8 @@ info = {
     'NSBonjourServices': ['_converse._tcp'],
     'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False},
     'UILaunchScreen': {},
-    'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
+    'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
+    'UISupportedInterfaceOrientations~ipad': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
     'UIRequiresFullScreen': False,
 }
 # Noise uses Apple CryptoKit primitives; URLSession uses Apple's HTTPS stack.

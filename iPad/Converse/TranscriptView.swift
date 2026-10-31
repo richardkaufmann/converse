@@ -232,6 +232,7 @@ struct PadTranscript: UIViewRepresentable {
     var removeImage: (String) -> Void = { _ in }
     var pasteError: (String) -> Void = { _ in }
     var imageTools: ((String?, Data) -> Void)? = nil
+    var didFocus: () -> Void = {}
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
@@ -493,6 +494,7 @@ struct PadTranscript: UIViewRepresentable {
         deinit { idleResume?.cancel() }
         func scheduleResume() { idleResume?.cancel() }
         func resumeIfIdle() { /* No timer-driven scrolling. */ }
+        func textViewDidBeginEditing(_ textView: UITextView) { parent.didFocus() }
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !updating else { return }
             explicitSelection = textView.selectedRange.length > 0 || (textView.isFirstResponder && textView.selectedRange.location < textView.textStorage.length)

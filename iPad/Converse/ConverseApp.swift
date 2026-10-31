@@ -56,14 +56,22 @@ struct PadAgentTarget: Identifiable { var id = UUID(); var home: String; var tar
 
 struct PadRoot: View {
     @ObservedObject var model: PadModel
-    @ObservedObject private var service = DeviceSyncService.shared
+    @ObservedObject private var service: DeviceSyncService
     @State private var agentTarget: PadAgentTarget?
     @State private var dragWidth: Double?
     @State private var closingTarget: DeviceSidebarRow?
     @State private var sessionActions: DeviceSidebarRow?
     @State private var closeInFlight = Set<String>()
+    @State private var phoneSessionsShown = false
+    @State private var phoneDestination: String?
+    @State private var keyboardShown = false
+    private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    init(model: PadModel) { self.model = model; self.service = model.service }
     var body: some View {
         GeometryReader { geometry in
+            if isPhone {
+                phoneLayout(availableHeight: geometry.size.height)
+            } else {
             let width = PadLayout.sidebarWidth(preferred: model.state.sidebarWidth, available: geometry.size.width)
             HStack(spacing: 0) {
                 if !model.state.sidebarHidden {
@@ -123,6 +131,22 @@ struct PadRoot: View {
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }.background(Color(uiColor: .systemBackground))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardShown = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardShown = false }
+        .sheet(isPresented: $phoneSessionsShown, onDismiss: {
+            let destination = phoneDestination; phoneDestination = nil
+            switch destination {
+            case "groups": model.connectShown = true
+            case "help": model.helpShown = true
+            case "about": model.aboutShown = true
+            default: break
+            }
+        }) {
+            PhoneSessionPicker(model: model) { action in
+                phoneDestination = action; phoneSessionsShown = false
+            }
         }
         .onChange(of: service.groupRequests) { old, requests in
             let previous = Set(old.map(\.id))
@@ -148,6 +172,59 @@ struct PadRoot: View {
         }
         .sheet(item: $agentTarget) { PadAgentPanel(home: $0.home, target: $0.target) }
         .alert("Converse", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) { Button("OK") { model.error = "" } } message: { Text(model.error) }
+    }
+    private func phoneLayout(availableHeight: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Converse").font(.headline)
+                Spacer()
+                if keyboardShown {
+                    Button { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) } label: {
+                        Image(systemName: "keyboard.chevron.compact.down").frame(width: 44, height: 44)
+                    }.accessibilityLabel("Hide keyboard")
+                }
+                Button { phoneSessionsShown = true } label: {
+                    Image(systemName: "rectangle.stack").foregroundStyle(.secondary).frame(width: 44, height: 44)
+                }.accessibilityLabel("Choose sessions and app options")
+            }.padding(.horizontal, 12)
+            Divider()
+            let assigned = model.state.placements.indices.filter { model.state.placements[$0] != nil }
+            if assigned.isEmpty {
+                ContentUnavailableView {
+                    Label("Your conversations, here", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text("Choose one or two sessions. They run on your computers and appear here.")
+                } actions: {
+                    Button(service.currentGroup == nil ? "Pair a computer" : "Choose sessions") {
+                        if service.currentGroup == nil { model.connectShown = true } else { phoneSessionsShown = true }
+                    }.buttonStyle(.borderedProminent)
+                }
+            } else {
+                let focused = assigned.contains(model.focusedPane) ? model.focusedPane : assigned[0]
+                VStack(spacing: 0) {
+                    ForEach(assigned, id: \.self) { pane in
+                        let id = model.state.placements[pane]!
+                        if pane != assigned.first { Divider().overlay(Color.secondary.opacity(0.3)) }
+                        if (keyboardShown || availableHeight < 500) && pane != focused {
+                            Button {
+                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                model.focusedPane = pane
+                            } label: {
+                                HStack {
+                                    Text(String(pane + 1)).font(.caption.bold())
+                                    Text(service.remoteRow(globalID: id)?.title ?? "Session").lineLimit(1)
+                                    Spacer()
+                                    Image(systemName: "chevron.up.chevron.down").font(.caption)
+                                }.padding(.horizontal, 12).frame(minHeight: 44)
+                            }.buttonStyle(.plain).accessibilityLabel("Show " + (service.remoteRow(globalID: id)?.title ?? "session"))
+                        } else {
+                            PadPane(id: id, pane: pane, model: model)
+                                .frame(maxHeight: .infinity)
+                        }
+                    }
+                }
+            }
+        }.background(Color(uiColor: .systemBackground))
     }
     var pin: some View {
         Button {
@@ -218,11 +295,71 @@ struct PadRoot: View {
     }
 }
 
+/// A sheet keeps controls reachable without spending transcript width on a sidebar.
+struct PhoneSessionPicker: View {
+    @ObservedObject var model: PadModel
+    @ObservedObject private var service: DeviceSyncService
+    @Environment(\.dismiss) private var dismiss
+    var open: (String) -> Void
+    init(model: PadModel, open: @escaping (String) -> Void) { self.model = model; self.service = model.service; self.open = open }
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Select up to two sessions. Two sessions stack vertically. Deselecting parks the display; work continues on its home.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(Array(service.homes.values).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
+                    Section(home.deviceName + (home.online ? "" : " · offline")) {
+                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                            let selected = model.state.placements.contains(row.globalID)
+                            Button { model.togglePhoneSession(row.globalID) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent")
+                                        Text(row.status).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    PadProviderLogo(engine: row.engine)
+                                }.frame(minHeight: 40).contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                                .disabled(!selected && (!home.online || model.state.placements.compactMap { $0 }.count >= 2))
+                                .accessibilityLabel((selected ? "Deselect " : "Select ") + row.title)
+                                .accessibilityAddTraits(selected ? .isSelected : [])
+                        }
+                        if home.online && service.canCreateRemote(home.deviceID) {
+                            Menu("New session") {
+                                ForEach(["claude", "codex", "muse"], id: \.self) { provider in
+                                    Button(provider.capitalized) {
+                                        Task { @MainActor in
+                                            let result = await service.requestParticipant(home: home.deviceID, action: "session.create", provider: provider)
+                                            if result.outcome != "completed" { model.error = result.detail }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Section("Converse") {
+                    Button("Groups / Pair a computer…") { open("groups") }
+                    Button("Help…") { open("help") }
+                    Button("About Converse…") { open("about") }
+                    Toggle("Message numbers", isOn: $model.lineNumbers)
+                    Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+                }
+            }.navigationTitle("Sessions")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
 struct PadPane: View {
     let id: String
     let pane: Int
     @ObservedObject var model: PadModel
-    @ObservedObject private var service = DeviceSyncService.shared
+    @ObservedObject private var service: DeviceSyncService
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
     @State private var imageTools = false
@@ -232,12 +369,13 @@ struct PadPane: View {
     @State private var editingModel = false
     @State private var customModel = ""
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
+    init(id: String, pane: Int, model: PadModel) { self.id = id; self.pane = pane; self.model = model; self.service = model.service }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
-                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(.title3).lineLimit(1).truncationMode(.tail)
+                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(UIDevice.current.userInterfaceIdiom == .phone ? .headline : .title3).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
                 Button { sessionActions = service.remoteRow(globalID: id) } label: {
                     Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
@@ -300,7 +438,7 @@ struct PadPane: View {
                           edit: { model.edit(id, text: $0) }, send: { model.send(id) }, attach: { model.attach(id, data: $0) }, removeImage: { model.removeImage(id, hash: $0) }, pasteError: { model.error = $0 }, imageTools: { originalHash, bytes in
                               let existing = originalHash.flatMap { model.draft(id).hashes.contains($0) ? $0 : nil }
                               if let hash = existing ?? model.attach(id, data: bytes) { imageToolsHash = hash; imageTools = true }
-                          })
+                          }, didFocus: { model.focusedPane = pane })
                 .overlay(alignment: .bottomTrailing) {
                     if let state = snapshot?.compaction, state.visible {
                         Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }

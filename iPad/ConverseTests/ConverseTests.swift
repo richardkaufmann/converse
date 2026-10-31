@@ -6,6 +6,122 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testFourMobileDevicesJoinOneGroupWithDistinctPersistentIdentities() async throws {
+        guard let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with the isolated Mac group sponsor") }
+        var mobiles: [DeviceSyncService] = []
+        defer { mobiles.forEach { $0.suspendViewer() } }
+        for index in 0..<4 {
+            let mobile = try service(); try mobile.enableGroupsForTesting(); mobiles.append(mobile)
+            let identity = try XCTUnwrap(mobile.identity)
+            mobile.deviceNameOverride = PadModel.mobileDeviceName(phone: index < 2, identifier: identity.deviceID)
+            try mobile.startNetworkForTesting()
+            mobile.joinGroupByAddress(host: "127.0.0.1", port: port)
+            try await eventually("Mobile requests admission") { mobile.pairingPrompt != nil }
+            XCTAssertNil(mobile.currentGroup)
+            mobile.confirmPairing()
+            try await eventually("Mac reviewed code and admitted mobile") { mobile.currentGroup?.name == "Simulator Group" }
+            XCTAssertTrue(mobile.remoteLeases.isEmpty, "Joining must not take any existing display lease")
+        }
+        try await eventually("Four mobile identities coexist") { mobiles.allSatisfy { $0.trusted.count >= 4 } }
+        XCTAssertEqual(Set(mobiles.compactMap { $0.identity?.deviceID }).count, 4)
+        XCTAssertEqual(Set(mobiles.compactMap(\.deviceNameOverride)).count, 4)
+        let group = try XCTUnwrap(mobiles.first?.currentGroup)
+        for mobile in mobiles {
+            let reloadedIdentity = try DeviceIdentity.loadOrCreate(folder: mobile.storageFolder, useKeychain: false)
+            XCTAssertEqual(reloadedIdentity.deviceID, mobile.identity?.deviceID)
+            let groups = try ConverseGroupStore(folder: mobile.storageFolder)
+            XCTAssertEqual(groups.current, group)
+            let trust = try DeviceTrustStore(folder: mobile.storageFolder)
+            XCTAssertGreaterThanOrEqual(trust.devices.count, 4)
+        }
+        let model = PadModel(service: mobiles[0])
+        XCTAssertEqual(PadModel(service: mobiles[0]).state.defaultDeviceName, model.state.defaultDeviceName)
+    }
+    func testPhoneRestoringThreeTabletPlacementsParksOnlyExtraAndKeepsDraft() throws {
+        let service = try service(), model = PadModel(service: service)
+        model.state.placements = ["one", "two", "three"]
+        model.state.drafts["three"] = PadDraft(text: "Recovered third draft", dirty: true)
+        model.constrainPhonePlacements()
+        XCTAssertEqual(model.state.placements, ["one", "two", nil])
+        XCTAssertEqual(model.draft("three").text, "Recovered third draft")
+        XCTAssertEqual(PadModel(service: service).state.placements, model.state.placements)
+    }
+    func testPhoneSelectionCapsAtTwoAndPreservesParkedDraft() throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "a", count: 64)
+        let ids = (0..<3).map { _ in DeviceGlobalID(home: home, session: UUID()).string }
+        model.state.drafts[ids[0]] = PadDraft(text: "Unsent phone draft", dirty: true)
+        model.togglePhoneSession(ids[0]); model.togglePhoneSession(ids[1])
+        XCTAssertEqual(model.state.placements.compactMap { $0 }, Array(ids.prefix(2)))
+        model.togglePhoneSession(ids[2])
+        XCTAssertFalse(model.state.placements.contains(ids[2]), "Choosing a third must not silently replace another session")
+        model.togglePhoneSession(ids[0])
+        XCTAssertEqual(model.draft(ids[0]).text, "Unsent phone draft")
+        model.togglePhoneSession(ids[2])
+        XCTAssertEqual(Set(model.state.placements.compactMap { $0 }), Set(ids.suffix(2)))
+        let restored = PadModel(service: service)
+        XCTAssertEqual(restored.state.placements, model.state.placements)
+        XCTAssertEqual(restored.draft(ids[0]).text, "Unsent phone draft")
+    }
+    func testTranscriptFocusSelectsPaneWithoutEditingDraft() {
+        var focusCount = 0
+        let parent = PadTranscript(messages: [], draft: "Untouched", images: [:], editable: true, lineNumbers: true,
+                                   edit: { _ in XCTFail("Focus must not edit the draft") }, send: {}, attach: { _ in }, didFocus: { focusCount += 1 })
+        let coordinator = PadTranscript.Coordinator(parent)
+        coordinator.textViewDidBeginEditing(TailTextView.native())
+        XCTAssertEqual(focusCount, 1)
+    }
+    func testUniversalAppDeviceFamilies() throws {
+        let families = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "UIDeviceFamily") as? [Int])
+        XCTAssertTrue(families.contains(1), "The built app must install on iPhone")
+        XCTAssertTrue(families.contains(2), "iPad support must remain")
+    }
+    func testPhoneTwoPanesPortraitAndLandscape() async throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "a", count: 64)
+        for index in 0..<2 {
+            let id = DeviceGlobalID(home: home, session: UUID()).string
+            model.state.placements[index] = id
+            model.state.drafts[id] = PadDraft(text: "Session \(index + 1) draft stays intact", dirty: true)
+            service.remoteLeases[id] = UInt64(index + 1)
+        }
+        let expected = model.state.drafts.mapValues(\.text)
+        for size in [CGSize(width: 390, height: 844), CGSize(width: 844, height: 390)] {
+            let window = UIWindow(frame: CGRect(origin: .zero, size: size)); window.overrideUserInterfaceStyle = .dark
+            let host = UIHostingController(rootView: PadRoot(model: model)); window.rootViewController = host; window.isHidden = false
+            try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+            let attachment = XCTAttachment(image: image); attachment.name = "iPhone two sessions \(Int(size.width))x\(Int(size.height))"; attachment.lifetime = .keepAlways; add(attachment)
+            XCTAssertEqual(model.state.drafts.mapValues(\.text), expected)
+            if size.width < size.height {
+                NotificationCenter.default.post(name: UIResponder.keyboardWillShowNotification, object: nil)
+                window.frame.size.height = 510
+                try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+                let keyboardImage = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+                let keyboardAttachment = XCTAttachment(image: keyboardImage); keyboardAttachment.name = "iPhone keyboard-sized focused pane"; keyboardAttachment.lifetime = .keepAlways; add(keyboardAttachment)
+                NotificationCenter.default.post(name: UIResponder.keyboardWillHideNotification, object: nil)
+            }
+            window.isHidden = true
+        }
+    }
+    func testPhoneSessionPickerAtPhoneWidth() async throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "a", count: 64)
+        var state = RemoteHomeState(deviceID: home, deviceName: "Richard-Air"); state.online = true
+        for (index, title) in ["Converse Development", "Converse Steward", "Weekend demo"].enumerated() {
+            let sid = UUID(), id = DeviceGlobalID(home: home, session: UUID()).string
+            state.rows.append(DeviceSidebarRow(globalID: id, sessionID: sid, title: title, assistant: "Muse", engine: "muse", model: "muse-spark-1.3", effort: "", access: "", status: index == 0 ? "Working" : "Ready", busy: index == 0, queued: 0, queuePaused: false))
+            if index < 2 { model.state.placements[index] = id }
+        }
+        service.homes[home] = state
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844)); window.overrideUserInterfaceStyle = .dark
+        let host = UIHostingController(rootView: PhoneSessionPicker(model: model, open: { _ in })); window.rootViewController = host; window.isHidden = false
+        try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+        let attachment = XCTAttachment(image: image); attachment.name = "iPhone session picker"; attachment.lifetime = .keepAlways; add(attachment)
+        window.isHidden = true
+    }
     func testImageToolsMenuForHistoryAndDraftOnly() {
         let parent = PadTranscript(messages: [], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in }, imageTools: { _, _ in })
         let coordinator = PadTranscript.Coordinator(parent)
