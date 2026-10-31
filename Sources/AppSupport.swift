@@ -27,6 +27,9 @@ enum AppSupport {
     static let version = 1
     static let title = "Converse App Support"
     static let connectionReply = "CONVERSE_CONNECTION_OK"
+    static let guideLinks = "[Set up your first coding session](converse-help://first-session) · [Set up your first agent](converse-help://first-agent) · [Connect your devices into a Group](converse-help://first-group)"
+    static let guideTopics = ["first-session": "set-up-your-first-coding-session", "first-agent": "set-up-your-first-agent", "first-group": "connect-your-devices-into-a-group"]
+    static let closingInvitation = "Tell me what you'd like to set up, or just ask for help understanding what the app can do"
     static let welcome = """
     # Welcome to Converse!
 
@@ -34,7 +37,9 @@ enum AppSupport {
 
     [README](converse-help://readme) · [Set up agents](converse-help://agents) · [Discord](converse-help://discord) · [Connect the Meta Muse iPhone app](converse-help://muse-iphone) · [Connect another device](converse-help://devices)
 
-    You can either read through the README in Help, or just ask me to “set up my agents, my Discord, my Meta iPhone connector,” and I’ll walk you through what’s needed and actually set it up for you.
+    \(guideLinks)
+
+    \(closingInvitation)
     """
     static func instructions(agent: Bool) -> String {
         """
@@ -45,7 +50,7 @@ enum AppSupport {
         Actions:
         - inspect: returns live session/agent IDs and safe configuration, not secrets or transcripts.
         - help: optional query searches the installed README and returns actual documentation. Use this before explaining installation, Discord or the Meta Muse iPhone connector; do not invent instructions or assume a connection works.
-        - open: target readme, agents, discord, muse-iphone, devices or settings. Opens the real app control/help. For agents/discord an optional title identifies an existing agent; otherwise opens agent creation. Secure fields are where the human enters keys, never in chat.
+        - open: target readme, first-session, first-agent, first-group, agents, discord, muse-iphone, devices or settings. Opens the real app control/help. For agents/discord an optional title identifies an existing agent; otherwise opens agent creation. Secure fields are where the human enters keys, never in chat.
         - create-agent: required title and objective. Creates one paused agent (no speech, artwork, web search, monitoring or Discord enabled). Same-title agent is returned rather than duplicated. Agents use the Meta API and need a Meta key in Agent Setup, independently of your session provider's login.
         - configure-agent: target is an exact ID from inspect; optional objective, repository (owner/name or empty), channelID (Discord numeric ID), discordMentions and jollyAllowed. Saves only these fields through the app; does not start loops or claim services tested. Never set sharing/mentions unless the human requested it. Open Agent Setup for keys and connection tests.
         - show-session: target is an exact local ID from inspect; displays that session.
@@ -55,6 +60,7 @@ enum AppSupport {
     }
     @discardableResult static func open(_ target: String, title: String? = nil, store: Store = .shared) -> Bool {
         guard let app = AppDelegate.shared else { return false }
+        if let topic = guideTopics[target] { app.helpController.show(topic: topic, query: ""); return true }
         switch target {
         case "readme": app.helpController.show(topic: "overview", query: "")
         case "discord":
@@ -101,6 +107,7 @@ extension Store {
         }
         if verified {
             setupCompleted = true; session.needsSignIn = false; session.supportTeachingVersion = AppSupport.version
+            session.switchboardEnabled = true
         }
         save(); callback(verified)
     }
@@ -120,7 +127,7 @@ extension Store {
             let found = book.search(request.query ?? "", limit: 6)
             return found.isEmpty ? "No matching Help topic. Try a shorter query." : String(found.map { $0.markdown }.joined(separator: "\n\n").prefix(24000))
         case "open":
-            guard let target = request.target, ["readme","agents","discord","muse-iphone","devices","settings"].contains(target) else { throw AgentFailure.message("Unknown app page.") }
+            guard let target = request.target, (["readme","agents","discord","muse-iphone","devices","settings"] + Array(AppSupport.guideTopics.keys)).contains(target) else { throw AgentFailure.message("Unknown app page.") }
             guard !openUI || AppSupport.open(target, title: request.title, store: self) else { throw AgentFailure.message("No app window is available.") }
             return "Opened \(target). Opening a page does not configure or test a connection."
         case "create-agent":

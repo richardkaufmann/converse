@@ -63,6 +63,7 @@ struct SavedSession: Codable {
     var lastCompactedAt: Date? = nil
     var supportTeachingVersion: Int? = nil
     var supportAssistant: Bool? = nil
+    var clearedThroughMessageID: UUID? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -90,6 +91,11 @@ final class Session: ObservableObject, Identifiable {
     var identityError = ""
     var messagesRevision: UInt64 = 0
     @Published var messages: [Message] { didSet { messagesRevision &+= 1 } }
+    @Published var clearedThroughMessageID: UUID? = nil { didSet { messagesRevision &+= 1 } }
+    var displayedMessages: [Message] {
+        guard let id = clearedThroughMessageID, let index = messages.firstIndex(where: { $0.id == id }) else { return messages }
+        return Array(messages.dropFirst(index + 1))
+    }
     // Presentation metadata supplied by a remote home; never persisted as a
     // second transcript. Local sessions derive their sequence from messages.
     var messageNumbers: [UUID: Int] = [:] { didSet { if messageNumbers != oldValue { messagesRevision &+= 1 } } }
@@ -170,6 +176,7 @@ final class Session: ObservableObject, Identifiable {
         createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
         id = saved.id; entry = saved.entry; title = saved.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New conversation" : saved.title; messages = saved.messages; agent = saved.agent
         supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
+        clearedThroughMessageID = saved.clearedThroughMessageID
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -189,7 +196,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -450,7 +457,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -483,7 +490,7 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false) {
         guard s.entry.engine != "support" else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -508,6 +515,7 @@ final class Store: ObservableObject {
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
+        if clearDisplayBeforeReply { clearSessionDisplay(s) }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
         s.claudeLastContext = nil
@@ -935,9 +943,19 @@ final class Store: ObservableObject {
             }
         }
     }
+    func clearSessionDisplay(_ s: Session) {
+        s.clearedThroughMessageID = s.messages.last?.id
+        save()
+    }
     func handleLocalCommand(_ s: Session) -> Bool {
         let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login"].contains(command) else { return false }
+        guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login", "/clear", "/unclear"].contains(command) else { return false }
+        if command == "/clear" || command == "/unclear" {
+            s.draft = ""
+            if command == "/clear" { clearSessionDisplay(s) }
+            else { s.clearedThroughMessageID = nil; save() }
+            return true
+        }
         if command == "/login" {
             s.draft = ""
             if s.agent != nil { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
@@ -947,7 +965,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: s.draft)); s.draft = ""
         if command == "/stop" { stop(s); saveSoon(); return true }
         if command == "/help" {
-            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/login — choose an existing login, add a new one, or sign in again\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
+            s.messages.append(Message(role: "notice", text: "/model or /models — query model, effort and access\n/usage — query last-turn tokens, session totals and available quota\n/status — refresh all session status\n/stop — interrupt the current turn\n/login — choose an existing login, add a new one, or sign in again\n/clear — clear the display; keep model context and history\n/unclear — show the hidden history again\n/help — show these local commands\nThese commands never submit a prompt. Use the bottom dropdowns for session settings. Return queues while busy. Use Inject now or Inject all to interrupt with queued input. Command Return inserts a newline.")); saveSoon(); return true
         }
         let response = UUID()
         s.messages.append(Message(id: response, role: "notice", text: "Reading " + s.entry.name + " status…"))
@@ -1209,7 +1227,7 @@ struct Transcript: NSViewRepresentable {
         web.navigationDelegate = context.coordinator; web.loadHTMLString(transcriptHTML, baseURL: nil); session.web = web; return web
     }
     func updateNSView(_ web: WKWebView, context: Context) {
-        context.coordinator.messages = session.messages; context.coordinator.update(web)
+        context.coordinator.messages = session.displayedMessages; context.coordinator.update(web)
     }
     final class Coordinator: NSObject, WKNavigationDelegate {
         var messages: [Message] = []
@@ -1862,7 +1880,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let firstRender = previous == nil
             var historyChanged = firstRender
             if seenMessagesRevision != session.messagesRevision {
-                let messages = session.messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
+                let messages = session.displayedMessages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
                 historyChanged = previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }

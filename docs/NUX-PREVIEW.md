@@ -1,11 +1,11 @@
 # Converse Setup Preview
 
-This is a Mac-only build81 prototype, not a production update or a TestFlight release.
+This is a Mac-only build82 prototype, not a production update or a TestFlight release.
 
 Build with:
 
 ```sh
-CONVERSE_NUX_PREVIEW=1 CONVERSE_APP_OUTPUT="/tmp/converse-nux81/Converse Setup Preview.app" ./build.sh
+CONVERSE_NUX_PREVIEW=1 CONVERSE_APP_OUTPUT="/tmp/converse-nux82/Converse Setup Preview.app" ./build.sh
 ```
 
 The signed bundle has ID `local.richard.Converse.NUXPreview` and an embedded
@@ -26,7 +26,10 @@ installed executables; no CLI installation is replaced by this preview.
    model response automatically. The first model request may consume provider
    quota. If login fails or is cancelled, the gate remains; select again to retry.
    The manual Check connection action covers a login completed outside this flow.
-5. Once connected, ask support to create an agent with an objective, then inspect
+5. Successful onboarding enables and teaches both app setup/control and the
+   switchboard, using the same instructions as the manual teaching menu.
+   Both capabilities persist after restart. Login checks and teaching are hidden
+   from the display before the welcome reply. Once connected, ask support to create an agent with an objective, then inspect
    it in Agent Setup. It starts paused. Ask for Discord or the Meta Muse iPhone
    connector; provide secrets only in native secure fields, never chat.
 6. Quit and reopen the preview: its support session and teaching remain, without
@@ -58,3 +61,12 @@ authentication failure and final-response gating, and a complete local fixture
 journey through provider selection, native login completion, CLI response parsing,
 and support handoff. The fixture uses no external account/model. A human login
 walkthrough remains necessary to validate the installed provider's real OAuth UX.
+
+## Clear the Mac conversation display
+
+Type `/clear` to hide existing messages without resetting the provider session,
+teaching, pending work or attachments. New replies remain visible. Type
+`/unclear` to restore the hidden history. The display boundary survives restart;
+exports and model context retain the complete transcript. Onboarding uses the
+same display operation after injecting both teaching prompts, so the user sees
+the support welcome and links instead of setup machinery.

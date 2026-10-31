@@ -22,8 +22,8 @@ struct SwitchboardCommand: Decodable {
     }
 }
 extension Store {
-    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false) {
-        let prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, agentLoopTick: agentLoopTick, text: text, images: [])
+    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false, clearDisplayBeforeReply: Bool = false) {
+        let prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, clearDisplayBeforeReply: clearDisplayBeforeReply ? true : nil, agentLoopTick: agentLoopTick, text: text, images: [])
         if urgent { s.pending.insert(prompt, at: 0); s.queuePaused = false }
         else { s.pending.append(prompt) }
         // Persist the sender's handled ID and recipient's pending input together,
@@ -34,11 +34,11 @@ extension Store {
     }
     func teachSwitchboard(_ s: Session) {
         s.switchboardEnabled = true
-        if s.entry.engine == "agent" {
-            enqueueSwitchboard(s, text: SwitchboardCommand.agentTeaching)
-            return
-        }
-        let prompt = """
+        enqueueSwitchboard(s, text: switchboardTeaching(s))
+    }
+    func switchboardTeaching(_ s: Session) -> String {
+        if s.entry.engine == "agent" { return SwitchboardCommand.agentTeaching }
+        return """
         [Converse switchboard instructions]
         This session can now send messages to other Converse sessions. Your session ID is \(s.id.uuidString).
         The user may type natural language such as 'tell <name> <message>', 'ask <name> <question>', or 'tell <name> urgently <message>'. Interpret that request and use this protocol.
@@ -59,7 +59,6 @@ extension Store {
         Automatic message chains stop after \(SwitchboardPolicy.maxHops) hops. A fresh human message starts a fresh chain. To discuss this protocol without executing it, include explanatory prose outside the fence.
         First acknowledge these instructions briefly. Look up sessions when you need to address one.
         """
-        enqueueSwitchboard(s, text: prompt)
     }
     func switchboardDirectory(for s: Session) -> String {
         let service = participantService

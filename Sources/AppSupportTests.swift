@@ -6,8 +6,10 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     let store = Store(folder: folder)
     let session = store.supportSession()
     check(store.supportSession() === session && store.sessions.count == 1, "Support onboarding creates exactly one welcome session")
-    check(!store.setupCompleted && session.supportTeachingVersion == nil, "Support is gated before a verified model response")
+    check(!store.setupCompleted && session.supportTeachingVersion == nil && !session.switchboardEnabled, "Support is gated before a verified model response")
     check(AppSupport.welcome.contains("[README](converse-help://readme)") && AppSupport.welcome.contains("[Discord](converse-help://discord)") && AppSupport.welcome.contains("[Connect the Meta Muse iPhone app](converse-help://muse-iphone)"), "Support welcome contains the three requested actionable links")
+    let help = try! HelpBook.load()
+    check(AppSupport.guideTopics.values.allSatisfy { id in help.topics.contains { $0.id == id } } && AppSupport.guideTopics.keys.allSatisfy { AppSupport.welcome.contains("converse-help://" + $0) }, "All three support getting-started links resolve to bundled Help topics")
     let command = AppSupportCommand(action: "create-agent", title: "Example", objective: "Help with this project")
     check((try? store.appSupportResult(command, session: session, openUI: false)) == nil, "Untaught sessions cannot control the app")
     session.supportTeachingVersion = AppSupport.version
@@ -29,13 +31,14 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     session.messages.append(Message(role: "assistant", text: "streamed text", finalReply: AppSupport.connectionReply))
     var accepted = false; session.supportProbeCompletion = { accepted = $0 }
     store.finishSupportProbe(session, success: false)
-    check(!accepted && !store.setupCompleted, "Failed provider exit never opens the setup gate even with a matching response")
+    check(!accepted && !store.setupCompleted && !session.switchboardEnabled, "Failed provider exit never opens the setup gate even with a matching response")
     session.supportProbeCompletion = { accepted = $0 }; session.messages[session.messages.count - 1].finalReply = nil
     store.finishSupportProbe(session, success: true)
-    check(!accepted && !store.setupCompleted, "Codex connection gate requires its authoritative final response")
+    check(!accepted && !store.setupCompleted && !session.switchboardEnabled, "Codex connection gate requires its authoritative final response")
     session.messages[session.messages.count - 1].finalReply = AppSupport.connectionReply
     session.supportProbeCompletion = { accepted = $0 }; store.finishSupportProbe(session, success: true)
-    check(accepted && store.setupCompleted && Store(folder: folder).setupCompleted, "Successful real-response confirmation persists completion")
+    let completed = Store(folder: folder)
+    check(accepted && store.setupCompleted && completed.setupCompleted && session.switchboardEnabled && completed.sessions.first { $0.id == session.id }?.switchboardEnabled == true, "Successful provider confirmation persists both app control and switchboard capability")
     session.switchboardTurnStart = session.messages.count
     session.messages.append(Message(role: "assistant", text: fenced, finalReply: fenced))
     session.switchboardHop = 1; session.supportContinuation = false
@@ -49,6 +52,19 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     agent.supportPendingCommand = AppSupportCommand(action: "inspect")
     store.processAppSupport(agent)
     check(agent.messages.count == before + 1 && agent.pending.count == 1, "Native-agent appControl executes through the same validated dispatcher")
+    // Clearing is presentation-only: model context, teaching and pending work survive.
+    session.pending = [PendingPrompt(text: "Retain queued work", images: [])]
+    let history = session.messages
+    session.attachments = ["/tmp/retained-draft-image.png"]
+    session.draft = "/clear"
+    check(store.handleLocalCommand(session) && session.displayedMessages.isEmpty && session.messages == history && session.pending.count == 1 && session.attachments.count == 1 && session.switchboardEnabled && session.supportTeachingVersion != nil && !session.busy, "/clear hides history without changing context, teaching, attachments or queued work")
+    let cleared = Store(folder: folder).sessions.first { $0.id == session.id }!
+    check(cleared.displayedMessages.isEmpty && cleared.messages == history, "Cleared display persists across restart while retaining the full transcript")
+    let newReply = Message(role: "assistant", text: "Visible after clear")
+    session.messages.append(newReply)
+    check(session.displayedMessages == [newReply], "New output appears after /clear")
+    session.draft = "/unclear"
+    check(store.handleLocalCommand(session) && session.displayedMessages == history + [newReply], "/unclear restores all retained history locally without a model request")
     let profile = Entry(name: "Muse", command: "muse", directory: folder.path, engine: "muse", accountDirectory: folder.path + "/MuseLogin")
     let script = ProviderCommand.script(entry: profile, arguments: ["login"])
     check(script.contains("MUSE_AUTH_PATH") && script.contains("XDG_CONFIG_HOME") && script.contains("unset META_API_KEY"), "Support Muse login uses its own credential store rather than the production account")
@@ -75,8 +91,11 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     controller.prepare(state: WindowState()); controller.choose("claude")
     let deadline = Date().addingTimeInterval(20)
     while !journey.setupCompleted && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-    check(journey.setupCompleted && journey.sessions.count == 1 && journey.sessions[0].supportTeachingVersion == AppSupport.version, "NUX journey: provider selection, isolated native login, model subprocess response and automatic support handoff")
+    check(journey.setupCompleted && journey.sessions.count == 1 && journey.sessions[0].supportTeachingVersion == AppSupport.version && journey.sessions[0].switchboardEnabled, "NUX journey: provider selection, isolated native login, model subprocess response and automatic support handoff")
+    let taught = journey.sessions[0]
+    check((taught.pending.map(\.text) + taught.messages.filter { $0.role == "user" }.map(\.text)).contains { $0.contains("[Converse switchboard instructions]") && $0.contains("[Converse setup and control teaching") }, "NUX injects both teaching prompts together after the provider gate")
     let drain = Date().addingTimeInterval(5)
     while journey.sessions[0].busy && Date() < drain { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(taught.clearedThroughMessageID != nil && !taught.displayedMessages.contains { $0.role == "user" || $0.text.contains("[Converse setup and control teaching") } && taught.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Support onboarding clears login and teaching from display while retaining learned context")
 
 }

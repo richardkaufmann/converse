@@ -19,13 +19,64 @@ It's a bit "opinionated" to match how I work. Feel free to rip it off and make a
 
 ## Converse App Support (Mac setup preview)
 
-The isolated **Converse Setup Preview** (build 81) starts with one **Converse App Support** session. Pick Meta Muse, Claude, or Codex; Converse opens that provider's native CLI login, then checks one short model response. Setup stays gated on failed, cancelled, missing, or timed-out authentication. The support session becomes available only after a successful model response. No additional setup questionnaire is required.
+The isolated **Converse Setup Preview** (build 82) starts with one **Converse App Support** session. Pick Meta Muse, Claude, or Codex; Converse opens that provider's native CLI login, then checks one short model response. Setup stays gated on failed, cancelled, missing, or timed-out authentication. The support session becomes available only after a successful model response. No additional setup questionnaire is required.
 
-The welcome message links to **README**, **Discord**, and **Connect the Meta Muse iPhone app** using in-app links. The last item opens Jolly, the connector to the Meta Muse phone app; it is distinct from pairing the native Converse iPhone/iPad viewer.
+Successful onboarding teaches App Support both app setup/control and the switchboard. It clears the login and teaching text from view before showing the support reply; the learned context remains intact.
+
+The welcome message links to **README**, **Discord**, and **Connect the Meta Muse iPhone app**, plus the three getting-started guides below, using in-app links. The Meta Muse iPhone link opens Jolly; it is distinct from pairing the native Converse iPhone/iPad viewer. The welcome ends: “Tell me what you'd like to set up, or just ask for help understanding what the app can do”.
 
 Right-click a local session or agent and choose **Teach Converse Setup & Control** to enable the same help and app commands. Teaching survives restart and compaction. The assistant can inspect safe configuration, search installed Help, create a paused agent, configure its objective/repository/Discord channel/Jolly access, and open native setup controls for credentials and connection tests. App operations return explicit results; saving settings does not prove a connection works. No scheduled loop or speech is enabled by teaching. **Disable app control** revokes the capability.
 
 The preview uses a separate bundle identity, preferences, data folder, provider logins, Keychain services, device identity and listening port. It does not replace the normal app. See [the preview walkthrough](docs/NUX-PREVIEW.md).
+
+## Set up your first coding session
+
+A **coding session** is a conversation with Muse, Claude Code, or Codex, connected to a working folder on its home computer. The provider can inspect or change files there according to the access settings you choose. Start with one session and one project.
+
+1. **Finish provider setup.** In the App Support welcome, pick a provider and complete its login. Wait for Converse to confirm a model response. On an existing installation, use **Settings → Models & sessions** to check your provider and login.
+2. **Choose the computer that holds your code.** In the sidebar, find that device and click its **+** menu. For a first session, use **this device**. A remote device must be online and in your Group; its folders and logins belong to that computer.
+3. **Choose Muse, Claude, or Codex.** Give the session a useful name, such as “Website — Claude,” and select the project's working folder. Choose your existing login—including the one you just set up for App Support—or **New login…** for a separate account. Complete any login in the provider's Terminal/browser flow.
+4. **Create the session and show its pane.** Creation itself sends no prompt. If it is parked, use **1**, **2**, or **3** beside its name. On iPhone, select it in the session picker.
+5. **Review the footer settings.** Choose the model, reasoning effort, and access/permission mode appropriate to your work. To get oriented, begin with a request such as: “Read this project and explain how it is organized. Don't change any files yet.”
+6. **Type at the bottom and send.** Return sends on desktop; Command-Return adds a line on Mac. On iPhone/iPad, use **Send**. Read the response and answer any provider approval request before asking for changes.
+
+You have a working coding session when the assistant responds about the intended project, using the intended login and home computer. A provider being installed is not enough; the first successful response confirms the connection.
+
+To have this session cooperate with others, choose **Teach Session To Talk To Other Sessions** from its context menu. Then ask naturally: “Ask Code Review to review this change.” App Support receives switchboard teaching automatically in the updated setup preview. Each ordinary coding session still has its own teaching choice.
+
+## Set up your first agent
+
+An **agent** is a session that can check on a defined objective, read/message the sessions you select, and optionally run on a schedule. It uses the **Meta Model API**, independently of the CLI login used by your coding sessions or App Support.
+
+1. **Choose its home.** On Mac or Windows, select **New agent…**, or use the **+** menu on a capable online device in your Group. Give it a descriptive name, such as “Project Steward.” New agents start paused.
+2. **Open Agent Setup.** Use the agent's context menu or **… Agent actions → Agent Setup / Loop…**. On its home computer, enter your Meta API key in the secure field and use **Test key**. This makes a short model request. Save the settings; don't paste keys into the conversation.
+3. **Write the objective and success criteria.** For example: “Watch the Website and Code Review sessions. Identify blockers, ask for missing evidence, and tell me when the release checklist is satisfied.” A specific outcome makes the agent's reports more useful.
+4. **Select its scope.** Under **Sessions this agent may read and message**, check only the sessions needed for that objective. The selection starts empty. Those selected sessions provide the evidence the agent can use; pairing a device does not automatically select all of its sessions for an agent.
+5. **Start with one manual check.** Leave **Enable automatic loop** off, save, then choose **Run once**. Read its response and any attention message. Adjust the objective or scope until the result is useful.
+6. **Add a schedule if you want one.** Choose the interval or text schedule and **Maximum turns per loop**, then enable the automatic loop and save. On desktop homes, Converse must remain open; Linux agents run in the home service.
+
+GitHub, Discord, art, and the Meta Muse iPhone connector are optional. Leave **Repository** blank for a general-purpose agent. For artwork, enable mood art and use **Scoreboard art direction** to specify the subject and style. Scheduled runs stay silent; spoken conversation starts with **Start talking!**
+
+For Discord, follow [Agents and project scoreboards](#agents-and-project-scoreboards). For the **Meta Muse iPhone app**, follow [Jolly (Mac)](#jolly-mac). That connector is separate from the native Converse iPhone/iPad app, which joins a Group.
+
+A useful first test is a manual run that correctly describes the selected sessions and reports a concrete next step. Saving configuration alone does not prove that an external service is connected.
+
+## Connect your devices into a Group
+
+A **Group** connects your Converse installations so you can view and control sessions across computers and mobile devices. A session always runs on its **home**: its provider login, tools, and working folder stay there, even when you type from another device.
+
+1. **Open Converse on both devices.** Start on the same local network, using compatible current builds. Mac and Windows can host sessions; iPhone and iPad are viewers/controllers. To add a headless Linux home, first follow [Connect a Linux computer](#connect-a-linux-computer).
+2. **Create one Group.** On your first desktop, open **Converse Groups** below the sidebar or from the Converse menu. Choose **Create Group**, enter a name, and press **Create**.
+3. **Join from the other device.** Open its Groups/pairing controls, find that Group, and choose **Join**. On iPhone, those controls are in the session picker opened by the stacked-rectangles button. Create the Group only once; the other devices join it.
+4. **Verify the devices together.** The joining device shows an eight-part verification number. On an existing member, choose **Review** for the incoming request. Compare all eight parts, then press **Pair** on both devices.
+5. **Choose a session to display.** After admission, the sidebar lists devices and their sessions. Use **1**, **2**, or **3** on desktop/iPad, or the session picker on iPhone. Joining does not automatically take a session.
+6. **Try a round trip.** Open a session from another device, send a simple request, and confirm its reply. Taking that session transfers its display to you; it does not copy the project or move execution. **P** parks the pane while work continues at home.
+
+Repeat the join and verification steps for additional computers, iPhones, or iPads. Any current member can review the next join. Each installation belongs to one Group at a time. You can give devices recognizable shared display names using **Rename device…**; their internal identities stay unchanged.
+
+If discovery shows nothing, check that the apps are open, local-network access is allowed, and both devices can reach each other. On a reachable VPN or another network without discovery, use **Host or IP**, **Port**, and **Join** to contact an existing member, then perform the same verification.
+
+Group membership grants access to session history and tool control under the home computers' logins, and members can admit other devices. Use your own trusted devices. A disconnected viewer does not stop work at home; return to the same home session when it reconnects.
 
 ## Feature overview
 
@@ -103,7 +154,7 @@ Current releases are **Developer ID signed and notarized by Apple**. macOS shows
 
 ## First launch
 
-Setup opens automatically for a new installation:
+Setup opens automatically for a new installation. The **Mac setup preview** uses the provider-gated App Support flow described above; it does not offer Set up later. The earlier setup wizard in production builds through 80 uses these steps:
 
 1. Choose one or more assistants, follow the official CLI installation links, and use **Check CLI** to verify installation. Choose an existing project folder (or keep `~` for your home folder).
 2. Reuse an existing CLI login or use **Sign in…** to open the selected CLI’s login flow in Terminal. Add another named Codex or Claude account for an independent sign-in. Muse reuses its CLI login. Credentials stay in the CLI’s stores.
@@ -468,6 +519,8 @@ These are handled by Converse without sending a prompt or spending model tokens:
 | `/status` | Refresh and display all session details |
 | `/stop` | Interrupt the current turn |
 | `/login` | Choose an existing login, create a new login, or sign in again; uses the same picker as session creation |
+| `/clear` | Mac setup preview: hide the current transcript without resetting model context or teaching |
+| `/unclear` | Mac setup preview: restore the hidden transcript |
 | `/help` | Show local command help |
 
 Muse queries run automatically when a conversation is opened. Read-only metadata commands do not change model, permissions or effort. `/usage` additionally invokes the built-in CLI usage view to fetch subscription quota; it never submits a model request. The status pickers, by contrast, explicitly update the selected conversation's model, effort or access profile. Muse uses its durable setters. Codex and Claude save per-conversation overrides and pass them on each subsequent turn, including resumed turns. CLI defaults are labeled when the CLI does not report a resolved effort. Claude and Codex also refresh their model catalogs and account/session metadata without submitting a model prompt. These commands do not implement the full CLI slash-command menus. Unrecognized commands remain ordinary prompts.

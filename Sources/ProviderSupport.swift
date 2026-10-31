@@ -31,6 +31,7 @@ struct PendingPrompt: Codable, Identifiable {
     var agentRunReserved: Bool? = nil
     var autonomous: Bool? = nil
     var supportContinuation: Bool? = nil
+    var clearDisplayBeforeReply: Bool? = nil
     var agentLoopTick: Bool? = nil
     var id = UUID()
     var text: String

@@ -98,7 +98,7 @@ final class SupportNUXController: ObservableObject {
             self.checking = false
             if connected {
                 self.status = "Connected. Converse App Support is ready."
-                self.store.enqueueSwitchboard(session, text: AppSupport.instructions(agent: false) + "\nThe user has completed provider login. Introduce yourself briefly as Converse App Support. Offer the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request.")
+                self.store.enqueueSwitchboard(session, text: self.store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: false) + "\nThe user has completed provider login. Introduce yourself briefly as Converse App Support. Offer the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Also include these getting-started links: \(AppSupport.guideLinks). Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request. End your welcome with exactly: \(AppSupport.closingInvitation)", clearDisplayBeforeReply: true)
             } else { self.status = "The model did not confirm a working connection. Setup remains locked. Retry login or check the connection again." }
         }
         session.draft = "Connection check only: reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
@@ -125,6 +125,11 @@ struct SupportNUXView: View {
                 Button("Discord") { AppSupport.open("discord") }
                 Button("Connect the Meta Muse iPhone app") { AppSupport.open("muse-iphone") }
             }.buttonStyle(.link)
+            HStack(spacing: 18) {
+                Button("First coding session") { AppSupport.open("first-session") }
+                Button("First agent") { AppSupport.open("first-agent") }
+                Button("Create a Group") { AppSupport.open("first-group") }
+            }.buttonStyle(.link)
             Divider()
             Text("But first, you need to set up one provider. Pick 1, 2, or 3.").font(.headline)
             HStack(spacing: 14) {
@@ -144,7 +149,7 @@ struct SupportNUXView: View {
                 Button("I’m signed in · Check connection") { controller.verify() }
             }
             Spacer(minLength: 0)
-            Text("You can either read through the README in Help, or just ask me to “set up my agents, my Discord, my Meta iPhone connector,” and I’ll walk you through what’s needed and actually set it up for you.").font(.callout)
+            Text(AppSupport.closingInvitation).font(.callout)
             if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
                 Text("SETUP PREVIEW · Separate conversations, logins, credentials and device identity").font(.caption).foregroundStyle(.secondary)
             }
