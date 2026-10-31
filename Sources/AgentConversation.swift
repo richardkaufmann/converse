@@ -85,7 +85,6 @@ struct VoiceEndpointDetector {
         stop()
         self.session = session; self.store = store; sessionID = session.id; lastHeard = ""; spokenTurns = 0
         guard ready(session, store: store) else { detail = "Agent is busy or its queue is paused. Try Start talking when it is ready."; return }
-        AgentRuntime.shared.silenceSpeech()
         listen()
     }
     private func ready(_ session: Session, store: Store) -> Bool {

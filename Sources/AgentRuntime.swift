@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import AVFoundation
 
 @MainActor final class AgentRuntime {
     static let shared = AgentRuntime()
@@ -11,7 +10,6 @@ import AVFoundation
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var timer: Timer?
     private var shuttingDown = false
-    private var speech = AVSpeechSynthesizer()
     func start() {
         guard !shuttingDown, timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
         // Sleep/relaunch never causes a burst of missed ticks.
@@ -21,7 +19,6 @@ import AVFoundation
         Store.shared.save()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }
     }
-    func silenceSpeech() { speech.stopSpeaking(at: .immediate) }
     func tick(store: Store, now: Date = Date()) {
         guard !shuttingDown else { return }
         store.superviseSwitchboard(now: now)
@@ -72,7 +69,6 @@ import AVFoundation
         discordRouter.stop()
         AgentConversation.shared.stop(resumeQueued: false)
         timer?.invalidate(); timer = nil
-        speech.stopSpeaking(at: .immediate)
         for task in tasks.values { task.cancel() }
         tasks.removeAll()
         // Keep saved loop settings intact. Late cancellation callbacks must not
@@ -228,13 +224,7 @@ import AVFoundation
                     }
                 }
                 try Task.checkCancellation()
-                if session.agent?.speak == true && !AgentConversation.shared.active {
-                    let utterance = AVSpeechUtterance(string: String(MarkdownText.render(display).string.prefix(2000)))
-                    let intent = reply?.speechIntent ?? (mood == "urgent" ? "urgent" : "calm")
-                    utterance.rate = intent == "urgent" ? 0.55 : (intent == "celebratory" ? 0.5 : 0.43)
-                    utterance.pitchMultiplier = intent == "celebratory" ? 1.12 : (intent == "concerned" || intent == "urgent" ? 0.9 : 1.0)
-                    self.speech.speak(utterance)
-                }
+                // Playback belongs exclusively to an explicitly started AgentConversation.
                 if refreshScoreboard { session.agent?.loopsSinceScoreboard = 0 }
                 else if loopTick { session.agent?.loopsSinceScoreboard = min(1000, max(0, session.agent?.loopsSinceScoreboard ?? 0) + 1) }
                 if refreshScoreboard { try AgentWidgetExport.writeSnapshot(session, store: store) }

@@ -270,6 +270,11 @@ final class Store: ObservableObject {
     }
     func saveChecked(file: String = #fileID, line: Int = #line, function: String = #function) throws {
         let source = "\(file):\(line) \(function)"
+        let began = ProcessInfo.processInfo.systemUptime
+        defer {
+            let elapsed = ProcessInfo.processInfo.systemUptime - began
+            if elapsed > 0.15 { NSLog("Converse slow archive save: %.0f ms at %@", elapsed * 1000, source) }
+        }
         do {
             let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts))
             configurationAudit.willSave(sessions, data: data, source: source)
@@ -292,6 +297,7 @@ final class Store: ObservableObject {
         let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
+        MainActor.assumeIsolated { if AgentConversation.shared.owns(s) { AgentConversation.shared.stop(resumeQueued: false) } }
         s.compactionRequested = false
         s.queuePaused = true; s.resumeAfterInterrupt = false
         if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
@@ -1207,7 +1213,7 @@ enum TranscriptPalette {
     static let traffic = NSColor(name: "ConverseTraffic") { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(red: 1, green: 0.70, blue: 0.36, alpha: 1) : NSColor(red: 0.65, green: 0.27, blue: 0, alpha: 1)
     }
-    static func draft(_ source: String) -> NSColor { TranscriptStyle.isTraffic(source) ? traffic : .systemBlue }
+    static func draft(_ source: String) -> NSColor { .systemBlue }
 }
 struct TranscriptMessageLabel: Equatable {
     var location: Int
@@ -1254,8 +1260,7 @@ final class MessageNumberRuler: NSRulerView {
         let first = start < string.length ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: start), effectiveRange: nil) : layout.extraLineFragmentRect
         let last = string.length > start && !text.string.hasSuffix("\n") ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: string.length - 1), effectiveRange: nil) : layout.extraLineFragmentRect
         if !dark {
-            let draftTraffic = TranscriptStyle.isTraffic(string.substring(from: start))
-            (draftTraffic ? TranscriptPalette.trafficBackground : TranscriptPalette.promptBackground).setFill()
+            TranscriptPalette.promptBackground.setFill()
             NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: max(18, last.maxY - first.minY)).intersection(bounds).fill()
             TranscriptPalette.trafficBackground.setFill()
             for block in text.trafficBlocks where block.length > 0 && block.location < string.length {
@@ -1707,6 +1712,29 @@ struct ScrollingConversation: NSViewRepresentable {
         private(set) var historyBuildCount = 0
         private(set) var lastReplacementStart = 0
         var markdownCache: [UUID: (String, NSAttributedString)] = [:]
+        private let imageCache = NSCache<NSString, NSTextAttachment>()
+        private(set) var imagePreparationCount = 0
+        func preparedImage(_ path: String) -> NSTextAttachment? {
+            guard let info = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+            let key = "\(path)|\(info[.size] ?? 0)|\((info[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)" as NSString
+            if let cached = imageCache.object(forKey: key) { return cached }
+            guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), let img = NSImage(data: bytes) else { return nil }
+            let png: Data?
+            if bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { png = bytes }
+            else { png = img.tiffRepresentation.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) } }
+            guard let png else { return nil }
+            let attachment = NSTextAttachment(); attachment.image = img
+            attachment.fileWrapper = FileWrapper(regularFileWithContents: png)
+            attachment.fileWrapper?.preferredFilename = "Converse-image.png"
+            let scale = min(1, 480 / max(img.size.width, 1), 260 / max(img.size.height, 1))
+            attachment.bounds = NSRect(x: 0, y: 0, width: img.size.width * scale, height: img.size.height * scale)
+            let preview = img.copy() as! NSImage; preview.size = attachment.bounds.size
+            attachment.attachmentCell = NSTextAttachmentCell(imageCell: preview)
+            imageCache.countLimit = 256; imageCache.totalCostLimit = 128 * 1024 * 1024
+            imageCache.setObject(attachment, forKey: key, cost: png.count)
+            imagePreparationCount += 1
+            return attachment
+        }
         let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         var rendering = false
         var draftChanged: ((String) -> Void)?
@@ -1755,6 +1783,11 @@ struct ScrollingConversation: NSViewRepresentable {
             return true
         }
         func render(_ text: ConversationTextView) {
+            let began = ProcessInfo.processInfo.systemUptime
+            defer {
+                let elapsed = ProcessInfo.processInfo.systemUptime - began
+                if elapsed > 0.15 { NSLog("Converse slow transcript render: %.0f ms, %d messages, %d prepared images", elapsed * 1000, session.messages.count, imagePreparationCount) }
+            }
             let previous = renderedMessages
             let firstRender = previous == nil
             var historyChanged = firstRender
@@ -1809,22 +1842,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
             }
             @discardableResult func image(_ path: String) -> Bool {
-                guard let img = NSImage(contentsOfFile: path) else { return false }
-                let attachment = NSTextAttachment(); attachment.image = img
-                // Share extensions need actual image bytes and a filename;
-                // a display-only attachment is not a portable image file.
-                if let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
-                    attachment.fileWrapper = FileWrapper(regularFileWithContents: png)
-                    attachment.fileWrapper?.preferredFilename = "Converse-image.png"
-                }
-                let scale = min(1, 480 / max(img.size.width, 1), 260 / max(img.size.height, 1))
-                attachment.bounds = NSRect(x: 0, y: 0, width: img.size.width * scale, height: img.size.height * scale)
-                // A file-backed AppKit attachment uses its cell's size, rather
-                // than NSTextAttachment.bounds, for layout. Keep full pixels
-                // in the wrapper but constrain the on-screen preview.
-                let preview = img.copy() as! NSImage
-                preview.size = attachment.bounds.size
-                attachment.attachmentCell = NSTextAttachmentCell(imageCell: preview)
+                guard let attachment = preparedImage(path) else { return false }
                 if document.length > 0 && !document.string.hasSuffix("\n") { append("\n") }
                 document.append(NSAttributedString(attachment: attachment)); return true
             }
@@ -2880,6 +2898,12 @@ func selfTest() {
         check(imageEditor.imageToolsItem(at: range.location)?.representedObject is NSImage, "Image tools target the clicked historical or draft attachment")
     }
     check(renderedImageLocations.count == 3 && imageEditor.imageToolsItem(at: imageEditor.inputStart) == nil, "Image menu is present for history and both draft images, never plain draft text")
+    let preparedCount = imageCoordinator.imagePreparationCount
+    imageDraft.messages.append(Message(role: "assistant", text: "Streaming update"))
+    imageCoordinator.render(imageEditor)
+    imageDraft.messages.removeLast(); imageCoordinator.render(imageEditor)
+    check(imageCoordinator.imagePreparationCount == preparedCount, "Streaming text reuses historical and draft image preparations")
+    check(TranscriptPalette.draft("tell me about the rain in Spain") == .systemBlue && TranscriptPalette.draft("tell Muse hello") == .systemBlue, "All unsent prompts remain blue, regardless of tell wording")
     let normalizedImage = try! MacImageSource.normalized(image)
     check(NSBitmapImageRep(data: normalizedImage)?.pixelsWide == 16, "Image tools normalize a captured image without changing its dimensions unnecessarily")
     check(imageEditor.draftImageButtons.count == 2 && imageEditor.draftImages.allSatisfy { $0.location < imageEditor.inputStart }, "Only draft image previews receive native remove buttons; historical images remain protected")

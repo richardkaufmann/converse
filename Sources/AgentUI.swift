@@ -64,7 +64,7 @@ struct AgentSetupView: View {
                         Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. Updated on the next scoreboard refresh when this prompt or the mood changes, otherwise at most hourly.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
                         Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
-                        Toggle("Speak replies with expressive pace", isOn: $settings.speak)
+                        Text("Speech starts only with Start talking in the session. Scheduled runs stay silent.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Accept file events from this agent’s Inbox", isOn: Binding(get: { settings.fileTriggers == true }, set: { settings.fileTriggers = $0 }))
                         if settings.fileTriggers == true { Text(Store.shared.folder.appendingPathComponent("Agents/" + session.id.uuidString + "/Inbox").path).font(.caption).textSelection(.enabled) }
                         Toggle("Read Discord channel during agent runs", isOn: Binding(get: { settings.discordRead == true }, set: { settings.discordRead = $0 }))
@@ -232,8 +232,12 @@ struct AgentControls: View {
                     .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
             }
             if conversation.sessionID == session.id {
-                Text(conversation.status).font(.caption).foregroundStyle(conversation.active ? Color.accentColor : Color.secondary)
-                    .lineLimit(2).help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)
+                HStack {
+                    Label(conversation.status, systemImage: conversation.phase == .listening ? "mic.fill" : "speaker.wave.2.fill")
+                        .font(.caption).foregroundStyle(conversation.active ? Color.orange : Color.secondary)
+                        .lineLimit(2).help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)
+                    if conversation.active { Button("Stop talking") { conversation.stop() }.keyboardShortcut(.escape, modifiers: []) }
+                }
             }
         }.padding(8).frame(height: conversation.sessionID == session.id ? 94 : 66)
             .onChange(of: session.id) { old, _ in
@@ -546,7 +550,7 @@ struct RemoteAgentSetupView: View {
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
                 Toggle("Generate status art", isOn: $settings.generateArt)
                 TextField("Scoreboard art direction", text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
-                Toggle("Speak on the home", isOn: $settings.speak)
+                Text("Speech requires Start talking on the viewing Mac.").font(.caption).foregroundStyle(.secondary)
                 Toggle("Allow configured Discord alerts", isOn: $settings.discord)
                 Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 })).help("Only in verified private Discord channels.")
                 Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))

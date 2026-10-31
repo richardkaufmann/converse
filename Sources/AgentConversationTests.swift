@@ -97,9 +97,26 @@ import AppKit
     }
     session.agent?.generateArt = false; session.agent?.webSearch = false; session.agent?.enabled = false
     store.startAgentRun = { s, id in runtime.run(s, store: store, responseID: id) }
+    // Old saved speech preferences must not authorize autonomous or typed playback.
+    session.agent?.speak = true
+    talk.stop(resumeQueued: false)
+    let priorSpeechCount = speeches.count
+    session.draft = "An ordinary typed question"
+    store.send(session)
+    let silentDeadline = Date().addingTimeInterval(4)
+    while session.busy && Date() < silentDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!session.busy && speeches.count == priorSpeechCount && !talk.active,
+          "A legacy speak setting cannot make an ordinary agent response start talking")
     talk.start(session, store: store); talk.transcribed("Say hello")
     let deadline = Date().addingTimeInterval(4)
     while talk.phase == .thinking && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(spokenInstructions && talk.phase == .speaking && speeches.last == "Hello from the fixture." && !session.busy,
           "Real agent runtime carries a voice question through model parsing and completion into correlated speech")
+    let workspace = Workspace(); let window = UUID(); workspace.register(window)
+    workspace.assign(session.id, to: window, pane: 1)
+    workspace.park(session.id)
+    check(!talk.active, "Parking immediately stops explicit voice playback")
+    talk.start(session, store: store)
+    store.stop(session)
+    check(!talk.active, "Stop ends explicit voice input even while the agent is idle")
 }

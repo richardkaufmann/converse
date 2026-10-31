@@ -63,7 +63,12 @@ final class Workspace: ObservableObject {
         next[sessionID] = destination; placements = next
     }
     func showsParkedApproval(_ session: Session) -> Bool { session.needsApproval && placements[session.id] == nil }
-    func park(_ sessionID: UUID) { placements.removeValue(forKey: sessionID) }
+    func park(_ sessionID: UUID) {
+        MainActor.assumeIsolated {
+            if AgentConversation.shared.active && AgentConversation.shared.sessionID == sessionID { AgentConversation.shared.stop() }
+        }
+        placements.removeValue(forKey: sessionID)
+    }
     func close(_ windowID: UUID) {
         placements = placements.filter { $0.value.windowID != windowID }
         names.removeValue(forKey: windowID)
