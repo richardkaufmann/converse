@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
     agentScheduleSelfTests(check)
+    configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
     agentDiscordRouterSelfTests(check)
     let voice = AgentDictation()
@@ -543,4 +544,47 @@ import Foundation
     let diagnosticDecoder = JSONDecoder(); diagnosticDecoder.dateDecodingStrategy = .iso8601
     let diagnostic = try! diagnosticDecoder.decode(AgentResponseDiagnostic.self, from: diagnosticBytes)
     check(diagnostic.incompleteReason == "max_output_tokens" && diagnostic.reasoningTokens == 8192 && !String(decoding: diagnosticBytes, as: UTF8.self).contains("private-api-canary"), "Response diagnostics preserve safe termination and usage metadata without raw API bodies")
+}
+
+
+func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("configuration-audit-" + UUID().uuidString)
+    let store = Store(folder: root)
+    let agent = store.createAgent(title: "private-title-canary")
+    agent.agent?.objective = "private-objective-canary"
+    agent.draft = "private-draft-canary"
+    store.save()
+    let expected = agent.agent
+    agent.agent = nil
+    store.save()
+    let directory = root.appendingPathComponent("Configuration Diagnostics")
+    func events() -> String {
+        ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "jsonl" }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined()
+    }
+    let recovery = directory.appendingPathComponent("Agent Recovery/" + agent.id.uuidString + "/latest.json")
+    do {
+        let recovered = try JSONDecoder().decode(AgentConfig.self, from: Data(contentsOf: recovery))
+        check(recovered == expected, "Diagnostic recovery retains the last valid agent configuration after it is removed from memory and saved")
+        let rows = events()
+        check(rows.contains("agent_configuration_removed_in_memory") && rows.contains("stack") && rows.contains("agent_configuration_save_committed") && rows.contains("AgentTests.swift"),
+              "Agent removal diagnostics identify in-memory transition, call stack and archive save origin")
+        check(!rows.contains("private-objective-canary") && !rows.contains("private-draft-canary") && !rows.contains("private-title-canary"),
+              "Configuration diagnostic events contain no objectives, titles or draft text")
+        let archive = root.appendingPathComponent("sessions.json")
+        var bytes = try Data(contentsOf: archive); bytes.append(10); try bytes.write(to: archive, options: .atomic)
+        store.save()
+        check(events().contains("archive_changed_outside_this_store"), "Configuration diagnostics detect an archive replaced by another writer")
+        let reopened = Store(folder: root)
+        check(reopened.sessions.first?.needsAgentSetup == true && events().contains("missingAgentConfigurations") && FileManager.default.fileExists(atPath: recovery.path),
+              "Restart records missing configurations and preserves recovery evidence without silently granting old permissions")
+        let mode = (try FileManager.default.attributesOfItem(atPath: recovery.path)[.posixPermissions] as? NSNumber)?.intValue
+        check(mode == 0o600, "Agent recovery copies are readable only by the owning user")
+        store.configurationAudit.failure("fixture_failure", error: NSError(domain: "fixture", code: 7, userInfo: [NSLocalizedDescriptionKey: "private-error-canary"]))
+        check(!events().contains("private-error-canary"), "Diagnostic failures record error categories without raw provider or filesystem error bodies")
+        let rotation = ConfigurationAudit(folder: root.appendingPathComponent("rotation"), limit: 512)
+        for index in 0..<40 { rotation.record("rotation_fixture", ["index": index]) }
+        let logs = try FileManager.default.contentsOfDirectory(at: rotation.directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "jsonl" }
+        check(logs.count == 2 && logs.allSatisfy { ((try? Data(contentsOf: $0).count) ?? 10000) <= 512 }, "Diagnostic rotation bounds active logs while retaining the previous segment")
+    } catch { check(false, "Configuration diagnostics fixture: \(error)") }
 }

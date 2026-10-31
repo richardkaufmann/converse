@@ -65,7 +65,8 @@ struct SavedSession: Codable {
 final class Session: ObservableObject, Identifiable {
     let id: UUID
     @Published var entry: Entry
-    @Published var agent: AgentConfig? = nil
+    @Published var agent: AgentConfig? = nil { didSet { if oldValue != agent { agentChanged?(oldValue, agent) } } }
+    var agentChanged: ((AgentConfig?, AgentConfig?) -> Void)?
     var isAgentSession: Bool { entry.engine == "agent" || agent != nil }
     var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
     static let missingAgentSettings = "Agent settings are missing. Open Agent Setup to review and save its configuration. No CLI sign-in is needed."
@@ -197,6 +198,7 @@ final class Store: ObservableObject {
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
     let folder: URL
+    let configurationAudit: ConfigurationAudit
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     var startAgentRun: ((Session, UUID) -> Void)?
     let responseImageLoader = ResponseImageLoader()
@@ -212,14 +214,17 @@ final class Store: ObservableObject {
     init(folder: URL? = nil) {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
         identityFolder = (folder != nil || ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil) ? self.folder.appendingPathComponent("SessionIdentity") : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".converse/sessions")
+        configurationAudit = ConfigurationAudit(folder: self.folder)
         accounts = AccountProfile.defaults(dataFolder: self.folder)
         do {
             try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
-            let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: self.folder.appendingPathComponent("sessions.json")))
+            let archiveData = try Data(contentsOf: self.folder.appendingPathComponent("sessions.json"))
+            let archive = try JSONDecoder().decode(Archive.self, from: archiveData)
             participantReceipts = archive.participantReceipts ?? []
             groupTellReceipts = archive.groupTellReceipts ?? []
             setupCompleted = archive.setupCompleted ?? true
             entries = archive.entries; sessions = archive.sessions.map(Session.init)
+            configurationAudit.loaded(sessions, data: archiveData)
             accounts = archive.accounts ?? accounts
             for session in sessions where session.entry.accountID == nil {
                 if let profile = accounts.first(where: { $0.id == session.entry.engine + "-default" }) {
@@ -236,6 +241,7 @@ final class Store: ObservableObject {
                 session.entry.accountDirectory = profile.directory; session.entry.useDefaultAccountStore = true
             }
         } catch {
+            configurationAudit.failure("archive_load_failed", error: error)
             if FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path) {
                 DispatchQueue.main.async { let alert = NSAlert(); alert.messageText = "Could not load saved conversations"; alert.informativeText = "Your saved file has been left in Application Support/Converse. \(error.localizedDescription)"; alert.runModal() }
             }
@@ -245,24 +251,37 @@ final class Store: ObservableObject {
         for session in sessions { attachIdentity(session); importResponseImages(session) }
         if !sessions.isEmpty { save() }
     }
+    deinit { configurationAudit.record("store_closed") }
     func attachIdentity(_ session: Session) {
+        session.agentChanged = { [weak self, weak session] old, new in
+            guard let self, let session else { return }
+            self.configurationAudit.agentChanged(id: session.id, old: old, new: new)
+        }
         session.identityChanged = { [weak self, weak session] in
             guard let self, let session, self.sessions.contains(where: { $0 === session }) else { return }
             self.syncIdentity(session); self.save()
         }
         syncIdentity(session)
     }
-    func saveSoon() {
+    func saveSoon(file: String = #fileID, line: Int = #line, function: String = #function) {
         pendingSave?.cancel()
-        let task = DispatchWorkItem { self.save() }; pendingSave = task
+        let task = DispatchWorkItem { self.save(file: file, line: line, function: function) }; pendingSave = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
-    func saveChecked() throws {
-        let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts))
-        try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
+    func saveChecked(file: String = #fileID, line: Int = #line, function: String = #function) throws {
+        let source = "\(file):\(line) \(function)"
+        do {
+            let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts))
+            configurationAudit.willSave(sessions, data: data, source: source)
+            try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
+            configurationAudit.didSave(sessions)
+        } catch {
+            configurationAudit.failure("archive_save_failed", error: error, source: source)
+            throw error
+        }
     }
-    func save() {
-        do { try saveChecked() }
+    func save(file: String = #fileID, line: Int = #line, function: String = #function) {
+        do { try saveChecked(file: file, line: line, function: function) }
         catch { NSLog("Save failed: %@", error.localizedDescription) }
     }
     func create(_ entry: Entry, persist: Bool = true) -> Session {
@@ -2142,10 +2161,11 @@ extension Store {
             group.enter()
             host.close { group.leave() }
         }
-        group.notify(queue: .main) { self.save(); completion() }
+        group.notify(queue: .main) { self.save(); self.configurationAudit.record("quit_save_completed"); completion() }
     }
     func requestApplicationQuit(confirm: (ConverseQuitWarning) -> Bool, stopAgents: () -> Void) -> Bool {
         if let warning = ConverseQuitWarning(sessions: sessions), !confirm(warning) { return false }
+        configurationAudit.record("quit_accepted", ["busySessions": sessions.filter(\.busy).count, "configuredAgents": sessions.filter { $0.agent != nil }.count])
         applicationQuitting = true
         // Stop the scheduler before stopping CLI sessions or saving. Agent shutdown
         // preserves enabled loops and held queues; ordinary Stop deliberately pauses.
