@@ -149,11 +149,176 @@ Existing paired devices migrate into a default **Converse Group**, preserving th
 
 ### Linux homes
 
-Linux runs Converse as a headless service: real Claude/Codex/Muse sessions with no desktop and no Converse window. It joins a group through the same pairing flow, answered from another group member, and every member can then take its sessions into a pane. The daemon runs under a systemd user service (guarded cron loop as fallback), keeps execution, logins, files, and secrets on the Linux computer, and is provisioned and maintained over SSH — install, start/stop, session creation, secret storage, and explicit signed updates. Because there is no UI on the host, setup begins over SSH from another computer. Windows **Converse → Set up Linux** walks a trust-first SSH bootstrap (you type the host-key answer yourself; the app verifies the fingerprint before any automated step). The Mac deployment GUI is not yet included; Mac operators currently use the SSH admin CLI described in the contract. Linux participates in the same Tell/Ask switchboard, so an agent or a Mac session can message a headless Linux session like any other. See [Linux home contract](docs/linux.md) for the full deployment and recovery model.
+Linux runs Converse as a headless service: real Claude/Codex/Muse sessions with no desktop and no Converse window. It joins a group through the same pairing flow, answered from another group member, and every member can then take its sessions into a pane. The daemon runs under a systemd user service (guarded cron loop as fallback), keeps execution, logins, files, and secrets on the Linux computer, and is provisioned and maintained over SSH — install, start/stop, session creation, secret storage, and explicit signed updates. Because there is no UI on the host, setup begins over SSH from another computer. Windows **Converse → Set up Linux** walks a trust-first SSH bootstrap (you type the host-key answer yourself; the app verifies the fingerprint before any automated step). The Mac deployment GUI is not yet included; on a Mac, follow [Connect a Linux computer](#connect-a-linux-computer). Linux participates in the same Tell/Ask switchboard, so an agent or a Mac session can message a headless Linux session like any other. See [Linux home contract](docs/linux.md) for the full deployment and recovery model.
 
 ### Returning to a displayed session
 
 After wake, reconnect or relaunch, a saved remote pane requests a conditional restore. The home grants a fresh display epoch only if nobody has taken it since that viewer last held it. A newer take remains authoritative even after its holder parks or disconnects, including across home restarts. Explicit P cancels restoration; 1/2/3 remain deliberate takeovers. Both ends need the `lease-resume-v1` capability; older homes still require a manual take. Draft conflicts and uncertain outgoing commands retain their existing review behavior.
+
+## Connect a Linux computer
+
+A Linux computer can be a **headless Converse home**: an always-on box in a closet, a cloud server, or a VM. It runs real Claude Code, Codex, and Muse sessions under its own logins, with no Converse window. You drive those sessions from your Mac, Windows PC, or iPad. Set it up once from your Mac over SSH; it takes about 20 minutes.
+
+> **Let Converse do it for you.** Copy this whole Help topic (click in the text, press **⌘A**, then **⌘C**) and paste it into a Converse session on your Mac that can run shell commands, such as Claude Code or Codex with full access. Add a line like *"Set up my Linux computer `you@my-linux.local` using these steps."* The session runs the commands for you and skips any step that's already done. It stops and hands you a command whenever it needs you: anything with `sudo` (you run it yourself in Terminal, for example `ssh -t mylinux 'sudo loginctl enable-linger $USER'`), approving the SSH host key, signing in to Claude, Codex, or Muse, and comparing the pairing number and pressing **Pair**. Those steps stay with you on purpose.
+
+**What you need**
+
+- A Linux computer with systemd (tested on Ubuntu 26.04), 64-bit Intel/AMD (`x86_64`) or ARM (`aarch64`), on the same network as your Mac.
+- Your own user account on it, with `sudo` rights for a few one-time steps. Converse itself runs as you, never as root.
+- A Mac that is already in a Converse group (see [Converse Groups](#converse-groups)).
+- For now, the Converse source code and the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) on that Mac. Linux builds aren't published as downloads yet, so you build the Linux program on the Mac (Step 4). The build finds .NET on your `PATH` or in `~/.dotnet`; check with `dotnet --version` or `~/.dotnet/dotnet --version`.
+
+In the steps below, replace `you@my-linux.local` with your Linux user name and computer name. The `.local` name works on most home networks; you can use the computer's IP address instead. `mylinux` is the short SSH nickname you create in Step 1; if you already have one for this computer, use it instead. Already did some steps? Skip them. Every check below is safe to repeat.
+
+### Step 1: Let your Mac log in with an SSH key
+
+Converse sets up and manages Linux over SSH, and it needs to log in **without a password prompt**.
+
+1. At the Linux computer itself (its own screen or console), make sure the SSH server is installed:
+   ```sh
+   sudo apt install openssh-server
+   ```
+2. On your Mac, make a key just for this computer and copy it over. `ssh-copy-id` asks for your Linux password one last time:
+   ```sh
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/mylinux
+   ssh-copy-id -i ~/.ssh/mylinux.pub you@my-linux.local
+   ```
+3. Give it a nickname. Add this to `~/.ssh/config` on your Mac:
+   ```
+   Host mylinux
+     HostName my-linux.local
+     User you
+     IdentityFile ~/.ssh/mylinux
+     IdentitiesOnly yes
+   ```
+4. Connect once by hand in Terminal: `ssh mylinux`. The first time, SSH shows the computer's fingerprint and asks whether to trust it. If you can get to the Linux computer's own screen or console, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` there and compare before you type `yes`.
+5. Confirm it now works with no prompts at all; this should print `ok`:
+   ```sh
+   ssh -o BatchMode=yes mylinux echo ok
+   ```
+
+### Step 2: Keep Converse running when you're logged out
+
+Converse runs as a background service under your account. Linux normally stops those when you log out. On the Linux computer, run this once:
+
+```sh
+sudo loginctl enable-linger $USER
+```
+
+If a firewall is turned on (check with `sudo ufw status`), let Converse and Bonjour through:
+
+```sh
+sudo ufw allow 48721/tcp
+sudo ufw allow 5353/udp
+```
+
+### Step 3: Install and sign in to Claude Code, Codex, and Muse
+
+Install the ones you want to use, at least one. Converse starts them itself, and **it only looks for them in these folders**:
+
+`~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`
+
+Your shell's `PATH` doesn't matter here, because the Converse service doesn't read `~/.bashrc` or `~/.profile`. Codex is a Node.js program, so `node` must be in one of those folders too. A Node installed only through a version manager such as `nvm` won't be found.
+
+Log in from your Mac with `ssh mylinux`, then on the Linux computer:
+
+1. Install Node.js (for Claude Code and Codex):
+   ```sh
+   sudo apt install nodejs npm
+   ```
+2. Install Claude Code and Codex into `~/.local/bin`, no `sudo` needed:
+   ```sh
+   mkdir -p ~/.local/bin
+   npm config set prefix ~/.local
+   npm install -g @anthropic-ai/claude-code @openai/codex
+   ```
+3. Install Muse's launcher into the same folder. It downloads Muse itself the first time you run it:
+   ```sh
+   curl -fsSL https://api.meta.ai/muse-launcher.sh -o ~/.local/bin/muse
+   chmod +x ~/.local/bin/muse
+   ```
+4. Let your own shell find them too. Put this line at the **very top** of `~/.bashrc`, above everything else, so it also works for one-off commands like `ssh mylinux claude --version`. Then log out and back in:
+   ```sh
+   PATH="$HOME/.local/bin:$PATH"
+   ```
+5. Sign in to each one. You're in SSH with no browser on the Linux side, so each tool gives you a link to open on your Mac:
+   - **Claude Code:** run `claude`, choose your account type, and open the link it prints on your Mac. After you approve, copy the code from the browser and paste it back into the terminal. Type `/exit` when you're done.
+   - **Codex:** run `codex login --device-auth`. Open the link on your Mac and enter the code it shows. (Plain `codex login` waits for a browser on the Linux computer, so it doesn't work over SSH.)
+   - **Muse:** run `muse`. It shows a meta.com link and a code. Approve it on your Mac, and Muse finishes downloading. Exit when it's ready.
+6. Check that everything is in place:
+   ```sh
+   ls ~/.local/bin
+   claude auth status
+   codex login status
+   muse usage
+   ```
+
+### Step 4: Build Converse for Linux (on your Mac)
+
+1. Find out which kind of processor the Linux computer has:
+   ```sh
+   ssh mylinux uname -m
+   ```
+   `x86_64` means **linux-x64**; `aarch64` means **linux-arm64**.
+2. In your Converse source folder on the Mac, build it. Use the matching name:
+   ```sh
+   ./linux/build.sh linux-arm64
+   ```
+   The program is written to `.build/linux/linux-arm64/converse`. The rest of this page says `linux-arm64`; if yours is `linux-x64`, use that everywhere instead.
+
+### Step 5: Install Converse on Linux
+
+From your Converse source folder on the Mac, copy the program over and run its installer. Use the same name as Step 4:
+
+```sh
+scp .build/linux/linux-arm64/converse mylinux:converse-setup
+ssh mylinux 'chmod 700 ~/converse-setup && ~/converse-setup install-self && rm ~/converse-setup'
+```
+
+The installer puts Converse in `~/.local/bin/converse`. It creates its own identity, sets up a `converse` background service, and starts it. Check that it's running:
+
+```sh
+ssh mylinux 'systemctl --user is-active converse && ~/.local/bin/converse --version'
+```
+
+The computer appears to other Converse devices under its Linux host name. To change that name, change the host name (for example with `sudo hostnamectl set-hostname`) before this step.
+
+### Step 6: Join your Converse group
+
+Make sure Converse is open on your Mac, then run this from your Converse source folder:
+
+```sh
+python3 linux/join-from-mac.py mylinux
+```
+
+It finds your Mac's group, asks the Linux computer to join, and walks you through approval. (This script is new and hasn't yet been run end to end on a fresh computer. If it stops with an error, the message says why, and nothing is admitted until you press **Pair** and type `yes`.)
+
+1. In Converse on your Mac, open **Converse → Converse Groups**. The Linux computer is asking to join; press **Review**.
+2. The script prints an eight-part number. Compare **all eight parts** with the number on your Mac. They must match exactly.
+3. If they match, press **Pair** on your Mac, then type `yes` in the terminal.
+
+Do this within three minutes; if the request expires, just run the script again. If the computer has already joined, the script says so and changes nothing. When it says **Done!**, the Linux computer is a full member of your group.
+
+### Step 7: Use it
+
+On your Mac, the Linux computer now appears under **Group** in the sidebar. Use the **+ ▾** menu beside it to create a Claude, Codex, or Muse session there. Then press **1**, **2**, or **3** to show it in a pane. The work runs on Linux, with its logins and files, and keeps running when your Mac sleeps or disconnects. Each pane's **⋯ Session settings** menu sets the model, effort, and restrictions. Your iPad and Windows PC in the same group can take these sessions too.
+
+**Updating later.** Wait until none of the Linux computer's sessions is in the middle of a reply. Build again (Step 4), then stop the service, reinstall, and it starts again on its own. It keeps its identity, group membership, and sessions. (These exact commands haven't been tested end to end yet; they follow the same stop-then-install sequence used for earlier updates.)
+
+```sh
+scp .build/linux/linux-arm64/converse mylinux:converse-setup
+ssh mylinux 'systemctl --user stop converse && chmod 700 ~/converse-setup && ~/converse-setup install-self && rm ~/converse-setup'
+```
+
+**If something goes wrong**
+
+- *The script can't reach Linux:* `ssh -o BatchMode=yes mylinux echo ok` must print `ok` with no questions (Step 1).
+- *Pairing never shows a number:* the Linux computer must be able to reach your Mac on port 48721. Make sure both are on the same network, and check firewalls on both sides. If your Mac has several network connections, run the join script again with the address Linux should use, for example `python3 linux/join-from-mac.py mylinux --host 192.168.1.20`.
+- *A session says it can't find `claude`, `codex`, or `muse`:* the tool isn't in one of the four folders in Step 3, or `node` isn't. Check with `ssh mylinux 'ls ~/.local/bin /usr/local/bin'`.
+- *Converse stops after you log out:* turn on lingering (Step 2).
+- *See what the service is doing:* `ssh mylinux journalctl --user -u converse -n 50`.
+
+For how deployment, trust, and recovery work under the hood, see [Linux home contract](docs/linux.md).
 
 ## Messaging between sessions
 
