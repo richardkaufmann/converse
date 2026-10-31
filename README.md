@@ -274,7 +274,7 @@ From your Converse source folder on the Mac, copy the program over and run its i
 
 ```sh
 scp .build/linux/linux-arm64/converse mylinux:converse-setup
-ssh mylinux 'chmod 700 ~/converse-setup && ~/converse-setup install-self && rm ~/converse-setup'
+ssh mylinux 'chmod 700 ~/converse-setup && ~/converse-setup install-self </dev/null && rm ~/converse-setup'
 ```
 
 The installer puts Converse in `~/.local/bin/converse`. It creates its own identity, sets up a `converse` background service, and starts it. Check that it's running:
@@ -309,7 +309,7 @@ On your Mac, the Linux computer now appears under **Group** in the sidebar. Use 
 
 ```sh
 scp .build/linux/linux-arm64/converse mylinux:converse-setup
-ssh mylinux 'systemctl --user stop converse && chmod 700 ~/converse-setup && ~/converse-setup install-self && rm ~/converse-setup'
+ssh mylinux 'systemctl --user stop converse && chmod 700 ~/converse-setup && ~/converse-setup install-self </dev/null && rm ~/converse-setup'
 ```
 
 **If something goes wrong**
