@@ -113,7 +113,7 @@ final class ProviderProbeConnection {
                 if let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { return value }; continue
             }
             let data = output.fileHandleForReading.availableData
-            guard !data.isEmpty else { throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "CLI status query failed or timed out. Check this account's sign-in and command."]) }
+            guard !data.isEmpty else { throw NSError(domain: "Converse", code: 1, userInfo: [NSLocalizedDescriptionKey: "CLI status is unavailable: the process exited or timed out before responding."]) }
             buffer.append(data)
         }
     }
@@ -262,6 +262,7 @@ extension Session {
 }
 extension Store {
     func refreshProviderStatus(_ s: Session, completion: (() -> Void)? = nil) {
+        guard !s.isAgentSession else { refreshStatus(s, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
@@ -270,6 +271,11 @@ extension Store {
             let result = Result { try ProviderStatus.query(entry: entry, remoteID: remoteID) }
             DispatchQueue.main.async {
                 s.probingStatus = false
+                // An agent can finish configuration while an older probe is in flight.
+                if s.isAgentSession {
+                    self.refreshStatus(s)
+                    let callbacks = s.statusCallbacks; s.statusCallbacks = []; callbacks.forEach { $0() }; return
+                }
                 // A catalog returned for a previous account must never label the new one.
                 if s.entry != entry { self.refreshProviderStatus(s); return }
                 if s.entry == entry {
@@ -361,6 +367,34 @@ extension Store {
 }
 
 import SwiftUI
+
+struct ProviderStatusRepairView: View {
+    @ObservedObject var session: Session
+    @State private var showingHelp = false
+    var body: some View {
+        Button { showingHelp = true } label: {
+            Text(session.probeError + " · Help / repair…").foregroundStyle(.orange).lineLimit(1)
+        }.buttonStyle(.plain).help(session.probeError + " Click for recovery options.")
+            .popover(isPresented: $showingHelp) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Status unavailable").font(.headline)
+                    Text(session.probeError).textSelection(.enabled)
+                    Text("This check reads CLI status without sending a model prompt. A timeout or process exit does not prove your login expired. Retry first; if it persists, check the session’s command and login.")
+                    HStack {
+                        Button("Retry status") { Store.shared.refreshStatus(session, quota: true) }.disabled(session.probingStatus)
+                        if ["codex", "claude"].contains(session.entry.engine) {
+                            Button("Login settings…") { showingHelp = false; AppDelegate.shared.chooseLogin(session) }
+                                .disabled(session.busy || session.changingSetting)
+                        }
+                        Button("Session settings…") { showingHelp = false; AppDelegate.shared.configureSession(session) }.disabled(session.busy)
+                    }
+                    Button("Read troubleshooting help") { showingHelp = false; AppDelegate.shared.helpController.show(query: "Status unavailable") }
+                    if session.probeError.isEmpty { Text("Status refreshed successfully.").foregroundStyle(.green) }
+                }.font(.callout).lineLimit(nil).padding(16).frame(width: 430)
+            }
+    }
+}
+
 struct PendingMessagesView: View {
     @ObservedObject var session: Session
     var body: some View {

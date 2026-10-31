@@ -19,6 +19,10 @@ struct AgentSetupView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Agent Setup · " + session.title).font(.title2.bold())
             Text("Runs on this home computer while Converse is open. Selected sessions and enabled Discord channel messages are sent to Meta. Keys stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
+            if session.needsAgentSetup {
+                Text("This session has no saved agent configuration. Review the new settings below before saving. Session access starts empty and the automatic loop starts off; existing transcript and draft are retained. Saved credentials are kept unless you replace or remove them.")
+                    .font(.callout).foregroundStyle(.orange)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -168,6 +172,8 @@ struct AgentSetupView: View {
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             session.agent = current; session.toolStatus.model = current.model
+            session.probeError = ""; session.needsSignIn = false
+            if !session.busy { session.status = "Ready" }
             if current.enabled && session.pending.isEmpty { session.queuePaused = false }
             Store.shared.save(); close()
         } catch { self.error = error.localizedDescription }

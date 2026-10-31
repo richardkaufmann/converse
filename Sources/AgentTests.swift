@@ -93,6 +93,24 @@ import Foundation
     let agent = store.createAgent(); agent.queuePaused = true
     check(agent.agent?.watchedSessions.isEmpty == true, "New agents have no transcript scope until the user explicitly selects sessions")
     check(agent.agent?.repository == "", "New agents do not assume a GitHub repository")
+    let missing = store.create(Entry(name: "Agent", command: "/usr/bin/false", directory: NSTemporaryDirectory(), engine: "agent"))
+    missing.draft = "Retain this unsent question"; missing.attachments = ["fixture-image"]
+    missing.probeError = "old CLI failure"; missing.needsSignIn = true
+    var completedMissingRefresh = false
+    store.refreshStatus(missing) { completedMissingRefresh = true }
+    check(completedMissingRefresh && !missing.probingStatus && missing.needsAgentSetup && !missing.needsSignIn && missing.probeError == Session.missingAgentSettings,
+          "Missing agent configuration reports setup recovery synchronously without launching a CLI")
+    store.send(missing)
+    check(!missing.busy && missing.process == nil && missing.draft == "Retain this unsent question" && missing.attachments == ["fixture-image"] && missing.messages.isEmpty && missing.queuePaused,
+          "Unconfigured agent cannot become a CLI conversation or consume a draft")
+    var missingSaved = missing.saved
+    do {
+        missingSaved = try JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(missingSaved))
+        let reopened = Session(missingSaved)
+        check(reopened.isAgentSession && reopened.needsAgentSetup && reopened.agent == nil,
+              "Missing configuration retains agent identity across reload without inventing permissions")
+    } catch { check(false, "Missing agent reload fixture: \(error)") }
+    store.sessions.removeAll { $0.id == missing.id }
     var optionalConfig = AgentConfig(repository: "owner/repo")
     optionalConfig.snapshot = AgentRepoSnapshot(repository: "owner/repo", stars: 42)
     var optionalWire = optionalConfig.wire(home: "local"); optionalWire.repository = " \n "

@@ -66,6 +66,9 @@ final class Session: ObservableObject, Identifiable {
     let id: UUID
     @Published var entry: Entry
     @Published var agent: AgentConfig? = nil
+    var isAgentSession: Bool { entry.engine == "agent" || agent != nil }
+    var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
+    static let missingAgentSettings = "Agent settings are missing. Open Agent Setup to review and save its configuration. No CLI sign-in is needed."
     @Published var title: String { didSet {
         if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { title = "New conversation" }
         if title != oldValue { titleUpdatedAt = Date(); identityChanged?() }
@@ -445,6 +448,10 @@ final class Store: ObservableObject {
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
     func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil) {
+        guard !s.needsAgentSetup else {
+            s.probeError = Session.missingAgentSettings; s.status = "Agent setup required"; s.queuePaused = true
+            return // Retain draft and attachments; never launch a CLI for an unconfigured agent.
+        }
         if s.agent != nil && preservingAgentDraft == nil {
             MainActor.assumeIsolated { if AgentConversation.shared.owns(s) { AgentConversation.shared.stop("Voice paused for your typed question · microphone off") } }
         }
@@ -746,7 +753,12 @@ final class Store: ObservableObject {
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
         guard !applicationQuitting else { completion?(); return }
-        if let agent = s.agent { s.toolStatus.model = agent.model; s.toolStatus.access = "Monitor selected sessions"; completion?(); return }
+        if s.isAgentSession {
+            s.probeError = s.needsAgentSetup ? Session.missingAgentSettings : ""
+            s.needsSignIn = false
+            if let agent = s.agent { s.toolStatus.model = agent.model; s.toolStatus.access = "Monitor selected sessions" }
+            completion?(); return
+        }
         guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
         if s.entry.engine != "muse" { refreshProviderStatus(s, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
@@ -769,7 +781,7 @@ final class Store: ObservableObject {
                     let previousQuota = s.toolStatus.quota
                     let previousUsage = s.toolStatus.accountUsage
                     let identity = snapshot.status.account ?? "Muse CLI has no reported account email"
-                    s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail
+                    s.toolStatus = snapshot.status; s.statusDetails = snapshot.detail; s.probeError = ""
                     if let context = previousUsage?.context {
                         if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
                         s.toolStatus.accountUsage?.context = context
@@ -778,6 +790,7 @@ final class Store: ObservableObject {
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
                 case .failure(let error):
+                    s.probeError = error.localizedDescription
                     s.statusDetails = "Muse status refresh failed: " + error.localizedDescription
                     s.toolStatus.access = "Status refresh failed"
                     s.toolStatus.usage = "Refresh failed"
@@ -1898,7 +1911,13 @@ struct Conversation: View {
                     }
                 }
             Divider()
-            if session.agent != nil { AgentControls(session: session) } else {
+            if session.needsAgentSetup {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Agent settings are missing · automatic work is paused").foregroundStyle(.orange)
+                    Button("Open Agent Setup…") { AgentWindows.shared.setup(session) }.buttonStyle(.link)
+                        .help(Session.missingAgentSettings)
+                }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+            } else if session.agent != nil { AgentControls(session: session) } else {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     Text(session.status)
@@ -1920,7 +1939,7 @@ struct Conversation: View {
                 }.disabled(session.changingSetting)
                 AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                 if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }
-                if !session.probeError.isEmpty { Text(session.probeError).foregroundStyle(.orange).help(session.probeError) }
+                if !session.probeError.isEmpty { ProviderStatusRepairView(session: session) }
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")

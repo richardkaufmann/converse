@@ -119,6 +119,10 @@ The Mac's local time zone and send time are supplied as context to the assistant
 
 ### Account status
 
+**Status unavailable:** click the orange status warning for **Retry status**, **Login settings**, **Session settings**, and troubleshooting help. A CLI status timeout does not by itself mean the login expired. Retry, check that the session command points to the installed CLI, then use Login settings if the provider reports an authentication problem. Muse uses its installed CLI login; follow its sign-in instructions in Terminal and return to retry.
+
+**Agent settings missing:** agents use the Meta API key in **Agent Setup**, not a CLI login. Click **Open Agent Setup** (also available by right-clicking the session). If its configuration is missing, execution stays paused and the setup form explains that it starts with an empty session scope and automatic loops off. Review the objective, selected sessions, schedule and optional Discord settings before saving. This does not restore lost settings from a backup. The existing transcript, draft and saved credentials are retained.
+
 The compact **Account** control follows Approvals in each local session footer. It shows the last reported context utilization and the highest reported account-limit percentage. Click for individual allowance windows, reset times, and refresh. Codex reports context from its last model call and account rate limits; Muse reports current-window and weekly allowances. Providers that do not expose a value show `?`, including API agents whose account allowance is not reported. These are observations, not guarantees of remaining capacity; account allowances may be shared with other sessions. A clock marks old, unknown-age, or expired observations. Refresh runs off the UI thread and does not send a model prompt.
 
 ### Compact session context
