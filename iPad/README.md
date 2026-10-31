@@ -18,6 +18,33 @@ A Developer ID certificate and the Mac notarization Keychain profile do not prov
 
 For an earlier direct-device test, connect the iPad once by cable, trust the Mac, enable Developer Mode if iPadOS requests it, select the iPad in Xcode and Run. Xcode's Devices and Simulators window can then enable network connection for later wireless development runs. TestFlight avoids that development-device pairing requirement.
 
+### Automated signing and uploads
+
+Use `python3 iPad/distribute.py` with an App Store Connect **team API key** to avoid depending on Xcode's cached Apple Account login. Create the key in App Store Connect → Users and Access → Integrations → Team Keys. Our automatic cloud-signing workflow uses Admin access; team keys have access across apps. Keep the downloaded `.p8` outside the checkout with mode `0600`, in a private directory with mode `0700`.
+
+The default configuration is `~/.config/converse/app-store-connect/config.json` (also keep it private):
+
+```json
+{
+  "keyID": "YOUR_KEY_ID",
+  "issuerID": "YOUR_ISSUER_UUID",
+  "keyPath": "/absolute/private/path/AuthKey_YOUR_KEY_ID.p8",
+  "teamID": "YOUR_DEVELOPER_TEAM_ID",
+  "appID": "YOUR_NUMERIC_APP_ID"
+}
+```
+
+```sh
+# Read-only API authentication check; requires Python's cryptography package.
+python3 iPad/distribute.py verify
+# Sign an existing archive locally without uploading it.
+python3 iPad/distribute.py export .build/Converse-iPad.xcarchive .build/iPadExport
+# Explicitly upload an existing archive for internal TestFlight testing.
+python3 iPad/distribute.py upload .build/Converse-iPad.xcarchive .build/iPadUpload
+```
+
+`export` and `upload` use Xcode directly and do not need the Python cryptography package. Version/build numbers are preserved. API verification proves app access; a successful export separately proves signing access. Upload success still requires Apple processing before TestFlight availability. Never commit keys, tokens, or the local configuration; keep any credential backup separate from source archives.
+
 ## Use
 
 Open **Setup** from the top-right Converse menu. Connect on one device, compare all eight code groups on both screens, then Pair on the initiator and Approve on the receiver. This admits the device to the entire fabric: other members connect automatically, and any member can admit the next device. The sidebar shows all reachable homes' sessions. Remove from Fabric propagates a membership removal to connected devices. Tap 1, 2 or 3 to take a session into that pane; P parks its display. Tool execution continues on home when parked.
