@@ -6,6 +6,14 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testBuiltAppDeclaresPhotoSavePermission() throws {
+        // Check the packaged host, not a source-file string: UIKit supplies
+        // Save Image for transcript attachments and TCC aborts without this.
+        let reason = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") as? String)
+        XCTAssertFalse(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        // The system Photos picker does not require broad library access.
+        XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription"))
+    }
     func testImageNotesPreserveTypingAndRejectStaleResults() throws {
         let service = try service(), model = PadModel(service: service)
         let id = DeviceGlobalID(home: String(repeating: "a", count: 64), session: UUID()).string

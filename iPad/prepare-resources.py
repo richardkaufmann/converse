@@ -16,6 +16,9 @@ info = {
     'CFBundleShortVersionString': version['version'], 'CFBundleVersion': str(version['build']),
     'LSRequiresIPhoneOS': True, 'MinimumOSVersion': '18.0',
     'NSLocalNetworkUsageDescription': 'Connect securely to Converse on your computers to view and control your conversations.',
+    # UIKit's built-in text-attachment menu offers Save Image. Even though
+    # Converse does not call PhotoKit directly, that action needs this key.
+    'NSPhotoLibraryAddUsageDescription': 'Save images from your conversations to your photo library when you choose Save Image.',
     'NSBonjourServices': ['_converse._tcp'],
     'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False},
     'UILaunchScreen': {},
