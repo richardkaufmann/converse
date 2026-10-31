@@ -683,7 +683,7 @@ extension DeviceSyncService {
     }
     #if os(macOS)
     private func wireMessage(_ message: Message) -> DeviceWireMessage {
-        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) })
+        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) }, createdAtUnixSeconds: message.createdAt?.timeIntervalSince1970)
     }
     private func requestDTOs(_ session: Session) -> [DeviceRequestDTO] {
         session.requests.map { request in

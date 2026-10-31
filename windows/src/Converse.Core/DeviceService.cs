@@ -1593,7 +1593,7 @@ public sealed partial class DeviceSyncService : IDisposable
             HomeSeq = _syncCounters.NextSequence(), Epoch = holder.Value.Epoch, Boot = _boot,
             Messages = session.Messages.Skip(start).Take(end - start).Select(m => new DeviceWireMessage
             {
-                Id = m.Id, Role = m.Role, Text = m.Text,
+                Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt,
                 ImageHashes = m.Images.Where(File.Exists).Select(ImageHash).ToArray(),
             }).ToList(),
             Offset = start, Total = total, Prepend = beforeOffset is not null,

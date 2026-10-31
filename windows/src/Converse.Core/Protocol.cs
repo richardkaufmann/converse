@@ -219,6 +219,16 @@ public sealed class DeviceWireMessage
     [JsonPropertyName("role")] public string Role { get; set; } = "";
     [JsonPropertyName("text")] public string Text { get; set; } = "";
     [JsonPropertyName("imageHashes")] public string[] ImageHashes { get; set; } = Array.Empty<string>();
+    // Optional UTC Unix seconds shared with Swift; absent in old peers/history.
+    [JsonPropertyName("createdAtUnixSeconds")] public double? CreatedAtUnixSeconds { get; set; }
+    [JsonIgnore] public DateTime? CreatedAt
+    {
+        get => CreatedAtUnixSeconds is { } seconds && double.IsFinite(seconds)
+            && seconds >= -62135596800 && seconds < 253402300800
+            ? DateTime.UnixEpoch.AddSeconds(seconds) : null;
+        set => CreatedAtUnixSeconds = value is { } date ? (date.ToUniversalTime() - DateTime.UnixEpoch).TotalSeconds : null;
+    }
+
 }
 
 public sealed class DevicePendingDto

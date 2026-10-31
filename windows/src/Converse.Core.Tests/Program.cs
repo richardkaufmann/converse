@@ -816,7 +816,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "claude"));
         homeSession.Messages.Clear();
         for (var i = 0; i < 250; i++)
-            homeSession.Messages.Add(new ChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Text = "m" + i });
+            homeSession.Messages.Add(new ChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Text = "m" + i, CreatedAt = i == 0 ? null : DateTime.UnixEpoch.AddSeconds(1793389200.125 + i) });
         using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
         home.PairingConfirmation = _ => Task.FromResult(true);
@@ -837,10 +837,19 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && t.ModelOptions.Select(o => o.Id).SequenceEqual(new[] { "fable", "opus", "sonnet" })
             && t.Offset == 50 && t.Messages.Count == 200),
             "Take streams model options with a 200-message tail at offset 50");
+        Check(viewer.RemoteTranscripts[gid].Messages.First().CreatedAt == homeSession.Messages[50].CreatedAt,
+            "Remote transcript carries the original UTC timestamp through TCP");
         await viewer.RequestEarlierAsync(gid);
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid) is { } t
             && t.Offset == 0 && t.Messages.Count == 250 && t.Messages.First().Text == "m0"),
             "Earlier page merges ahead to the full 250 messages");
+        Check(viewer.RemoteTranscripts[gid].Messages[0].CreatedAt is null
+            && viewer.RemoteTranscripts[gid].Messages[1].CreatedAt == homeSession.Messages[1].CreatedAt,
+            "Earlier pages preserve timestamps and leave undated historical messages undated");
+        var interop = DeviceJson.Decode<DeviceWireMessage>(Utf8("{\"id\":\"00000000-0000-4000-8000-000000000001\",\"role\":\"user\",\"text\":\"Interop\",\"imageHashes\":[],\"createdAtUnixSeconds\":1793389200.125}"));
+        Check(interop?.CreatedAt == DateTime.UnixEpoch.AddSeconds(1793389200.125),
+            "Swift and C# use the same Unix epoch and fractional timestamp precision");
+
         var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV9sAAAAASUVORK5CYII=");
         var hash = await viewer.UploadBlobAsync(gid, png);
         Check(hash == DeviceBlob.Sha256Hex(png), "Blob upload returns the content hash");

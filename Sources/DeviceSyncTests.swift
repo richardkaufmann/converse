@@ -268,6 +268,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         session.entry.engine = "codex"; session.remoteID = "compact-fixture"
         session.toolStatus.accountUsage = AccountUsage(context: ContextUsage(tokens: 85, capacity: 100, observedAt: Date()))
         session.messages = (0..<10).map { Message(role: $0 < 3 ? "user" : "activity", text: "prefix \($0)") } + (0..<200).map { Message(role: $0.isMultiple(of: 2) ? "user" : "assistant", text: "message \($0)\nsecond line") }
+        session.messages[10].createdAt = Date(timeIntervalSince1970: 1793389200.125)
         let draftImage = root.appendingPathComponent("draft-image.png")
         let draftBytes = Data("isolated image transfer fixture".utf8)
         try draftBytes.write(to: draftImage); session.attachments = [draftImage.path]
@@ -295,6 +296,15 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let snapshot = grantFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
         check(granted != nil && snapshot?.draft == "home draft" && snapshot?.epoch == granted?.epoch, "Service harness grants lease and streams matching home snapshot")
         check(snapshot?.draftImageHashes == [DeviceBlob.sha256Hex(draftBytes)], "Home snapshot carries staged draft attachment hashes for takeover")
+        check(snapshot?.messages.first?.createdAt == session.messages[10].createdAt, "Home snapshot preserves original message timestamp")
+        let timestampViewer = RemoteComposer()
+        timestampViewer.updateEditor(transcript: snapshot, cache: [:])
+        check(timestampViewer.editor.messages.first?.createdAt == session.messages[10].createdAt, "Remote editor preserves home timestamp for native message-number tooltip")
+        let legacyMessage = try JSONDecoder().decode(DeviceWireMessage.self, from: Data("{\"id\":\"00000000-0000-4000-8000-000000000001\",\"role\":\"user\",\"text\":\"Old history\",\"imageHashes\":[]}".utf8))
+        check(legacyMessage.createdAt == nil, "Older remote history never invents timestamps")
+        let interopMessage = try JSONDecoder().decode(DeviceWireMessage.self, from: Data("{\"id\":\"00000000-0000-4000-8000-000000000001\",\"role\":\"user\",\"text\":\"Interop\",\"imageHashes\":[],\"createdAtUnixSeconds\":1793389200.125}".utf8))
+        check(interopMessage.createdAt?.timeIntervalSince1970 == 1793389200.125, "Remote timestamps use Unix seconds including fractional precision across platforms")
+
         check(snapshot?.offset == 10 && snapshot?.messages.first?.messageNumber == 4 && snapshot?.messages.last?.messageNumber == 203, "Home paged snapshot numbers visible messages across hidden prefix activity")
         check(snapshot?.compaction?.recommended == true && snapshot?.compaction?.percent == 85, "Home advertises measured compaction state to a leased viewer")
         session.busy = true // Exercise remote queueing without starting any provider.

@@ -146,6 +146,14 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
     // Optional home-assigned visible-message ordinal, independent of raw
     // paging offsets (which also count hidden activity and empty messages).
     var messageNumber: Int? = nil
+    // UTC Unix seconds, not Swift's default Date encoding (2001 epoch).
+    // Optional for older peers and history with no original timestamp.
+    var createdAtUnixSeconds: Double? = nil
+    var createdAt: Date? {
+        guard let seconds = createdAtUnixSeconds, seconds.isFinite,
+              seconds >= -62135596800, seconds < 253402300800 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
 }
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID
