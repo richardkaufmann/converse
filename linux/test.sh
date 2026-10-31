@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+python3 Tests/linux_join_helper_test.py
+
 if command -v dotnet >/dev/null 2>&1; then
   dotnet_bin="dotnet"
 elif [[ -x "$HOME/.dotnet/dotnet" ]]; then

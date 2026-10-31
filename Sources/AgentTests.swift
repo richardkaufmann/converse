@@ -586,5 +586,40 @@ func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
         for index in 0..<40 { rotation.record("rotation_fixture", ["index": index]) }
         let logs = try FileManager.default.contentsOfDirectory(at: rotation.directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "jsonl" }
         check(logs.count == 2 && logs.allSatisfy { ((try? Data(contentsOf: $0).count) ?? 10000) <= 512 }, "Diagnostic rotation bounds active logs while retaining the previous segment")
+
+        let historyStore = Store(folder: root.appendingPathComponent("snapshot-history"))
+        let historyAgent = historyStore.createAgent(title: "Recovery history fixture")
+        historyAgent.agent?.objective = "first-private-objective"
+        try historyStore.saveChecked()
+        let firstConfig = historyAgent.agent
+        historyAgent.agent?.objective = "second-private-objective"
+        try historyStore.saveChecked()
+        let secondConfig = historyAgent.agent
+        let historyFolder = historyStore.configurationAudit.directory.appendingPathComponent("Agent Recovery/" + historyAgent.id.uuidString)
+        func historyConfig(_ name: String) throws -> AgentConfig {
+            try JSONDecoder().decode(AgentConfig.self, from: Data(contentsOf: historyFolder.appendingPathComponent(name + ".json")))
+        }
+        check(try historyConfig("latest") == secondConfig && historyConfig("previous") == firstConfig,
+              "Changed agent configuration preserves both the current and preceding recovery versions")
+        try historyStore.saveChecked()
+        let historyReopened = Store(folder: historyStore.folder)
+        check(try historyReopened.sessions.first?.agent == secondConfig && historyConfig("previous") == firstConfig,
+              "Unchanged saves and restart do not replace the preceding recovery version")
+        let previousMode = (try FileManager.default.attributesOfItem(atPath: historyFolder.appendingPathComponent("previous.json").path)[.posixPermissions] as? NSNumber)?.intValue
+        check(previousMode == 0o600, "Previous configuration snapshots remain owner-readable only")
+
+        // An ordinary file blocks creation of the diagnostics directory on every
+        // platform, even when the test process has elevated filesystem access.
+        let blockedRoot = root.appendingPathComponent("blocked-diagnostics")
+        try FileManager.default.createDirectory(at: blockedRoot, withIntermediateDirectories: true)
+        try Data("blocked".utf8).write(to: blockedRoot.appendingPathComponent("Configuration Diagnostics"))
+        let blockedStore = Store(folder: blockedRoot)
+        let blockedAgent = blockedStore.createAgent(title: "Diagnostic failure fixture")
+        blockedAgent.agent?.objective = "preserve despite logging failure"
+        blockedAgent.draft = "preserve editable draft"
+        try blockedStore.saveChecked()
+        let blockedReopened = Store(folder: blockedRoot)
+        check(blockedReopened.sessions.first?.agent == blockedAgent.agent && blockedReopened.sessions.first?.draft == blockedAgent.draft,
+              "Unavailable diagnostics never prevent saving and reopening the agent configuration and draft")
     } catch { check(false, "Configuration diagnostics fixture: \(error)") }
 }

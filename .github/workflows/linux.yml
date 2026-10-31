@@ -4,6 +4,8 @@ on:
     paths:
       - "linux/**"
       - "docs/linux.md"
+      - "Tests/linux_join_helper_test.py"
+      - "VERSION.json"
       - "windows/src/Converse.Core/**"
       - "windows/src/Converse.Core.Tests/**"
       - ".github/workflows/linux.yml"
@@ -11,6 +13,8 @@ on:
     paths:
       - "linux/**"
       - "docs/linux.md"
+      - "Tests/linux_join_helper_test.py"
+      - "VERSION.json"
       - "windows/src/Converse.Core/**"
       - "windows/src/Converse.Core.Tests/**"
       - ".github/workflows/linux.yml"

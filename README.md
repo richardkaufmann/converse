@@ -474,6 +474,8 @@ Install and authenticate the assistant CLIs separately. Configure each entry wit
 
 ## Check
 
+See the [testing strategy](docs/testing.md) for the coverage layers, platform commands, release checks and remaining gaps.
+
 With Muse installed:
 
 ```sh
