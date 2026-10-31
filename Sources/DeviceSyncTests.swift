@@ -594,6 +594,13 @@ func runIPadHomeFixture() {
         let groupService = DeviceSyncService()
         try groupService.configureForTesting(folder: folder.appendingPathComponent("groups"))
         try groupService.enableGroupsForTesting(); groupService.createGroup(name: "Simulator Group")
+        groupService.imageAssistKey = { "synthetic-test-key" }
+        var imageCalls = 0
+        groupService.imageAssistAPI.request = { request in
+            imageCalls += 1
+            let data = try JSONSerialization.data(withJSONObject: ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "Synthetic image result #" + String(imageCalls)]]]]])
+            return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
         try groupService.startNetworkForTesting()
         defer { groupService.suspendViewer() }
         let deadline = Date().addingTimeInterval(180)

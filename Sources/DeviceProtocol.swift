@@ -322,6 +322,7 @@ struct DeviceAgentSettings: Codable, Equatable {
     var scheduleTimeZone: String? = nil
     var discordShareScoreboard: Bool? = nil
     var discordShareSessionInformation: Bool? = nil
+    var artDirection: String? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var provider: String? = nil
@@ -330,6 +331,7 @@ struct DeviceParticipantRequest: Codable, Equatable {
     var target: String? = nil
     var title: String? = nil
     var settings: DeviceAgentSettings? = nil
+    var imageAssist: DeviceImageAssistRequest? = nil
 }
 struct DeviceParticipantEvidence: Codable {
     var globalID: String
@@ -345,6 +347,7 @@ struct DeviceParticipantResponse: Codable {
     var target: String? = nil
     var evidence: DeviceParticipantEvidence? = nil
     var settings: DeviceAgentSettings? = nil
+    var imageAssist: DeviceImageAssistResult? = nil
 }
 struct ParticipantMutationReceipt: Codable {
     var id: UUID

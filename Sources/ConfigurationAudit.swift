@@ -80,7 +80,7 @@ final class ConfigurationAudit {
     }
     func agentChanged(id: UUID, old: AgentConfig?, new: AgentConfig?) {
         let changed = Self.changedFields(old, new)
-        let settings: Set<String> = ["objective", "repository", "model", "watchedSessions", "watchedParticipants", "intervalSeconds", "scheduleText", "scheduleTimeZone", "enabled", "maxTurnsPerLoop", "discordChannelID", "discordMentions", "discordRead", "discord", "fileTriggers", "jollyAllowed", "webSearch", "speak", "generateArt"]
+        let settings: Set<String> = ["objective", "repository", "model", "watchedSessions", "watchedParticipants", "intervalSeconds", "scheduleText", "scheduleTimeZone", "enabled", "maxTurnsPerLoop", "discordChannelID", "discordMentions", "discordRead", "discord", "fileTriggers", "jollyAllowed", "webSearch", "speak", "generateArt", "artDirection"]
         var detail: [String: Any] = ["sessionID": id.uuidString, "beforePresent": old != nil, "afterPresent": new != nil, "changedFields": changed]
         if new == nil || !settings.isDisjoint(with: changed) { detail["stack"] = Array(Thread.callStackSymbols.prefix(18)) }
         if let old, new == nil { snapshot(id, old) }

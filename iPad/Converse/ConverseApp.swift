@@ -188,6 +188,7 @@ struct PadPane: View {
     @ObservedObject private var service = DeviceSyncService.shared
     @State private var photo: PhotosPickerItem?
     @State private var importing = false
+    @State private var imageTools = false
     @State private var sessionActions: DeviceSidebarRow?
     @State private var scoreboardExpanded = false
     @State private var editingModel = false
@@ -293,6 +294,7 @@ struct PadPane: View {
                 PhotosPicker(selection: $photo, matching: .images) { Image(systemName: "photo") }.accessibilityLabel("Choose image from Photos")
                 Button { importing = true } label: { Image(systemName: "paperclip") }.accessibilityLabel("Attach image file")
                 if !model.draft(id).hashes.isEmpty {
+                    Button { imageTools = true } label: { Image(systemName: "wand.and.stars") }.accessibilityLabel("Image tools")
                     Text("\(model.draft(id).hashes.count) images").font(.caption)
                     Button("Clear images") { model.clearImages(id) }.font(.caption)
                 }
@@ -321,6 +323,7 @@ struct PadPane: View {
                     if photo == value { photo = nil }
                 }
             }
+            .sheet(isPresented: $imageTools) { PadImageTools(id: id, model: model) }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.image]) { result in
                 do {
                     let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }

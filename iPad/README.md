@@ -50,3 +50,9 @@ Real-device gates remain: BigPad installation, LAN permission denial/recovery, B
 Use + beside a capable remote home to create an agent there. Agent Setup / Loop is available in the pane’s fixed-width **⋯ Session actions** menu and its sidebar actions panel. The menu also offers Run once and Scoreboard. Settings include objective, optional repository, explicit session scope, fixed or text schedule, maximum turns per loop and scoreboard cadence. The editor previews the schedule; home validates it and rejects stale revisions. Creation and control do not change display leases. The agent’s loop status, attention and flexible scoreboard arrive in transcript snapshots, with images fetched by verified content hash. Execution and secrets stay on the desktop home; iPad suspension does not stop the home loop.
 
 Agent reports render Markdown headings, bullets and fenced code. Pipe tables become wrapping labelled records suitable for narrow panes; archived Markdown stays unchanged.
+
+## Image assistance (0.5.48 / 73)
+
+The wand beside attached images opens Image tools. Describe drafts editable Spark notes; tap an object and Find region uses SAM 3.1, then Add focused crop retains the original alongside a rectangular crop. Processing uses the updated Mac home's Meta key, independently of the session provider. Windows/Linux homes do not yet advertise image assistance. No result sends a prompt automatically. A changed lease, removed image, draft conflict or pending send prevents applying a stale result. Home operation receipts prevent retrying an uncertain paid request as a second API call.
+
+Agent Setup now includes Scoreboard art direction. Save and run once to try it; changed direction bypasses the normal hour/mood art refresh gate on the next scoreboard refresh. Older homes require an update before accepting this field.

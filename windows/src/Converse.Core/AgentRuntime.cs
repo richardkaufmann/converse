@@ -14,13 +14,14 @@ public sealed class AgentConfig
     public string? ArtPath { get; set; }
     public DateTime? ArtAtUtc { get; set; }
     public string? ArtMood { get; set; }
+    public string? LastArtDirection { get; set; }
     public int LoopsSinceScoreboard { get; set; }
     public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
     public string LoopStatus => !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.TurnLimit} maximum turns per loop";
     public void Apply(DeviceAgentSettings proposed)
     {
         if ((proposed.Revision ?? 0) != (Settings.Revision ?? 0)) throw new ArgumentException("Settings changed. Reload before saving.");
-        if (proposed.Objective.Length > 16000 || string.IsNullOrWhiteSpace(proposed.Model) || proposed.Model.Length > 200 || proposed.Watched.Count > 64 || proposed.Watched.Any(w => DeviceGlobalID.Parse(w) is null) || proposed.TurnLimit is < 1 or > 1000 || proposed.ScoreboardEveryLoops is < 1 or > 1000) throw new ArgumentException("Invalid agent settings.");
+        if (proposed.Objective.Length > 16000 || System.Text.Encoding.UTF8.GetByteCount(proposed.ArtDirection ?? "") > 4000 || string.IsNullOrWhiteSpace(proposed.Model) || proposed.Model.Length > 200 || proposed.Watched.Count > 64 || proposed.Watched.Any(w => DeviceGlobalID.Parse(w) is null) || proposed.TurnLimit is < 1 or > 1000 || proposed.ScoreboardEveryLoops is < 1 or > 1000) throw new ArgumentException("Invalid agent settings.");
         if (proposed.Repository.Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(proposed.Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) throw new ArgumentException("Repository must be blank or owner/name.");
         if (!string.IsNullOrEmpty(Settings.ScheduleText) && proposed.ScheduleText is null) throw new ArgumentException("Update this editor to preserve text schedules.");
         // These platform features are explicit rather than silently accepted.
@@ -29,6 +30,7 @@ public sealed class AgentConfig
         var next = rule.Next(DateTime.UtcNow);
         if (proposed.Enabled && next is null) throw new ArgumentException("No future date in this calendar. Review the schedule.");
         proposed = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(proposed));
+        proposed.ArtDirection ??= Settings.ArtDirection; // Old editors must preserve owner art direction.
         proposed.Revision = checked((Settings.Revision ?? 0) + 1);
         Settings = proposed; NextRunUtc = proposed.Enabled ? next : null;
     }
@@ -152,15 +154,16 @@ public sealed class AgentRuntime
                     Metrics = (board["metrics"] as JsonArray ?? new()).OfType<JsonObject>().Take(8).Select(m => new DeviceWidgetMetric { Label = Clip(m["label"], 80), Value = sources.Contains(Clip(m["sourceURL"], 2048)) ? Clip(m["value"], 100) : "Unavailable" }).ToList() };
                 config.LoopsSinceScoreboard = 0;
                 var mood = Clip(board["sentiment"], 40); var art = Clip(reply["artPrompt"], 4000);
-                if (config.Settings.GenerateArt && art.Length > 0 && (config.ArtMood != mood || config.ArtAtUtc is null || DateTime.UtcNow - config.ArtAtUtc > TimeSpan.FromHours(1)))
+                var direction = config.Settings.ArtDirection ?? "";
+                if (config.Settings.GenerateArt && (art.Length > 0 || direction.Length > 0) && (config.ArtMood != mood || config.ArtAtUtc is null || DateTime.UtcNow - config.ArtAtUtc > TimeSpan.FromHours(1) || (config.LastArtDirection ?? "") != direction))
                 {
-                    var image = await JsonAsync("https://api.meta.ai/v1/images/generations", new JsonObject { ["model"] = "muse-image-1.0", ["prompt"] = art, ["n"] = 1, ["output_format"] = "png", ["response_format"] = "b64_json", ["size"] = "1536x1024" }, key, token);
+                    var image = await JsonAsync("https://api.meta.ai/v1/images/generations", new JsonObject { ["model"] = "muse-image-1.0", ["prompt"] = "Create a scoreboard illustration with no numerical data or captions. Owner art direction (takes precedence): " + direction + ". Suggested scene: " + art, ["n"] = 1, ["output_format"] = "png", ["response_format"] = "b64_json", ["size"] = "1536x1024" }, key, token);
                     var png = Convert.FromBase64String(image["data"]?[0]?["b64_json"]?.GetValue<string>() ?? "");
                     if (png.Length is > 8 and <= 8000000 && png.AsSpan(0,8).SequenceEqual(new byte[] {137,80,78,71,13,10,26,10}))
                     {
                         var folder = Path.Combine(_store.Folder, "Agents", session.Id.ToString()); Directory.CreateDirectory(folder);
                         var path = Path.Combine(folder, "scoreboard.png"); await File.WriteAllBytesAsync(path, png, token);
-                        config.ArtPath = path; config.ArtAtUtc = DateTime.UtcNow; config.ArtMood = mood; message.Images.Add(path);
+                        config.ArtPath = path; config.ArtAtUtc = DateTime.UtcNow; config.ArtMood = mood; config.LastArtDirection = direction; message.Images.Add(path);
                     }
                 }
             }

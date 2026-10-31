@@ -154,6 +154,11 @@ final class DeviceSyncService: ObservableObject {
     private var pendingAsyncAcks: [(commandID: UUID, peerID: UUID, sessionID: String, homeSession: UUID, epoch: UInt64)] = []
     @Published var draftConflicts: [String: String] = [:]
     @Published var completedCommands: Set<UUID> = []
+    #if os(macOS)
+    var imageAssistAPI = AgentAPI()
+    var imageAssistKey: () throws -> String? = { try AgentSecrets.read("meta") }
+    #endif
+    private var imageAssistInFlight = Set<UUID>()
     @Published var draftAttachments: [String: [String]] = [:]
     private var lastSeqByHome: [String: UInt64] = [:]
     private var tickCount = 0
@@ -336,7 +341,7 @@ final class DeviceSyncService: ObservableObject {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
                                 converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
-        hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1"])
+        hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "agent-art-direction-v1"])
         #endif
         hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
         #if os(macOS)
@@ -1790,22 +1795,28 @@ extension DeviceSyncService {
         #endif
         return peerForHome(home)?.hello?.capabilities.contains("agent-host-v1") == true
     }
-    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
+    @MainActor func requestParticipant(home: String, action: String, target: String? = nil, title: String? = nil, settings: DeviceAgentSettings? = nil, provider: String? = nil, imageAssist: DeviceImageAssistRequest? = nil, id explicitID: UUID? = nil) async -> DeviceParticipantResponse {
         guard let group = currentGroup?.id, acceptsParticipant(home: home, groupID: group), let peer = peerForHome(home),
               peer.hello?.capabilities.contains("participant-control-v1") == true else {
             return DeviceParticipantResponse(groupID: currentGroup?.id ?? "", outcome: "rejected", detail: "Home is offline, outside this group, or needs an update.")
         }
+        if action == "image.assist" && peer.hello?.capabilities.contains("image-assist-v1") != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Image tools require an updated Mac home in this first version.")
+        }
+        if !(settings?.artDirection ?? "").isEmpty && peer.hello?.capabilities.contains("agent-art-direction-v1") != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving scoreboard art direction.")
+        }
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
         }
-        let request = DeviceParticipantRequest(provider: provider, groupID: group, action: action, target: target, title: title, settings: settings)
+        let request = DeviceParticipantRequest(provider: provider, groupID: group, action: action, target: target, title: title, settings: settings, imageAssist: imageAssist)
         let durable = !["inspect", "agent.settings"].contains(action)
         let previous = participantIntents.first { $0.home == home && $0.request == request && ["pending", "uncertain"].contains($0.outcome) }
         let id = explicitID ?? previous?.id ?? UUID()
         if let old = participantIntents.first(where: { $0.id == id }), old.home != home || old.request != request {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Command ID is already bound to another operation.")
         }
-        if let result = participantIntents.first(where: { $0.id == id })?.response { return result }
+        if let result = participantIntents.first(where: { $0.id == id })?.response, !["pending", "uncertain"].contains(result.outcome) { return result }
         guard participantReplies[id] == nil else { return DeviceParticipantResponse(groupID: group, outcome: "pending", detail: "This operation is already awaiting home acceptance.") }
         if durable && !participantIntents.contains(where: { $0.id == id }) {
             guard participantIntents.count < 10000 else { return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Outgoing operation journal is full.") }
@@ -1821,7 +1832,7 @@ extension DeviceSyncService {
                 if let index = self.participantIntents.firstIndex(where: { $0.id == id }) { self.participantIntents[index].outcome = "uncertain"; try? self.saveParticipantIntents() }
                 pending.finish(DeviceParticipantResponse(groupID: group, outcome: "uncertain", detail: "Home response unconfirmed. Retry uses the saved operation ID; nothing replays automatically."))
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: timeout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (action == "image.assist" ? 195 : 20), execute: timeout)
         }
     }
     private func loadParticipantIntents() throws {
@@ -1876,6 +1887,41 @@ extension DeviceSyncService {
             return true
         }
         guard store.participantReceipts.count < 100000 else { reject("Home command journal is full."); return true }
+        if request.action == "image.assist" {
+            guard let session, let global, let operation = request.imageAssist,
+                  leases?.validate(session: session.id, device: origin, epoch: operation.epoch) == true,
+                  ["describe", "focus"].contains(operation.operation),
+                  (draftAttachments[session.id.uuidString] ?? []).contains(operation.hash),
+                  let path = blobPaths[operation.hash], let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  DeviceBlob.sha256Hex(bytes) == operation.hash else { reject("Take this session and wait for the attachment to be stored on home before using image tools."); return true }
+            guard imageAssistInFlight.count < 2 else { reject("Home is processing two images. Try again shortly."); return true }
+            let key: String
+            do {
+                guard let saved = try imageAssistKey(), !saved.isEmpty else { reject("Add a Meta API key in Agent Setup on the Mac home to use image tools. The session can use any provider."); return true }
+                key = saved
+            } catch { reject("Could not read the Meta API key on home. Open Agent Setup on that Mac."); return true }
+            let reserved = DeviceParticipantResponse(groupID: group, outcome: "uncertain", detail: "Image request started. Check this operation again for its result; it will not run twice.", target: global.string)
+            store.participantReceipts.append(ParticipantMutationReceipt(id: id, origin: origin, payloadHash: hash, response: reserved))
+            do { try store.saveChecked() } catch { store.participantReceipts.removeAll { $0.id == id }; reject("Could not save image operation. Nothing was sent to Meta."); return true }
+            imageAssistInFlight.insert(id)
+            Task { @MainActor in
+                defer { self.imageAssistInFlight.remove(id) }
+                var result: DeviceParticipantResponse
+                do {
+                    let output = try await self.imageAssistAPI.assistImage(bytes, request: operation, key: key)
+                    result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Review before adding to your draft.", target: global.string, imageAssist: output)
+                } catch {
+                    let detail = (error is ImageAssistError || error is AgentFailure) ? error.localizedDescription : "Image request failed or timed out. Original attachment unchanged."
+                    result = DeviceParticipantResponse(groupID: group, outcome: "failed", detail: detail, target: global.string)
+                }
+                guard let index = store.participantReceipts.firstIndex(where: { $0.id == id }) else { return }
+                store.participantReceipts[index].response = result
+                do { try store.saveChecked() }
+                catch { store.participantReceipts[index].response = reserved; result = reserved }
+                if self.currentGroup?.id == group, self.acceptsParticipant(home: origin, groupID: group) { send(result) }
+            }
+            return true
+        }
         if request.action == "session.close" {
             guard global?.home == identity?.deviceID else { reject("Target belongs to another home."); return true }
             let result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Session closed on home. A recovery snapshot was saved.", target: request.target)

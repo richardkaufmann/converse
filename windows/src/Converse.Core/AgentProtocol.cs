@@ -28,6 +28,7 @@ public sealed class DeviceAgentSettings
     [JsonPropertyName("maxTurnsPerLoop")] public int? MaxTurnsPerLoop { get; set; }
     [JsonIgnore] public int TurnLimit { get => MaxTurnsPerLoop ?? Math.Max(1, RemainingRuns); set => MaxTurnsPerLoop = value; }
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+    [JsonPropertyName("artDirection")] public string? ArtDirection { get; set; }
     [JsonPropertyName("generateArt")] public bool GenerateArt { get; set; } = true;
     [JsonPropertyName("speak")] public bool Speak { get; set; } = false;
     [JsonPropertyName("discord")] public bool Discord { get; set; } = false;

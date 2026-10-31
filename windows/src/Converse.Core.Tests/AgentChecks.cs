@@ -10,6 +10,12 @@ static class AgentChecks
         DateTime D(string text) => DateTime.Parse(text, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
         check(DeviceSyncService.ParseSwitchboardReply("```converse\n{\"command\":\"list-sessions\"}\n```")?["command"]?.GetValue<string>() == "list-sessions", "Whole final reply can execute a switchboard command");
         check(DeviceSyncService.ParseSwitchboardReply("Some prose\n```converse\n{\"command\":\"tell\"}\n```") is null, "Prose around switchboard fence never executes");
+        var artConfig = new AgentConfig();
+        var artSettings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(artConfig.Settings)); artSettings.ArtDirection = "Watercolor moonbase"; artConfig.Apply(artSettings);
+        var oldArtEditor = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(artConfig.Settings)); oldArtEditor.ArtDirection = null; artConfig.Apply(oldArtEditor);
+        check(artConfig.Settings.ArtDirection == "Watercolor moonbase", "Old editors preserve scoreboard art direction");
+        var oversizedArt = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(artConfig.Settings)); oversizedArt.ArtDirection = new string('x', 4001);
+        try { artConfig.Apply(oversizedArt); check(false, "Art prompt bound"); } catch (ArgumentException) { check(artConfig.Settings.ArtDirection == "Watercolor moonbase", "Oversized art prompt cannot mutate settings"); }
         var settings = new DeviceAgentSettings { ScheduleText = "every 20 minutes while the us stock market is open", ScheduleTimeZone = "America/New_York" };
         var rule = AgentSchedule.Compile(settings);
         check(rule.Next(D("2026-10-29T13:29:00Z")) == D("2026-10-29T13:30:00Z"), "Agent market schedule anchors at New York open");

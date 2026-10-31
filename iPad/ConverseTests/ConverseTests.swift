@@ -6,6 +6,51 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testImageNotesPreserveTypingAndRejectStaleResults() throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: String(repeating: "a", count: 64), session: UUID()).string
+        service.remoteLeases[id] = 7
+        model.state.drafts[id] = PadDraft(text: "Typed while processing", hashes: ["image"], dirty: true)
+        XCTAssertTrue(model.addImageNotes(id, hash: "image", epoch: 7, notes: "A blue square"))
+        XCTAssertTrue(model.draft(id).text.hasPrefix("Typed while processing"))
+        XCTAssertEqual(model.draft(id).hashes, ["image"])
+        let saved = model.draft(id).text
+        service.remoteLeases[id] = 8
+        XCTAssertFalse(model.addImageNotes(id, hash: "image", epoch: 7, notes: "Late result"))
+        service.remoteLeases[id] = 7; model.state.drafts[id]?.sentID = UUID()
+        XCTAssertFalse(model.addImageNotes(id, hash: "image", epoch: 7, notes: "After send"))
+        model.state.drafts[id]?.sentID = nil; model.state.drafts[id]?.hashes = []
+        XCTAssertFalse(model.addImageNotes(id, hash: "image", epoch: 7, notes: "Removed image"))
+        XCTAssertEqual(model.draft(id).text, saved)
+    }
+    func testImageToolsPanelAtNarrowWidth() async throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: String(repeating: "a", count: 64), session: UUID()).string
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 200)).image { c in
+            UIColor.systemBackground.setFill(); c.fill(CGRect(x: 0, y: 0, width: 320, height: 200))
+            UIColor.red.setFill(); c.cgContext.fillEllipse(in: CGRect(x: 20, y: 35, width: 120, height: 120))
+            UIColor.blue.setFill(); c.fill(CGRect(x: 200, y: 60, width: 80, height: 80))
+        }
+        let file = service.storageFolder.appendingPathComponent("sample.png"); try image.pngData()!.write(to: file)
+        service.blobCache["image"] = file; service.blobReady["image"] = true; service.remoteLeases[id] = 1
+        model.state.drafts[id] = PadDraft(text: "", hashes: ["image"])
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 480, height: 820)); window.overrideUserInterfaceStyle = .dark
+        let host = UIHostingController(rootView: PadImageTools(id: id, model: model)); window.rootViewController = host; window.isHidden = false
+        try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+        let screenshot = UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) }
+        let attachment = XCTAttachment(image: screenshot); attachment.name = "Image tools at narrow width"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertEqual(model.draft(id).hashes, ["image"], "Opening tools never sends or modifies attachments")
+        window.isHidden = true
+    }
+    func testSAMRegionsAndMalformedResponses() throws {
+        let parsed = try ImageAssist.regions("<0f>1<|box;x1=26;y1=41;x2=144;y2=159;w=320;h=240|><|mask;x=0;y=0;data=119,119,~payload|>", width: 320, height: 240)
+        XCTAssertEqual(parsed.first?.width, 119)
+        XCTAssertEqual(parsed.first?.height, 119)
+        XCTAssertThrowsError(try ImageAssist.regions("<|box;x1=0;y1=0;x2=321;y2=20;w=320;h=240|>", width: 320, height: 240))
+        XCTAssertThrowsError(try ImageAssist.regions("<|box;x1=20;y1=0;x2=10;y2=20;w=320;h=240|>", width: 320, height: 240))
+        XCTAssertThrowsError(try ImageAssist.outputText(["status": "incomplete", "output": []]))
+        XCTAssertEqual(try ImageAssist.regions("", width: 320, height: 240), [])
+    }
     func testDraftWrapsAfterTrafficDuringTypingPasteAndResize() throws {
         let message = DeviceWireMessage(id: UUID(), role: "user", text: "[Converse message from Reviewer · session abc · delivery def · hop 1/100]\nPlease review this change")
         var edited = ""
@@ -124,6 +169,30 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(transcript.messages.contains { $0.text.contains("verified code " + code) }, "Mac Review saw the exact number the iPad displayed first")
         XCTAssertEqual(transcript.draft, "home draft")
         let home = try XCTUnwrap(DeviceGlobalID(row.globalID)?.home)
+        let imageModel = PadModel(service: service); imageModel.state.placements[0] = row.globalID; imageModel.reconcile()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { c in UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 40, height: 40)) }
+        let hash = try XCTUnwrap(imageModel.attach(row.globalID, data: try XCTUnwrap(image.pngData())))
+        try await eventually("Image tool input reaches authenticated home draft") { service.blobReady[hash] == true && service.remoteTranscripts[row.globalID]?.draftImageHashes == [hash] }
+        let epoch = try XCTUnwrap(service.remoteLeases[row.globalID])
+        let operation = DeviceImageAssistRequest(hash: hash, operation: "describe", epoch: epoch)
+        let staleImage = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: DeviceImageAssistRequest(hash: hash, operation: "describe", epoch: epoch + 1))
+        XCTAssertEqual(staleImage.outcome, "rejected", "Stale viewers cannot start paid image processing")
+        let missing = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: DeviceImageAssistRequest(hash: String(repeating: "0", count: 64), operation: "describe", epoch: epoch))
+        XCTAssertEqual(missing.outcome, "rejected", "Unattached blobs cannot be processed")
+        let operationID = UUID()
+        let described = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: operation, id: operationID)
+        XCTAssertEqual(described.outcome, "completed", described.detail)
+        XCTAssertEqual(described.imageAssist?.notes, "Synthetic image result #1")
+        service.participantIntents.removeAll { $0.id == operationID } // Force a round trip to the home receipt, not the viewer cache.
+        let replay = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: operation, id: operationID)
+        XCTAssertEqual(replay.imageAssist?.notes, described.imageAssist?.notes, "Retry returns the same result without another paid request")
+        service.participantIntents.removeAll { $0.id == operationID }
+        let altered = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: DeviceImageAssistRequest(hash: hash, operation: "focus", epoch: epoch, x: 1, y: 1), id: operationID)
+        XCTAssertEqual(altered.outcome, "rejected", "Home binds an operation ID to its original image request")
+        XCTAssertEqual(imageModel.draft(row.globalID).text, "home draft", "Receiving image notes never replaces or submits the draft")
+        imageModel.removeImage(row.globalID, hash: hash)
+        let removed = await service.requestParticipant(home: home, action: "image.assist", target: row.globalID, imageAssist: operation)
+        XCTAssertEqual(removed.outcome, "rejected", "Removed attachments cannot start new processing")
         let oldLeases = service.remoteLeases
         let created = await service.requestParticipant(home: home, action: "agent.create", title: "iPad-created paused agent")
         XCTAssertEqual(created.outcome, "completed", created.detail)
@@ -136,6 +205,7 @@ final class ConverseTests: XCTestCase {
         settings.scheduleTimeZone = "America/New_York"
         settings.discordShareSessionInformation = true
         settings.discordShareScoreboard = true
+        settings.artDirection = "Playful watercolor robots celebrating verified progress"
         settings.objective = "Persist the edited objective from the iPad"
         settings.remainingRuns = 0; settings.turnLimit = 3; settings.enabled = true
         let saved = await service.requestParticipant(home: home, action: "agent.configure", target: target, settings: settings)
@@ -145,6 +215,7 @@ final class ConverseTests: XCTestCase {
         let refreshed = await service.requestParticipant(home: home, action: "agent.settings", target: target)
         XCTAssertEqual(refreshed.settings?.scheduleText, settings.scheduleText)
         XCTAssertEqual(refreshed.settings?.objective, settings.objective)
+        XCTAssertEqual(refreshed.settings?.artDirection, settings.artDirection, "Art direction survives a remote save and reload independently of the objective")
         XCTAssertEqual(refreshed.settings?.discordShareScoreboard, true)
         XCTAssertEqual(refreshed.settings?.discordShareSessionInformation, true)
         var duringRun = try XCTUnwrap(refreshed.settings)

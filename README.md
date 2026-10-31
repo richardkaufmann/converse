@@ -49,6 +49,34 @@ Agents reach beyond the app. They can search the web for current facts, watch a 
 
 Converse also integrates with **Meta's Muse mobile app and its avatar, Jolly**. From Jolly on your phone you can address a Converse agent by name, ask what your coding sessions are doing, and leave requests it picks up on your Mac — your desktop coding workspace, reachable from Meta's personal assistant. Credentials and execution stay on the agent's home; its transcript and scoreboard data travel to viewers. Native scoreboard windows and HTML export are desktop features.
 
+### Image tools on iPad
+
+After attaching or pasting an image, tap the **wand** beside the image count. **Describe image** uses Muse Spark to draft notes you can edit before adding them to the current prompt. Or tap an object in the preview and choose **Find region · SAM** to inspect a highlighted region, then add its crop as another attachment. The original stays attached. Nothing sends until you press Send.
+
+These tools work with any session provider. This first version requires an updated **Mac home** with a Meta API key saved in Agent Setup; Windows/Linux image processing is not yet available. Processing sends the selected attachment to Meta, using the home's credentials. SAM selects geometry; Spark writes descriptions. SAM's first-version selection is a rectangular crop, not a transparent cutout. If a request times out, **Check result** queries the same operation without paying for another run.
+
+In **Agent Setup**, the separate **Scoreboard art direction** field controls subject, style, colors and humor. It is saved independently of success criteria and passed directly to Muse Image. A changed direction requests new art on the next scoreboard refresh, even if the mood is unchanged. Save and run once to try it; automatic runs remain governed by the existing loop settings.
+
+### Meta models, from desktop to Muse mobile
+
+**Reach your coding workspace from Muse mobile through Jolly.** Ask for a Converse agent by name, get the current status of its selected sessions, and receive its response and available scoreboard art on your phone. The phone is Meta’s Muse client; Converse supplies the authenticated bridge to the agent on your Mac. This is the same multi-provider workspace: a Meta-powered agent can monitor authorized Muse, Claude Code, and Codex sessions together.
+
+Meta also powers work inside Converse itself. Muse coding sessions run through **Muse Code**, and Converse’s own agents call **Meta Model API** directly. These are distinct integration paths:
+
+| Feature | Model and transport | Calling code |
+| --- | --- | --- |
+| Muse coding sessions | Muse Code’s selected Spark/Wonder model via `muse serve` and MSP `turn/start`; the footer reports the resolved model from the CLI | [Muse connection](Sources/MuseConnection.swift), [status and model catalog](Sources/MuseStatus.swift) |
+| Agent reasoning and optional web search | Configurable model, default `muse-spark-1.3`; `POST https://api.meta.ai/v1/responses` | [Mac API client](Sources/Agents.swift), [Mac agent runtime](Sources/AgentRuntime.swift), [Windows/Linux agent runtime](windows/src/Converse.Core/AgentRuntime.cs) |
+| Scoreboard art | `muse-image-1.0`; `POST https://api.meta.ai/v1/images/generations` | [Mac API client](Sources/Agents.swift), [Windows/Linux agent runtime](windows/src/Converse.Core/AgentRuntime.cs) |
+| Mac speech recognition | `muse-voice-transcribe-1.0`; `POST https://api.meta.ai/v1/asr/transcribe` | [Voice input](Sources/AgentVoice.swift) |
+| Muse mobile / Jolly access | Named-agent routing, request status, and returned art through Converse’s own bridge; the selected agent then uses the reasoning path above | [Jolly routing](Sources/Jolly.swift), [bridge and connector schema](scripts/jolly_bridge.py) |
+
+For a demo, keep the Muse session’s resolved model visible while it completes a task. Spark’s current API model ID is `muse-spark-1.3`; Wonder’s is `muse-wonder-1.0`. Wonder Full is a Muse Code subscription option, not a Model API model. The installed CLI’s catalog and the model shown for the actual turn are authoritative; do not label one run as both Spark and Wonder. See [Meta’s model catalog](https://dev.meta.ai/docs/models).
+
+Voice input uses Meta transcription; spoken replies use Apple speech synthesis. Jolly’s mobile access is a connector integration, not an embedded Muse mobile SDK or a replacement phone app. Art is returned when available, and pending work remains pending until the home produces a result. See [Jolly setup](#jolly-mac) for deployment and access details.
+
+The [demo storyboard and implementation evidence](docs/demo-storyboard.md) distinguish the original Mac prototype from the agent, voice, art, mobile bridge and distributed work added during the build period. The iPad image tools also use `muse-spark-1.3` for editable descriptions and `sam-3.1` for point-selected region crops through the Responses endpoint, independently of the session model ([calling code](Sources/ImageAssist.swift)). Spark Open and Glimmer are not implemented integrations.
+
 The rest of this document is the reference: setup first, then daily use, groups, messaging, agents, and internals.
 
 ## Download

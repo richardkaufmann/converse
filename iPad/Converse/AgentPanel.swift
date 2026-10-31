@@ -47,6 +47,8 @@ struct PadAgentPanel: View {
                         Text("The schedule repeats until paused. Each activation currently makes one model response, within this limit; it does not spend future loops.").font(.caption)
                         Stepper("Scoreboard every \(settings?.scoreboardEveryLoops ?? 1) loops", value: Binding(get: { settings?.scoreboardEveryLoops ?? 1 }, set: { settings?.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art", isOn: field(\.generateArt))
+                        TextField("Scoreboard art direction", text: Binding(get: { settings?.artDirection ?? "" }, set: { settings?.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
+                        Text("Subject, style, colors or humor. Applied directly to artwork on the next scoreboard refresh. Separate from the objective and success criteria. Requires an updated home.").font(.caption)
                         Toggle("Speak on home", isOn: field(\.speak))
                         Toggle("Allow Discord alerts", isOn: field(\.discord))
                         Toggle("Share session information", isOn: Binding(get: { settings?.discordShareSessionInformation == true }, set: { settings?.discordShareSessionInformation = $0 }))
