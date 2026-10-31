@@ -2399,12 +2399,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func quitConverse(_ sender: Any?) {
         // SwiftUI's non-dismissable onboarding sheet must close before AppKit
         // can complete termination. The unfinished setup stays persisted.
+        let setupWindows = windows.filter { $0.1.setup }.map { $0.0 }
         for (_, state) in windows { state.setup = false }
-        finishQuitAfterSheets(sender)
+        finishQuitAfterSheets(sender, setupWindows: setupWindows)
     }
-    private func finishQuitAfterSheets(_ sender: Any?) {
-        guard !windows.contains(where: { $0.0.attachedSheet != nil }) else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.finishQuitAfterSheets(sender) }
+    private func finishQuitAfterSheets(_ sender: Any?, setupWindows: [NSWindow]) {
+        guard !setupWindows.contains(where: { $0.attachedSheet != nil }) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.finishQuitAfterSheets(sender, setupWindows: setupWindows) }
             return
         }
         NSApp.terminate(sender)
