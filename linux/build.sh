@@ -45,7 +45,10 @@ rm -rf "$publish_dir"
   -o "$publish_dir"
 
 install -m 700 "$publish_dir/Converse.Linux" "$output/converse"
-cp LICENSE VERSION.json "$output/"
+# Keep the established bundle file allowlist compatible with installed updaters.
+# Both notices travel in LICENSE; the GPL text itself remains unchanged.
+cat LICENSING.md LICENSE > "$output/LICENSE"
+cp VERSION.json "$output/"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$output/converse"
 else

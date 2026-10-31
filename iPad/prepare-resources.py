@@ -32,6 +32,9 @@ info = {
 info['ITSAppUsesNonExemptEncryption'] = False
 with (output / 'Converse-Info.plist').open('wb') as file: plistlib.dump(info, file)
 resources = Path(os.environ['TARGET_BUILD_DIR']) / os.environ['UNLOCALIZED_RESOURCES_FOLDER_PATH']
+resources.mkdir(parents=True, exist_ok=True)
+for notice in ('LICENSE', 'LICENSING.md'):
+    shutil.copyfile(root/notice, resources/notice)
 shutil.copytree(root/'Resources/ThirdParty', resources/'ThirdParty', dirs_exist_ok=True)
 shutil.copytree(root/'Resources/ProviderLogos', resources/'ProviderLogos', dirs_exist_ok=True)
 subprocess.run(['/usr/bin/python3', str(root/'scripts/build-help.py'), str(root/'README.md'), str(resources/'Help')], check=True)

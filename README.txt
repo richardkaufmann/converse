@@ -150,8 +150,8 @@ The assistant queries a live session directory and emits visible JSON commands.
 Normal messages queue; urgent messages interrupt. Both preserve the recipient draft.
 
 LICENSE
-Copyright 2026 Richard Kaufmann. Licensed under the Apache License, Version 2.0.
-See the included LICENSE file.
+Copyright 2026 Richard Kaufmann. GPL version 3 or later, with a SAM codec exception. Third-party licenses apply.
+See LICENSE for the GPL text and LICENSING.md for the grant, SAM exception, and third-party scope.
 
 SIGN-IN RECOVERY
 Click the conversation login identity or type /login; choose Sign in again.

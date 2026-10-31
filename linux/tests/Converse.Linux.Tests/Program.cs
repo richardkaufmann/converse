@@ -172,7 +172,7 @@ CreatedBundle CreateBundle(
         Add("converse", artifact);
         Add("manifest.json", manifestBytes);
         Add("manifest.json.sig", Encoding.UTF8.GetBytes(signature));
-        Add("LICENSE", Encoding.UTF8.GetBytes("Apache-2.0"));
+        Add("LICENSE", Encoding.UTF8.GetBytes("GPL-3.0-or-later"));
         Add("VERSION.json", Encoding.UTF8.GetBytes("{\"version\":\"1.0.0\",\"build\":2}"));
         if (extraEntry) Add("extra.txt", Encoding.UTF8.GetBytes("not allowed"));
     }

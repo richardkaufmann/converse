@@ -173,7 +173,7 @@ Mac and iPad remote viewers use the home's advertised capability and existing di
 
 ### About and responsive controls
 
-Mac, iPad, and Windows have **About Converse** with the installed version/build, copyright, and Apache License 2.0 statement. Mac and Windows also show version/build in the main window title. On iPad, open **… → About Converse**; **Converse Help** always includes a link to the GitHub README. Linux prints the same information with `converse --about`.
+Mac, iPad, and Windows have **About Converse** with the installed version/build, copyright, and GPLv3-or-later statement and SAM codec exception. Mac and Windows also show version/build in the main window title. On iPad, open **… → About Converse**; **Converse Help** always includes a link to the GitHub README. Linux prints the same information with `converse --about`.
 
 Model, effort, and access controls appear directly when the pane has room. In a narrow pane, a single **…** menu replaces them; it does not duplicate visible controls.
 
@@ -592,6 +592,6 @@ Questions and ideas are welcome in [Discussions](https://github.com/richardkaufm
 
 ## License
 
-Copyright 2026 Richard Kaufmann. Licensed under the [Apache License, Version 2.0](LICENSE).
+Copyright 2026 Richard Kaufmann. Converse-owned code is licensed under the [GNU General Public License, version 3 or (at your option) any later version](LICENSE), with the narrow SAM codec permission in [LICENSING.md](LICENSING.md). That notice defines the grant and third-party scope. GPL permits commercial copies and forks subject to its terms; earlier Apache-licensed versions retain their existing grants.
 
-The SAM mask codec in [Sources/SAMMask.swift](Sources/SAMMask.swift) is adapted from Meta’s parser and is distributed under the [SAM License](Resources/ThirdParty/SAM-LICENSE.txt), included with the Mac and iPad apps. Provider-logo notices are in [Resources/ProviderLogos](Resources/ProviderLogos/).
+The SAM mask codec in [Sources/SAMMask.swift](Sources/SAMMask.swift) is adapted from Meta’s parser and is distributed under the [SAM License](Resources/ThirdParty/SAM-LICENSE.txt), included with the Mac and iOS apps. The additional permission allows combining that codec with Converse; it does not relicense Meta’s code. Provider-logo notices are in [Resources/ProviderLogos](Resources/ProviderLogos/).

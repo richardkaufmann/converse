@@ -2,6 +2,7 @@
 // 9348a8a791d3e5b6417232227e32e10464cdf49f (mask-codec.ts).
 // Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved.
 // Codec adaptations are distributed under Resources/ThirdParty/SAM-LICENSE.txt.
+// See LICENSING.md for Converse's additional permission to combine this codec.
 import Foundation
 
 enum SAMMask {

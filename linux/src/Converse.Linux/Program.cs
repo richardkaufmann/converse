@@ -79,7 +79,7 @@ internal static class LinuxProgram
                 case "supervise":
                     return await SuperviseAsync(paths);
                 case "--about":
-                    Console.WriteLine($"Converse {product.Version} ({product.Build})\n© 2026 Richard Kaufmann\nLicensed under the Apache License, Version 2.0.\nhttps://github.com/richardkaufmann/converse");
+                    Console.WriteLine($"Converse {product.Version} ({product.Build})\n© 2026 Richard Kaufmann\nGPL version 3 or later, with a SAM codec exception. Third-party licenses apply.\nhttps://github.com/richardkaufmann/converse");
                     return 0;
                 case "--version":
                     Console.WriteLine($"{product.Version} ({product.Build})");

@@ -17,7 +17,7 @@ elif [[ ! -f "$app/Contents/Resources/Converse.icns" ]]; then
 fi
 mkdir -p "$app/Contents/Resources/ThirdParty"
 cp Resources/ThirdParty/* "$app/Contents/Resources/ThirdParty/"
-cp LICENSE "$app/Contents/Resources/LICENSE"
+cp LICENSE LICENSING.md "$app/Contents/Resources/"
 mkdir -p "$app/Contents/Resources/ProviderLogos"
 cp Resources/ProviderLogos/* "$app/Contents/Resources/ProviderLogos/"
 mkdir -p .build

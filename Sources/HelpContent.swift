@@ -5,9 +5,9 @@ enum ConverseAbout {
     static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0" }
     static var versionBuild: String { version + " (" + build + ")" }
     static let copyright = "© 2026 Richard Kaufmann"
-    static let license = "Licensed under the Apache License, Version 2.0."
+    static let license = "GPL version 3 or later, with a SAM codec exception. Third-party licenses apply."
     static let readme = URL(string: "https://github.com/richardkaufmann/converse#readme")!
-    static let licenseURL = URL(string: "https://github.com/richardkaufmann/converse/blob/main/LICENSE")!
+    static let licenseURL = URL(string: "https://github.com/richardkaufmann/converse/blob/main/LICENSING.md")!
 }
 
 struct HelpTopic: Codable, Identifiable, Equatable {

@@ -1158,8 +1158,8 @@ public sealed partial class MainWindow : Window
         var content = new StackPanel { Spacing = 12 };
         content.Children.Add(new TextBlock { Text = "Converse " + VersionBuild, FontSize = 20 });
         content.Children.Add(new TextBlock { Text = "© 2026 Richard Kaufmann" });
-        content.Children.Add(new TextBlock { Text = "Licensed under the Apache License, Version 2.0.", TextWrapping = TextWrapping.Wrap });
-        content.Children.Add(new HyperlinkButton { Content = "Apache License 2.0", NavigateUri = new Uri("https://github.com/richardkaufmann/converse/blob/main/LICENSE") });
+        content.Children.Add(new TextBlock { Text = "GPL version 3 or later, with a SAM codec exception. Third-party licenses apply.", TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(new HyperlinkButton { Content = "GPLv3 or later · licensing details", NavigateUri = new Uri("https://github.com/richardkaufmann/converse/blob/main/LICENSING.md") });
         content.Children.Add(new HyperlinkButton { Content = "README on GitHub", NavigateUri = new Uri("https://github.com/richardkaufmann/converse#readme") });
         await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "About Converse", Content = content, CloseButtonText = "Done" }.ShowAsync();
     }

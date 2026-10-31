@@ -86,7 +86,7 @@ struct PadAbout: View {
         NavigationStack {
             Form {
                 Section { Text("Converse " + ConverseAbout.versionBuild).font(.headline) }
-                Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("Apache License 2.0", destination: ConverseAbout.licenseURL) }
+                Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("GPLv3 or later · licensing details", destination: ConverseAbout.licenseURL) }
                 Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
             }.navigationTitle("About Converse")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
