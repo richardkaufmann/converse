@@ -106,6 +106,8 @@ final class DeviceSyncService: ObservableObject {
     #if os(macOS)
     var participantStore: Store { storeOverride ?? .shared }
     var storeOverride: Store?
+    var parkingLibraryOverride: ParkingLotLibrary?
+    var parkingLibrary: ParkingLotLibrary { parkingLibraryOverride ?? .shared }
     #endif
     var deviceNameOverride: String?
     var isPlaced: ((String) -> Bool)?
@@ -168,6 +170,9 @@ final class DeviceSyncService: ObservableObject {
     // Isolated harness wiring without listener, browser, timers, or Keychain.
     func configureForTesting(folder: URL) throws {
         testFolder = folder
+        #if os(macOS)
+        parkingLibraryOverride = ParkingLotLibrary(folder: folder.appendingPathComponent("parking-test-profile"))
+        #endif
         loadResumeEpochs()
         identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: false)
         trustStore = try DeviceTrustStore(folder: folder)
@@ -758,10 +763,16 @@ extension DeviceSyncService {
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
                              accountName: session.entry.accountName, messagingEnabled: session.switchboardEnabled, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention)
         }
+        let parkingRows = parkingLibrary.lots.filter(\.active).map { lot in
+            DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot.id).string, sessionID: lot.id,
+                             title: lot.name, assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only",
+                             status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false, messagingEnabled: false, participantKind: "parkingLot")
+        }
         #else
+        let parkingRows: [DeviceSidebarRow] = []
         let rows: [DeviceSidebarRow] = []
         #endif
-        return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: deviceName, homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows)
+        return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: deviceName, homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows + parkingRows)
     }
     private func sendSidebar(to peer: DevicePeer) {
         guard !groupsEnabled || (!peer.controlOnly && currentGroup != nil && !locallyRemoved) else { return }
@@ -782,6 +793,18 @@ extension DeviceSyncService {
         }
     }
     private func sendTranscript(to peer: DevicePeer, sessionID: UUID, beforeOffset: Int? = nil) {
+        if let lot = parkingLibrary.lot(sessionID), lot.active {
+            guard peer.leasedSessions.contains(sessionID), let home = identity?.deviceID else { return }
+            let payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: lot.id).string,
+                homeSeq: stateStore?.nextSeq() ?? 0, epoch: 0, boot: boot,
+                messages: [DeviceWireMessage(id: lot.id, role: "assistant", text: ParkingLotStore.markdown(lot.document.rows))],
+                total: 1, draft: "", draftVersion: UInt64(max(0, lot.document.revision)), busy: false,
+                status: "Parking Lot · read only", title: lot.name, engine: "parking")
+            if let data = try? JSONEncoder().encode(payload) {
+                sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: 0, payload: data))
+            }
+            return
+        }
         guard let session = Store.shared.sessions.first(where: { $0.id == sessionID }), let home = identity?.deviceID, let leases, let device = peer.hello?.deviceID else { return }
         // Never stream without a current lease for this exact peer and epoch.
         guard let holder = leases.holder(session: sessionID), holder.device == device else { peer.leasedSessions.remove(sessionID); return }
@@ -819,6 +842,11 @@ extension DeviceSyncService {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
         }
     }
+    private func homeParkingLot(_ envelope: DeviceEnvelope) -> ParkingLotStore? {
+        guard let id = envelope.sessionID.flatMap(DeviceGlobalID.init), id.home == identity?.deviceID,
+              let lot = parkingLibrary.lot(id.session), lot.active else { return nil }
+        return lot
+    }
     private func homeSession(_ envelope: DeviceEnvelope) -> (Session, DeviceGlobalID)? {
         guard let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == identity?.deviceID,
               let session = Store.shared.sessions.first(where: { $0.id == global.session }) else { return nil }
@@ -836,6 +864,10 @@ extension DeviceSyncService {
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: sessionID, commandID: commandID, epoch: epoch, payload: payload))
     }
     private func executeHomeCommand(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
+        if homeParkingLot(envelope) != nil {
+            if let command = envelope.commandID { sendAck(peer, commandID: command, sessionID: envelope.sessionID, outcome: "rejected", detail: "Parking Lots are read only on Group viewers.", epoch: envelope.epoch) }
+            return
+        }
         guard let (session, _) = homeSession(envelope), let commandID = envelope.commandID,
               let data = envelope.payload, let command = try? JSONDecoder().decode(DeviceCommandPayload.self, from: data) else { return }
         let teaching = command.action == "teachSwitchboard" && envelope.epoch == 0 && peer.hello?.capabilities.contains("switchboard-teach-v1") == true
@@ -995,6 +1027,12 @@ extension DeviceSyncService {
             if let encoded = try? JSONEncoder().encode(homes.values.map { DeviceSidebarPayload(homeDeviceID: $0.deviceID, homeDeviceName: $0.deviceName, homeSeq: 0, rows: $0.rows) }) { stateStore?.saveSidebarCache(encoded) }
         #if os(macOS)
         case DeviceMessageKind.leaseAcquire.rawValue, DeviceMessageKind.leaseResume.rawValue:
+            // Notes are nonexclusive read subscriptions: viewing never displaces another reader or the home editor.
+            if let lot = homeParkingLot(envelope) {
+                peer.leasedSessions.insert(lot.id)
+                sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseGranted.rawValue, boot: boot, sessionID: envelope.sessionID, epoch: 0))
+                sendTranscript(to: peer, sessionID: lot.id); return
+            }
             guard let (session, _) = homeSession(envelope), let leases else { return }
             let restoring = envelope.kind == DeviceMessageKind.leaseResume.rawValue
             let result = restoring
@@ -1014,6 +1052,7 @@ extension DeviceSyncService {
         case DeviceMessageKind.leaseHeartbeat.rawValue:
             if let (session, _) = homeSession(envelope), let epoch = envelope.epoch { _ = leases?.heartbeat(session: session.id, device: peerHome, epoch: epoch) }
         case DeviceMessageKind.leaseRelease.rawValue:
+            if let lot = homeParkingLot(envelope) { peer.leasedSessions.remove(lot.id); return }
             if let (session, _) = homeSession(envelope), let epoch = envelope.epoch {
                 leases?.release(session: session.id, device: peerHome, epoch: epoch); peer.leasedSessions.remove(session.id); publishSidebarIfChanged()
             }
@@ -1083,10 +1122,12 @@ extension DeviceSyncService {
             remoteOffline.remove(payload.globalID)
         #if os(macOS)
         case DeviceMessageKind.transcriptRequest.rawValue:
+            if let lot = homeParkingLot(envelope) { sendTranscript(to: peer, sessionID: lot.id); return }
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let request = try? JSONDecoder().decode(DeviceTranscriptRequest.self, from: data) else { return }
             guard requireLease(peer, envelope, session) else { return }
             sendTranscript(to: peer, sessionID: session.id, beforeOffset: request.beforeOffset)
         case DeviceMessageKind.draftPatch.rawValue:
+            if let lot = homeParkingLot(envelope) { sendTranscript(to: peer, sessionID: lot.id); return }
             guard let (session, _) = homeSession(envelope), let data = envelope.payload, let draft = try? JSONDecoder().decode(DeviceDraftPayload.self, from: data) else { return }
             guard requireLease(peer, envelope, session) else { return }
             let hashes = draft.imageHashes ?? []
@@ -1295,11 +1336,13 @@ extension DeviceSyncService {
     }
     #endif
     func canTeachRemote(_ globalID: String) -> Bool {
+        guard remoteRow(globalID: globalID)?.engine != "parking" else { return false }
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { return false }
         return peer.hello?.capabilities.contains("switchboard-teach-v1") == true
     }
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
+        guard remoteRow(globalID: globalID)?.engine != "parking", remoteTranscripts[globalID]?.engine != "parking" else { lastOutcome = "Parking Lots are read only on Group viewers."; return nil }
         // A double click is the same outstanding queue intent, not a second
         // interrupt. Uncertain requests require a home query before retrying.
         if Self.queueActions.contains(command.action), let active = queueCommand(globalID: globalID),

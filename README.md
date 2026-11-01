@@ -9,15 +9,17 @@ Converse is one app for conversations with **Muse, Claude Code, and Codex** (AI 
 its standout features
 
 1. **[It’s multi-session.](#keep-several-sessions-visible)** You can have many sessions open simultaneously, and have up to three of them up, side by side, in each of the app’s desktop windows.
-2. **[It’s multi-provider.](#set-up-your-first-coding-session)** Meta, OpenAI, Anthropic can be mixed and matched as desired.
-3. **[It’s multi-system.](#download)** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
-4. **[It’s distributed.](#connect-your-devices-into-a-group)** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent. Systems rejoin when they come back online, including iPhones and iPads, as long as they can reach the other systems.
-5. **[It hosts agent sessions.](#set-up-your-first-agent)** These sessions have initiative and can start periodically or via an external stimulus.
-6. **[It’s chatty.](#messaging-between-sessions)** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
-7. **[It talks to the outside world.](#give-the-agent-evidence-for-its-objective)** Agents interact with GitHub (to track PRs, issues, updates), [Discord](#connect-discord-on-a-mac) (to send and receive messages), and [Meta’s Muse mobile app](#jolly-mac) (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
-8. **[It has polish.](#use)** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
-9. **[You can enter into spoken conversations with your agent.](#voice-on-mac)**
-10. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. You've been warned! Read the [security section](#security-and-privacy) to make sure this app is for you!
+2. **[It’s multi-account.](#accounts)** Each session uses its own provider account—you can be logged into two different Muse accounts at once. (“Hi, my name is Richard, and I have five Pro/Ultra accounts across three providers.”)
+3. **[It’s multi-provider.](#set-up-your-first-coding-session)** Meta, OpenAI, Anthropic can be mixed and matched as desired.
+4. **[It’s multi-system.](#download)** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
+5. **[It has Parking Lots.](#parking-lots)** Organize ideas and future prompts in an outline. Sessions can take ideas from your Parking Lots, and you can talk conversationally with them!
+6. **[It’s distributed.](#connect-your-devices-into-a-group)** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent. Systems rejoin when they come back online, including iPhones and iPads, as long as they can reach the other systems.
+7. **[It hosts agent sessions.](#set-up-your-first-agent)** These sessions have initiative and can start periodically or via an external stimulus.
+8. **[It’s chatty.](#messaging-between-sessions)** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
+9. **[It talks to the outside world.](#give-the-agent-evidence-for-its-objective)** Agents interact with GitHub (to track PRs, issues, updates), [Discord](#connect-discord-on-a-mac) (to send and receive messages), and [Meta’s Muse mobile app](#jolly-mac) (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
+10. **[It has polish.](#use)** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
+11. **[You can enter into spoken conversations with your agent.](#voice-on-mac)**
+12. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. You've been warned! Read the [security section](#security-and-privacy) to make sure this app is for you!
 
 These features combine in interesting ways. There’s a built-in support agent that knows this README, and can help you avoid fiddly UIs to configure providers, agents, etc. You can talk with this support agent via Discord or Muse Jolly. And it checks daily for bugs and version updates of the app! This uses a teaching prompt injected into a normal Converse agent.
 
@@ -108,15 +110,21 @@ On Mac, transcripts follow new output automatically. Scrolling up pauses this fo
 
 On Mac, **Command-F** (Edit → Find) searches the current transcript without changing any text. There is no Replace. Use the Find bar’s previous/next buttons, **Command-G** / **Shift-Command-G**, and its close control.
 
-### Parking Lot (Mac)
+### Parking Lots
 
-Click the grey **Parking Lot** in the sidebar to keep ideas, prompts and bugs under headings. Use **P**, **1**, **2** or **3** to park it or place it beside your conversations. Return creates an item, even at the end of a heading; ⌘Return adds a line within the current entry. Right-click to create a heading, rename one, or delete an entry. There is always an empty item ready to type into at the end of each open section. Notes save automatically on this Mac.
+Keep ideas, prompts and bugs in named **Parking Lots**, alongside the sessions under their home device. Click the grey starter lot, or choose **Parking Lots…** or **File → New → Parking Lot…** to create another. Right-click a lot in the sidebar to rename or delete it. **P**, **1**, **2** and **3** work just as they do for conversations.
+
+On Mac, Return creates an item, even at the end of a heading. Shift-Return creates a heading below; ⌘Return adds a line within the current entry. There is always an empty item ready to type into at the end of each open section. Notes save automatically. Right-click a heading or item for **Cut Heading**, **Copy Heading**, **Cut Item** or **Copy Item**. Cutting a heading takes its items with it. Paste those words straight into a conversation when you are ready to act on them.
 
 Drag across text to select several items or headings, then copy, cut or paste normally. **Reorder** shows drag handles; moving a heading moves its items too. Click its chevron to collapse a section. Entries with comments show a comment count; right-click to read the comments and who wrote them.
 
-Ordinary sessions can help after **Teach Session To Talk To Other Sessions** (teach again after updating if needed). Try: “Look at the parking lot. Sort the ideas into Converse and KAOS headings, leaving unclear or shared ideas where they are.” The session uses the context it actually has, shows you its proposed changes, and asks before proceeding. Converse also presents the changes for review before saving. Seeing the session directory does not give the model every other session’s transcript.
+Ask any taught session, “Look at the Parking Lot and think about how you’d implement this feature.” It can list and read the Parking Lots on its home. A session can propose edits, but Converse shows you the changes for approval before saving. When there are several lots, name the one you mean. Agents opt in to each named lot through their existing session access list; that shares its contents with the selected provider and allows edits. Stale edits are rejected if the notes change while the assistant is working.
 
-Agents opt in through **Parking Lot · read and edit** in their existing session access list. Then ask, “Assess this feature idea and add your comments.” That shares the notes with the selected provider and permits agent edits. Comments preserve the original idea. If you or another writer changes the notes during a run or review, stale edits are rejected so your work survives. Parking Lot is local to this Mac for now.
+**Talk…** starts a voice conversation about the lot on Mac. Choose a model, then discuss ideas or ask it to organize them. The helper can read this lot; select any other sessions it needs in Agent Setup. You review proposed changes before they are saved. Voice transcription uses your saved Meta key. You can also type in the helper’s conversation. Sessions, agents and this conversational helper can change the notes. And yes, there’s Undo: **⌘Z** reverses the latest content change, including a cut, reorder or assistant edit; **⇧⌘Z** redoes it. Each lot keeps its own undo history while the app is open.
+
+Other devices in your Group can view a Mac’s Parking Lots and receive updates. Viewing is read only for now, and several devices can read the same lot without moving it away from its home. iPhone and iPad do not host their own lots yet.
+
+To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart.
 
 ### Keep several sessions visible
 

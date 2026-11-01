@@ -263,6 +263,7 @@ struct WindowTitle: View {
     }
 }
 struct WorkspacePanes: View {
+    @ObservedObject var parkingLots = ParkingLotLibrary.shared
     @ObservedObject var workspace: Workspace
     @ObservedObject var store = Store.shared
     @ObservedObject var devices = DeviceSyncService.shared
@@ -279,8 +280,8 @@ struct WorkspacePanes: View {
             } else {
                 HSplitView {
                     ForEach(occupied, id: \.self) { pane in
-                        if workspace.session(in: state.id, pane: pane) == ParkingLotStore.id {
-                            ParkingLotView()
+                        if let id = workspace.session(in: state.id, pane: pane), let lot = parkingLots.lot(id) {
+                            ParkingLotView(lot: lot)
                         } else if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
                             SessionPane(session: session, workspace: workspace, pane: pane, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         } else if let id = workspace.session(in: state.id, pane: pane), let globalID = devices.globalID(forPlacement: id) {

@@ -287,12 +287,14 @@ struct PadRoot: View {
                                     PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityLabel("Actions for " + row.title)
                                     .simultaneousGesture(LongPressGesture().onEnded { _ in sessionActions = row })
-                                PadProviderLogo(engine: row.engine).frame(width: 24).help(row.model)
+                                Group { if row.engine == "parking" { Image(systemName: "note.text") } else { PadProviderLogo(engine: row.engine) } }.frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
-                                    placementButton("X", selected: false) { closingTarget = row }
-                                        .disabled(closeInFlight.contains(row.globalID) || !service.canCloseRemote(home.deviceID)).accessibilityLabel("Close " + row.title + " on home")
+                                    if row.engine == "parking" { Color.clear.frame(width: 24) } else {
+                                        placementButton("X", selected: false) { closingTarget = row }
+                                            .disabled(closeInFlight.contains(row.globalID) || !service.canCloseRemote(home.deviceID)).accessibilityLabel("Close " + row.title + " on home")
+                                    }
                                 }.frame(width: 132).fixedSize(horizontal: true, vertical: false).disabled(!home.online)
                             }.font(.system(size: 13)).padding(.vertical, 4).padding(.horizontal, 3)
                                 .background(attention ? Color.yellow.opacity(0.65) : (pane == nil ? .clear : Color.accentColor.opacity(0.07)))
@@ -430,7 +432,9 @@ struct PadPane: View {
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
             Divider()
-            if !model.canControl(id) {
+            if model.isParkingLot(id), service.remoteLeases[id] != nil, !service.remoteOffline.contains(id) {
+                Text("Parking Lot · read only").font(.caption).foregroundStyle(.secondary).padding(8)
+            } else if !model.canControl(id) {
                 HStack {
                     Text(service.remoteOffline.contains(id) ? "Home offline. Your draft is preserved." : "Take this session to edit and send.")
                     Spacer(); Button("Take here") { service.acquireRemote(globalID: id) }
@@ -624,7 +628,7 @@ struct PadSessionActions: View {
         NavigationStack {
             Form {
                 Section("Actions") {
-                    Button("Rename…") { renameShown = true }.disabled(!service.canRenameRemote(home))
+                    Button("Rename…") { renameShown = true }.disabled(row.engine == "parking" || !service.canRenameRemote(home))
                     Button("Teach / Refresh Switchboard Instructions") {
                         teachingID = service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard"))
                         if teachingID == nil { error = "Could not queue instructions. Check that the session's home is connected." }

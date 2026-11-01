@@ -20,7 +20,7 @@ public sealed record SidebarHeader(string Key, string Title, string Status, bool
     public bool HasStatus => Status.Length > 0;
     public Windows.UI.Text.FontWeight Weight => Offline ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.SemiBold;
 }
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false, string Engine = "", string Model = "", bool IsAgent = false) : SidebarItem(Key);
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false, string Engine = "", string Model = "", bool IsAgent = false) : SidebarItem(Key) { public bool CanEdit => Engine != "parking"; }
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -602,7 +602,7 @@ public sealed partial class MainWindow : Window
                     home.Online ? "No sessions available" : "Offline", "", null, null, ShowPark: false, ShowClose: false, ShowPlace: false));
             foreach (var row in home.Rows)
                 items.Add(new SidebarSession("remote:" + row.GlobalID, (!string.IsNullOrEmpty(row.Attention) ? "⚠ " : row.Busy ? "● " : "") + row.Title,
-                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: home.Online && _devices.CanCloseRemote(home.DeviceID), ShowPlace: true, ShowGreyClose: !home.Online || !_devices.CanCloseRemote(home.DeviceID),
+                    (home.Online ? "" : "Offline · ") + row.Status, row.GlobalID, null, ShowPark: true, ShowClose: row.Engine != "parking" && home.Online && _devices.CanCloseRemote(home.DeviceID), ShowPlace: true, ShowGreyClose: row.Engine != "parking" && (!home.Online || !_devices.CanCloseRemote(home.DeviceID)),
                     PActive: _placements.PaneOf("remote:" + row.GlobalID) is null,
                     In1: _placements.KeyIn(1) == "remote:" + row.GlobalID,
                     In2: _placements.KeyIn(2) == "remote:" + row.GlobalID,
@@ -1178,7 +1178,7 @@ public sealed partial class MainWindow : Window
 
     private async void OnRenameRow(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuFlyoutItem { Tag: SidebarSession row }) return;
+        if (sender is not MenuFlyoutItem { Tag: SidebarSession row } || !row.CanEdit) return;
         var local = row.LocalSessionID is { } id ? _store.Sessions.FirstOrDefault(s => s.Id == id) : null;
         var remote = row.GlobalID is { } gid ? _devices.Homes.Values.SelectMany(h => h.Rows).FirstOrDefault(s => s.GlobalID == gid) : null;
         if (local is null && remote is null) return;

@@ -289,6 +289,40 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             for chunk in captured { out.append(contentsOf: try decoder.append(try viewerKeys.receiver.decrypt(chunk))) }
             return out
         }
+        let lot = try home.parkingLibrary.create(name: "Shared ideas")
+        let lotID = DeviceGlobalID(home: homeIdentity.deviceID, session: lot.id).string
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: lotID))
+        let lotFrames = try capturedEnvelopes(); captured = []
+        let lotSnapshot = lotFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
+        check(lotSnapshot?.engine == "parking" && lotSnapshot?.title == "Shared ideas" && lotSnapshot?.draft == "" && lotSnapshot?.epoch == 0, "Group viewers receive read-only named Parking Lot snapshots")
+        let reader = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: false, displayName: "Second reader")
+        reader.hello = DeviceHello(deviceID: "second-reader", deviceName: "Second reader", converseVersion: "test")
+        reader.keys = peer.keys; reader.trustedReady = true; reader.testSink = { _ in }
+        home.adoptPeerForTesting(reader)
+        home.handleEnvelope(reader, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: lotID))
+        check(peer.leasedSessions.contains(lot.id) && reader.leasedSessions.contains(lot.id) && captured.isEmpty, "Two viewers can read a lot without displacing each other")
+        let beforeRemoteEdit = lot.document
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: lotID, commandID: UUID(), epoch: 0,
+            payload: try JSONEncoder().encode(DeviceCommandPayload(action: "submit", text: "overwrite"))))
+        let rejectedLot = try capturedEnvelopes(); captured = []
+        let lotAck = rejectedLot.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) } }.first
+        check(lotAck?.outcome == "rejected" && lot.document == beforeRemoteEdit, "Home rejects commands that attempt to mutate a viewed Parking Lot")
+        lot.update(lot.document.rows[1].id, text: "New shared idea")
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: lotID, epoch: 0))
+        let updatedLot = try capturedEnvelopes(); captured = []
+        check(updatedLot.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first?.messages.first?.text.contains("New shared idea") == true, "A subscribed viewer receives current note edits")
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: lotID, epoch: 0))
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: lotID, epoch: 0))
+        check(captured.isEmpty && !peer.leasedSessions.contains(lot.id) && reader.leasedSessions.contains(lot.id), "Parking one lot viewer leaves another reader subscribed and stops its own snapshots")
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseResume.rawValue, sessionID: lotID, epoch: 0))
+        _ = try capturedEnvelopes(); captured = []
+        check(peer.leasedSessions.contains(lot.id), "A read-only lot subscription can resume after reconnect")
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: lotID, epoch: 0))
+        home.handleEnvelope(reader, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: lotID, epoch: 0))
+        reader.trustedReady = false
+        home.handleEnvelope(reader, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: lotID))
+        check(!reader.leasedSessions.contains(lot.id), "An untrusted peer cannot subscribe to Parking Lot contents")
+        try home.parkingLibrary.delete(lot.id)
         let globalString = DeviceGlobalID(home: homeIdentity.deviceID, session: session.id).string
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: globalString))
         let grantFrames = try capturedEnvelopes()

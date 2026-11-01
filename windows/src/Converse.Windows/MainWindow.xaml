@@ -35,11 +35,11 @@
         <DataTemplate x:Key="SidebarSessionTemplate">
             <Grid Padding="18,3,4,3">
                 <Grid.ContextFlyout><MenuFlyout>
-                    <MenuFlyoutItem Text="Rename…" Tag="{Binding}" Click="OnRenameRow"/>
+                    <MenuFlyoutItem Text="Rename…" IsEnabled="{Binding CanEdit}" Tag="{Binding}" Click="OnRenameRow"/>
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Agent Setup / Loop" Tag="{Binding}" Click="OnAgentSetupRow"/>
-                    <MenuFlyoutItem Text="Teach Session To Talk To Other Sessions" Tag="{Binding}" Click="OnTeachRow"/>
-                    <MenuFlyoutItem Text="Teach Converse Setup &amp; Control" Tag="{Binding}" Click="OnTeachAppRow"/>
+                    <MenuFlyoutItem Text="Teach Session To Talk To Other Sessions" IsEnabled="{Binding CanEdit}" Tag="{Binding}" Click="OnTeachRow"/>
+                    <MenuFlyoutItem Text="Teach Converse Setup &amp; Control" IsEnabled="{Binding CanEdit}" Tag="{Binding}" Click="OnTeachAppRow"/>
                     <MenuFlyoutItem Text="Disable app control" Tag="{Binding}" Click="OnDisableAppRow"/>
                 </MenuFlyout></Grid.ContextFlyout>
                 <Grid.ColumnDefinitions>

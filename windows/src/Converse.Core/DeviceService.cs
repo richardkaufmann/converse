@@ -2255,6 +2255,8 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public async Task<Guid?> SendRemoteCommandAsync(string globalId, DeviceCommandPayload command)
     {
+        if (RemoteTranscripts.GetValueOrDefault(globalId)?.Engine == "parking" || Homes.Values.SelectMany(h => h.Rows).Any(r => r.GlobalID == globalId && r.Engine == "parking"))
+        { LastOutcome = "Parking Lots are read only on Group viewers."; return null; }
         var parsed = DeviceGlobalID.Parse(globalId);
         if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before sending."; return null; }

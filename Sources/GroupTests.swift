@@ -105,6 +105,10 @@ func converseGroupSelfTests(_ check: (Bool, String) -> Void) {
         localSession.draft = "Unsent home draft"
         let globalID = DeviceGlobalID(home: a.identity!.deviceID, session: localSession.id).string
         c.isPlaced = { _ in true }
+        // The UI can only take an advertised row. Await that precondition so an
+        // older in-flight sidebar snapshot cannot cancel an unpublished take.
+        pump { c.remoteRow(globalID: globalID) != nil }
+        check(c.remoteRow(globalID: globalID) != nil, "New Group fixture reaches the viewer sidebar before Take")
         c.acquireRemote(globalID: globalID)
         pump { c.remoteTranscripts[globalID]?.draft == "Unsent home draft" }
         check(c.remoteLeases[globalID] != nil && c.remoteTranscripts[globalID]?.draft == "Unsent home draft", "Admitted group members retain normal lease and transcript semantics")

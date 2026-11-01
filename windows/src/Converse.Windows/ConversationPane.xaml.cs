@@ -389,7 +389,7 @@ public sealed partial class ConversationPane : UserControl
     {
         if (_selected?.LocalSessionID is not null) return true;
         if (_selected?.GlobalID is string gid)
-            return _host.Devices.RemoteLeases.ContainsKey(gid) && !_host.Devices.RemoteOffline.Contains(gid);
+            return _host.Devices.RemoteTranscripts.GetValueOrDefault(gid)?.Engine != "parking" && _host.Devices.RemoteLeases.ContainsKey(gid) && !_host.Devices.RemoteOffline.Contains(gid);
         return false;
     }
 

@@ -73,6 +73,9 @@ struct DeviceConnectView: View {
 }
 
 struct DeviceSidebarSection: View {
+    @ObservedObject var order = SidebarOrder.shared
+    var onlyHome: String? = nil
+    var deviceOrder: [String] = []
     @ObservedObject var service = DeviceSyncService.shared
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
@@ -80,11 +83,12 @@ struct DeviceSidebarSection: View {
     @State private var creating = Set<String>()
     @State private var createError: String?
     var body: some View {
-        let homes = service.homes.values.sorted { $0.deviceName < $1.deviceName }
+        let homes = service.homes.values.filter { onlyHome == nil || $0.deviceID == onlyHome }.sorted { $0.deviceName < $1.deviceName }
         if service.currentGroup != nil && !homes.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(homes, id: \.deviceID) { home in
                     VStack(alignment: .leading, spacing: 0) {
+                        SidebarReorderRow(scope: "devices", id: home.deviceID, available: deviceOrder) {
                         HStack(spacing: 6) {
                             Text(service.displayName(for: home.deviceID, fallback: home.deviceName)).fontWeight(.bold).foregroundStyle(Color.green.opacity(home.online ? 1 : 0.4)).lineLimit(1)
                             if home.online { Text("remote").font(.caption).foregroundStyle(.secondary) }
@@ -104,13 +108,20 @@ struct DeviceSidebarSection: View {
                         }.padding(.horizontal, 4).frame(height: 28)
                             .help(service.deviceDetails(home.deviceID))
                             .contextMenu { Button("Rename device…") { renameDeviceDisplay(service, id: home.deviceID) }.disabled(!service.canRenameDevice(home.deviceID)) }
+                        }
                         if home.online {
-                            ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                            let rowIDs = home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.map(\.globalID)
+                            ForEach(order.ordered(rowIDs, scope: home.deviceID), id: \.self) { id in
+                              if let row = home.rows.first(where: { $0.globalID == id }) {
+                                SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel,
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
                                                  park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                                  assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
                             }
+                              }
+                            }
+                            if order.reordering { SidebarReorderRow(scope: home.deviceID, id: nil, available: rowIDs) { Text("Move to end of this device").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(5) } }
                             if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.leading, 16).frame(height: 30) }
                         }
                     }.padding(.bottom, 8)
@@ -160,7 +171,10 @@ struct RemoteSidebarRow: View {
             ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
             SessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            if showsModel { ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model) }
+            if showsModel {
+                if row.engine == "parking" { Image(systemName: "note.text").frame(width: 24) }
+                else { ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model) }
+            }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
@@ -168,19 +182,23 @@ struct RemoteSidebarRow: View {
                     PaneButton(label: String(pane), selected: localPane == pane) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
+                if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { confirmingClose = true }
                     .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
                     .help("Close this session on its home and remove it from every viewer. The home must support remote closing.")
+                }
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onHover { hover.setHovered($0) }
             .contextMenu {
+                if row.engine != "parking" {
                 Button("Rename…") { renameText = row.title; renaming = true }
                     .disabled(!online || !DeviceSyncService.shared.canRenameRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
+                }
                 Button("Park conversation") { park() }
             }
             .alert("Rename session", isPresented: $renaming) {
@@ -228,6 +246,7 @@ struct RemotePane: View {
         let name = DeviceGlobalID(globalID).map { service.displayName(for: $0.home) }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         return name.flatMap { $0.isEmpty ? nil : $0 } ?? "home device"
     }
+    var isParkingLot: Bool { (transcript?.engine ?? service.remoteRow(globalID: globalID)?.engine) == "parking" }
     var hasLease: Bool { service.remoteLeases[globalID] != nil }
     var offline: Bool { service.remoteOffline.contains(globalID) }
     var pendingRecord: DeviceOutboxRecord? { service.unresolved(globalID: globalID).first { $0.payload.action == "submit" } }
@@ -260,17 +279,17 @@ struct RemotePane: View {
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             HStack {
-                Text("↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(isParkingLot ? "Parking Lot · read only" : "↵ send / queue · ⌘↵ newline").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("message numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button {
                     let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true
                     if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { attach(image) } } }
-                } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot").disabled(offline || !hasLease)
+                } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot").disabled(offline || !hasLease || isParkingLot)
                 if !composer.blobHashes.isEmpty { Button("Clear images") { composer.blobHashes = []; service.saveDraftAttachments(globalID: globalID, hashes: []); syncEditor() }.disabled(composer.hydrationConflict) }
                 if transcript?.busy == true {
                     if transcript?.requests.isEmpty != false { ProgressView().controlSize(.small) }
-                    Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(offline || !hasLease)
+                    Button("Stop") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "stop")) }.disabled(offline || !hasLease || isParkingLot)
                 }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
@@ -344,7 +363,7 @@ struct RemotePane: View {
             if let transcript, transcript.offset > 0 {
                 Button("Load earlier messages (" + String(transcript.offset) + " earlier)") { service.requestEarlier(globalID: globalID) }.font(.caption).padding(4)
             }
-            ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline,
+            ScrollingConversation(session: composer.editor, lineNumbers: store.lineNumbers, inputEnabled: hasLease && !offline && !isParkingLot,
                 droppedFileSourceDevice: service.identity.map { service.displayName(for: $0.deviceID) } ?? "Mac",
                 onTeachSwitchboard: service.canTeachRemote(globalID) ? { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) } : nil,
                                   onSubmit: send,
@@ -368,7 +387,7 @@ struct RemotePane: View {
                     }
                 }
             Divider()
-            if let transcript {
+            if let transcript, !isParkingLot {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(transcript.status).lineLimit(1)

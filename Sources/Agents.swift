@@ -9,6 +9,8 @@ struct AgentConfig: Codable, Equatable {
     var repository = ""
     var hasRepository: Bool { !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var repositorySnapshot: AgentRepoSnapshot? { hasRepository && snapshot?.repository == repository ? snapshot : nil }
+    var parkingLotTalkID: UUID? = nil
+    var parkingLotRequiresReview: Bool? = nil
     var watchedSessions: [UUID] = []
     var watchedParticipants: [String]? = nil
     func allows(local id: UUID, home: String?) -> Bool {

@@ -27,18 +27,23 @@ struct ParkingLotEdits: Decodable {
     }
     var revision: Int
     var operations: [Operation]
+    var lotID: UUID? = nil
 }
 // Local notes, not a provider session. The stable ID uses the ordinary agent
 // watched-session scope and workspace placement, without starting a CLI.
-final class ParkingLotStore: ObservableObject {
+final class ParkingLotStore: ObservableObject, Identifiable {
     static let id = UUID(uuidString: "B4AA70E2-147E-40A1-9342-0751C0A40101")!
-    static let shared = ParkingLotStore(folder: Store.shared.folder)
+    // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
+    let id: UUID
+    let undoManager: UndoManager = { let manager = UndoManager(); manager.groupsByEvent = false; manager.levelsOfUndo = 100; return manager }()
+    @Published var name: String
     @Published private(set) var document = ParkingLotDocument()
     @Published private(set) var active = false
     @Published var error = ""
     private let file: URL
-    init(folder: URL) {
-        file = folder.appendingPathComponent("parking-lot.json")
+    init(folder: URL, id: UUID = ParkingLotStore.id, name: String = "Parking Lot") {
+        self.id = id; self.name = name
+        file = id == Self.id ? folder.appendingPathComponent("parking-lot.json") : folder.appendingPathComponent("ParkingLots/" + id.uuidString + ".json")
         if FileManager.default.fileExists(atPath: file.path) {
             do { document = try JSONDecoder().decode(ParkingLotDocument.self, from: Data(contentsOf: file)); active = true }
             catch { self.error = "Could not read Parking Lot. The saved file has been left intact." }
@@ -52,7 +57,19 @@ final class ParkingLotStore: ObservableObject {
     private func persist(_ next: ParkingLotDocument) throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(next).write(to: file, options: .atomic)
+        let before = document.rows
+        if active && before != next.rows {
+            let group = !undoManager.isUndoing && !undoManager.isRedoing
+            if group { undoManager.beginUndoGrouping() }
+            undoManager.registerUndo(withTarget: self) { lot in lot.restoreUndo(before, replacing: next.rows) }
+            undoManager.setActionName("Edit Parking Lot")
+            if group { undoManager.endUndoGrouping() }
+        }
         document = next; active = true; error = ""
+    }
+    private func restoreUndo(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
+        guard document.rows == expected else { error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
+        commit(rows)
     }
     private func commit(_ rows: [ParkingLotRow]) {
         do { try Self.validate(rows); try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
@@ -81,6 +98,19 @@ final class ParkingLotStore: ObservableObject {
         rows.insert(row, at: index); commit(rows); return row.id
     }
     func delete(_ id: UUID) { commit(document.rows.filter { $0.id != id }) }
+    static func entryRange(_ id: UUID, in rows: [ParkingLotRow]) -> Range<Int>? {
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        let end = rows[index].heading ? (rows.indices.dropFirst(index + 1).first(where: { rows[$0].heading }) ?? rows.count) : index + 1
+        return index..<end
+    }
+    static func markdown(_ rows: [ParkingLotRow]) -> String {
+        var number = 0
+        return rows.map { row in
+            if row.heading { number = 0 } else { number += 1 }
+            let line = (row.heading ? "# " : "\(number). ") + row.text.replacingOccurrences(of: "\n", with: "\n   ")
+            return line + (row.notes ?? []).map { "\n   > " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: "\n   > ") }.joined()
+        }.joined(separator: "\n")
+    }
     func move(_ id: UUID, before destination: UUID?) {
         var rows = document.rows
         guard id != destination, let index = rows.firstIndex(where: { $0.id == id }) else { return }
@@ -103,6 +133,7 @@ final class ParkingLotStore: ObservableObject {
     }
     func preview(_ edits: ParkingLotEdits, author: String) throws -> [ParkingLotRow] {
         guard error.isEmpty else { throw AgentFailure.message(error) }
+        guard edits.lotID == nil || edits.lotID == id else { throw AgentFailure.message("Those edits name a different Parking Lot. Nothing changed.") }
         guard edits.revision == document.revision else { throw AgentFailure.message("Parking Lot changed during this run. Read it again before editing; no edits applied.") }
         guard edits.operations.count <= 50 else { throw AgentFailure.message("Too many Parking Lot edits; no edits applied.") }
         var rows = document.rows
@@ -140,32 +171,38 @@ final class ParkingLotStore: ObservableObject {
 }
 
 struct ParkingLotSidebar: View {
-    @ObservedObject var lot = ParkingLotStore.shared
+    @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     private func show(_ pane: Int? = nil) {
         lot.open()
-        workspace.assign(ParkingLotStore.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
+        workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
     }
     var body: some View {
         HStack(spacing: 3) {
             Button { show() } label: {
-                Label("Parking Lot", systemImage: "note.text").foregroundStyle(lot.active ? Color.primary : Color.secondary)
+                Label(lot.name, systemImage: "note.text").foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
             HStack(spacing: 2) {
-                PaneButton(label: "P", selected: workspace.placements[ParkingLotStore.id] == nil) { workspace.park(ParkingLotStore.id) }
+                PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: workspace.pane(for: ParkingLotStore.id, in: state.id) == pane) { show(pane) }
+                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane) { show(pane) }
                 }
                 Color.clear.frame(width: 18, height: 19).accessibilityHidden(true)
             }.frame(width: 98)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
+            .contextMenu {
+                Button("Rename Parking Lot…") { ParkingLotLibrary.shared.promptRename(lot) }
+                Button("Delete Parking Lot…") { ParkingLotLibrary.shared.promptDelete(lot) }
+            }
     }
 }
 struct ParkingLotView: View {
-    @ObservedObject var lot = ParkingLotStore.shared
+    @ObservedObject var lot: ParkingLotStore
     @State private var reordering = false
+    @StateObject private var undoFocus = ParkingLotUndoFocus()
+    @State private var talking = false
     @State private var dragging: UUID?
     @State private var dropBefore: UUID?
     @State private var rowFrames: [UUID: CGRect] = [:]
@@ -208,7 +245,7 @@ struct ParkingLotView: View {
             .onChanged { value in dragging = row.id; dropBefore = destination(for: value.location, source: row) }
             .onEnded { value in
                 let area = rowFrames.values.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -14, dy: -50)
-                if area.contains(value.location) { lot.move(row.id, before: destination(for: value.location, source: row)) }
+                if area.contains(value.location) { lot.move(row.id, before: destination(for: value.location, source: row)); undoFocus.activate() }
                 dragging = nil; dropBefore = nil
             }
     }
@@ -239,15 +276,6 @@ struct ParkingLotView: View {
                 if let author = row.editedBy { Text("Edited by " + author).font(.caption2).foregroundStyle(.secondary) }
             }
         }.padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-        .contextMenu {
-            Button("Add item below") { lot.insert(after: row.id) }
-            Button("Add heading below") { lot.insert(heading: true, after: row.id) }
-            Divider()
-            Button("Copy") { copy(row.text) }
-            Button("Paste as new item") { if let text = NSPasteboard.general.string(forType: .string) { lot.insert(text: text, after: row.id) } }
-            Button("Reorder…") { reordering = true }
-            Button(row.heading ? "Delete heading (keep items)" : "Delete", role: .destructive) { lot.delete(row.id) }
-        }
         .background(GeometryReader { geometry in
             Color.clear.preference(key: ParkingLotFrames.self, value: [row.id: geometry.frame(in: .named("parkingOutline"))])
         })
@@ -257,7 +285,7 @@ struct ParkingLotView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Spacer()
-                Button(reordering ? "Done" : "Reorder") { reordering.toggle() }
+                Button(reordering ? "Done" : "Reorder") { reordering.toggle(); DispatchQueue.main.async { undoFocus.activate() } }
             }.padding(8)
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
@@ -275,7 +303,14 @@ struct ParkingLotView: View {
             }.coordinateSpace(name: "parkingOutline")
                 .onPreferenceChange(ParkingLotFrames.self) { rowFrames = $0 }
             }
+            HStack {
+                Text(lot.name).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Talk…") { talking = true }
+            }.padding(8)
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
+            .background(ParkingLotUndoAnchor(lot: lot, focus: undoFocus).frame(width: 0, height: 0))
+            .sheet(isPresented: $talking) { ParkingLotTalkView(lot: lot) }
     }
 }
 private struct ParkingLotFrames: PreferenceKey {
@@ -287,6 +322,7 @@ private struct ParkingLotFrames: PreferenceKey {
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     parkingOutlineSelfTests(check)
+    parkingLibrarySelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
     let lot = ParkingLotStore(folder: folder)

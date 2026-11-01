@@ -2277,6 +2277,7 @@ struct Conversation: View {
 }
 
 struct RootView: View {
+    @ObservedObject var sidebarOrder = SidebarOrder.shared
     @ObservedObject var store = Store.shared
     @ObservedObject var workspace = Workspace.shared
     @ObservedObject var devices = DeviceSyncService.shared
@@ -2292,38 +2293,21 @@ struct RootView: View {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "sparkles").frame(width: 24).help("Assistant provider; hover over an icon for the model")
-                    Text("Placement").frame(width: 98, alignment: .leading)
+                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.reordering.toggle() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ParkingLotSidebar(workspace: workspace, state: state)
                         if let group = devices.currentGroup {
                             Text(group.name + " group").font(.system(size: 17, weight: .semibold)).foregroundStyle(Color.accentColor)
                                 .padding(.horizontal, 4).help("Converse group: " + group.name + ". Choose a pane number to bring a session here.")
                         }
-                        VStack(alignment: .leading, spacing: 0) {
-                            HStack {
-                                Text((devices.identity.map { devices.displayName(for: $0.deviceID) } ?? "This Mac") + " • this device").fontWeight(.bold).foregroundStyle(Color.green)
-                                    .help(devices.identity.map { devices.deviceDetails($0.deviceID) } ?? "This Mac")
-                                    .contextMenu { if let id = devices.identity?.deviceID { Button("Rename device…") { renameDeviceDisplay(devices, id: id) }.disabled(!devices.canRenameDevice(id)) } }
-                                Spacer()
-                                Menu {
-                                    ForEach(store.assistantFamilies, id: \.self) { engine in
-                                        Button("New " + AssistantFamily.name(engine) + " session…") { state.sessionSetup = SessionSetupRequest(engine: engine) }
-                                    }
-                                    Button("New agent…") { AgentWindows.shared.create() }
-                                } label: { Image(systemName: "plus") }.menuStyle(.borderlessButton).fixedSize().help("Create a session on this device")
-                            }.padding(.horizontal, 4).frame(height: 28)
-                            ForEach(store.sessions.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { session in
-                                SidebarSession(session: session, workspace: workspace, state: state)
-                            }
-                        }.padding(.bottom, 8)
-                        DeviceSidebarSection(workspace: workspace, state: state)
+                        OrderedDeviceSidebar(workspace: workspace, state: state)
                     }.padding(.top, 6)
                 }
-                Button("New agent…") { AgentWindows.shared.create() }.buttonStyle(.plain).padding(.vertical, 4)
+                Button("Parking Lots…") { ParkingLotLibrary.shared.promptNew() }.buttonStyle(.plain).padding(.vertical, 4)
+                Button("Agents…") { AgentWindows.shared.create() }.buttonStyle(.plain).padding(.vertical, 4)
                 Button { state.deviceConnect = true } label: {
-                    HStack { Text("Converse Groups"); Spacer(); if !devices.groupRequests.isEmpty { Text(String(devices.groupRequests.count)).bold().foregroundStyle(.orange) } }
+                    HStack { Text("Groups"); Spacer(); if !devices.groupRequests.isEmpty { Text(String(devices.groupRequests.count)).bold().foregroundStyle(.orange) } }
                 }.buttonStyle(.plain).padding(.vertical, 6)
                 HStack {
                     Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }
@@ -2537,12 +2521,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(quitConverse(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
+        let new = NSMenuItem(title: "New", action: nil, keyEquivalent: ""); let choices = NSMenu(title: "New"); new.submenu = choices; f.addItem(new)
+        choices.addItem(withTitle: "Parking Lot…", action: #selector(newParkingLot), keyEquivalent: "")
+        choices.addItem(withTitle: "Agent…", action: #selector(newAgent), keyEquivalent: "")
+        choices.addItem(withTitle: "Group…", action: #selector(showDeviceConnect), keyEquivalent: "")
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
         f.addItem(withTitle: "Restore Closed Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
-        for (name, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
+        for (name, action, key) in [("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
         e.addItem(.separator())
         for (title, key, tag) in [("Find…", "f", NSTextFinder.Action.showFindInterface.rawValue), ("Find Next", "g", NSTextFinder.Action.nextMatch.rawValue), ("Find Previous", "G", NSTextFinder.Action.previousMatch.rawValue)] {
             let item = e.addItem(withTitle: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
@@ -2639,6 +2627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Workspace.shared.assign(session.id, to: state.id, pane: pane)
         if let (window, _) = windows.first(where: { $0.1.id == state.id }) { window.makeKeyAndOrderFront(nil) }
     }
+    @objc func newParkingLot() { ParkingLotLibrary.shared.promptNew() }
     @objc func newAgent() { guard Store.shared.setupCompleted else { showSetup(); return }; MainActor.assumeIsolated { AgentWindows.shared.create() } }
     @objc func restoreDeletedConversation() {
         guard let session = Store.shared.restoreDeleted() else { return }

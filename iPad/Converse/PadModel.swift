@@ -150,7 +150,8 @@ final class PadModel: ObservableObject {
         conflicts.remove(id); persist(); if keepLocal { flush(id) }
     }
     func pending(_ id: String) -> DeviceOutboxRecord? { service.unresolved(globalID: id).first { $0.payload.action == "submit" } }
-    func canControl(_ id: String) -> Bool { service.remoteLeases[id] != nil && !service.remoteOffline.contains(id) }
+    func isParkingLot(_ id: String) -> Bool { (service.remoteTranscripts[id]?.engine ?? service.remoteRow(globalID: id)?.engine) == "parking" }
+    func canControl(_ id: String) -> Bool { !isParkingLot(id) && service.remoteLeases[id] != nil && !service.remoteOffline.contains(id) }
     func canSend(_ id: String) -> Bool {
         let draft = draft(id)
         return canControl(id) && !conflicts.contains(id) && pending(id) == nil && (!draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.hashes.isEmpty) && draft.hashes.allSatisfy { service.blobReady[$0] == true }

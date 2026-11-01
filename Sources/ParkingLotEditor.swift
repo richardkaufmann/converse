@@ -104,7 +104,7 @@ struct ParkingLotEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
         let text = ParkingOutlineText(frame: .zero)
-        text.isRichText = false; text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
+        text.isRichText = false; text.allowsUndo = true; text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isVerticallyResizable = true; text.isHorizontallyResizable = false
         text.autoresizingMask = [.width]; text.textContainerInset = NSSize(width: 36, height: 8)
         text.textContainer?.widthTracksTextView = true; text.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
@@ -161,10 +161,6 @@ struct ParkingLotEditor: NSViewRepresentable {
         func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil) {
             do {
                 try parent.lot.replaceUserRows(rows, revision: expected.revision)
-                if rows != expected.rows {
-                    text?.undoManager?.registerUndo(withTarget: self) { owner in owner.restore(expected.rows, replacing: rows) }
-                    text?.undoManager?.setActionName("Edit Parking Lot")
-                }
                 render(caret: caret)
             } catch { parent.lot.error = error.localizedDescription; render() }
         }
@@ -181,12 +177,21 @@ struct ParkingLotEditor: NSViewRepresentable {
             let index: Int
             if let entry {
                 if entry.placeholder { index = entry.before.flatMap { id in document.rows.firstIndex { $0.id == id } } ?? document.rows.count }
+                else if heading && entry.row.heading { index = ParkingLotStore.entryRange(entry.row.id, in: document.rows)?.upperBound ?? document.rows.count }
                 else { index = document.rows.firstIndex { $0.id == entry.row.id }.map { $0 + 1 } ?? document.rows.count }
                 parent.collapsed.remove(entry.row.id)
             } else { index = document.rows.count }
             let row = ParkingLotRow(heading: heading, text: "")
             var rows = document.rows; rows.insert(row, at: index)
             save(rows, expected: document, caret: (row.id, 0)); text?.window?.makeFirstResponder(text)
+        }
+        func copyEntry(_ id: UUID, cut: Bool, board: NSPasteboard = .general) {
+            let document = parent.lot.document
+            guard let range = ParkingLotStore.entryRange(id, in: document.rows) else { return }
+            let rows = Array(document.rows[range])
+            board.clearContents()
+            board.setString(ParkingLotStore.markdown(rows), forType: .string)
+            if cut { var next = document.rows; next.removeSubrange(range); save(next, expected: document) }
         }
         func toggle(_ id: UUID) {
             if !parent.collapsed.insert(id).inserted { parent.collapsed.remove(id) }
@@ -198,10 +203,20 @@ private var emptyPlaceholders: [String: UUID] = [:]
 
 final class ParkingOutlineText: NSTextView {
     weak var owner: ParkingLotEditor.Coordinator?
-    private let outlineUndo = UndoManager()
-    override var undoManager: UndoManager? { outlineUndo }
+    override var undoManager: UndoManager? { owner?.parent.lot.undoManager }
+    @objc func undo(_ sender: Any?) { undoManager?.undo(); owner?.render() }
+    @objc func redo(_ sender: Any?) { undoManager?.redo(); owner?.render() }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
+        if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        return super.validateUserInterfaceItem(item)
+    }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 36 || event.keyCode == 76 {
+            if event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.command), let owner,
+               let index = owner.projection.index(at: selectedRange().location) {
+                owner.add(heading: true, after: owner.projection.entries[index]); return
+            }
             insertText(event.modifierFlags.contains(.command) ? "\u{2028}" : "\n", replacementRange: selectedRange()); return
         }
         super.keyDown(with: event)
@@ -257,8 +272,9 @@ final class ParkingOutlineText: NSTextView {
         let point = convert(event.locationInWindow, from: nil)
         let index = characterIndexForInsertion(at: point)
         let menu = NSMenu()
-        func item(_ title: String, _ action: @escaping () -> Void) {
-            let target = ParkingMenuAction(action); let item = NSMenuItem(title: title, action: #selector(ParkingMenuAction.run), keyEquivalent: "")
+        func item(_ title: String, key: String = "", modifiers: NSEvent.ModifierFlags = [], _ action: @escaping () -> Void) {
+            let target = ParkingMenuAction(action); let item = NSMenuItem(title: title, action: #selector(ParkingMenuAction.run), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
             item.target = target; item.representedObject = target; menu.addItem(item)
         }
         guard let i = owner.projection.index(at: index) else {
@@ -268,11 +284,11 @@ final class ParkingOutlineText: NSTextView {
         let entry = owner.projection.entries[i]
         if selectedRange().length == 0 || !NSLocationInRange(index, selectedRange()) { setSelectedRange(NSRange(location: index, length: 0)) }
         if entry.row.heading { item("Rename heading") { owner.select(entry.row.id) } }
-        item("New heading below") { owner.add(heading: true, after: entry) }
-        item("New item below") { owner.add(heading: false, after: entry) }
+        item("New heading below", key: "\r", modifiers: .shift) { owner.add(heading: true, after: entry) }
+        item("New item below", key: "\r") { owner.add(heading: false, after: entry) }
         menu.addItem(.separator())
-        item("Copy") { if self.selectedRange().length == 0 { owner.select(entry.row.id) }; self.copy(nil) }
-        item("Cut") { if self.selectedRange().length == 0 { owner.select(entry.row.id) }; self.cut(nil) }
+        item(entry.row.heading ? "Copy Heading" : "Copy Item") { owner.copyEntry(entry.row.id, cut: false) }
+        item(entry.row.heading ? "Cut Heading" : "Cut Item") { owner.copyEntry(entry.row.id, cut: true) }
         item("Paste") { self.paste(nil) }
         item("Reorder") { owner.parent.reorder() }
         if let notes = entry.row.notes, !notes.isEmpty {
@@ -282,10 +298,6 @@ final class ParkingOutlineText: NSTextView {
                 alert.runModal()
             }
         }
-        if !entry.placeholder { item(entry.row.heading ? "Delete heading (keep items)" : "Delete") {
-            let document = owner.parent.lot.document
-            owner.save(document.rows.filter { $0.id != entry.row.id }, expected: document)
-        } }
         return menu
     }
 }
@@ -346,13 +358,16 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     text.setSelectedRange(NSRange(location: 0, length: 3))
     text.insertText("Fresh", replacementRange: text.selectedRange())
     check(lot.document.rows[0].text == "Fresh features", "Native text edits update the persisted outline")
-    text.undoManager?.undo()
+    check(text.validateUserInterfaceItem(NSMenuItem(title: "Undo", action: #selector(ParkingOutlineText.undo(_:)), keyEquivalent: "z")), "Native Edit menu enables Undo for the document history")
+    text.undo(nil)
     check(lot.document.rows == original.rows, "Native Undo restores a multi-row-capable outline transaction")
-    text.undoManager?.redo()
+    text.redo(nil)
     check(lot.document.rows[0].text == "Fresh features", "Native Redo restores the edited outline")
     lot.update(lot.document.rows[0].id, text: "Another writer")
     text.undoManager?.undo()
-    check(lot.document.rows[0].text == "Another writer", "Undo cannot overwrite changes made by another writer")
+    check(lot.document.rows[0].text == "Fresh features", "Undo reverses the newest lot change before earlier text edits")
+    text.redo(nil)
+    check(lot.document.rows[0].text == "Another writer", "Redo restores the newest lot change before continuing edits")
     lot.error = ""
     lot.update(lot.document.rows[1].id, text: "Existing item"); coordinator.render()
     let ready = coordinator.projection.entries.first { $0.placeholder }!
