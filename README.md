@@ -9,7 +9,7 @@ Converse is one app for conversations with **Muse, Claude Code, and Codex** (AI 
 its standout features
 
 1. **[It’s multi-session.](#keep-several-sessions-visible)** You can have many sessions open simultaneously, and have up to three of them up, side by side, in each of the app’s desktop windows.
-2. **[It’s multi-account.](#accounts)** Each session uses its own provider account—you can be logged into two different Muse accounts at once. (“Hi, my name is Richard, and I have five Pro/Ultra accounts across three providers.”)
+2. **[It’s multi-account.](#accounts)** Each session is logged into its own provider account—e.g. a user can be logged into two different Muse accounts, three different Codex accounts, etc. In practice this is useful to balance token budgets, but also to get different perspectives on development efforts. (“Hi, my name is Richard, and I have five Pro/Ultra accounts across three providers.”)
 3. **[It’s multi-provider.](#set-up-your-first-coding-session)** Meta, OpenAI, Anthropic can be mixed and matched as desired.
 4. **[It’s multi-system.](#download)** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
 5. **[It has Parking Lots.](#parking-lots)** Organize ideas and future prompts in an outline. Sessions can take ideas from your Parking Lots, and you can talk conversationally with them!
@@ -34,6 +34,8 @@ The rest of this README walks through installing Converse, and then using it. A 
 Enjoy.
 
 This guide is also bundled as searchable, offline **Converse Help**: open **Help → Converse Help** on desktop, or **Help** in the mobile menu. The [security and privacy section](#security-and-privacy) explains data sharing and key storage.
+
+Please file bugs and suggestions through the support agent. Your agent will talk to Converse's agents; your input will be used to fix bugs and add great new features.
 
 ## Download
 
