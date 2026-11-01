@@ -53,6 +53,11 @@ public partial class App : Application
             _window?.DispatcherQueue.TryEnqueue(() => _window.Activate());
         try
         {
+            Converse.Core.DemoReset.Consume(SetupPreview.Folder, SetupPreview.Demo, () => {
+                var vault = new Windows.Security.Credentials.PasswordVault();
+                foreach (var credential in vault.RetrieveAll().Where(c => c.Resource == "Converse.Demo.Agent"))
+                    vault.Remove(credential);
+            });
             _window = new MainWindow();
             _window.Activate();
             if (instanceSuffix.Length > 0 && Environment.GetEnvironmentVariable("CONVERSE_UI_CHECK") == "pane-reset")

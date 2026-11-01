@@ -9,6 +9,22 @@ import Foundation
     let scrubbed = BugReportPrivacy.scrub(privateReport)
     check(scrubbed.contains("Bug 123") && !scrubbed.contains("alice") && !scrubbed.contains("fixture") && !scrubbed.contains("example.com") && !scrubbed.contains("192.168"), "Bug report scrubber removes common credentials and identifiers locally while preserving symptoms")
     check(BugReportPrivacy.summary(version: "test", os: "macOS", grouped: true, peers: 2, online: 1, sessions: 3, busy: 1).contains("Known peers: 2; online: 1"), "Diagnostics consist of allowlisted versions and counts")
+    let resetRoot = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("demo-reset-" + UUID().uuidString)
+    let demoFolder = resetRoot.appendingPathComponent("Converse Demo")
+    let realFolder = resetRoot.appendingPathComponent("Converse")
+    try! FileManager.default.createDirectory(at: demoFolder, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: realFolder, withIntermediateDirectories: true)
+    try! Data("demo fixture".utf8).write(to: demoFolder.appendingPathComponent("sessions.json"))
+    try! Data("production fixture".utf8).write(to: realFolder.appendingPathComponent("sessions.json"))
+    defer { try? FileManager.default.removeItem(at: resetRoot) }
+    check((try? DemoReset.request(folder: realFolder, enabled: true)) == nil && (try? DemoReset.request(folder: demoFolder, enabled: false)) == nil, "Demo Reset rejects production profiles and normal editions")
+    try! DemoReset.request(folder: demoFolder, enabled: true)
+    var clearedDemoKeys = 0
+    let backup = try! DemoReset.consume(folder: demoFolder, enabled: true, clearCredentials: { clearedDemoKeys += 1 })!
+    check((try! String(contentsOf: backup.appendingPathComponent("sessions.json"), encoding: .utf8)) == "demo fixture" && (try! FileManager.default.contentsOfDirectory(atPath: demoFolder.path)).isEmpty && clearedDemoKeys == 1, "Demo Reset backs up demo data and clears it before fresh NUX")
+    check((try! String(contentsOf: realFolder.appendingPathComponent("sessions.json"), encoding: .utf8)) == "production fixture" && (try! DemoReset.consume(folder: demoFolder, enabled: true, clearCredentials: { clearedDemoKeys += 1 })) == nil && clearedDemoKeys == 1, "Demo Reset preserves production and is consumed only once")
+    try! DemoReset.request(folder: demoFolder, enabled: true)
+    check((try? DemoReset.consume(folder: demoFolder, enabled: true, clearCredentials: { throw NSError(domain: "fixture", code: 1) })) == nil && FileManager.default.fileExists(atPath: demoFolder.appendingPathComponent(DemoReset.marker).path), "Failed Demo credential reset retains request for retry instead of starting NUX")
     let oldAPI = AgentRuntime.shared.api, oldKeyReader = AgentRuntime.shared.keyReader
     defer { AgentRuntime.shared.api = oldAPI; AgentRuntime.shared.keyReader = oldKeyReader }
     AgentRuntime.shared.keyReader = { _ in nil }

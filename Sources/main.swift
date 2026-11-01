@@ -2364,6 +2364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var paneLayouts: [UUID: WindowPaneLayout] = [:]
     private var quitting = false
     private var quitReady = false
+    private var resettingDemo = false
     var transcriptExporter: TranscriptExportController?
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
@@ -2425,6 +2426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
+        if DemoReset.enabled { sub.addItem(withTitle: "Reset Demo…", action: #selector(resetDemo), keyEquivalent: "") }
         sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(quitConverse(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
@@ -2587,12 +2589,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
+    @objc func resetDemo() {
+        guard DemoReset.enabled, !quitting else { return }
+        let alert = NSAlert()
+        alert.messageText = "Reset Converse Demo?"
+        alert.informativeText = "This stops Demo’s work and quits. Reopen Converse Demo to start the welcome walkthrough again, with fresh sessions, provider logins and Group pairing. Saved Demo API tokens will be removed. The old Demo files are kept in a local backup. Your normal Converse app and project files are untouched."
+        alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Reset and Quit")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        do {
+            try DemoReset.request(folder: Store.shared.folder, enabled: DemoReset.enabled)
+            resettingDemo = true
+            quitConverse(nil)
+        } catch { NSAlert(error: error).runModal() }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitReady { return .terminateNow }
         if quitting { return .terminateCancel }
         let confirmed = Store.shared.requestApplicationQuit(confirm: { warning in
+            if self.resettingDemo { return true }
             let alert = NSAlert()
             alert.messageText = warning.title; alert.informativeText = warning.detail
             alert.addButton(withTitle: "Keep Running"); alert.addButton(withTitle: warning.quitButton)
@@ -3275,6 +3291,13 @@ if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
     let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
     setenv("CONVERSE_DATA_DIR", isolated.path, 1)
+    do {
+        if try DemoReset.consume(folder: isolated, enabled: DemoReset.enabled, clearCredentials: DemoReset.clearCredentials) != nil,
+           let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+    } catch {
+        NSAlert(error: error).runModal()
+        exit(1) // Never open a half-reset profile.
+    }
 }
 let application = NSApplication.shared
 let delegate = AppDelegate()

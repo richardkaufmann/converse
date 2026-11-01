@@ -21,6 +21,30 @@ void Check(bool ok, string label)
     Console.WriteLine((ok ? "PASS: " : "FAIL: ") + label);
     if (!ok) { failures++; failedLabels.Add(label); }
 }
+// Reset consumes only an explicit Demo request before stores exist.
+var resetRoot = Path.Combine(Path.GetTempPath(), "converse-reset-" + Guid.NewGuid());
+var resetDemo = Path.Combine(resetRoot, "Converse Demo");
+var resetReal = Path.Combine(resetRoot, "Converse");
+Directory.CreateDirectory(resetDemo); Directory.CreateDirectory(resetReal);
+File.WriteAllText(Path.Combine(resetDemo, "sessions.json"), "demo fixture");
+File.WriteAllText(Path.Combine(resetReal, "sessions.json"), "production fixture");
+try {
+    var rejected = 0;
+    try { DemoReset.Request(resetReal, true); } catch (InvalidOperationException) { rejected++; }
+    try { DemoReset.Request(resetDemo, false); } catch (InvalidOperationException) { rejected++; }
+    Check(rejected == 2, "Demo Reset rejects production profiles and normal editions");
+    DemoReset.Request(resetDemo, true);
+    var cleared = 0;
+    var backup = DemoReset.Consume(resetDemo, true, () => cleared++);
+    Check(File.ReadAllText(Path.Combine(backup!, "sessions.json")) == "demo fixture" && !Directory.EnumerateFileSystemEntries(resetDemo).Any() && cleared == 1,
+        "Demo Reset preserves backup and creates fresh profile before NUX");
+    Check(File.ReadAllText(Path.Combine(resetReal, "sessions.json")) == "production fixture" && DemoReset.Consume(resetDemo, true, () => cleared++) is null && cleared == 1,
+        "Demo Reset preserves production and is consumed only once");
+    DemoReset.Request(resetDemo, true);
+    try { DemoReset.Consume(resetDemo, true, () => throw new IOException("fixture")); } catch (IOException) { }
+    Check(File.Exists(Path.Combine(resetDemo, DemoReset.Marker)), "Credential reset failure retains request for retry");
+} finally { Directory.Delete(resetRoot, true); }
+
 byte[] FixedKey(byte value)
 {
     var key = new byte[32];

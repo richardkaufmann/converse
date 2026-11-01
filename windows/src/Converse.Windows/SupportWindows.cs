@@ -29,6 +29,22 @@ internal static class SetupPreview
 
 public sealed partial class MainWindow
 {
+    private async void OnResetDemo(object sender, RoutedEventArgs e)
+    {
+        if (!SetupPreview.Demo) return;
+        try
+        {
+            var dialog = new ContentDialog {
+                XamlRoot = Content.XamlRoot, Title = "Reset Converse Demo?",
+                Content = "This stops Demo’s work and quits. Reopen Converse Demo to start the welcome walkthrough again, with fresh sessions, provider logins and Group pairing. Saved Demo API tokens will be removed. The old Demo files are kept in a local backup. Your normal Converse app and project files are untouched.",
+                PrimaryButtonText = "Reset and Quit", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            DemoReset.Request(_dataFolder, SetupPreview.Demo);
+            _quitAccepted = true;
+            Close();
+        }
+        catch (Exception ex) { await AgentNotice("Demo reset could not be started: " + ex.Message); }
+    }
     private ContentDialog? _supportDialog;
     private readonly CancellationTokenSource _supportCancellation = new();
     private Process? _supportLogin;

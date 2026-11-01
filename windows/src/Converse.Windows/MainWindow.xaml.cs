@@ -121,6 +121,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ResetDemoItem.Visibility = SetupPreview.Demo ? Visibility.Visible : Visibility.Collapsed;
         AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Converse.ico"));
         var folder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR") ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");

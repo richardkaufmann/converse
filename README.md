@@ -63,6 +63,8 @@ Ask App Support to “open a Muse coding session” and it creates and displays 
 
 **Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Existing sessions keep their logins. New sessions and agents default to the provider login verified during setup; you can choose another login in setup. Demo and the normal app keep separate credentials. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
 
+**Recording a fresh start?** In the separate Mac or Windows **Converse Demo** app, choose **Converse → Reset Demo… → Reset and Quit**. Reopen Demo to go through setup again. This clears Demo’s sessions, logins, tokens and pairing, keeping a local backup of its files. Your normal app and project files stay untouched.
+
 ### Report a bug
 
 Tell App Support what went wrong and ask it to file a bug. It prepares a title and description and opens a report you can edit. You can also choose **Help → Report a Bug on GitHub…** on desktop, or **Report a Bug on GitHub…** in the mobile menu.
