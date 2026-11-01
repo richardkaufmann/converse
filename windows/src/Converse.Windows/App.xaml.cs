@@ -11,6 +11,7 @@ public partial class App : Application
 
     public App()
     {
+        SetupPreview.Initialize();
         InitializeComponent();
         // WinUI surfaces startup failures as a bare stowed exception (0xc000027b)
         // with no message; keep the real one where a user can find it.
@@ -24,9 +25,9 @@ public partial class App : Application
         // AppInstance alone is not enough: unpackaged exes at different paths
         // do not see each other's registration, so a held mutex backs it.
         // A dead previous owner counts as acquired (the OS hands us the lock).
-        var instanceSuffix = "";
+        var instanceSuffix = SetupPreview.Enabled ? "-SetupPreview" : "";
         var testFolder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR");
-        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") == "1" &&
+        if (!SetupPreview.Enabled && Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") == "1" &&
             !string.IsNullOrWhiteSpace(testFolder) && Path.IsPathFullyQualified(testFolder) &&
             Path.GetFullPath(testFolder).StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase))
             instanceSuffix = "-Test-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
@@ -82,7 +83,7 @@ public partial class App : Application
     {
         try
         {
-            var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
+            var folder = SetupPreview.Enabled ? SetupPreview.Folder : Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse");
             Directory.CreateDirectory(folder);
             File.AppendAllText(Path.Combine(folder, "crash.log"), $"{DateTime.Now:O}\n{ex}\n\n");
         }

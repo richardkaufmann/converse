@@ -1,7 +1,13 @@
 import AppKit
 import Foundation
 
-func appSupportSelfTests(_ check: (Bool, String) -> Void) {
+@MainActor func appSupportSelfTests(_ check: (Bool, String) -> Void) {
+    let oldAPI = AgentRuntime.shared.api, oldKeyReader = AgentRuntime.shared.keyReader
+    defer { AgentRuntime.shared.api = oldAPI; AgentRuntime.shared.keyReader = oldKeyReader }
+    AgentRuntime.shared.keyReader = { _ in nil }
+    AgentRuntime.shared.api.request = { request in
+        (Data("{\"total_count\":0,\"items\":[],\"tag_name\":\"test\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-support-" + UUID().uuidString)
     let store = Store(folder: folder)
     let session = store.supportSession()
@@ -78,7 +84,11 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     if [[ "$1" == "--version" ]]; then print 'fixture 1'; exit 0; fi
     if [[ "$1" == "auth" ]]; then exit 0; fi
     cat >/dev/null
-    print '{"type":"result","is_error":false,"result":"CONVERSE_CONNECTION_OK"}'
+    if [[ "$*" != *"--tools"* ]]; then
+      print '{"type":"result","is_error":false,"result":"CONVERSE_CONNECTION_OK"}'
+    else
+      print -r '{"type":"result","is_error":false,"result":"{\\"reply\\":\\"Welcome to Converse!\\",\\"attention\\":\\"\\"}"}'
+    fi
     """.write(to: fakeCLI, atomically: true, encoding: .utf8)
     try! FileManager.default.setAttributes([.posixPermissions:0o700], ofItemAtPath: fakeCLI.path)
     journey.entries[journey.entries.firstIndex { $0.engine == "claude" }!].command = ProviderCommand.quote(fakeCLI.path)
@@ -93,9 +103,21 @@ func appSupportSelfTests(_ check: (Bool, String) -> Void) {
     while !journey.setupCompleted && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     check(journey.setupCompleted && journey.sessions.count == 1 && journey.sessions[0].supportTeachingVersion == AppSupport.version && journey.sessions[0].switchboardEnabled, "NUX journey: provider selection, isolated native login, model subprocess response and automatic support handoff")
     let taught = journey.sessions[0]
+    check(taught.agent?.enabled == true && taught.agent?.intervalSeconds == 86400 && taught.agent?.repository == "richardkaufmann/converse" && taught.agent?.generateArt == false && taught.agent?.watchedSessions.isEmpty == true, "App Support becomes a daily repository agent with no art or watched sessions")
+    check(AgentModels.parse(taught.agent?.model ?? "")?.engine == "claude", "Support agent keeps the verified provider instead of switching to Meta")
+    taught.agent?.enabled = false; journey.configureSupportAgent(taught)
+    check(taught.agent?.enabled == false, "Default migration never re-enables a loop the user paused")
+    for engine in ["claude", "codex", "muse"] {
+        let route = AgentModels.reference(engine: engine, account: "login:with|separators", model: "same-model")
+        check(AgentModels.parse(route)?.account == "login:with|separators" && AgentModels.parse(route)?.engine == engine, "Model choice retains explicit provider and account: " + engine)
+        let args = AgentCLI.arguments(engine: engine, model: "same-model", prompt: "/tmp/prompt", output: "/tmp/final")
+        check(args.contains("--model") && !args.contains("--resume") && !args.contains("--yolo") && !args.contains("--dangerously-bypass-approvals-and-sandbox"), "Agent CLI uses a fresh bounded turn without bypass flags: " + engine)
+    }
+    check(AgentModels.parse("cli|claude|bad-base64|bad") == nil && (try? AgentCLI.finalReply(engine: "claude", data: Data("{\"is_error\":true,\"result\":\"unsafe\"}".utf8), final: nil)) == nil, "Malformed model routes and failed provider results cannot execute actions")
     check((taught.pending.map(\.text) + taught.messages.filter { $0.role == "user" }.map(\.text)).contains { $0.contains("[Converse switchboard instructions]") && $0.contains("[Converse setup and control teaching") }, "NUX injects both teaching prompts together after the provider gate")
     let drain = Date().addingTimeInterval(5)
     while journey.sessions[0].busy && Date() < drain { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(taught.agent?.lastOutcome == "Completed", "The taught support agent completes its first turn using the selected CLI provider")
     check(taught.clearedThroughMessageID != nil && !taught.displayedMessages.contains { $0.role == "user" || $0.text.contains("[Converse setup and control teaching") } && taught.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Support onboarding clears login and teaching from display while retaining learned context")
 
 }

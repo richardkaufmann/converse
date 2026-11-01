@@ -27,8 +27,8 @@ enum AppSupport {
     static let version = 1
     static let title = "Converse App Support"
     static let connectionReply = "CONVERSE_CONNECTION_OK"
-    static let guideLinks = "[Set up your first coding session](converse-help://first-session) · [Set up your first agent](converse-help://first-agent) · [Connect your devices into a Group](converse-help://first-group)"
-    static let guideTopics = ["first-session": "set-up-your-first-coding-session", "first-agent": "set-up-your-first-agent", "first-group": "connect-your-devices-into-a-group"]
+    static let guideLinks = "[Security and privacy](converse-help://security) · [Set up your first coding session](converse-help://first-session) · [Set up your first agent](converse-help://first-agent) · [Connect your devices into a Group](converse-help://first-group)"
+    static let guideTopics = ["security": "security-and-privacy", "first-session": "set-up-your-first-coding-session", "first-agent": "set-up-your-first-agent", "first-group": "connect-your-devices-into-a-group"]
     static let closingInvitation = "Tell me what you'd like to set up, or just ask for help understanding what the app can do"
     static let welcome = """
     # Welcome to Converse!
@@ -51,7 +51,7 @@ enum AppSupport {
         - inspect: returns live session/agent IDs and safe configuration, not secrets or transcripts.
         - help: optional query searches the installed README and returns actual documentation. Use this before explaining installation, Discord or the Meta Muse iPhone connector; do not invent instructions or assume a connection works.
         - open: target readme, first-session, first-agent, first-group, agents, discord, muse-iphone, devices or settings. Opens the real app control/help. For agents/discord an optional title identifies an existing agent; otherwise opens agent creation. Secure fields are where the human enters keys, never in chat.
-        - create-agent: required title and objective. Creates one paused agent (no speech, artwork, web search, monitoring or Discord enabled). Same-title agent is returned rather than duplicated. Agents use the Meta API and need a Meta key in Agent Setup, independently of your session provider's login.
+        - create-agent: required title and objective. Creates one paused agent (no speech, artwork, web search, monitoring or Discord enabled). Same-title agent is returned rather than duplicated. Agents can use enabled provider logins or the Meta API. Choose the provider and model in Agent Setup. Meta artwork and voice still require a Meta API key.
         - configure-agent: target is an exact ID from inspect; optional objective, repository (owner/name or empty), channelID (Discord numeric ID), discordMentions and jollyAllowed. Saves only these fields through the app; does not start loops or claim services tested. Never set sharing/mentions unless the human requested it. Open Agent Setup for keys and connection tests.
         - show-session: target is an exact local ID from inspect; displays that session.
         Results are supplied by Converse. A saved configuration is not a successful connection test. Report blockers honestly. Login/OAuth and pairing confirmation require the human's participation. Do not request pasted passwords, tokens or codes. The Meta Muse iPhone app connects through Jolly; it is separate from the native Converse iPhone/iPad viewer. Use the exact link label "Connect the Meta Muse iPhone app".
@@ -85,6 +85,29 @@ enum AppSupport {
 }
 
 extension Store {
+    func converseHealth() -> [String: Any] {
+        let service = participantService
+        return ["appUp": true, "appVersion": ConverseAbout.versionBuild, "observedAt": ISO8601DateFormatter().string(from: Date()),
+                "group": service.currentGroup?.name as Any? ?? NSNull(),
+                "thisSystem": service.displayName(for: service.localDeviceID ?? "", fallback: Host.current().localizedName ?? "This Mac"),
+                "hosts": service.participantHomes.map { ["name": $0.deviceName, "online": $0.online] as [String: Any] }]
+    }
+    func configureSupportAgent(_ session: Session) {
+        guard session.supportAssistant, setupCompleted, session.agent?.supportDefaultsVersion == nil else { return }
+        var config = session.agent ?? AgentConfig()
+        if session.agent == nil, let account = session.entry.accountID {
+            config.model = AgentModels.reference(engine: session.entry.engine, account: account, model: session.choices.model ?? "")
+        }
+        config.objective = "Keep Converse up to date, especially when critical bugs are reported. Check richardkaufmann/converse daily for releases and serious open issues. Treat critical bugs as reasons for grave concern: explain their impact and the recommended next step with links and observed dates. Do not install updates or change settings without the user's request. Answer questions about this app's current health, Group and hosts from supplied live evidence."
+        config.repository = "richardkaufmann/converse"; config.intervalSeconds = 86400
+        config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
+        config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
+        config.nextRunAt = config.nextScheduledRun(after: Date())
+        session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"
+        session.supportTeachingVersion = AppSupport.version; session.switchboardEnabled = true
+        save()
+    }
+
     @discardableResult func supportSession() -> Session {
         if let session = sessions.first(where: { $0.supportAssistant }) { return session }
         let session = create(Entry(name: "Support", command: "", directory: folder.path, engine: "support"), persist: false)
@@ -121,7 +144,7 @@ extension Store {
                 if let a = s.agent { row["agent"] = ["objective":a.objective,"repository":a.repository,"loopEnabled":a.enabled,"discordChannelID":a.discordChannelID ?? "","discordMentions":a.discordMentions ?? false,"jollyAllowed":a.jollyAllowed ?? false] }
                 return row
             }
-            return String(decoding: try JSONSerialization.data(withJSONObject: ["appVersion":ConverseAbout.versionBuild,"setupCompleted":setupCompleted,"sessions":rows], options: [.sortedKeys]), as: UTF8.self)
+            return String(decoding: try JSONSerialization.data(withJSONObject: ["appVersion":ConverseAbout.versionBuild,"setupCompleted":setupCompleted,"health":converseHealth(),"sessions":rows], options: [.sortedKeys]), as: UTF8.self)
         case "help":
             let book = try HelpBook.load()
             let found = book.search(request.query ?? "", limit: 6)

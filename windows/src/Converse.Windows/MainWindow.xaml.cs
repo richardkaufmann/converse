@@ -143,9 +143,9 @@ public sealed partial class MainWindow : Window
             _placements.Save(_dataFolder);
             Refresh();
         });
-        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(enableDiscovery: true, loopbackOnly: false);
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(port: SetupPreview.Enabled ? 0 : DeviceSyncService.DefaultPort, enableDiscovery: !SetupPreview.Enabled, loopbackOnly: SetupPreview.Enabled);
         _help = LoadHelp();
-        Title = "Converse " + VersionBuild;
+        Title = (SetupPreview.Enabled ? "Converse Setup Preview " : "Converse ") + VersionBuild;
         for (var pane = 1; pane <= 3; pane++)
         {
             var view = new ConversationPane();
@@ -161,6 +161,7 @@ public sealed partial class MainWindow : Window
         Activated += (_, _) => ClampWindowWidth();
         ApplyLayout();
         Refresh();
+        InitializeSupport();
     }
 
 
@@ -231,6 +232,7 @@ public sealed partial class MainWindow : Window
     // CLI presence, and the data folder. Help is searchable documentation only.
     private async void OnSetupClick(object sender, RoutedEventArgs e)
     {
+        if (SetupPreview.Enabled && !_store.Sessions.Any(s => s.SupportAssistant && s.SupportSetupCompleted)) { await ShowSupportSetup(); return; }
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(new TextBlock
         {

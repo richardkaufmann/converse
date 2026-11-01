@@ -97,8 +97,9 @@ final class SupportNUXController: ObservableObject {
             guard let self, self.generation == token, let session else { return }
             self.checking = false
             if connected {
+                self.store.configureSupportAgent(session)
                 self.status = "Connected. Converse App Support is ready."
-                self.store.enqueueSwitchboard(session, text: self.store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: false) + "\nThe user has completed provider login. Introduce yourself briefly as Converse App Support. Offer the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Also include these getting-started links: \(AppSupport.guideLinks). Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request. End your welcome with exactly: \(AppSupport.closingInvitation)", clearDisplayBeforeReply: true)
+                self.store.enqueueSwitchboard(session, text: self.store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true) + "\nThe user has completed provider login. Introduce yourself briefly as Converse App Support. Offer Security and privacy at converse-help://security, the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Also include these getting-started links: \(AppSupport.guideLinks). Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request. End your welcome with exactly: \(AppSupport.closingInvitation)", clearDisplayBeforeReply: true)
             } else { self.status = "The model did not confirm a working connection. Setup remains locked. Retry login or check the connection again." }
         }
         session.draft = "Connection check only: reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
@@ -122,6 +123,7 @@ struct SupportNUXView: View {
             Text("I’m Converse App Support. I can help you set up and use Converse.").font(.title3)
             HStack(spacing: 18) {
                 Button("README") { AppSupport.open("readme") }
+                Button("Security & privacy") { AppSupport.open("security") }
                 Button("Discord") { AppSupport.open("discord") }
                 Button("Connect the Meta Muse iPhone app") { AppSupport.open("muse-iphone") }
             }.buttonStyle(.link)

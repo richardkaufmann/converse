@@ -21,6 +21,7 @@ public sealed class DeviceAgentSettings
 {
     [JsonPropertyName("objective")] public string Objective { get; set; } = "Monitor progress and report blockers.";
     [JsonPropertyName("repository")] public string Repository { get; set; } = "";
+    [JsonPropertyName("modelOptions")] public List<DeviceChoiceDto>? ModelOptions { get; set; }
     [JsonPropertyName("model")] public string Model { get; set; } = "muse-spark-1.3";
     [JsonPropertyName("watched")] public List<string> Watched { get; set; } = new();
     [JsonPropertyName("intervalSeconds")] public double IntervalSeconds { get; set; } = 900;

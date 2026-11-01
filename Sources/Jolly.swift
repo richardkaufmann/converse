@@ -20,13 +20,21 @@ struct JollyRequest: Codable {
     static func eligible(_ store: Store) -> [Session] { store.sessions.filter { $0.agent != nil && $0.agent?.jollyAllowed != false } }
     static func resolve(_ request: JollyRequest, sessions: [Session]) -> Session? {
         let target = request.agent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let support = sessions.filter { $0.supportAssistant && $0.agent?.jollyAllowed != false }
+        if target.lowercased() == "converse" { return support.count == 1 ? support[0] : nil }
         if !target.isEmpty {
             let matches = sessions.filter { $0.id.uuidString.lowercased() == target.lowercased() || $0.title.localizedCaseInsensitiveCompare(target) == .orderedSame }
             return matches.count == 1 ? matches[0] : nil
         }
         let matches = sessions.filter { request.question.lowercased().hasPrefix($0.title.lowercased() + ":") }
         if matches.count == 1 { return matches[0] }
+        if isHealthQuestion(request.question) { return support.count == 1 ? support[0] : nil }
         return sessions.count == 1 ? sessions[0] : nil
+    }
+    static func isHealthQuestion(_ question: String) -> Bool {
+        let text = question.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.contains("converse") || text.contains("the app") else { return false }
+        return ["app is up", "app up", "app running", "is running", "is converse up", "health", "which hosts", "which devices", "what group", "which group", "what version", "up to date"].contains { text.contains($0) }
     }
     func start() {
         guard timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
@@ -85,7 +93,7 @@ struct JollyRequest: Codable {
             }
             let sessions = Self.eligible(store)
             try write(["available": true, "updatedAt": now.timeIntervalSince1970, "agents": sessions.map {
-                ["id": $0.id.uuidString, "name": $0.title, "busy": $0.busy, "maxTurnsPerLoop": $0.agent?.turnLimit ?? 0] as [String: Any]
+                ["id": $0.id.uuidString, "name": $0.title, "busy": $0.busy, "maxTurnsPerLoop": $0.agent?.turnLimit ?? 0, "appSupport": $0.supportAssistant] as [String: Any]
             }], file: folder.appendingPathComponent("directory.json"))
             let files = try FileManager.default.contentsOfDirectory(at: requestFolder, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])
                 .filter { $0.pathExtension == "json" && !finished.contains($0.deletingPathExtension().lastPathComponent) }.sorted { $0.lastPathComponent < $1.lastPathComponent }

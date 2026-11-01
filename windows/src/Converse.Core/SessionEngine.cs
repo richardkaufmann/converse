@@ -58,6 +58,8 @@ public sealed class ChatMessage
 public sealed class PendingPrompt
 {
     public List<Guid>? ComponentIDs { get; set; }
+    public bool ClearDisplayBeforeReply { get; set; }
+    public int AppControlDepth { get; set; }
     public bool Autonomous { get; set; }
     public bool AgentLoopTick { get; set; }
     public bool AgentRunReserved { get; set; }
@@ -72,6 +74,14 @@ public sealed class PendingPrompt
 
 public sealed class ChatSession
 {
+    public bool SupportAssistant { get; set; }
+    public int? SupportTeachingVersion { get; set; }
+    public bool SupportSetupCompleted { get; set; }
+    public Guid? ClearedThroughMessageID { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public IEnumerable<ChatMessage> DisplayedMessages => ClearedThroughMessageID is { } id && Messages.FindIndex(m => m.Id == id) is var at && at >= 0 ? Messages.Skip(at + 1) : Messages;
+    [System.Text.Json.Serialization.JsonIgnore] public bool ActiveBackground { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public int ActiveAppControlDepth { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] internal TaskCompletionSource<bool>? SupportProbe { get; set; }
     public AgentConfig? Agent { get; set; }
     public bool MessagingEnabled { get; set; }
     public List<SwitchboardObligation> SwitchboardObligations { get; set; } = new();
@@ -146,22 +156,7 @@ public sealed class ProcessAgentRunner : IAgentRunner
         if (System.IO.Directory.Exists(session.Entry.Directory)) start.WorkingDirectory = session.Entry.Directory;
         start.Environment["NO_COLOR"] = "1";
         start.Environment["TERM"] = "dumb";
-        if (!string.IsNullOrEmpty(session.Entry.AccountDirectory))
-        {
-            if (session.Entry.Engine == "codex")
-            {
-                start.Environment.Remove("CODEX_ACCESS_TOKEN");
-                start.Environment.Remove("OPENAI_API_KEY");
-                start.Environment["CODEX_HOME"] = session.Entry.AccountDirectory;
-            }
-            if (session.Entry.Engine == "claude")
-            {
-                start.Environment.Remove("ANTHROPIC_API_KEY");
-                start.Environment.Remove("ANTHROPIC_AUTH_TOKEN");
-                if (session.Entry.UseDefaultAccountStore != true)
-                    start.Environment["CLAUDE_CONFIG_DIR"] = session.Entry.AccountDirectory;
-            }
-        }
+        ProviderProfile.Apply(start, session.Entry);
         if (session.Entry.Engine == "claude" && session.Choices.Effort is { } effort)
             start.Environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort;
         using var process = new Process { StartInfo = start };
@@ -253,6 +248,7 @@ public sealed class SessionStore
     public Func<ChatSession, string, IReadOnlyList<string>, Task>? AgentRun { get; set; }
     public Func<PendingPrompt, bool>? AcceptGroupPrompt { get; set; }
     public Action<ChatSession, string>? FinalParticipantReply { get; set; }
+    public Func<ChatSession, System.Text.Json.Nodes.JsonObject, Task>? AppSupportRequest { get; set; }
     internal void NotifyTranscript(ChatSession session) => TranscriptAdvanced?.Invoke(session);
 
     // Fires when the transcript holds new turn content: throttled stream
@@ -399,6 +395,12 @@ public sealed class SessionStore
     public void Submit(ChatSession session)
     {
         var text = session.Draft;
+        if (text.Trim() is "/clear" or "/unclear")
+        {
+            session.ClearedThroughMessageID = text.Trim() == "/clear" ? session.Messages.LastOrDefault()?.Id : null;
+            session.Draft = ""; Save(); return;
+        }
+        if (session.SupportAssistant && !session.SupportSetupCompleted && session.SupportProbe is null) return;
         if (string.IsNullOrWhiteSpace(text) && session.Attachments.Count == 0) return;
         var images = new List<string>(session.Attachments);
         session.Draft = "";
@@ -412,7 +414,7 @@ public sealed class SessionStore
             Save();
             return;
         }
-        session.ActiveAgentLoopTick = false; session.ActiveHop = 0;
+        session.ActiveAgentLoopTick = false; session.ActiveHop = 0; session.ActiveBackground = false; session.ActiveAppControlDepth = 0;
         AppendUserMessage(session, text, images);
         _ = RunTurnAsync(session, text, images);
     }
@@ -436,10 +438,13 @@ public sealed class SessionStore
             catch { config.Settings.RemainingRuns = old; config.Settings.Enabled = enabled; config.Settings.Revision = revision; next.AgentRunReserved = false; session.QueuePaused = true; config.Attention = "Could not preserve run budget. Agent paused."; return; }
         }
         session.ActiveAgentLoopTick = next.AgentLoopTick; session.ActiveHop = next.Hop;
+        session.ActiveBackground = next.Autonomous || next.OriginGroupID is not null || next.OriginHomeID is not null || next.Hop > 0;
+        session.ActiveAppControlDepth = next.AppControlDepth;
         session.Pending.RemoveAt(0);
         foreach (var item in session.SwitchboardObligations.Where(o => o.PromptID == next.Id || next.ComponentIDs?.Contains(o.PromptID) == true))
         { item.State = item.Kind == "request" ? "submitted" : "resolved"; item.FinishedAt = null; }
         AppendUserMessage(session, next.Text, next.Images);
+        if (next.ClearDisplayBeforeReply) session.ClearedThroughMessageID = session.Messages.LastOrDefault()?.Id;
         _ = RunTurnAsync(session, next.Text, next.Images);
     }
 
@@ -511,6 +516,8 @@ public sealed class SessionStore
         var response = new ChatMessage { Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow };
         session.Messages.Add(response);
         var responseId = response.Id;
+        try
+        {
         var client = MuseFactory?.Invoke(session.Entry, session)
             ?? MuseMspClient.StartProcess(session.Entry, session.RemoteID ?? session.Id.ToString("D"));
         session.Muse = client;
@@ -518,8 +525,6 @@ public sealed class SessionStore
         client.Event += (method, @params) => ConsumeMuse(method, @params, session, responseId);
         client.Disconnected += error => session.MuseTurnDone?.TrySetResult(("Disconnected", error));
         Save();
-        try
-        {
             await client.InitializeAsync();
             await client.LoadAsync(session.Entry, session.Choices);
             if (client.SettingWarning is { } warning) session.Messages.Add(new ChatMessage { Role = "notice", Text = warning });
@@ -528,7 +533,7 @@ public sealed class SessionStore
             session.Status = "Working…";
             session.TurnCancellation = new CancellationTokenSource();
             using var registration = session.TurnCancellation.Token.Register(() => _ = client.InterruptAsync());
-            await client.SubmitAsync(ImageGuidance.WithGuidance(SwitchboardInstructions.WithPolicy(session, prompt)), prompt, images, session.Choices.Effort);
+            await client.SubmitAsync(ImageGuidance.WithGuidance(AppSupportTeaching.WithPolicy(session, SwitchboardInstructions.WithPolicy(session, prompt))), prompt, images, session.Choices.Effort);
             if (session.Interrupted) await client.InterruptAsync();
             var (status, notice) = await session.MuseTurnDone.Task;
             FinishMuse(session, status, notice);
@@ -552,8 +557,8 @@ public sealed class SessionStore
         if (!string.IsNullOrEmpty(notice)) session.Messages.Add(new ChatMessage { Role = "notice", Text = notice });
         // Mac finishQueue parity: an interrupted turn runs the queue only
         // when an inject asked for the resume; anything else held pauses.
-        if (status == "Ready" && !session.Interrupted)
-            FinalParticipantReply?.Invoke(session, string.Join("\n", session.Messages.Where(m => session.MuseItems.Values.Contains(m.Id)).Select(m => m.FinalReply ?? m.Text)));
+        CompleteReply(session, status == "Ready" && !session.Interrupted,
+            string.Join("\n", session.Messages.Where(m => session.MuseItems.Values.Contains(m.Id)).Select(m => m.FinalReply ?? m.Text)));
         var shouldRun = status == "Ready" || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -710,7 +715,7 @@ public sealed class SessionStore
         var exit = -1;
         try
         {
-            var input = await ProviderInput.CreateAsync(session.Entry.Engine, ImageGuidance.WithGuidance(SwitchboardInstructions.WithPolicy(session, prompt)), images);
+            var input = await ProviderInput.CreateAsync(session.Entry.Engine, ImageGuidance.WithGuidance(AppSupportTeaching.WithPolicy(session, SwitchboardInstructions.WithPolicy(session, prompt))), images);
             exit = await _runner.RunAsync(session, args, input,
                 line => Consume(line, session, response), session.TurnCancellation.Token);
         }
@@ -744,8 +749,7 @@ public sealed class SessionStore
         if (success && !string.IsNullOrEmpty(response.Text))
             await ResponseImages.ImportAsync(Folder, session, response);
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
-        if (success && !session.Interrupted && response.FinalReply is { } authoritative)
-            FinalParticipantReply?.Invoke(session, authoritative);
+        CompleteReply(session, success && !session.Interrupted, response.FinalReply);
         var shouldRun = success || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -754,6 +758,16 @@ public sealed class SessionStore
         TranscriptAdvanced?.Invoke(session);
         if (shouldRun) RunNext(session);
         Changed?.Invoke();
+    }
+
+    private void CompleteReply(ChatSession session, bool success, string? reply)
+    {
+        if (session.SupportProbe is { } probe)
+        {
+            session.SupportProbe = null;
+            probe.TrySetResult(success && reply?.Trim() == AppSupportTeaching.ConnectionReply);
+        }
+        else if (success && reply is not null) FinalParticipantReply?.Invoke(session, reply);
     }
 
     // JSONL consumption mirroring Store.consume for claude/codex/muse-exec.

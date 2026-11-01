@@ -807,7 +807,7 @@ final class Store: ObservableObject {
         if s.isAgentSession {
             s.probeError = s.needsAgentSetup ? Session.missingAgentSettings : ""
             s.needsSignIn = false
-            if let agent = s.agent { s.toolStatus.model = agent.model; s.toolStatus.access = "Monitor selected sessions" }
+            if let agent = s.agent { s.toolStatus.model = AgentModels.label(agent.model); s.toolStatus.access = "Monitor selected sessions" }
             completion?(); return
         }
         guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
@@ -2415,6 +2415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
         h.addItem(withTitle: "Converse Help…", action: #selector(showConverseHelp), keyEquivalent: "?")
+        h.addItem(withTitle: "Security & Privacy…", action: #selector(showSecurityHelp), keyEquivalent: "")
         NSApp.mainMenu = menu
         NSApp.helpMenu = h
         NSApp.registerUserInterfaceItemSearchHandler(helpController)
@@ -2452,6 +2453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
     @objc func showJolly() { guard Store.shared.setupCompleted else { helpController.show(topic: "jolly-mac", query: ""); return }; MainActor.assumeIsolated { jollyController.show() } }
+    @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
     @objc func newWindow() { makeWindow(WindowState()) }
@@ -2732,7 +2734,7 @@ func selfTest() {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh to run isolated tests.\n", stderr); exit(2) }
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
-    appSupportSelfTests(check)
+    MainActor.assumeIsolated { appSupportSelfTests(check) }
     providerSelfTests(check)
     conversationLayoutSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")

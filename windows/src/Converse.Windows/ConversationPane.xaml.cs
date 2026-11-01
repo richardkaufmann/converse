@@ -166,7 +166,7 @@ public sealed partial class ConversationPane : UserControl
     {
         List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
-            lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.Messages
+            lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.DisplayedMessages
                 .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
                 .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList(), m.CreatedAt)).ToList();
         else if (_selected?.GlobalID is { } globalId)
@@ -1592,6 +1592,7 @@ public sealed partial class ConversationPane : UserControl
         signature.Append("|lease:").Append(gid is null || _host.Devices.RemoteLeases.ContainsKey(gid));
         var widget = local?.Agent?.Widget ?? (gid is null ? null : _host.Devices.RemoteTranscripts.GetValueOrDefault(gid)?.AgentWidget);
         var isAgent = local?.Agent is not null || widget is not null;
+        signature.Append("|support:").Append(local?.SupportAssistant).Append(local?.SupportSetupCompleted);
         signature.Append("|agent:").Append(isAgent).Append(System.Text.Json.JsonSerializer.Serialize(widget)).Append(local?.Agent?.Attention);
         var text = signature.ToString();
         if (text == _bannerSignature) return;
@@ -1599,6 +1600,7 @@ public sealed partial class ConversationPane : UserControl
         foreach (var stale in _host.AnswerStates.Keys.Where(k => !liveKeys.Contains(k)).ToList())
             _host.AnswerStates.Remove(stale);
         BannerStack.Children.Clear();
+        if (local?.SupportAssistant == true) BannerStack.Children.Add(_host.SupportLinks());
         if (isAgent && _selected is { } selected)
         {
             var attention = local?.Agent?.Attention ?? widget?.Attention ?? "";

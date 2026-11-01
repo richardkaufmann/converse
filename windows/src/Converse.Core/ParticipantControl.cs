@@ -215,7 +215,17 @@ public sealed partial class DeviceSyncService
         var session = target?.Home == DeviceId ? _store.Sessions.FirstOrDefault(s => s.Id == target.Value.Session) : null;
         if (request.Action == "session.export") return Task.FromResult(ExportTranscript(session, request));
         if (request.Action == "inspect") return Task.FromResult(session is null ? Result("rejected", "Target is not on this home.") : new DeviceParticipantResponse { GroupID = group, Outcome = "completed", Detail = "Home evidence snapshot.", Target = request.Target, Evidence = Evidence(DeviceId, session) });
-        if (request.Action == "agent.settings") return Task.FromResult(session?.Agent is not { } c ? Result("rejected", "Target is not an agent.") : new DeviceParticipantResponse { GroupID = group, Outcome = "completed", Detail = "Credentials stay on home.", Target = request.Target, Settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(c.Settings)) });
+        if (request.Action == "agent.settings")
+        {
+            if (session?.Agent is not { } c) return Task.FromResult(Result("rejected", "Target is not an agent."));
+            async Task<DeviceParticipantResponse> SettingsReply()
+            {
+                var settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(c.Settings));
+                settings.ModelOptions = await AgentModels.DiscoverAsync(_store, Agents.ReadSecret("meta"));
+                return new() { GroupID = group, Outcome = "completed", Detail = "Credentials stay on home.", Target = request.Target, Settings = settings };
+            }
+            return SettingsReply();
+        }
         var hash = DeviceBlob.Sha256Hex(DeviceJson.Encode(request));
         var previous = _store.ParticipantReceipts.FirstOrDefault(r => r.Id == id);
         if (previous is not null) return Task.FromResult(previous.Origin == origin && previous.Hash == hash ? previous.Response : Result("rejected", "Operation ID belongs to another request."));
@@ -348,6 +358,11 @@ public sealed partial class DeviceSyncService
         if (command is null || source.Agent is not null) return;
         try
         {
+            if (command["command"]?.GetValue<string>() == "app-control")
+            {
+                if (_store.AppSupportRequest is { } handler) await handler(source, command);
+                return;
+            }
             if (!source.MessagingEnabled) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
             if (source.ActiveHop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
             var action = command["command"]?.GetValue<string>();

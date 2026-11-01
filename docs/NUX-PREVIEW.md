@@ -1,6 +1,6 @@
 # Converse Setup Preview
 
-The isolated Mac preview validated onboarding in build82. The same onboarding and teaching flow ships in the normal Mac app starting with **0.5.58 (83)**. Windows and mobile onboarding have not yet been ported. This separate preview remains available for testing without touching production data.
+The isolated Mac preview validated onboarding in build82. The same onboarding and teaching flow ships in the normal Mac app starting with **0.5.58 (83)**. Windows has an isolated build84 preview described in [Windows onboarding preview](WINDOWS-NUX-PREVIEW.md). Mobile onboarding has not been ported. This separate preview remains available for testing without touching production data.
 
 Build with:
 
@@ -20,13 +20,13 @@ installed executables; no CLI installation is replaced by this preview.
 ## Walkthrough
 
 1. Open **Converse Setup Preview**. Only Converse App Support is shown.
-2. Check the clickable README, Discord, and Connect the Meta Muse iPhone app links. Before login these open the relevant Help articles; after login the mobile link opens Jolly.
+2. Check the clickable README, Security and privacy, Discord, and Connect the Meta Muse iPhone app links. Before login these open the relevant Help articles; after login the mobile link opens Jolly.
 3. Pick 1 Meta Muse, 2 Claude, or 3 Codex (buttons or number keys).
 4. Complete the provider-owned login in Terminal/browser. The app checks a short
    model response automatically. The first model request may consume provider
    quota. If login fails or is cancelled, the gate remains; select again to retry.
    The manual Check connection action covers a login completed outside this flow.
-5. Successful onboarding enables and teaches both app setup/control and the
+5. In build84, App Support becomes a native agent using the verified provider, with a daily repository-health loop, no watched sessions and no mood art. Pause the loop in Agent Setup at any time. Successful onboarding enables and teaches both app setup/control and the
    switchboard, using the same instructions as the manual teaching menu.
    Both capabilities persist after restart. Login checks and teaching are hidden
    from the display before the welcome reply. Once connected, ask support to create an agent with an objective, then inspect

@@ -13,7 +13,7 @@ public sealed partial class MainWindow
     private readonly List<Window> _agentWindows = new();
     private static string? ReadAgentKey(string name)
     {
-        try { var credential = new PasswordVault().Retrieve("Converse.Agent", name); credential.RetrievePassword(); return credential.Password; }
+        try { var credential = new PasswordVault().Retrieve(SetupPreview.CredentialResource, name); credential.RetrievePassword(); return credential.Password; }
         catch { return null; }
     }
     private void InitializeAgents()
@@ -25,6 +25,7 @@ public sealed partial class MainWindow
         AppWindow.Closing += async (_, e) =>
         {
             if (_quitAccepted) return;
+            if (_supportDialog is not null) { _quitAccepted = true; return; }
             var loops = _store.Sessions.Count(s => s.Agent?.CanSchedule == true);
             var busy = _store.Sessions.Count(s => s.Busy);
             if (loops == 0 && busy == 0) return;
@@ -86,8 +87,10 @@ public sealed partial class MainWindow
             if (local?.Agent is { } agent) settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(agent.Settings));
             else { var response = await _devices.RequestParticipantAsync(reference.Home, "agent.settings", target); settings = response.Settings; if (settings is null) { await AgentNotice(response.Detail); return; } }
             var panel = new StackPanel { Spacing = 8, Width = 470 };
-            panel.Children.Add(new TextBlock { Text = "Execution and credentials stay on " + (local is null ? "the remote home." : "this PC."), TextWrapping = TextWrapping.Wrap });
-            var model = new TextBox { Header = "Model", Text = settings.Model }; panel.Children.Add(model);
+            panel.Children.Add(new TextBlock { Text = "Runs on " + (local is null ? "the home system" : "this system") + " when Converse is open. Your messages here are shared with the selected provider. If you enable this agent to examine selected sessions, those sessions’ content will also be shared.", TextWrapping = TextWrapping.Wrap });
+            var modelOptions = local is null ? settings.ModelOptions ?? new() : await AgentModels.DiscoverAsync(_store, ReadAgentKey("meta"));
+            if (!modelOptions.Any(o => o.Id == settings.Model)) modelOptions.Insert(0, new() { Id = settings.Model, Label = AgentModels.Label(settings.Model) + " · current" });
+            var model = new ComboBox { Header = "Model", ItemsSource = modelOptions, DisplayMemberPath = "Label", SelectedValuePath = "Id", SelectedValue = settings.Model, HorizontalAlignment = HorizontalAlignment.Stretch }; panel.Children.Add(model);
             var repo = new TextBox { Header = "GitHub owner/name · optional", Text = settings.Repository }; panel.Children.Add(repo);
             var objective = new TextBox { Header = "Objective and success criteria", Text = settings.Objective, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 90 }; panel.Children.Add(objective);
             var enabled = new CheckBox { Content = "Enable automatic loop", IsChecked = settings.Enabled }; panel.Children.Add(enabled);
@@ -107,11 +110,13 @@ public sealed partial class MainWindow
             void AddScope(string global, string label) { if (global == target) return; var box = new CheckBox { Content = label, IsChecked = settings.Watched.Contains(global) }; scope.Add((global, box)); panel.Children.Add(box); }
             foreach (var s in _store.Sessions) AddScope(new DeviceGlobalID(_devices.DeviceId, s.Id).ToString(), "This PC · " + s.Title);
             foreach (var home in _devices.Homes.Values) foreach (var s in home.Rows) AddScope(s.GlobalID, home.DeviceName + " · " + s.Title);
-            PasswordBox? key = null; CheckBox? remove = null;
+            PasswordBox? key = null, githubKey = null; CheckBox? remove = null, removeGithub = null;
             if (local is not null)
             {
-                key = new PasswordBox { Header = "Meta API key · blank keeps saved key" }; panel.Children.Add(key);
+                key = new PasswordBox { PasswordRevealMode = PasswordRevealMode.Hidden, Header = "Meta API key · blank keeps saved key" }; panel.Children.Add(key);
                 remove = new CheckBox { Content = "Remove saved Meta key" }; panel.Children.Add(remove);
+                githubKey = new PasswordBox { Header = "GitHub token · optional, blank keeps saved token", PasswordRevealMode = PasswordRevealMode.Hidden }; panel.Children.Add(githubKey);
+                removeGithub = new CheckBox { Content = "Remove saved GitHub token" }; panel.Children.Add(removeGithub);
                 panel.Children.Add(new TextBlock { Text = "Saved in Windows Credential Manager. Voice, Discord and file triggers remain Mac-home features in this release.", TextWrapping = TextWrapping.Wrap });
             }
             var error = new TextBlock { TextWrapping = TextWrapping.Wrap }; panel.Children.Add(error);
@@ -123,17 +128,20 @@ public sealed partial class MainWindow
                 {
                     ReadSchedule(); AgentSchedule.Compile(settings);
                     if (!double.IsFinite(runs.Value) || !double.IsFinite(cadence.Value)) throw new ArgumentException("Enter a run allowance and scoreboard interval.");
-                    settings.Model = model.Text; settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
+                    settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
                     settings.TurnLimit = checked((int)runs.Value); settings.ScoreboardEveryLoops = checked((int)cadence.Value); settings.GenerateArt = art.IsChecked == true; settings.ArtDirection = artDirection.Text;
                     // Preserve selected IDs temporarily absent from the current directory.
                     settings.Watched = settings.Watched.Except(scope.Select(s => s.Id)).Concat(scope.Where(s => s.Box.IsChecked == true).Select(s => s.Id)).Distinct().ToList();
                     if (local?.Agent is { } config)
                     {
                         if (remove?.IsChecked == true && !string.IsNullOrWhiteSpace(key?.Password)) throw new ArgumentException("Choose key replacement or removal, not both.");
+                        if (removeGithub?.IsChecked == true && !string.IsNullOrWhiteSpace(githubKey?.Password)) throw new ArgumentException("Choose GitHub token replacement or removal, not both.");
                         config.Apply(settings); _store.Save();
                         var vault = new PasswordVault();
-                        if (remove?.IsChecked == true) { try { vault.Remove(vault.Retrieve("Converse.Agent", "meta")); } catch { } }
-                        else if (!string.IsNullOrWhiteSpace(key?.Password)) vault.Add(new PasswordCredential("Converse.Agent", "meta", key.Password.Trim()));
+                        if (removeGithub?.IsChecked == true) { try { vault.Remove(vault.Retrieve(SetupPreview.CredentialResource, "github")); } catch { } }
+                        else if (!string.IsNullOrWhiteSpace(githubKey?.Password)) vault.Add(new PasswordCredential(SetupPreview.CredentialResource, "github", githubKey.Password.Trim()));
+                        if (remove?.IsChecked == true) { try { vault.Remove(vault.Retrieve(SetupPreview.CredentialResource, "meta")); } catch { } }
+                        else if (!string.IsNullOrWhiteSpace(key?.Password)) vault.Add(new PasswordCredential(SetupPreview.CredentialResource, "meta", key.Password.Trim()));
                     }
                     else { var response = await _devices.RequestParticipantAsync(reference.Home, "agent.configure", target, settings: settings); if (response.Outcome != "completed") throw new ArgumentException(response.Detail); }
                 }

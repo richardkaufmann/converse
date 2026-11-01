@@ -22,6 +22,7 @@ struct AgentConfig: Codable, Equatable {
     var jollyAllowed: Bool? = nil
     var jollyRequestID: String? = nil
     var scoreboard: AgentScoreboard? = nil
+    var supportDefaultsVersion: Int? = nil
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
     var scheduleText: String? = nil
@@ -114,6 +115,10 @@ struct AgentRepoSnapshot: Codable, Equatable {
     var conversationComments: Int?
     var releaseDownloads: Int?
     var visitors14d: Int?
+    struct Issue: Codable, Equatable { var title: String; var url: String; var labels: [String]; var updatedAt: String; var summary: String }
+    var recentOpenIssues: [Issue]? = nil
+    var latestRelease: String? = nil
+    var latestReleaseURL: String? = nil
     var notes: [String] = []
     var hasMeasurements: Bool {
         [stars, openPRs, openIssues, openBugs, conversationComments, releaseDownloads, visitors14d].contains { $0 != nil }
@@ -311,10 +316,16 @@ final class AgentAPI {
         for (filter, kind) in [("is:pr is:open", 0), ("is:issue is:open", 1), ("is:issue is:open label:bug", 2)] {
             do {
                 let query = ("repo:" + repository + " " + filter).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#")))!
-                let (raw, _) = try await get("search/issues?q=" + query + "&per_page=1")
+                let (raw, _) = try await get("search/issues?q=" + query + "&sort=updated&order=desc&per_page=" + (kind == 1 ? "30" : "1"))
                 let obj = raw as? [String: Any]
                 guard obj?["incomplete_results"] as? Bool != true else { throw AgentFailure.message("Incomplete search") }
                 let count = obj?["total_count"] as? Int
+                if kind == 1 {
+                    snapshot.recentOpenIssues = (obj?["items"] as? [[String: Any]] ?? []).map { issue in
+                        AgentRepoSnapshot.Issue(title: String((issue["title"] as? String ?? "").prefix(300)), url: issue["html_url"] as? String ?? "", labels: (issue["labels"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }, updatedAt: issue["updated_at"] as? String ?? "", summary: String((issue["body"] as? String ?? "").prefix(1200)))
+                    }
+                    if (count ?? 0) > 30 { snapshot.notes.append("Issue details cover the 30 most recently updated open issues, not the full backlog.") }
+                }
                 if kind == 0 { snapshot.openPRs = count }; if kind == 1 { snapshot.openIssues = count }; if kind == 2 { snapshot.openBugs = count }
             } catch { snapshot.notes.append("An issue/PR count is unavailable.") }
         }
@@ -335,6 +346,11 @@ final class AgentAPI {
             }
             if complete { snapshot.releaseDownloads = count } else { snapshot.notes.append("Download count unavailable: release pagination limit reached.") }
         } catch { snapshot.notes.append("Release downloads unavailable.") }
+        do {
+            let (raw, _) = try await get("repos/" + repository + "/releases/latest")
+            snapshot.latestRelease = (raw as? [String: Any])?["tag_name"] as? String
+            snapshot.latestReleaseURL = (raw as? [String: Any])?["html_url"] as? String
+        } catch { snapshot.notes.append("Latest published release unavailable.") }
         if let token, !token.isEmpty {
             do { let (raw, _) = try await get("repos/" + repository + "/traffic/views"); snapshot.visitors14d = (raw as? [String: Any])?["uniques"] as? Int }
             catch { snapshot.notes.append("Visitors require GitHub repository traffic access.") }

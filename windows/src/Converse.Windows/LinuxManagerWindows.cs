@@ -556,6 +556,7 @@ public sealed partial class MainWindow
         _linuxSecretBox = new PasswordBox
         {
             Header = "Meta API key (stored only on Linux)",
+            PasswordRevealMode = PasswordRevealMode.Hidden,
         };
         panel.Children.Add(_linuxSecretBox);
         var setSecret = ActionButton("Set key on Linux");

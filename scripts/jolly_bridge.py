@@ -115,7 +115,7 @@ def schema():
         "agent": {"type": "string", "maxLength": 200, "description": "Agent ID or exact name from /v1/agents"},
         "request_id": {"type": "string", "maxLength": 128, "description": "Stable unique ID for this request; reuse on retries"}}, ["question"])
     return {"openapi": "3.0.3", "info": {"title": "Ask Converse", "version": "3.0.0",
-        "description": "Jolly addresses Converse agents. List agents, then ask with an agent ID or exact name. If ambiguous, ask Richard which agent; never guess or broadcast. Reuse request_id when retrying. A pending response has requestId: poll /v1/requests/{requestId}. Agent execution can take minutes. No fallback backend. Inbox is non-consuming; acknowledge received IDs explicitly."},
+        "description": "Jolly addresses Converse agents. List agents, then ask with an agent ID or exact name. General Converse health questions (is the app up, its version or Group, which hosts are in its Group) go to Converse App Support: choose the agent marked appSupport, or use agent=converse. Never route an explicitly named other agent to App Support. If Converse is offline, report appAvailable=false from /health rather than claiming an agent answered. If ambiguous, ask Richard which agent; never guess or broadcast. Reuse request_id when retrying. A pending response has requestId: poll /v1/requests/{requestId}. Agent execution can take minutes. No fallback backend. Inbox is non-consuming; acknowledge received IDs explicitly."},
         "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}, "paths": paths}
 
 def handler(bridge, wait_seconds=20):

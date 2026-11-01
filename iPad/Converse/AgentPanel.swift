@@ -15,12 +15,15 @@ struct PadAgentPanel: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section { Text("Runs on \(service.displayName(for: home, fallback: service.homes[home]?.deviceName ?? "its home computer")) while Converse is open there. API keys stay on that computer.").font(.caption) }
+                Section { Text("Runs on \(service.displayName(for: home, fallback: service.homes[home]?.deviceName ?? "its home computer")) while Converse is open there. Your messages are shared with the selected provider. Selected sessions are shared too. API keys stay on the home computer.").font(.caption) }
                 if target == nil {
                     TextField("Agent name", text: $title)
                     Button("Create Agent") { perform("agent.create") }.disabled(working || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } else if settings != nil {
-                    TextField("Model", text: field(\.model))
+                    Picker("Model", selection: field(\.model)) {
+                        if let settings, !(settings.modelOptions ?? []).contains(where: { $0.id == settings.model }) { Text("Current model").tag(settings.model) }
+                        ForEach(settings?.modelOptions ?? []) { option in Text(option.label).tag(option.id) }
+                    }
                     TextField("GitHub repository · optional", text: field(\.repository))
                     Section("Objective and success criteria") { TextEditor(text: field(\.objective)).frame(minHeight: 110) }
                     Section("Loop") {

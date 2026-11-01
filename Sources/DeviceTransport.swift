@@ -1933,7 +1933,12 @@ extension DeviceSyncService {
         }
         if request.action == "agent.settings" {
             guard let config = session?.agent, let home = identity?.deviceID else { reject("Target is not an agent on this home."); return true }
-            send(DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Home-local credentials are never included.", target: request.target, settings: config.wire(home: home))); return true
+            Task { @MainActor in
+                var settings = config.wire(home: home)
+                settings.modelOptions = await AgentModels.catalog(store: store)
+                send(DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Home-local credentials are never included.", target: request.target, settings: settings))
+            }
+            return true
         }
         let hash = DeviceBlob.sha256Hex((try? DeviceCanonical.encode(request)) ?? bytes)
         if let record = store.participantReceipts.first(where: { $0.id == id }) {
@@ -2032,7 +2037,7 @@ extension DeviceSyncService {
             case "agent.configure":
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
                 guard settings.watched.allSatisfy({ ref in DeviceGlobalID(ref).map { acceptsParticipant(home: $0.home, groupID: group) } == true }) else { reject("Scope includes a participant outside this group."); return true }
-                try session.agent?.apply(settings); session.toolStatus.model = settings.model
+                try session.agent?.apply(settings); session.toolStatus.model = AgentModels.label(settings.model)
                 if settings.enabled && session.pending.isEmpty { session.queuePaused = false }
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent settings saved on home.", target: request.target, settings: session.agent?.wire(home: identity!.deviceID))
             default: reject("Unsupported participant operation."); return true

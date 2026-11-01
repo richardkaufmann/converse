@@ -12,6 +12,12 @@ import Foundation
     func request(_ digit: String, agent: String = "", question: String = "Report status") -> JollyRequest {
         JollyRequest(id: String(repeating: digit, count: 64), question: question, context: "", agent: agent, createdAt: now.timeIntervalSince1970)
     }
+    let support = store.createAgent(title: AppSupport.title); support.supportAssistant = true
+    check(JollyRouter.resolve(request("f", agent: "converse", question: "Which hosts are in the group?"), sessions: [first, support]) === support && JollyRouter.resolve(request("f", question: "ask converse if the app is up, what group is it in, which hosts are in the group"), sessions: [first, support]) === support, "Jolly routes general app health to the explicitly identified App Support agent")
+    check(JollyRouter.resolve(request("f", agent: "Unknown", question: "is Converse up?"), sessions: [support]) == nil, "Explicit unknown targets never fall through to App Support")
+    support.agent?.jollyAllowed = false
+    check(JollyRouter.resolve(request("f", agent: "converse"), sessions: [support]) == nil, "App health alias respects revoked Jolly access")
+    store.sessions.removeAll { $0 === support }
     check(JollyRouter.resolve(request("a"), sessions: [first, second]) == nil, "Jolly never guesses or broadcasts an ambiguous destination")
     check(JollyRouter.resolve(request("b", agent: "sToCk"), sessions: [first, second]) === first &&
           JollyRouter.resolve(request("c", question: "Stock: current price?"), sessions: [first, second]) === first, "Jolly routes by exact case-insensitive name or explicit name prefix")

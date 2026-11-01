@@ -39,6 +39,8 @@
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Agent Setup / Loop" Tag="{Binding}" Click="OnAgentSetupRow"/>
                     <MenuFlyoutItem Text="Teach Session To Talk To Other Sessions" Tag="{Binding}" Click="OnTeachRow"/>
+                    <MenuFlyoutItem Text="Teach Converse Setup &amp; Control" Tag="{Binding}" Click="OnTeachAppRow"/>
+                    <MenuFlyoutItem Text="Disable app control" Tag="{Binding}" Click="OnDisableAppRow"/>
                 </MenuFlyout></Grid.ContextFlyout>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -107,6 +109,7 @@
             </MenuBarItem>
             <MenuBarItem Title="Help">
                 <MenuFlyoutItem Text="Converse Help" Click="OnHelpClick"/>
+                <MenuFlyoutItem Text="Security &amp; Privacy" Click="OnSecurityHelp"/>
                 <MenuFlyoutItem Text="About Converse…" Click="OnAboutClick"/>
             </MenuBarItem>
         </MenuBar>

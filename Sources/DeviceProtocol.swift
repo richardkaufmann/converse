@@ -298,6 +298,7 @@ struct GroupTellReceipt: Codable {
 }
 
 struct DeviceAgentSettings: Codable, Equatable {
+    var modelOptions: [DeviceChoiceDTO]? = nil
     var objective: String
     var repository: String
     var model: String

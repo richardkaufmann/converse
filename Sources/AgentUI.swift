@@ -12,13 +12,15 @@ struct AgentSetupView: View {
     @State private var discordClient = AgentDiscordClient()
     @State private var removeSecrets: Set<String> = []
     @State private var error = ""
+    @State private var modelOptions: [DeviceChoiceDTO] = []
+    @State private var loadingModels = false
     var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     init(session: Session, onClose: (() -> Void)? = nil) { self.session = session; self.onClose = onClose; _settings = State(initialValue: session.agent ?? AgentConfig()) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Agent Setup · " + session.title).font(.title2.bold())
-            Text("Runs on this home computer while Converse is open. Selected sessions and enabled Discord channel messages are sent to Meta. Keys stay in this computer’s Keychain.").font(.callout).foregroundStyle(.secondary)
+            Text("Runs on this system when Converse is open. Your messages here are shared with the selected provider. If you enable this agent to examine selected sessions, those sessions’ content will also be shared.").font(.callout).foregroundStyle(.secondary)
             if session.needsAgentSetup {
                 Text("This session has no saved agent configuration. Review the new settings below before saving. Session access starts empty and the automatic loop starts off; existing transcript and draft are retained. Saved credentials are kept unless you replace or remove them.")
                     .font(.callout).foregroundStyle(.orange)
@@ -50,7 +52,14 @@ struct AgentSetupView: View {
                         }
                         Text("One Converse bot serves all agents. Enable Message Content Intent in Discord; invite it with View Channel, Read Message History and Send Messages. Copy the channel ID with Discord Developer Mode enabled.").font(.caption).foregroundStyle(.secondary)
                         testStatus("discordBot")
-                        HStack { Text("Model").frame(width: 90, alignment: .leading); TextField("Model", text: $settings.model).disabled(testingServices.contains("meta")) }
+                        HStack {
+                            Picker("Model", selection: $settings.model) {
+                                if !modelOptions.contains(where: { $0.id == settings.model }) { Text(AgentModels.label(settings.model) + " · current").tag(settings.model) }
+                                ForEach(modelOptions) { option in Text(option.label).tag(option.id) }
+                            }.disabled(session.busy || testingServices.contains("meta"))
+                            Button(loadingModels ? "Loading…" : "Refresh models") { loadModels() }.disabled(loadingModels)
+                        }
+                        Text("CLI models use the selected login. Meta API models, mood art and voice use the Meta key. Catalog visibility does not guarantee access. CLI agents use supplied evidence; hosted web research currently requires a Meta API model.").font(.caption).foregroundStyle(.secondary)
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
@@ -106,8 +115,17 @@ struct AgentSetupView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); error = "" }.disabled(!testingServices.isEmpty); Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction).disabled(!testingServices.isEmpty) }
-        }.padding(22).frame(width: 650, height: 750)
+        }.padding(22).frame(width: 650, height: 750).onAppear { loadModels() }
     }
+    private func loadModels() {
+        guard !loadingModels else { return }; loadingModels = true
+        modelOptions = AgentModels.options(store: .shared)
+        Task { @MainActor in
+            modelOptions = await AgentModels.catalog(store: .shared)
+            loadingModels = false
+        }
+    }
+
     @ViewBuilder private func testStatus(_ service: String) -> some View {
         if let outcome = testOutcomes[service], !outcome.isEmpty {
             Text(outcome).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -120,7 +138,7 @@ struct AgentSetupView: View {
         testOutcomes[service] = service == "discordBot" ? "Testing send and read with one labeled message; no session content or mentions." : "Checking access; no session history is sent."
         let entered = service == "meta" ? metaKey : service == "github" ? githubKey : discordToken
         let discordChannel = settings.discordChannelID ?? ""
-        let model = settings.model, repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = AgentModels.parse(settings.model) == nil ? settings.model : "muse-spark-1.3", repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
             defer { testingServices.remove(service) }
             do {
@@ -174,7 +192,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
-            session.agent = current; session.toolStatus.model = current.model
+            session.agent = current; session.toolStatus.model = AgentModels.label(current.model)
             session.probeError = ""; session.needsSignIn = false
             if !session.busy { session.status = "Ready" }
             if current.enabled && session.pending.isEmpty { session.queuePaused = false }
@@ -298,6 +316,8 @@ struct AgentLoopOptions: View {
     @State private var scoreboardEvery = 1
     @State private var revision: UInt64 = 0
     @State private var error = ""
+    @State private var modelOptions: [DeviceChoiceDTO] = []
+    @State private var loadingModels = false
     var close: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

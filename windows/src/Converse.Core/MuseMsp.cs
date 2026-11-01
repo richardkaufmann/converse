@@ -54,6 +54,7 @@ public sealed class MuseMspClient : IDisposable
         CommandResolution.Apply(start, resolved, serveArgs);
         if (Directory.Exists(entry.Directory)) start.WorkingDirectory = entry.Directory;
         start.Environment["NO_COLOR"] = "1";
+        ProviderProfile.Apply(start, entry);
         var process = new Process { StartInfo = start };
         process.Start();
         return new MuseMspClient(sessionId, process.StandardInput.BaseStream, process.StandardOutput.BaseStream, process);
