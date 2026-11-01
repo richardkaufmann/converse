@@ -122,7 +122,7 @@ public static class AgentCLI
             token.ThrowIfCancellationRequested();
             if (entry.Engine == "codex" && File.Exists(output)) return await File.ReadAllTextAsync(output, token);
             if (entry.Engine == "claude" && JsonNode.Parse(data) is JsonObject root && root["is_error"]?.GetValue<bool>() != true && root["result"] is { } result) return result.GetValue<string>();
-            if (entry.Engine == "muse") foreach (var line in data.Split('\n').Reverse())
+            if (entry.Engine == "muse") foreach (var line in data.Split('\n').AsEnumerable().Reverse())
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var row = JsonNode.Parse(line);

@@ -25,6 +25,12 @@ Tests use disposable data folders, synthetic identities, local peers and injecta
 
 ## Repeatable checks
 
+`global.json` selects the .NET 8 SDK family (latest installed stable feature band)
+for both local and CI builds. Installing .NET 8 alone does not select it when a
+runner also has newer SDKs. CI prints `dotnet --info` to preserve that evidence.
+After pushing, verify the Windows and Linux workflow results for that exact
+commit; a local pass does not establish that GitHub Actions passed.
+
 ```sh
 # Mac: build current source before testing. test.sh reuses an existing bundle.
 CONVERSE_APP_OUTPUT=/tmp/converse-qa/Converse.app ./build.sh

@@ -1148,7 +1148,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     Check(group is not null && group.Id == "27be22ea-df62-15e3-f5ca-dc1771d8f526"
         && group.Name == "Converse Group" && group.Creator == ownID,
         "Shared migration vector derives the documented group UUID");
-    Check(Converse.Core.ConverseGroupStore.Migrate(members.Reverse().Append(ownRow).Append(ownRow).ToArray(), ownID)?.Id == group!.Id,
+    Check(Converse.Core.ConverseGroupStore.Migrate(members.AsEnumerable().Reverse().Append(ownRow).Append(ownRow).ToArray(), ownID)?.Id == group!.Id,
         "Migration deduplicates self and is roster-order independent");
     Check(Converse.Core.ConverseGroupStore.Migrate(Array.Empty<Converse.Core.TrustedDevice>(), ownID) is null
         && Converse.Core.ConverseGroupStore.Migrate(new[] { ownRow }, ownID) is null,

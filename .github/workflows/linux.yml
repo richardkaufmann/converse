@@ -2,6 +2,7 @@ name: Linux contracts + shared core
 on:
   push:
     paths:
+      - "global.json"
       - "linux/**"
       - "docs/linux.md"
       - "Tests/linux_join_helper_test.py"
@@ -11,6 +12,7 @@ on:
       - ".github/workflows/linux.yml"
   pull_request:
     paths:
+      - "global.json"
       - "linux/**"
       - "docs/linux.md"
       - "Tests/linux_join_helper_test.py"
@@ -26,5 +28,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - name: Selected SDK
+        run: dotnet --info
       - name: Linux contract and shared Core checks
         run: ./linux/test.sh
