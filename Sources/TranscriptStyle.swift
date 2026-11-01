@@ -65,7 +65,9 @@ enum TranscriptStyle {
                 return "Queued " + kind + " from " + name(String(header.dropFirst("message queued from ".count))) + (detail.isEmpty ? "" : " · " + detail)
             }
             if let arrow = header.range(of: "→") {
-                let status = header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : header.hasPrefix("rejected") ? "Rejected" : header.hasPrefix("delivery unconfirmed") ? "Unconfirmed" : "Sent"
+                let known = ["reply sent · awaiting receipt", "recovery queued", "awaiting reply", "needs attention", "processing", "completed", "answered", "processed", "delivered", "failed", "cancelled"]
+                let status = known.first(where: { header.hasPrefix($0 + " →") }).map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                    ?? (header.contains("awaiting home") ? "Sending" : header.hasPrefix("queued") ? "Queued" : header.hasPrefix("rejected") ? "Rejected" : header.hasPrefix("delivery unconfirmed") ? "Unconfirmed" : "Sent")
                 return status + " " + kind + " to " + name(String(header[arrow.upperBound...]).trimmingCharacters(in: .whitespaces)) + (detail.isEmpty ? "" : " · " + detail)
             }
             return "Switchboard · " + clipped(header.components(separatedBy: " · ")[0])

@@ -15,7 +15,20 @@ struct SwitchboardObligation: Codable, Identifiable {
     var replyDeliveryID: UUID?
     var groupID: String?
     var originHomeID: String?
-    var terminal: Bool { state == "resolved" || state == "escalated" || state == "cancelled" }
+    var terminal: Bool { ["resolved", "completed", "failed", "escalated", "cancelled"].contains(state) }
+    var displayState: String {
+        switch state {
+        case "queued": return intervenedAt == nil ? "Queued" : "Recovery queued"
+        case "submitted": return finishedAt == nil ? "Processing" : "Awaiting reply"
+        case "completed": return "Completed"
+        case "resolved": return kind == "request" ? "Answered" : "Delivered"
+        case "awaitingReceipt": return "Reply sent · awaiting receipt"
+        case "failed", "deliveryFailed": return "Failed"
+        case "escalated": return "Needs attention"
+        case "cancelled": return "Cancelled"
+        default: return state
+        }
+    }
 }
 struct SwitchboardExpectation: Codable, Identifiable {
     var id: UUID
@@ -24,6 +37,88 @@ struct SwitchboardExpectation: Codable, Identifiable {
 }
 
 extension Store {
+    // Update the original receipt rather than leaving a permanent "Queued" label.
+    // Only the receiving home can advance delivery state. Remote homes retain
+    // their transport receipt until they supply a richer protocol in a later release.
+    func refreshSwitchboardReceipts(_ target: Session) {
+        target.objectWillChange.send()
+        for item in target.switchboardObligations {
+            guard let sender = sessions.first(where: { switchboardAddress($0.id.uuidString) == item.source }) else { continue }
+            let marker = " · " + item.id.uuidString
+            guard let index = sender.messages.lastIndex(where: { $0.role == "notice" && $0.text.hasPrefix("Switchboard:") && ($0.text.components(separatedBy: "\n").first?.contains(marker + " [") == true) && $0.text.contains("→") }),
+                  let arrow = sender.messages[index].text.range(of: "→") else { continue }
+            let updated = "Switchboard: " + item.displayState.lowercased() + " " + sender.messages[index].text[arrow.lowerBound...]
+            if updated != sender.messages[index].text { sender.messages[index].text = updated }
+        }
+    }
+
+    func switchboardRecoveryBlocker(_ session: Session, item: SwitchboardObligation, now: Date) -> String? {
+        guard !applicationQuitting, session.switchboardEnabled, !session.queuePaused, !session.changingSetting,
+              !session.compacting, !session.interrupted, session.requests.isEmpty,
+              !session.status.localizedCaseInsensitiveContains("approval"),
+              !session.status.localizedCaseInsensitiveContains("sign in") else { return "Session is paused, signing in, awaiting approval, or changing state." }
+        if session.agent != nil && MainActor.assumeIsolated({ AgentConversation.shared.owns(session) }) { return "A spoken conversation owns this session." }
+        guard !item.terminal, item.intervenedAt == nil else { return "Delivery is finished or its one recovery has already been used." }
+        guard session.switchboardLastRecoveryAt.map({ now.timeIntervalSince($0) >= 120 }) ?? true else { return "Recovery cooldown is active." }
+        if let group = item.groupID, let home = item.originHomeID {
+            guard participantService.acceptsParticipant(home: home, groupID: group), participantService.participantOnline(home) else { return "The sender is no longer an online member of this group." }
+        }
+        if item.state == "queued", let home = DeviceGlobalID(item.source)?.home, home != participantService.localDeviceID {
+            guard let report = participantService.switchboardQueueReports[home],
+                  participantService.acceptsParticipant(home: home, groupID: report.report.groupID),
+                  now.timeIntervalSince(report.at) >= 0, now.timeIntervalSince(report.at) <= 15 else { return "Waiting for fresh authenticated peer state." }
+            if report.report.entries.contains(where: { $0.target == item.source && $0.source == switchboardAddress(session.id.uuidString) }) {
+                return "Mutual remote queues use the elected-home recovery protocol."
+            }
+        }
+        let queued = session.pending.contains { $0.id == item.promptID || ($0.components ?? []).contains { $0.id == item.promptID } }
+        let quiet = !session.busy || session.switchboardProgress.map { $0.revision == session.messagesRevision && now.timeIntervalSince($0.at) >= 120 } == true
+        if item.state == "queued", queued, now.timeIntervalSince(item.createdAt) >= 120, quiet { return nil }
+        if item.kind == "request", item.state == "submitted", !session.busy,
+           item.finishedAt.map({ now.timeIntervalSince($0) >= 30 }) == true { return nil }
+        return "Delivery is progressing or has not reached its recovery deadline."
+    }
+
+    // Both agents and the automatic supervisor consume the SAME durable allowance.
+    // No arbitrary injected text, invented delivery IDs, or overrides of human pauses.
+    @discardableResult func recoverSwitchboard(_ target: Session, delivery: UUID, by supervisor: Session? = nil, now: Date = Date()) -> String? {
+        if let supervisor {
+            guard supervisor !== target, let config = supervisor.agent,
+                  config.allows(local: target.id, home: participantService.localDeviceID) else { return "Recovery target is outside this agent's selected sessions." }
+        }
+        guard let index = target.switchboardObligations.firstIndex(where: { $0.id == delivery }) else { return "No authenticated delivery with that ID exists." }
+        var item = target.switchboardObligations[index]
+        if let blocker = switchboardRecoveryBlocker(target, item: item, now: now) { return blocker }
+        let previous = item, previousPending = target.pending, previousRecovery = target.switchboardLastRecoveryAt
+        item.intervenedAt = now; target.switchboardLastRecoveryAt = now
+        if item.state == "submitted" {
+            let prompt = PendingPrompt(switchboardHop: 0, originGroupID: item.groupID, originHomeID: item.originHomeID,
+                autonomous: true, text: "[Converse switchboard recovery · request \(item.id.uuidString)]\nYour turn finished without the requested reply to \(item.sourceName) (\(item.source)). Send the answer, a blocker, or an explicit decline using tell with inReplyTo: \"\(item.id.uuidString)\". This is the only automatic reminder; do not request a reply to this recovery notice.", images: [])
+            item.promptID = prompt.id; item.state = "queued"; item.finishedAt = nil
+            target.pending.insert(prompt, at: 0)
+        }
+        target.switchboardObligations[index] = item
+        do { try saveChecked() } catch {
+            target.switchboardObligations[index] = previous; target.pending = previousPending; target.switchboardLastRecoveryAt = previousRecovery
+            return "Could not persist the recovery allowance. Nothing was injected."
+        }
+        target.messages.append(Message(role: "notice", text: "[Converse switchboard recovery] \(supervisor?.title ?? "Automatic supervisor") is injecting delivery \(delivery.uuidString) once. Draft preserved."))
+        refreshSwitchboardReceipts(target)
+        guard let pending = target.pending.first(where: { $0.id == item.promptID || ($0.components ?? []).contains { $0.id == item.promptID } }) else { return "Delivery is no longer queued." }
+        return injectPending(target, id: pending.id)
+    }
+
+    func switchboardRecoveryEvidence(for supervisor: Session, now: Date = Date()) -> [[String: Any]] {
+        sessions.filter { $0 !== supervisor && supervisor.agent?.allows(local: $0.id, home: participantService.localDeviceID) == true }.flatMap { target in
+            target.switchboardObligations.suffix(32).map { item in
+                ["target": switchboardAddress(target.id.uuidString), "delivery": item.id.uuidString,
+                 "kind": item.kind, "state": item.displayState, "queued": target.pending.contains { $0.id == item.promptID },
+                 "recoveryUsed": item.intervenedAt != nil, "canRecover": switchboardRecoveryBlocker(target, item: item, now: now) == nil,
+                 "blocker": switchboardRecoveryBlocker(target, item: item, now: now) ?? "",
+                 "observedAt": ISO8601DateFormatter().string(from: now)] as [String: Any]
+            }
+        }
+    }
     func switchboardAddress(_ raw: String) -> String {
         if let id = UUID(uuidString: raw) {
             return participantService.localDeviceID.map { DeviceGlobalID(home: $0, session: id).string } ?? id.uuidString
@@ -46,6 +141,7 @@ extension Store {
             source.switchboardObligations[index].state = remote ? "awaitingReceipt" : "resolved"
             source.switchboardObligations[index].replyDeliveryID = id
             source.switchboardObligations[index].finishedAt = Date()
+            refreshSwitchboardReceipts(source)
         }
     }
     func switchboardReceipt(_ source: Session, delivery: UUID, accepted: Bool) {
@@ -53,10 +149,13 @@ extension Store {
         for index in source.switchboardObligations.indices where source.switchboardObligations[index].replyDeliveryID == delivery {
             source.switchboardObligations[index].state = accepted ? "resolved" : "deliveryFailed"
         }
+        refreshSwitchboardReceipts(source)
     }
     func switchboardReceived(_ target: Session, source: String, name: String, id: UUID, prompt: PendingPrompt,
                              replyExpected: Bool, inReplyTo: UUID?, group: String? = nil, home: String? = nil) {
-        target.switchboardObligations.removeAll { $0.terminal && $0.intervenedAt == nil }
+        // Retain recent terminal records for a visible last-delivery result.
+        let retired = Set(target.switchboardObligations.filter { $0.terminal }.dropLast(63).map(\.id))
+        target.switchboardObligations.removeAll { retired.contains($0.id) }
         if inReplyTo == nil || replyExpected {
             target.switchboardObligations.append(SwitchboardObligation(id: id, source: switchboardAddress(source), sourceName: name,
                 promptID: prompt.id, kind: replyExpected ? "request" : "delivery", groupID: group, originHomeID: home))
@@ -72,14 +171,18 @@ extension Store {
     func switchboardStarted(_ session: Session, prompt: PendingPrompt) {
         let ids = Set([prompt.id] + (prompt.components ?? []).map(\.id))
         for index in session.switchboardObligations.indices where ids.contains(session.switchboardObligations[index].promptID) {
-            session.switchboardObligations[index].state = session.switchboardObligations[index].kind != "request" ? "resolved" : "submitted"
+            session.switchboardObligations[index].state = "submitted"
             session.switchboardObligations[index].finishedAt = nil
         }
+        refreshSwitchboardReceipts(session)
     }
-    func switchboardTurnFinished(_ session: Session, now: Date = Date()) {
-        for index in session.switchboardObligations.indices where session.switchboardObligations[index].state == "submitted" {
+    func switchboardTurnFinished(_ session: Session, now: Date = Date(), success: Bool = true) {
+        for index in session.switchboardObligations.indices where session.switchboardObligations[index].state == "submitted" && session.switchboardObligations[index].finishedAt == nil {
             session.switchboardObligations[index].finishedAt = now
+            if !success { session.switchboardObligations[index].state = "failed" }
+            else if session.switchboardObligations[index].kind != "request" { session.switchboardObligations[index].state = "completed" }
         }
+        refreshSwitchboardReceipts(session)
     }
     static func replyInstruction(id: UUID, expected: Bool, inReplyTo: UUID?) -> String {
         var result = inReplyTo.map { "\n[Reply to request \($0.uuidString)]" } ?? ""
@@ -90,9 +193,10 @@ extension Store {
     // pasted transcript as a request to interrupt another session.
     func recoverMutualSwitchboardQueues(now: Date) {
         func eligible(_ s: Session) -> Bool {
-            s.switchboardEnabled && !s.queuePaused && !s.changingSetting && s.requests.isEmpty &&
+            if s.agent != nil && MainActor.assumeIsolated({ AgentConversation.shared.owns(s) }) { return false }
+            return s.switchboardEnabled && !s.queuePaused && !s.changingSetting && !s.compacting && !s.interrupted && s.requests.isEmpty &&
             !s.status.localizedCaseInsensitiveContains("approval") && !s.status.localizedCaseInsensitiveContains("sign in") &&
-            (s.switchboardProgress.map { now.timeIntervalSince($0.at) >= 120 } == true) &&
+            (s.switchboardProgress.map { $0.revision == s.messagesRevision && now.timeIntervalSince($0.at) >= 120 } == true) &&
             (s.switchboardLastRecoveryAt.map { now.timeIntervalSince($0) >= 120 } ?? true)
         }
         func queued(_ s: Session, _ item: SwitchboardObligation) -> Bool {
@@ -151,6 +255,14 @@ extension Store {
     func superviseSwitchboard(now: Date = Date()) {
         guard !applicationQuitting else { return }
         for session in sessions {
+            var changed = false
+            for index in session.switchboardObligations.indices where session.switchboardObligations[index].state == "queued" {
+                let id = session.switchboardObligations[index].promptID
+                if !session.pending.contains(where: { $0.id == id || ($0.components ?? []).contains { $0.id == id } }) {
+                    session.switchboardObligations[index].state = "cancelled"; changed = true
+                }
+            }
+            if changed { refreshSwitchboardReceipts(session); save() }
             if session.switchboardProgress?.revision != session.messagesRevision { session.switchboardProgress = (session.messagesRevision, now) }
         }
         recoverMutualSwitchboardQueues(now: now)
@@ -161,12 +273,6 @@ extension Store {
             for index in session.switchboardObligations.indices {
                 var item = session.switchboardObligations[index]
                 guard !item.terminal else { continue }
-                if item.kind == "delivery" {
-                    if !session.pending.contains(where: { $0.id == item.promptID || ($0.components ?? []).contains { $0.id == item.promptID } }) {
-                        session.switchboardObligations[index].state = "cancelled"; save()
-                    }
-                    continue
-                }
                 if let group = item.groupID, let home = item.originHomeID {
                     guard participantService.acceptsParticipant(home: home, groupID: group) else {
                         session.switchboardObligations[index].state = "cancelled"; save(); continue
@@ -176,40 +282,15 @@ extension Store {
                 let queued = session.pending.contains { $0.id == item.promptID || ($0.components ?? []).contains { $0.id == item.promptID } }
                 let graceElapsed = item.finishedAt.map { now.timeIntervalSince($0) >= 30 } ?? false
                 let quiet = !session.busy || session.switchboardProgress.map { now.timeIntervalSince($0.at) >= 120 } == true
-                let waitingOnPeer = session.switchboardExpectations.contains { !$0.answered && $0.target == item.source }
-                let remotePairReady: Bool = {
-                    guard let home = DeviceGlobalID(item.source)?.home, home != participantService.localDeviceID,
-                          let report = participantService.switchboardQueueReports[home],
-                          participantService.acceptsParticipant(home: home, groupID: report.report.groupID),
-                          now.timeIntervalSince(report.at) >= 0, now.timeIntervalSince(report.at) <= 15 else { return false }
-                    return report.report.entries.contains { $0.target == item.source && $0.source == switchboardAddress(session.id.uuidString) }
-                }()
-                let remoteHome = DeviceGlobalID(item.source)?.home
-                let hasFreshPeer = remoteHome == nil || remoteHome == participantService.localDeviceID ||
-                    remoteHome.flatMap { participantService.switchboardQueueReports[$0] }.map { now.timeIntervalSince($0.at) >= 0 && now.timeIntervalSince($0.at) <= 15 } == true
-                let stuckQueue = hasFreshPeer && !remotePairReady && queued && now.timeIntervalSince(item.createdAt) >= 120 && quiet && (item.kind == "reply" || waitingOnPeer)
-                if item.state == "queued" && !queued { item.state = "cancelled"; session.switchboardObligations[index] = item; save(); continue }
-                let cooledDown = session.switchboardLastRecoveryAt.map { now.timeIntervalSince($0) >= 120 } ?? true
-                if item.intervenedAt == nil && cooledDown && (stuckQueue || (item.state == "submitted" && graceElapsed && !session.busy)) {
-                    // Reserve durably before interrupting; a crash cannot grant another attempt.
-                    item.intervenedAt = now; session.switchboardLastRecoveryAt = now
-                    if !queued {
-                        let prompt = PendingPrompt(switchboardHop: 0, originGroupID: item.groupID, originHomeID: item.originHomeID,
-                            autonomous: true, text: "[Converse switchboard recovery · request \(item.id.uuidString)]\nYour turn finished without the requested reply to \(item.sourceName) (\(item.source)). Send the answer, a blocker, or an explicit decline using tell with inReplyTo: \"\(item.id.uuidString)\". This is the only automatic reminder; do not request a reply to this recovery notice.", images: [])
-                        item.promptID = prompt.id; item.state = "queued"; item.finishedAt = nil
-                        session.pending.insert(prompt, at: 0)
-                    }
-                    session.switchboardObligations[index] = item
-                    do { try saveChecked() } catch { session.queuePaused = true; continue }
-                    if let pending = session.pending.first(where: { $0.id == item.promptID || ($0.components ?? []).contains { $0.id == item.promptID } }) {
-                        _ = injectPending(session, id: pending.id)
-                    }
+                if item.state == "queued" && !queued { item.state = "cancelled"; session.switchboardObligations[index] = item; refreshSwitchboardReceipts(session); save(); continue }
+                if switchboardRecoveryBlocker(session, item: item, now: now) == nil {
+                    _ = recoverSwitchboard(session, delivery: item.id, now: now)
                 } else if (item.intervenedAt.map { now.timeIntervalSince($0) >= 120 } == true &&
                            (graceElapsed || (queued && quiet))) ||
                           (["awaitingReceipt", "deliveryFailed"].contains(item.state) && graceElapsed) {
                     let unresolvedState = item.state
-                    item.state = "escalated"; session.switchboardObligations[index] = item
-                    let text = "[Converse switchboard supervision · needs attention · \(item.id.uuidString)]\n\(session.title) ↔ \(item.sourceName): reply expected but unresolved. State: \(unresolvedState); delivery \(item.replyDeliveryID?.uuidString ?? "not confirmed"). One automatic recovery at most; no further retries. Inspect the sessions and pending queues. This notice does not request a reply."
+                    item.state = "escalated"; session.switchboardObligations[index] = item; refreshSwitchboardReceipts(session)
+                    let text = "[Converse switchboard supervision · needs attention · \(item.id.uuidString)]\n\(session.title) ↔ \(item.sourceName): \(item.kind == "request" ? "reply expected but unresolved" : "delivery has not been processed"). State: \(unresolvedState); delivery \(item.replyDeliveryID?.uuidString ?? "not confirmed"). One automatic recovery at most; no further retries. Inspect the sessions and pending queues. This notice does not request a reply."
                     session.messages.append(Message(role: "notice", text: text))
                     for watcher in sessions where watcher.id != session.id && watcher.agent.map({
                         $0.allows(local: session.id, home: participantService.localDeviceID) || $0.allows(global: item.source, home: participantService.localDeviceID)
@@ -221,7 +302,7 @@ extension Store {
                     for watcher in sessions where !watcher.queuePaused && watcher.agent != nil && watcher.requests.isEmpty && !watcher.changingSetting {
                         guard let alert = watcher.pending.first(where: { $0.text == text }) else { continue }
                         let cooledDown = watcher.switchboardLastRecoveryAt.map { now.timeIntervalSince($0) >= 120 } ?? true
-                        if cooledDown {
+                        if cooledDown && (!watcher.busy || watcher.switchboardProgress.map({ $0.revision == watcher.messagesRevision && now.timeIntervalSince($0.at) >= 120 }) == true) {
                             watcher.switchboardLastRecoveryAt = now
                             do { try saveChecked() } catch { continue }
                             _ = injectPending(watcher, id: alert.id)

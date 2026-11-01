@@ -318,6 +318,51 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     check(mutualReload.sessions.filter { $0.id == a.id || $0.id == b.id }.allSatisfy { $0.switchboardObligations.first?.intervenedAt != nil },
           "Both sides of mutual recovery are durably marked before interruption")
     a.busy = false; b.busy = false; a.queuePaused = true; b.queuePaused = true
+    // Full delivery lifecycle: tells complete without manufacturing reply obligations.
+    let producer = store.create(entry), consumer = store.create(entry), supervisor = store.create(entry)
+    producer.switchboardEnabled = true; consumer.switchboardEnabled = true
+    producer.queuePaused = true; consumer.queuePaused = true; supervisor.queuePaused = true
+    supervisor.agent = AgentConfig(watchedSessions: [consumer.id])
+    let tellID = UUID()
+    _ = store.deliverSwitchboard(from: producer, to: consumer.id.uuidString, text: "One-way update", id: tellID, hop: 1)
+    let queuedTell = consumer.pending.removeFirst()
+    store.switchboardStarted(consumer, prompt: queuedTell)
+    check(producer.messages.last?.text.hasPrefix("Switchboard: processing →") == true, "Sender receipt advances from queued to processing")
+    store.switchboardTurnFinished(consumer)
+    check(consumer.switchboardObligations.last?.state == "completed" && producer.messages.last?.text.hasPrefix("Switchboard: completed →") == true, "Completed tell updates both panes without waiting for a reply")
+    check(store.recoverSwitchboard(consumer, delivery: tellID, by: supervisor, now: Date().addingTimeInterval(1000)) != nil, "Supervisor cannot recover a completed tell")
+    let stalledID = UUID()
+    _ = store.deliverSwitchboard(from: producer, to: consumer.id.uuidString, text: "Existing queued work", id: stalledID, hop: 1)
+    let recoveryTime = Date().addingTimeInterval(121)
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime) != nil, "Scoped supervisor cannot override a paused queue")
+    consumer.queuePaused = false; consumer.busy = true
+    consumer.switchboardProgress = (consumer.messagesRevision, Date())
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: producer, now: recoveryTime) != nil, "Non-agent cannot request supervisory force injection")
+    supervisor.agent?.watchedSessions = []
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime) != nil, "Revoked session scope prevents recovery")
+    supervisor.agent?.watchedSessions = [consumer.id]
+    consumer.status = "Waiting for approval"
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime) != nil, "Supervisor cannot bypass an approval")
+    consumer.status = "Working"
+    consumer.messages.append(Message(role: "assistant", text: "New progress"))
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime) != nil, "Fresh output invalidates stale recovery evidence")
+    consumer.switchboardProgress = (consumer.messagesRevision, Date())
+    consumer.agent = AgentConfig(); consumer.agent?.enabled = true
+    consumer.draft = "Preserve my unsent draft"
+    let queuedID = consumer.pending[0].id
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime) == nil && consumer.interrupted && consumer.pending[0].id == queuedID && consumer.draft == "Preserve my unsent draft", "Scoped supervisor injects the existing stalled delivery once and preserves draft")
+    check(consumer.agent?.enabled == true, "Recovery interruption preserves the target agent loop")
+    consumer.interrupted = false
+    check(store.recoverSwitchboard(consumer, delivery: stalledID, by: supervisor, now: recoveryTime.addingTimeInterval(500)) != nil, "Automatic and agent recovery share one durable allowance")
+    let recoveryReload = Store(folder: folder)
+    check(recoveryReload.sessions.first(where: { $0.id == consumer.id })?.switchboardObligations.last?.intervenedAt != nil, "Agent recovery allowance survives restart")
+    check(AgentReply.decode("{\"reply\":\"Recover\",\"recover\":[{\"target\":\"test\",\"delivery\":\"" + stalledID.uuidString + "\"}]}")?.recover?.first?.delivery == stalledID, "Agent recovery response decodes authenticated delivery IDs")
+    consumer.busy = false; consumer.queuePaused = true
+    let failedPrompt = consumer.pending.removeFirst()
+    store.switchboardStarted(consumer, prompt: failedPrompt)
+    store.switchboardTurnFinished(consumer, success: false)
+    check(consumer.switchboardObligations.last?.state == "failed" && producer.messages.last?.text.hasPrefix("Switchboard: failed →") == true, "Provider failure is visible instead of a stuck processing receipt")
+    check(TranscriptStyle.trafficSummary("Switchboard: completed → Steward [id] · delivery [tell]\nUpdate") == "Completed tell to Steward · Update", "Completed receipt renders as completed, not queued")
     let hoverText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
     let hoverScroll = NSScrollView(frame: hoverText.frame)
     let ruler = MessageNumberRuler(scroll: hoverScroll, text: hoverText)

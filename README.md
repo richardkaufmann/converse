@@ -263,6 +263,10 @@ Right-click a session and choose **Teach Session To Talk To Other Sessions**. Th
 
 **Tell** is one-way; **Ask** expects an answer, blocker or decline. Delivery means a message was queued, not that the work was done. Traffic appears as compact orange lines that you can expand or inspect. “Reply needed” means an Ask still needs its matching response; refreshing teaching alone does not resolve it.
 
+On Mac, a message's receipt advances from **Queued** to **Processing**, then **Completed** for a tell or **Awaiting reply / Answered** for an ask. The receiving pane shows its delivery status above the transcript; **Delivery details** shows recent messages. A completed tell needs no acknowledgement. Remote transport receipts confirm acceptance on the home system; they do not prove the remote turn completed.
+
+A supervising agent can request recovery for a stalled message in a selected session on the same Mac. Converse checks the delivery ID and current progress before acting: queued work must be at least two minutes old, with no recent output if the session is busy; a finished unanswered ask gets a 30-second grace period. Recovery injects the existing message, or one reminder to answer the ask. The agent and automatic supervisor share **one attempt per delivery**, followed by a visible alert if it still needs attention. Paused queues, approvals, sign-in and unsent drafts are respected. Normal one-way tells never create reply deadlines. Agent-requested recovery of remote sessions is not yet supported.
+
 App Support receives switchboard teaching during onboarding. Agents retain the session scope you selected in Agent Setup. You can disable session messaging from the context menu. The [switchboard reference](docs/switchboard-reference.md) describes command formats, delivery tracking and recovery; you do not need to type that protocol to use it.
 
 ## Connect your devices into a Group

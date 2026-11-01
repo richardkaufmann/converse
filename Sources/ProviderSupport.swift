@@ -406,6 +406,38 @@ struct ProviderStatusRepairView: View {
     }
 }
 
+struct SwitchboardStatusView: View {
+    @ObservedObject var session: Session
+    @State private var details = false
+    private var records: [SwitchboardObligation] { Array(session.switchboardObligations.suffix(12).reversed()) }
+    private var current: SwitchboardObligation? {
+        session.switchboardObligations.last(where: { !$0.terminal }) ?? records.first
+    }
+    var body: some View {
+        if let item = current {
+            HStack(spacing: 6) {
+                Image(systemName: item.state == "completed" || item.state == "resolved" ? "checkmark.circle" : "arrow.left.arrow.right")
+                Text(item.displayState + (item.state == "queued" && session.queuePaused ? " · paused" : "") + " · " + (item.kind == "request" ? "ask" : "tell") + " from " + item.sourceName).lineLimit(1)
+                Spacer(minLength: 4)
+                Button("Delivery details") { details.toggle() }.buttonStyle(.link)
+                    .popover(isPresented: $details) {
+                        ScrollView { VStack(alignment: .leading, spacing: 8) {
+                            Text("Recent incoming messages").font(.headline)
+                            ForEach(records) { record in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(record.displayState + " · " + record.sourceName).fontWeight(.semibold)
+                                    Text(record.kind == "request" ? "Ask · answer, blocker, or decline expected" : "Tell · no reply required")
+                                    Text(record.id.uuidString).font(.caption2).textSelection(.enabled)
+                                    if record.intervenedAt != nil { Text("One recovery used; no further automatic injections.") }
+                                }
+                            }
+                        }.font(.caption).padding() }.frame(width: 390, height: 360)
+                    }
+            }.font(.caption).padding(.horizontal, 10).padding(.vertical, 5).background(Color.accentColor.opacity(0.06))
+        }
+    }
+}
+
 struct PendingMessagesView: View {
     @ObservedObject var session: Session
     var body: some View {

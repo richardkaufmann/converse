@@ -43,6 +43,8 @@ message through remembered names or automatically replayed requests. Tell queues
 normally, preserving recipient drafts and paused queues. Existing interruption
 semantics and message-chain limits apply.
 
+Mac supervisory actions use `recover: [{target, delivery}]` in the normal agent response object, with at most one recovery per activation. `switchboardDeliveries` supplies authenticated local delivery IDs, current state, `canRecover`, and a blocker reason for selected sessions. The host rechecks scope and eligibility at execution, so stale model evidence cannot interrupt a session that has since made progress. It injects the existing queued item or a host-written reminder for an unanswered ask, never arbitrary model-supplied text. This shares the automatic supervisor's persisted single-attempt allowance and two-minute cooldown. Pauses, approvals, sign-in, compaction and spoken conversations prevent intervention. Successful tells are complete without a return message. Remote targets are explicitly refused by this action in the current Mac release.
+
 A parked agent can work and receive tells. Sending a tell does not acquire a
 display lease or steal its pane. An agent's transcript can be displayed on any
 device in its group, using the same single-view/controller and takeover rules as

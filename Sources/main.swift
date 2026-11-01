@@ -115,7 +115,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var queuePaused = false
     @Published var switchboardEnabled = false
     var switchboardHandled: [UUID] = []
-    var switchboardObligations: [SwitchboardObligation] = []
+    @Published var switchboardObligations: [SwitchboardObligation] = []
     var switchboardExpectations: [SwitchboardExpectation] = []
     var switchboardLastRecoveryAt: Date?
     var switchboardProgress: (revision: UInt64, at: Date)?
@@ -185,9 +185,9 @@ final class Session: ObservableObject, Identifiable {
         switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
         switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
-        for index in switchboardObligations.indices where switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil { switchboardObligations[index].state = "cancelled" }
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
+        for index in switchboardObligations.indices where switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil { switchboardObligations[index].state = "cancelled" }
         if saved.compactionInProgress == true {
             queuePaused = true
             messages.append(Message(role: "notice", text: "Compaction was interrupted when Converse closed. Its completion is unknown; it will not be retried automatically. Your transcript and draft are retained."))
@@ -477,7 +477,8 @@ final class Store: ObservableObject {
     func finishQueue(_ s: Session, success: Bool) {
         importResponseImages(s)
         finishSupportProbe(s, success: success)
-        if success && !s.interrupted { processAppSupport(s); processSwitchboard(s); switchboardTurnFinished(s) }
+        if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
+        switchboardTurnFinished(s, success: success && !s.interrupted)
         s.switchboardTurnStart = nil
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
@@ -2179,6 +2180,7 @@ struct Conversation: View {
                     if !session.interrupted { Button("Dismiss") { session.injectionNotice = "" } }
                 }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.22))
             }
+            SwitchboardStatusView(session: session)
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
                 .overlay(alignment: .bottomTrailing) {

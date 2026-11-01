@@ -206,6 +206,8 @@ struct AgentReply: Decodable {
     var parkingLotEdits: ParkingLotEdits?
     var attention: String?
     var artPrompt: String?
+    struct Recovery: Decodable { var target: String; var delivery: UUID }
+    var recover: [Recovery]?
     var tell: [Tell]?
     var memory: String?
     var speechIntent: String?
