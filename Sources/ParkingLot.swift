@@ -289,7 +289,11 @@ struct ParkingLotView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Spacer()
-                Button(reordering ? "Done" : "Reorder") { reordering.toggle(); DispatchQueue.main.async { undoFocus.activate() } }
+                Button(reordering ? "Done" : "Reorder") {
+                    let previous = undoFocus.view?.window?.firstResponder
+                    reordering.toggle()
+                    DispatchQueue.main.async { undoFocus.activate(ifUnchangedFrom: previous) }
+                }
             }.padding(8)
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }

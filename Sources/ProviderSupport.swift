@@ -442,6 +442,7 @@ struct PendingMessagesView: View {
     @ObservedObject var session: Session
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if session.pending.count > 1 {
             HStack {
                 Text("\(session.pending.count) queued" + (session.queuePaused ? " · paused" : ""))
                 Spacer()
@@ -453,10 +454,17 @@ struct PendingMessagesView: View {
                 Button("Inject all") { Store.shared.injectPending(session) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send all queued messages together, in order")
                 Button("Clear queue") { session.pending = []; Store.shared.save() }
             }
+            }
             ForEach(session.pending) { prompt in
                 HStack {
                     Text(TranscriptStyle.trafficSummary(prompt.text, queued: true) ?? (prompt.text.isEmpty ? "Attached image" : prompt.text)).help(prompt.text).foregroundStyle(TranscriptStyle.isTraffic(prompt.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
+                    if session.pending.count == 1 {
+                        Button(session.queuePaused ? "Resume queue" : "Pause queue") {
+                            session.queuePaused.toggle(); Store.shared.save()
+                            if !session.queuePaused { Store.shared.runNext(session) }
+                        }
+                    }
                     Button(session.interrupted && session.injectionTargetID == prompt.id ? "Interrupting…" : "Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }
                     Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }

@@ -1,6 +1,48 @@
 import AppKit
 import SwiftUI
 
+// Transparent handles overlap the pane edges, so easier grabbing costs no
+// transcript space. Keep SwiftUI's split-view delegates and constraints intact.
+final class PaneDividerHandle: NSView {
+    static let hitWidth: CGFloat = 14
+    weak var split: NSSplitView?
+    let dividerIndex: Int
+    private var tracking: NSTrackingArea?
+    private var dragStart: (pointer: CGFloat, divider: CGFloat)?
+    init(split: NSSplitView, index: Int) {
+        self.split = split; dividerIndex = index
+        super.init(frame: .zero)
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(area); tracking = area
+    }
+    override func cursorUpdate(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
+    override func mouseEntered(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
+    override func mouseExited(with event: NSEvent) { if dragStart == nil { NSCursor.arrow.set() } }
+    override func mouseDown(with event: NSEvent) {
+        guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
+        dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
+        NSCursor.resizeLeftRight.set()
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
+        let position = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
+        split.setPosition(max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex))), ofDividerAt: dividerIndex)
+        NSCursor.resizeLeftRight.set()
+    }
+    override func mouseUp(with event: NSEvent) {
+        dragStart = nil
+        window?.invalidateCursorRects(for: self)
+    }
+}
+
 enum PaneSizing {
     static let modelColumnThreshold: CGFloat = 360
     static let compactSidebar: CGFloat = modelColumnThreshold - 1
@@ -82,6 +124,7 @@ final class WindowPaneLayout {
     private var restoreSidebarCap: CGFloat?
     private var countChangeSidebar: CGFloat?
     private var observers: [NSObjectProtocol] = []
+    private var dividerHandles: [PaneDividerHandle] = []
     init(window: NSWindow) {
         self.window = window
         referenceWidth = window.contentRect(forFrameRect: window.frame).width; lastWidth = referenceWidth
@@ -89,9 +132,32 @@ final class WindowPaneLayout {
         observers.append(NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let split = note.object as? NSSplitView, split.window === self.window else { return }
             self.dividerChanged()
+            self.refreshDividerHandles()
         })
     }
-    deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+    deinit {
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        for handle in dividerHandles { handle.removeFromSuperview() }
+    }
+    private func refreshDividerHandles() {
+        guard let root = window?.contentView, let outer = PaneSizing.split(in: root) else { return }
+        var splits: [NSSplitView] = sidebarCollapsed ? [] : [outer]
+        if outer.arrangedSubviews.count == 2, let inner = PaneSizing.split(in: outer.arrangedSubviews[1]) { splits.append(inner) }
+        var active: [PaneDividerHandle] = []
+        for split in splits where split.arrangedSubviews.count > 1 {
+            for index in 0..<(split.arrangedSubviews.count - 1) {
+                let handle = dividerHandles.first { $0.split === split && $0.dividerIndex == index } ?? PaneDividerHandle(split: split, index: index)
+                let edge = split.arrangedSubviews[index].frame.maxX + split.dividerThickness / 2
+                let rect = NSRect(x: edge - PaneDividerHandle.hitWidth / 2, y: split.bounds.minY, width: PaneDividerHandle.hitWidth, height: split.bounds.height)
+                handle.frame = root.convert(rect, from: split).intersection(root.bounds)
+                if handle.superview !== root { root.addSubview(handle, positioned: .above, relativeTo: nil) }
+                window?.invalidateCursorRects(for: handle)
+                active.append(handle)
+            }
+        }
+        for handle in dividerHandles where !active.contains(where: { $0 === handle }) { handle.removeFromSuperview() }
+        dividerHandles = active
+    }
     func setSidebarCollapsed(_ collapsed: Bool) {
         guard collapsed != sidebarCollapsed else { return }
         if collapsed, let window { lastExpandedSidebar = PaneSizing.sidebarWidth(in: window) ?? preferredSidebar }
@@ -174,6 +240,7 @@ final class WindowPaneLayout {
         // transition; later manual window resizing keeps its usual minimum.
         window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed), height: 540)
         pending = false
+        refreshDividerHandles()
     }
 }
 
@@ -185,11 +252,34 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     let inner = NSSplitView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700)); inner.isVertical = true; inner.dividerStyle = .thin
     outer.addArrangedSubview(NSView()); outer.addArrangedSubview(inner)
     for _ in 0..<3 { inner.addArrangedSubview(NSView()) }
-    window.contentView = outer
+    let content = NSView(frame: outer.frame)
+    outer.autoresizingMask = [.width, .height]; content.addSubview(outer)
+    window.contentView = content
     let layout = WindowPaneLayout(window: window)
     func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.12)) }
     func sizes() -> [CGFloat] { inner.arrangedSubviews.map { $0.frame.width } }
     layout.setPaneCount(3); settle()
+    let handles = content.subviews.compactMap { $0 as? PaneDividerHandle }
+    check(handles.count == 3 && handles.allSatisfy { abs($0.frame.width - 14) < 0.1 } && outer.dividerThickness <= 1,
+          "All gutters have wider invisible handles without widening drawn dividers")
+    if let handle = handles.first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
+        let before = inner.arrangedSubviews[0].frame.width
+        let start = NSPoint(x: handle.frame.midX + 5, y: handle.frame.midY)
+        check(content.hitTest(start) === handle && content.hitTest(NSPoint(x: handle.frame.maxX + 2, y: start.y)) !== handle,
+              "A gutter catches clicks five points off its line but leaves nearby content interactive")
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: content.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        handle.mouseDown(with: event(.leftMouseDown, start))
+        check(abs(inner.arrangedSubviews[0].frame.width - before) < 0.1, "An off-center gutter grab does not jump the divider")
+        handle.mouseDragged(with: event(.leftMouseDragged, NSPoint(x: start.x + 45, y: start.y)))
+        handle.mouseUp(with: event(.leftMouseUp, NSPoint(x: start.x + 45, y: start.y)))
+        settle()
+        check(abs(inner.arrangedSubviews[0].frame.width - before - 45) < 2, "Dragging the wider gutter moves its native divider by the pointer delta")
+        handle.cursorUpdate(with: event(.mouseMoved, start))
+        check(NSCursor.current == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
+        NSCursor.arrow.set()
+    } else { check(false, "Session gutter handle is installed") }
     inner.setPosition(500, ofDividerAt: 0); settle()
     _ = sizes()
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()

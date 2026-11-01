@@ -361,6 +361,11 @@ func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
 final class ParkingLotUndoFocus: ObservableObject {
     weak var view: ParkingLotUndoResponder?
     func activate() { if let view { view.window?.makeFirstResponder(view) } }
+    func activate(ifUnchangedFrom previous: NSResponder?) {
+        guard let window = view?.window else { return }
+        guard window.firstResponder === previous || window.firstResponder == nil || window.firstResponder === window else { return }
+        activate()
+    }
 }
 struct ParkingLotUndoAnchor: NSViewRepresentable {
     var lot: ParkingLotStore
@@ -372,6 +377,7 @@ struct ParkingLotUndoAnchor: NSViewRepresentable {
 }
 final class ParkingLotUndoResponder: NSView, NSUserInterfaceValidations {
     var lot: ParkingLotStore?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var acceptsFirstResponder: Bool { true }
     override var undoManager: UndoManager? { lot?.undoManager }
     @objc func undo(_ sender: Any?) { undoManager?.undo() }

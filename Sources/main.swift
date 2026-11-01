@@ -1329,6 +1329,7 @@ final class MessageNumberRuler: NSRulerView {
 }
 
 final class InputClipView: NSClipView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
         if let text = documentView as? ConversationTextView { text.focusInput() }
         else { super.mouseDown(with: event) }
@@ -1375,6 +1376,7 @@ final class ConversationScrollView: NSScrollView {
         addSubview(latest)
         interactionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             if let self, let window = self.window, event.window === window {
+                if event.type == .leftMouseDown { self.focusBlankInput(at: event.locationInWindow) }
                 let inside = self.bounds.contains(self.convert(event.locationInWindow, from: nil))
                 let focused = (window.firstResponder as? NSView)?.isDescendant(of: self) == true
                 if event.type == .keyDown ? focused : inside { self.interaction() }
@@ -1384,6 +1386,17 @@ final class ConversationScrollView: NSScrollView {
         NotificationCenter.default.addObserver(self, selector: #selector(startedScrolling), name: NSScrollView.willStartLiveScrollNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSScrollView.didLiveScrollNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(endedScrolling), name: NSScrollView.didEndLiveScrollNotification, object: self)
+    }
+    // Claim a blank-input click before the responder chain routes it. In
+    // particular, a Parking Lot's text/Undo responder must not keep that click.
+    @discardableResult func focusBlankInput(at windowPoint: NSPoint) -> Bool {
+        guard let window, let text = documentView as? ConversationTextView, text.isEditable,
+              contentView.bounds.contains(contentView.convert(windowPoint, from: nil)),
+              text.isInputWhitespace(text.convert(windowPoint, from: nil)) else { return false }
+        if let root = window.contentView,
+           root.hitTest(root.convert(windowPoint, from: nil)) is PaneDividerHandle { return false }
+        text.focusInput()
+        return window.firstResponder === text
     }
     var nearBottom: Bool { contentView.bounds.maxY >= (documentView?.bounds.height ?? 0) - 2 }
     var selecting: Bool {
@@ -1588,7 +1601,10 @@ final class ConversationTextView: NSTextView {
         typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: Self.inputParagraphStyle]
         insertionPointColor = color
         scrollRangeToVisible(selectedRange())
+        updateInsertionPointStateAndRestartTimer(true)
+        needsDisplay = true
     }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     func isInputWhitespace(_ point: NSPoint) -> Bool {
         guard let layout = layoutManager, let container = textContainer else { return true }
         layout.ensureLayout(for: container)
@@ -3008,6 +3024,26 @@ func selfTest() {
     let tall = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 950))
     tall.documentView = native; tall.tile()
     check(native.minSize.height == tall.contentView.bounds.height && native.frame.height >= tall.contentView.bounds.height, "Editable document fills a viewport taller than 600 points")
+    let focusWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 950), styleMask: [.titled], backing: .buffered, defer: false)
+    focusWindow.isReleasedWhenClosed = false
+    let focusRoot = NSView(frame: NSRect(x: 0, y: 0, width: 1000, height: 950)); focusWindow.contentView = focusRoot
+    focusRoot.addSubview(tall)
+    let parkingText = ParkingOutlineText(frame: NSRect(x: 720, y: 0, width: 250, height: 950)); focusRoot.addSubview(parkingText)
+    let undoAnchor = ParkingLotUndoResponder(); focusRoot.addSubview(undoAnchor)
+    let undoFocus = ParkingLotUndoFocus(); undoFocus.view = undoAnchor
+    focusWindow.makeFirstResponder(parkingText)
+    native.setSelectedRange(NSRange(location: 0, length: 0))
+    let inputPoint = native.convert(NSPoint(x: 80, y: 850), to: nil)
+    check(tall.focusBlankInput(at: inputPoint) && focusWindow.firstResponder === native && native.selectedRange().location == (native.string as NSString).length,
+          "Blank input clicks take focus directly from the Parking Lot and place the draft caret")
+    undoFocus.activate(ifUnchangedFrom: parkingText)
+    check(focusWindow.firstResponder === native, "A deferred Parking Lot Undo handoff cannot steal a later conversation click")
+    focusWindow.makeFirstResponder(undoAnchor)
+    check(tall.focusBlankInput(at: inputPoint) && focusWindow.firstResponder === native, "Blank input clicks also leave the Parking Lot reorder Undo responder")
+    check(!tall.focusBlankInput(at: parkingText.convert(NSPoint(x: 80, y: 300), to: nil)), "Clicks in another pane do not focus this conversation")
+    native.isEditable = false; focusWindow.makeFirstResponder(parkingText)
+    check(!tall.focusBlankInput(at: inputPoint) && focusWindow.firstResponder === parkingText, "Read-only conversation views do not claim input focus")
+    native.isEditable = true; focusWindow.close()
     check(native.typingAttributes[.foregroundColor] as? NSColor == NSColor.systemBlue, "Draft typing is blue")
     check(native.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == NSColor.textColor, "Submitted transcript follows system text color")
     check(!native.string.contains("YOU") && !native.string.contains("MUSE"), "Transcript has no speaker labels")

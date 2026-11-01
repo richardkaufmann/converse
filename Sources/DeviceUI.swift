@@ -314,14 +314,24 @@ struct RemotePane: View {
             if let request = transcript?.requests.first { RemoteRequestView(globalID: globalID, request: request, composer: composer) }
             if let pending = transcript?.pending, !pending.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
+                    if pending.count > 1 {
                     HStack {
                         Text(String(pending.count) + " queued on home" + (transcript?.queuePaused == true ? " · paused" : "")); Spacer()
                         Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
                         Button(queueBusy && queueRecord?.payload.action == "injectAll" ? "Injecting…" : "Inject all") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "injectAll")) }
                         Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                     }
+                    }
                     ForEach(pending) { item in
-                        HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button(queueBusy && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } }
+                        HStack {
+                            Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                            Spacer()
+                            if pending.count == 1 {
+                                Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
+                                Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
+                            }
+                            Button(queueBusy && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) }
+                        }
                     }
                 }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06)).disabled(offline || !hasLease || queueBusy)
             }
