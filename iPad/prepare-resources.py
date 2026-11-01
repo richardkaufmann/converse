@@ -26,6 +26,11 @@ info = {
     'UISupportedInterfaceOrientations~ipad': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
     'UIRequiresFullScreen': False,
 }
+if os.environ.get('CONVERSE_DEMO') == '1':
+    if os.environ.get('PRODUCT_BUNDLE_IDENTIFIER') != 'app.kaoslabs.Converse.Demo':
+        raise ValueError('Demo requires its separate bundle identifier')
+    info['CFBundleDisplayName'] = info['CFBundleName'] = 'Converse Demo'
+    info['ConverseDemo'] = True
 # Noise uses Apple CryptoKit primitives; URLSession uses Apple's HTTPS stack.
 # This describes exempt encryption, not an absence of encryption. Revisit if
 # a future dependency supplies cryptography outside Apple's operating system.

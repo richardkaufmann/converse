@@ -47,11 +47,17 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>NSBonjourServices</key><array><string>_converse._tcp</string></array>
 </dict></plist>
 PLIST
-if [[ "${CONVERSE_NUX_PREVIEW:-0}" == 1 ]]; then
+if [[ "${CONVERSE_NUX_PREVIEW:-0}" == 1 || "${CONVERSE_DEMO:-0}" == 1 ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.richard.Converse.NUXPreview' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName Converse Setup Preview' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Converse Setup Preview' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :ConverseNUXPreview bool true' "$app/Contents/Info.plist"
+fi
+if [[ "${CONVERSE_DEMO:-0}" == 1 ]]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.richard.Converse.Demo' "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Converse Demo' "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Converse Demo' "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Add :ConverseDemo bool true' "$app/Contents/Info.plist"
 fi
 /usr/bin/python3 scripts/build-help.py README.md "$app/Contents/Resources/Help"
 if [[ "$signing_identity" == - ]]; then

@@ -151,7 +151,7 @@ struct AgentRepoSnapshot: Codable, Equatable {
 
 // No secret is part of the Codable session or exported widget.
 enum AgentSecrets {
-    static let service = Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "app.kaoslabs.Converse.NUXPreview.Agent" : "app.kaoslabs.Converse.Agent"
+    static let service = Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "app.kaoslabs.Converse.Demo.Agent" : Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "app.kaoslabs.Converse.NUXPreview.Agent" : "app.kaoslabs.Converse.Agent"
     static func read(_ name: String) throws -> String? {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: name, kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne] as CFDictionary, &result)

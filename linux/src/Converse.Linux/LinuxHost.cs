@@ -128,6 +128,16 @@ internal sealed class LinuxHost : ILinuxUpdateRuntime, IAsyncDisposable
 
         var floors = BuildRecoveryFloors(_ledger.Existing);
         _store = new SessionStore(_paths.DataRoot);
+        if (Environment.GetEnvironmentVariable("CONVERSE_DEMO") == "1")
+        {
+            foreach (var entry in _store.Entries)
+            {
+                entry.AccountDirectory = Path.Combine(_paths.DataRoot, "DemoAccounts", entry.Engine);
+                entry.UseDefaultAccountStore = false;
+                Directory.CreateDirectory(entry.AccountDirectory);
+            }
+            _store.Save();
+        }
         _devices = new DeviceSyncService(
             _paths.DataRoot,
             _store,

@@ -1344,6 +1344,16 @@ final class LatestOutputButton: NSButton {
 }
 final class ConversationScrollView: NSScrollView {
     private var tiling = false
+    private var initialTailPending = false
+    func revealInitialTail() { initialTailPending = true; needsLayout = true }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if initialTailPending { needsLayout = true } }
+    override func layout() {
+        super.layout()
+        guard initialTailPending, window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        initialTailPending = false
+        tile()
+        jumpToLatest()
+    }
     private(set) var followState = TranscriptFollowState()
     private var idleResume: DispatchWorkItem?
     private var interactionMonitor: Any?
@@ -1379,6 +1389,7 @@ final class ConversationScrollView: NSScrollView {
     }
     func outputArrived() { followState.outputArrived(); refreshLatest() }
     func interaction() {
+        initialTailPending = false
         followState.interaction(now: ProcessInfo.processInfo.systemUptime)
         if selecting && followState.following { followState.pause(now: ProcessInfo.processInfo.systemUptime) }
         scheduleResume()
@@ -1388,6 +1399,7 @@ final class ConversationScrollView: NSScrollView {
     @objc private func scrolled() { recordScroll() }
     @objc private func endedScrolling() { liveScrolling = false; recordScroll() }
     private func recordScroll() {
+        initialTailPending = false
         followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
         scheduleResume(); refreshLatest()
     }
@@ -1761,6 +1773,7 @@ struct ScrollingConversation: NSViewRepresentable {
         context.coordinator.render(text)
         if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
         if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
+        else { scroll.revealInitialTail() } // Startup: wait for the actual pane width and height.
         DispatchQueue.main.async {
             // A newly mounted pane must not steal focus from a question answer,
             // settings field, or another pane's draft.
@@ -2461,7 +2474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.setup = !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
-        window.title = (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "Converse Setup Preview" : state.title) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") : state.title) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
         title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         window.addTitlebarAccessoryViewController(title)
@@ -2685,6 +2698,17 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     check(view.frame.height <= scroll.contentView.bounds.height + 1, "Mac tiling shrinks a stale document frame instead of leaving a large blank tail")
     session.messages = [Message(role: "assistant", text: String(repeating: "A long wrapping response line with words. ", count: 600))]
     coordinator.render(view); scroll.tile()
+    let startupWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 330, height: 240), styleMask: [.titled], backing: .buffered, defer: false)
+    startupWindow.isReleasedWhenClosed = false
+    scroll.revealInitialTail()
+    startupWindow.contentView = scroll
+    scroll.layoutSubtreeIfNeeded()
+    check(scroll.contentView.bounds.maxY >= view.frame.maxY - 2, "Startup waits for the mounted pane layout before revealing the transcript tail")
+    scroll.contentView.scroll(to: .zero)
+    scroll.needsLayout = true; scroll.layoutSubtreeIfNeeded()
+    check(scroll.contentView.bounds.minY < 2, "Later layout does not repeat the one-time startup jump")
+    startupWindow.contentView = nil
+    scroll.setFrameSize(NSSize(width: 700, height: 400)); scroll.tile()
     let longHeight = view.frame.height
     check(longHeight > 1000, "Native layout fixture produces a scrollable transcript")
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
@@ -3237,7 +3261,7 @@ if CommandLine.arguments.contains("--provider-self-test") {
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
-    let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse Setup Preview")
+    let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
     setenv("CONVERSE_DATA_DIR", isolated.path, 1)
 }
 let application = NSApplication.shared

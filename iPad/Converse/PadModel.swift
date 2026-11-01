@@ -43,7 +43,7 @@ final class PadModel: ObservableObject {
             state.defaultDeviceName = Self.mobileDeviceName(phone: UIDevice.current.userInterfaceIdiom == .phone, identifier: service.identity?.deviceID ?? UUID().uuidString)
             persist()
         }
-        service.deviceNameOverride = UserDefaults.standard.string(forKey: "deviceName") ?? state.defaultDeviceName
+        service.deviceNameOverride = UserDefaults.standard.string(forKey: "deviceName") ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo · " + (state.defaultDeviceName ?? "Mobile") : state.defaultDeviceName)
         service.isPlaced = { [weak self] id in self?.state.placements.contains(id) == true }
         service.onRemotePark = { [weak self] id in self?.removePlacement(id) }
         observer = service.objectWillChange.sink { [weak self] in

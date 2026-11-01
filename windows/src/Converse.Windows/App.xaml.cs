@@ -25,7 +25,7 @@ public partial class App : Application
         // AppInstance alone is not enough: unpackaged exes at different paths
         // do not see each other's registration, so a held mutex backs it.
         // A dead previous owner counts as acquired (the OS hands us the lock).
-        var instanceSuffix = SetupPreview.Enabled ? "-SetupPreview" : "";
+        var instanceSuffix = SetupPreview.Demo ? "-Demo" : SetupPreview.Enabled ? "-SetupPreview" : "";
         var testFolder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR");
         if (!SetupPreview.Enabled && Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") == "1" &&
             !string.IsNullOrWhiteSpace(testFolder) && Path.IsPathFullyQualified(testFolder) &&

@@ -28,12 +28,13 @@ ditto --norsrc --noextattr "$source_app" "$job/Converse.app"
 codesign --verify --deep --strict "$job/Converse.app"
 source_digest=$(shasum -a 256 "$source_app/Contents/MacOS/Converse" | cut -d ' ' -f 1)
 dock_command=$(command -v dockutil || true)
+dock_label=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$source_app/Contents/Info.plist")
 label="local.converse.install.${job:t}"
 helper="$job/install.command"
 {
     print '#!/bin/zsh'
     print 'set -eu'
-    printf 'destination=%q\njob=%q\nexpected=%q\nversion=%q\ndock_command=%q\n' "$destination" "$job" "$source_digest" "$version" "$dock_command"
+    printf 'destination=%q\njob=%q\nexpected=%q\nversion=%q\ndock_command=%q\ndock_label=%q\n' "$destination" "$job" "$source_digest" "$version" "$dock_command" "$dock_label"
     cat <<'HELPER'
 status_file="$job/status.txt"
 fail() { print -r -- "FAILED: $1" > "$status_file"; exit 1; }
@@ -64,13 +65,13 @@ fi
 # supported Dock management CLI preserves the existing item's position.
 if [[ -n "$dock_command" && -x "$dock_command" ]]; then
     dock_url=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri() + "/")' "$destination")
-    current_dock=$($dock_command --list | awk -F '\t' '$1 == "Converse" {print $2}')
+    current_dock=$($dock_command --list | awk -F '\t' -v label="$dock_label" '$1 == label {print $2}')
     if [[ -n "$current_dock" && "$current_dock" != "$dock_url" ]]; then
-        if ! "$dock_command" --add "$destination" --replacing Converse; then
+        if ! "$dock_command" --add "$destination" --replacing "$dock_label"; then
             print -r -- "INSTALLED: Converse $version at $destination; SHORTCUT REPAIR FAILED" > "$status_file"
             exit 1
         fi
-        current_dock=$($dock_command --list | awk -F '\t' '$1 == "Converse" {print $2}')
+        current_dock=$($dock_command --list | awk -F '\t' -v label="$dock_label" '$1 == label {print $2}')
         if [[ "$current_dock" != "$dock_url" ]]; then
             print -r -- "INSTALLED: Converse $version at $destination; SHORTCUT TARGET NOT VERIFIED" > "$status_file"
             exit 1

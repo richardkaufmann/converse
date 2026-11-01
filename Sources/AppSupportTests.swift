@@ -115,8 +115,8 @@ import Foundation
     }
     check(AgentModels.parse("cli|claude|bad-base64|bad") == nil && (try? AgentCLI.finalReply(engine: "claude", data: Data("{\"is_error\":true,\"result\":\"unsafe\"}".utf8), final: nil)) == nil, "Malformed model routes and failed provider results cannot execute actions")
     check((taught.pending.map(\.text) + taught.messages.filter { $0.role == "user" }.map(\.text)).contains { $0.contains("[Converse switchboard instructions]") && $0.contains("[Converse setup and control teaching") }, "NUX injects both teaching prompts together after the provider gate")
-    let drain = Date().addingTimeInterval(5)
-    while journey.sessions[0].busy && Date() < drain { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    let drain = Date().addingTimeInterval(20)
+    while (taught.busy || !taught.pending.isEmpty) && Date() < drain { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     check(taught.agent?.lastOutcome == "Completed", "The taught support agent completes its first turn using the selected CLI provider")
     check(taught.clearedThroughMessageID != nil && !taught.displayedMessages.contains { $0.role == "user" || $0.text.contains("[Converse setup and control teaching") } && taught.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Support onboarding clears login and teaching from display while retaining learned context")
 

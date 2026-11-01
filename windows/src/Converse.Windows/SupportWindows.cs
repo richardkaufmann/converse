@@ -13,8 +13,14 @@ internal static class SetupPreview
 #else
     public static bool Enabled => false;
 #endif
-    public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Converse Setup Preview");
-    public static string CredentialResource => Enabled ? "Converse.SetupPreview.Agent" : "Converse.Agent";
+#if CONVERSE_DEMO
+    public static bool Demo => true;
+#else
+    public static bool Demo => false;
+#endif
+    public static string Name => Demo ? "Converse Demo" : "Converse Setup Preview";
+    public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Name);
+    public static string CredentialResource => Demo ? "Converse.Demo.Agent" : Enabled ? "Converse.SetupPreview.Agent" : "Converse.Agent";
     public static void Initialize()
     {
         if (Enabled) Environment.SetEnvironmentVariable("CONVERSE_DATA_DIR", Folder);
@@ -109,7 +115,7 @@ public sealed partial class MainWindow
         var install = new HyperlinkButton { Content = "Provider installation instructions", Visibility = Visibility.Collapsed }; panel.Children.Add(install);
         var cancel = new Button { Content = "Cancel connection check", Visibility = Visibility.Collapsed }; panel.Children.Add(cancel);
         panel.Children.Add(new TextBlock { Text = AppSupportTeaching.Invitation, TextWrapping = TextWrapping.Wrap });
-        panel.Children.Add(new TextBlock { Text = "SETUP PREVIEW · Separate conversations, logins, credentials and device identity", FontSize = 11, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = (SetupPreview.Demo ? "DEMO" : "SETUP PREVIEW") + " · Separate conversations, logins, credentials and device identity", FontSize = 11, TextWrapping = TextWrapping.Wrap });
         var dialog = new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Welcome to Converse!", Content = new ScrollViewer { Content = panel, MaxHeight = 540 }, CloseButtonText = "Quit" };
         dialog.Resources["ContentDialogMaxWidth"] = 700d;
         _supportDialog = dialog;

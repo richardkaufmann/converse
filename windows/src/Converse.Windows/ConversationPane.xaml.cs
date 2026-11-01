@@ -33,6 +33,7 @@ public sealed partial class ConversationPane : UserControl
     {
         InitializeComponent();
         NormalizeDraftFormat();
+        LayoutUpdated += (_, _) => RevealInitialTail();
         ActualThemeChanged += (_, _) => RenderProviderLogo();
     }
 
@@ -143,6 +144,19 @@ public sealed partial class ConversationPane : UserControl
     // one count per finished event without touching the idle clock. Any
     // uncounted change is the user.
     private int _ownScrolls;
+    private bool _initialTailPending;
+    private void RevealInitialTail()
+    {
+        if (!_initialTailPending || _selected is null || !IsLoaded || ActualHeight <= 0) return;
+        // Consume only after the content extent reflects the measured stack.
+        // Loaded/SizeChanged can occur before the message blocks are measured.
+        if (TranscriptScroller.ViewportHeight <= 0 || TranscriptStack.ActualHeight <= 0 ||
+            TranscriptScroller.ExtentHeight + 1 < TranscriptStack.ActualHeight) return;
+        _initialTailPending = false;
+        OwnChangeView(TranscriptScroller, TranscriptScroller.ScrollableHeight);
+    }
+    internal string TranscriptGeometry => $"offset={TranscriptScroller.VerticalOffset} end={TranscriptScroller.ScrollableHeight} extent={TranscriptScroller.ExtentHeight} stack={TranscriptStack.ActualHeight} pending={_initialTailPending} loaded={IsLoaded}";
+    internal bool TranscriptAtEnd => TranscriptScroller.ScrollableHeight - TranscriptScroller.VerticalOffset < 2;
 
     // Streaming coalescing: while the shown session works, block syncs run
     // at most every 200ms with one trailing catch-up.
@@ -759,7 +773,7 @@ public sealed partial class ConversationPane : UserControl
                 if (!SameLine(lines[i], _renderedLines[i])) { samePrefix = false; break; }
         if (samePrefix && lines.Count == _renderedLines.Count
             && (lines.Count == 0 || SameLine(lines[^1], _renderedLines[^1]))) return;
-        var follow = ComputeFollow(caretToEnd);
+        var follow = _initialTailPending || ComputeFollow(caretToEnd);
         if (samePrefix)
         {
             if (_renderedLines.Count > 0
@@ -787,7 +801,12 @@ public sealed partial class ConversationPane : UserControl
             _unreadUpdates = 0;
             UpdateJumpButton(following: true);
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-                () => OwnChangeView(TranscriptScroller, TranscriptScroller.ScrollableHeight));
+                () => {
+                    if (_lastChangeKey != key) return;
+                    TranscriptScroller.UpdateLayout();
+                    OwnChangeView(TranscriptScroller, TranscriptScroller.ScrollableHeight);
+                    RevealInitialTail();
+                });
         }
         else
         {
@@ -1520,6 +1539,7 @@ public sealed partial class ConversationPane : UserControl
         _rebuildCoalesced = false;
         _lastStreamRebuildUtc = DateTime.MinValue;
         _selected = session;
+        _initialTailPending = false;
         _draftText = "";
         _notice = null; _noticeUtc = null;
         // The identity check forces a sync even for an empty new session.
@@ -1537,6 +1557,8 @@ public sealed partial class ConversationPane : UserControl
             _draftText = Breaks(_host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Draft ?? "");
         SetDraftBox();
         RenderPane(caretToEnd);
+        _initialTailPending = session is not null;
+        InvalidateArrange();
         if (caretToEnd) DraftBox.Focus(FocusState.Programmatic);
     }
 

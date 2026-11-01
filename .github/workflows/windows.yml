@@ -3,11 +3,17 @@ on:
   push:
     paths:
       - "global.json"
+      - "VERSION.json"
+      - "README.md"
+      - "scripts/build-help.py"
       - "windows/**"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "global.json"
+      - "VERSION.json"
+      - "README.md"
+      - "scripts/build-help.py"
       - "windows/**"
 jobs:
   core-tests:
@@ -23,6 +29,9 @@ jobs:
         run: dotnet run --project windows/src/Converse.Core.Tests -c Release
   app-build:
     runs-on: windows-2022
+    strategy:
+      matrix:
+        demo: ['false', 'true']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -30,5 +39,5 @@ jobs:
           dotnet-version: "8.0.x"
       - name: Selected SDK
         run: dotnet --info
-      - name: Build WinUI app (x64)
-        run: dotnet build windows/src/Converse.Windows -c Release -p:Platform=x64
+      - name: Build WinUI app (x64, demo=${{ matrix.demo }})
+        run: dotnet build windows/src/Converse.Windows -c Release -p:Platform=x64 -p:ConverseDemo=${{ matrix.demo }}

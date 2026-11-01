@@ -128,7 +128,7 @@ public sealed partial class MainWindow : Window
         _layout = SidebarLayoutState.Load(folder);
         _placements = PanePlacements.Load(folder);
         _store = new SessionStore(folder);
-        _devices = new DeviceSyncService(folder, _store);
+        _devices = new DeviceSyncService(folder, _store, SetupPreview.Demo ? "Converse Demo · " + Environment.MachineName : null);
         _devices.IsViewerPlaced = id => PanePlacements.Load(_dataFolder).PaneOf("remote:" + id) is not null;
         InitializeAgents();
         // No modal pairing prompt: joins surface as codes in the Groups
@@ -143,9 +143,9 @@ public sealed partial class MainWindow : Window
             _placements.Save(_dataFolder);
             Refresh();
         });
-        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(port: SetupPreview.Enabled ? 0 : DeviceSyncService.DefaultPort, enableDiscovery: !SetupPreview.Enabled, loopbackOnly: SetupPreview.Enabled);
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") _ = _devices.StartAsync(port: SetupPreview.Enabled ? 0 : DeviceSyncService.DefaultPort, enableDiscovery: !SetupPreview.Enabled || SetupPreview.Demo, loopbackOnly: SetupPreview.Enabled && !SetupPreview.Demo);
         _help = LoadHelp();
-        Title = (SetupPreview.Enabled ? "Converse Setup Preview " : "Converse ") + VersionBuild;
+        Title = (SetupPreview.Enabled ? SetupPreview.Name + " " : "Converse ") + VersionBuild;
         for (var pane = 1; pane <= 3; pane++)
         {
             var view = new ConversationPane();
@@ -716,6 +716,11 @@ public sealed partial class MainWindow : Window
             Require(pane.SettingsUseOverflow == overflow && pane.SettingsShowControls != overflow, "Settings overflow duplicates controls or fails to track pane width " + width);
         }
         pane.Width = double.NaN;
+        var longHistory = _store.Create(_store.Entries.First(e => e.Engine == "claude"));
+        longHistory.Messages.Add(new ChatMessage { Role = "assistant", Text = string.Concat(Enumerable.Repeat("Long startup transcript line.\n", 160)) });
+        Show(longHistory); pane.UpdateLayout(); await Task.Delay(200);
+        Require(pane.TranscriptAtEnd, "A mounted long transcript did not start at the end: " + pane.TranscriptGeometry);
+        Show(fresh);
         pane.CheckFilePathDrop();
         var third = _store.Create(_store.Entries.First(e => e.Engine == "codex"));
         var sidebarBefore = SidebarColumn.Width;
