@@ -110,6 +110,7 @@ final class Session: ObservableObject, Identifiable {
         return cachedMessageNumbers
     }
     @Published var draft: String
+    let substitutionFeedback = SubstitutionFeedback()
     @Published var attachments: [String]
     @Published var pending: [PendingPrompt] = []
     @Published var queuePaused = false
@@ -1626,11 +1627,78 @@ final class ConversationTextView: NSTextView {
         explicitCursor = selectedRange().length > 0 || selectedRange().location < inputStart
         (enclosingScrollView as? ConversationScrollView)?.interaction()
     }
+    private func prepareTypingUndoGroup() {
+        guard let manager = undoManager, manager.groupsByEvent, manager.groupingLevel == 0,
+              manager.isUndoRegistrationEnabled, !manager.isUndoing, !manager.isRedoing else { return }
+        manager.beginUndoGrouping()
+        // The first explicit group can also create AppKit's event group.
+        // Keep only that outer group so native typing coalesces normally.
+        if manager.groupingLevel > 1 { manager.endUndoGrouping() }
+    }
     override func insertText(_ value: Any, replacementRange: NSRange) {
+        prepareTypingUndoGroup()
+        immediateSubstitution = nil
+        let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
         if selectedRange().location < inputStart || (replacementRange.location != NSNotFound && replacementRange.location < inputStart) {
             focusInput(); super.insertText(value, replacementRange: selectedRange()); return
         }
         super.insertText(value, replacementRange: replacementRange)
+        guard typedSpace, TextSubstitutions.shared.enabled, let manager = undoManager, manager.groupingLevel <= 1,
+              !manager.isUndoing, !manager.isRedoing, selectedRange().location >= inputStart,
+              let match = TextSubstitutions.match(in: (string as NSString).substring(from: inputStart), caret: selectedRange().location - inputStart) else { return }
+        let caret = selectedRange().location
+        let before = (string as NSString).substring(from: inputStart)
+        let after = (before as NSString).replacingCharacters(in: match.range, with: match.replacement)
+        breakUndoCoalescing()
+        // Finish the typing event before registering a distinct substitution.
+        // Undo must restore the literal token, including the triggering space.
+        if manager.groupingLevel == 1 { manager.endUndoGrouping() }
+        manager.beginUndoGrouping()
+        manager.disableUndoRegistration()
+        super.insertText(match.replacement, replacementRange: NSRange(location: inputStart + match.range.location, length: match.range.length))
+        manager.enableUndoRegistration()
+        setSelectedRange(NSRange(location: caret + (match.replacement as NSString).length - match.range.length, length: 0))
+        let beforeCaret = caret - inputStart, afterCaret = selectedRange().location - inputStart
+        manager.registerUndo(withTarget: self) { view in view.restoreSubstitution(expected: after, replacement: before, caret: beforeCaret, inverseCaret: afterCaret) }
+        breakUndoCoalescing(); manager.setActionName(TextSubstitutions.undoName); manager.endUndoGrouping()
+        substitutionUndo = (after, before, beforeCaret, afterCaret)
+        immediateSubstitution = ImmediateSubstitution(text: after, caret: NSRange(location: afterCaret, length: 0))
+    }
+    private func restoreSubstitution(expected: String, replacement: String, caret: Int, inverseCaret: Int) {
+        guard isEditable, let manager = undoManager, (string as NSString).substring(from: inputStart) == expected else { return }
+        manager.registerUndo(withTarget: self) { view in view.restoreSubstitution(expected: replacement, replacement: expected, caret: inverseCaret, inverseCaret: caret) }
+        manager.setActionName(TextSubstitutions.undoName)
+        manager.disableUndoRegistration()
+        super.insertText(replacement, replacementRange: NSRange(location: inputStart, length: (string as NSString).length - inputStart))
+        manager.enableUndoRegistration()
+        breakUndoCoalescing()
+        setSelectedRange(NSRange(location: inputStart + min(caret, (replacement as NSString).length), length: 0))
+        if manager.isUndoing { substitutionFeedback.rejected() }
+    }
+    private var substitutionUndo: (expected: String, replacement: String, caret: Int, inverseCaret: Int)?
+    func retainedSubstitutionUndo(for draft: String) -> (() -> Void)? {
+        guard let value = substitutionUndo, value.expected == draft, undoManager?.undoActionName == TextSubstitutions.undoName else { return nil }
+        return { [weak self] in
+            guard let self, let manager = self.undoManager else { return }
+            manager.beginUndoGrouping()
+            manager.registerUndo(withTarget: self) { view in
+                view.restoreSubstitution(expected: value.expected, replacement: value.replacement, caret: value.caret, inverseCaret: value.inverseCaret)
+            }
+            manager.setActionName(TextSubstitutions.undoName); manager.endUndoGrouping()
+        }
+    }
+    var substitutionFeedback = SubstitutionFeedback()
+    private var suppressSubstitutions = false
+    private var immediateSubstitution: ImmediateSubstitution?
+    @objc func undo(_ sender: Any?) {
+        let substituted = undoManager?.undoActionName == TextSubstitutions.undoName
+        immediateSubstitution = nil; breakUndoCoalescing(); undoManager?.undo(); breakUndoCoalescing()
+        if substituted { substitutionFeedback.rejected() }
+    }
+    @objc func redo(_ sender: Any?) { immediateSubstitution = nil; breakUndoCoalescing(); undoManager?.redo(); breakUndoCoalescing() }
+    override func deleteBackward(_ sender: Any?) {
+        if immediateSubstitution?.matches(self, start: inputStart) == true, undoManager?.undoActionName == TextSubstitutions.undoName { undo(sender); return }
+        immediateSubstitution = nil; prepareTypingUndoGroup(); super.deleteBackward(sender)
     }
     struct CopyBlock {
         let range: NSRange
@@ -1794,6 +1862,8 @@ final class ConversationTextView: NSTextView {
         return nil
     }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
+        if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
         if item.action == #selector(performTextFinderAction(_:)) {
             guard Self.allowsFindAction(item.tag), let action = NSTextFinder.Action(rawValue: item.tag) else { return false }
             return readOnlyFinder.validateAction(action)
@@ -1847,6 +1917,7 @@ final class ConversationTextView: NSTextView {
         return super.performDragOperation(sender)
     }
     override func paste(_ sender: Any?) {
+        suppressSubstitutions = true; defer { suppressSubstitutions = false }
         if let image = Self.clipboardImage(.general) { imagePaste?(image); return }
         if selectedRange().location < inputStart { setSelectedRange(NSRange(location: (string as NSString).length, length: 0)) }
         pasteAsPlainText(sender)
@@ -1875,6 +1946,7 @@ struct ScrollingConversation: NSViewRepresentable {
         let text = ConversationTextView(frame: scroll.contentView.bounds)
         text.droppedFileSourceDevice = droppedFileSourceDevice
         session.inputTextView = text
+        text.substitutionFeedback = session.substitutionFeedback
         text.minSize = NSSize(width: 0, height: 600)
         text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         text.isVerticallyResizable = true; text.isHorizontallyResizable = false
@@ -1885,6 +1957,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.importsGraphics = false; text.allowsUndo = true
         text.registerForDraggedTypes([.fileURL])
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false
         text.textContainerInset = NSSize(width: 12, height: 12)
         text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
@@ -2018,6 +2091,7 @@ struct ScrollingConversation: NSViewRepresentable {
             return true
         }
         func render(_ text: ConversationTextView) {
+            let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
             defer {
                 let elapsed = ProcessInfo.processInfo.systemUptime - began
@@ -2167,6 +2241,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             text.insertionPointColor = .systemBlue
             text.undoManager?.removeAllActions()
+            restoreSubstitutionUndo?()
             if session.draft.isEmpty && selection.length == 0 && !text.explicitCursor { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else {
@@ -2228,6 +2303,7 @@ struct Conversation: View {
             SwitchboardStatusView(session: session)
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
+                .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: session.substitutionFeedback).padding(.trailing, 12).padding(.bottom, 80) }
                 .overlay(alignment: .bottomTrailing) {
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
                         if let state = session.compactionState { CompactionControl(state: state) { if session.compactionRequested { session.compactionRequested = false } else { _ = store.requestCompaction(session) } }.disabled(session.changingSetting || session.interrupted).padding(.trailing, 12).padding(.bottom, 46) }
@@ -2403,12 +2479,15 @@ struct RootView: View {
 }
 struct SettingsView: View {
     @ObservedObject var store = Store.shared
+    @ObservedObject var substitutions = TextSubstitutions.shared
     @ObservedObject var state: WindowState
     @StateObject private var flow = SettingsFlow()
     @Environment(\.dismiss) var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Models & sessions").font(.title2.bold())
+            Toggle("Text substitutions while typing", isOn: Binding(get: { substitutions.enabled }, set: { substitutions.changeFromUI($0) }))
+                .help("Turn :-) into 🙂 and --> into → after a space. Undo restores the literal text. Pasted text and Markdown code stay unchanged.")
             Text("Choose a model, create a session, then bind its login. Existing conversations keep their history and login.").font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -2999,6 +3078,7 @@ func selfTest() {
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
     MainActor.assumeIsolated { appSupportSelfTests(check) }
     providerSelfTests(check)
+    MainActor.assumeIsolated { textSubstitutionSelfTests(check) }
     conversationLayoutSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)

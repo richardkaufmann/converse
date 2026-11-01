@@ -390,6 +390,9 @@ struct RemotePane: View {
                                       syncEditor()
                                   })
                 .overlay(alignment: .bottomTrailing) {
+                    if hasLease && !offline && !isParkingLot { SubstitutionButton(feedback: composer.editor.substitutionFeedback).padding(.trailing, 12).padding(.bottom, 80) }
+                }
+                .overlay(alignment: .bottomTrailing) {
                     if let state = transcript?.compaction {
                         CompactionControl(state: state) { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: state.phase == "queued" ? "cancelCompact" : "compact")) }
                             .disabled(!hasLease || offline).padding(.trailing, 12).padding(.bottom, 46)

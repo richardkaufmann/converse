@@ -35,6 +35,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     static let id = UUID(uuidString: "B4AA70E2-147E-40A1-9342-0751C0A40101")!
     // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
     let id: UUID
+    let substitutionFeedback = SubstitutionFeedback()
     let undoManager: UndoManager = { let manager = UndoManager(); manager.groupsByEvent = false; manager.levelsOfUndo = 100; return manager }()
     @Published var name: String
     @Published private(set) var document = ParkingLotDocument()
@@ -62,8 +63,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             let group = !undoManager.isUndoing && !undoManager.isRedoing
             if group { undoManager.beginUndoGrouping() }
             undoManager.registerUndo(withTarget: self) { lot in lot.restoreUndo(before, replacing: next.rows) }
-            undoManager.setActionName("Edit Parking Lot")
-            if group { undoManager.endUndoGrouping() }
+            if group { undoManager.setActionName("Edit Parking Lot"); undoManager.endUndoGrouping() }
         }
         document = next; active = true; error = ""
     }
@@ -299,6 +299,7 @@ struct ParkingLotView: View {
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
             if !reordering {
                 ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
+                    .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: lot.substitutionFeedback).padding(12) }
             } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {

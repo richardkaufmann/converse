@@ -12,7 +12,7 @@ Its standout features:
 2. **[It’s multi-account.](#accounts)** Each session is logged into its own provider account—e.g. a user can be logged into two different Muse accounts, three different Codex accounts, etc. In practice this is useful to balance token budgets, but also to get different perspectives on development efforts.
 3. **[It’s multi-provider.](#set-up-your-first-coding-session)** Meta, OpenAI, Anthropic can be mixed and matched as desired.
 4. **[It’s multi-system.](#download)** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
-5. **[It has Parking Lots.](#parking-lots)** Organize ideas and future prompts in an outline. Sessions can take ideas from your Parking Lots, and you can talk conversationally with them!
+5. **[It has Parking Lots.](#parking-lots)** Organize ideas and future prompts in an outline. Sessions can take ideas from, and make changes to, Parking Lots. Users can talk to the Parking Lot agent to bounce off ideas, direct edits, and listen to summaries.
 6. **[It’s distributed.](#connect-your-devices-into-a-group)** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent. Systems rejoin when they come back online, including iPhones and iPads, as long as they can reach the other systems.
 7. **[It hosts agent sessions.](#set-up-your-first-agent)** These sessions have initiative and can start periodically or via an external stimulus.
 8. **[It’s chatty.](#messaging-between-sessions)** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
@@ -114,6 +114,8 @@ On Mac, **Command-F** (Edit → Find) searches the current transcript without ch
 
 ### Parking Lots
 
+Parking Lots are great ways to work on ideas or save (park) them for later injection. They're persistent, and letting agents and sessions see and edit them is a great way to track and direct development. Integration with Jira and other tracking systems is an idea for future work, not something the app does yet.
+
 Keep ideas, prompts and bugs in named **Parking Lots**, alongside the sessions under their home device. Click the grey starter lot, or choose **Parking Lots…** or **File → New → Parking Lot…** to create another. Right-click a lot in the sidebar to rename or delete it. **P**, **1**, **2** and **3** work just as they do for conversations. **X** deletes the lot after confirmation; a recovery copy stays on its home device.
 
 On Mac, Return creates an item, even at the end of a heading. Shift-Return creates a heading below; ⌘Return adds a line within the current entry. There is always an empty item ready to type into at the end of each open section. Notes save automatically. Right-click a heading or item for **Cut Heading**, **Copy Heading**, **Cut Item** or **Copy Item**. Cutting a heading takes its items with it. Paste those words straight into a conversation when you are ready to act on them.
@@ -129,6 +131,12 @@ Group members may read your active lots. Agents need explicit access to each lot
 Other devices in your Group can view a Mac’s Parking Lots and receive updates. Viewing is read only for now, and several devices can read the same lot without moving it away from its home. iPhone and iPad do not host their own lots yet.
 
 Undo covers saved changes. If a simultaneous edit is rejected because the lot has changed, it never enters the undo history. That can reject a whole paste, not just one keystroke; Undo cannot recover that rejected text.
+
+### Text substitutions
+
+On Mac, type a smiley or arrow followed by a space: `:-)` becomes 🙂, `-->` becomes →, `<--` becomes ←, and `==>` becomes ⇒. Other supported forms include `:)`, `:(`, `;-)`, `:D`, `:P`, `<-->`, `<==`, `<==>`, `<->`, `...`, `(c)`, `(r)` and `(tm)`. These work in conversation drafts and Parking Lots, including drafts for remote sessions displayed on this Mac. Pasted text, Markdown code blocks, inline code, indented code, and lines beginning with `/` or `$` stay literal.
+
+Don't like a substitution? **⌘Z** restores exactly what you typed; **Backspace immediately after the substitution** does the same. A **Turn off substitutions** button then appears. When substitutions are off, **Turn on substitutions** is available. You can also use **Settings → Text substitutions while typing**, or simply ask App Support to turn them on or off. The setting starts on and is saved for this app on this Mac; changing it never rewrites existing text.
 
 To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart.
 

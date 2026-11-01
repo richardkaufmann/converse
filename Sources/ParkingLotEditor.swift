@@ -105,6 +105,7 @@ struct ParkingLotEditor: NSViewRepresentable {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
         let text = ParkingOutlineText(frame: .zero)
         text.isRichText = false; text.allowsUndo = true; text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false
         text.isVerticallyResizable = true; text.isHorizontallyResizable = false
         text.autoresizingMask = [.width]; text.textContainerInset = NSSize(width: 36, height: 8)
         text.textContainer?.widthTracksTextView = true; text.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
@@ -203,9 +204,34 @@ private var emptyPlaceholders: [String: UUID] = [:]
 
 final class ParkingOutlineText: NSTextView {
     weak var owner: ParkingLotEditor.Coordinator?
+    private var suppressSubstitutions = false
+    private var immediateSubstitution: ImmediateSubstitution?
     override var undoManager: UndoManager? { owner?.parent.lot.undoManager }
-    @objc func undo(_ sender: Any?) { undoManager?.undo(); owner?.render() }
-    @objc func redo(_ sender: Any?) { undoManager?.redo(); owner?.render() }
+    @objc func undo(_ sender: Any?) {
+        let substituted = undoManager?.undoActionName == TextSubstitutions.undoName
+        immediateSubstitution = nil; undoManager?.undo(); owner?.render()
+        if substituted { owner?.parent.lot.substitutionFeedback.rejected() }
+    }
+    @objc func redo(_ sender: Any?) { immediateSubstitution = nil; undoManager?.redo(); owner?.render() }
+    override func insertText(_ value: Any, replacementRange: NSRange) {
+        immediateSubstitution = nil
+        let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
+        super.insertText(value, replacementRange: replacementRange)
+        guard typedSpace, TextSubstitutions.shared.enabled, let owner, let match = TextSubstitutions.match(in: string, caret: selectedRange().location) else { return }
+        let revision = owner.parent.lot.document.revision
+        let caret = selectedRange().location
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+        super.insertText(match.replacement, replacementRange: match.range)
+        guard owner.parent.lot.document.revision != revision else { return }
+        setSelectedRange(NSRange(location: caret + (match.replacement as NSString).length - match.range.length, length: 0))
+        undoManager?.setActionName(TextSubstitutions.undoName)
+        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+    }
+    override func deleteBackward(_ sender: Any?) {
+        if immediateSubstitution?.matches(self) == true, undoManager?.undoActionName == TextSubstitutions.undoName { undo(sender); return }
+        immediateSubstitution = nil; super.deleteBackward(sender)
+    }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
@@ -226,7 +252,10 @@ final class ParkingOutlineText: NSTextView {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(owner.projection.markdown(selectedRange()), forType: .string)
     }
     override func cut(_ sender: Any?) { guard selectedRange().length > 0 else { return }; copy(sender); insertText("", replacementRange: selectedRange()) }
-    override func paste(_ sender: Any?) { if let value = NSPasteboard.general.string(forType: .string) { insertText(value, replacementRange: selectedRange()) } }
+    override func paste(_ sender: Any?) {
+        suppressSubstitutions = true; defer { suppressSubstitutions = false }
+        if let value = NSPasteboard.general.string(forType: .string) { insertText(value, replacementRange: selectedRange()) }
+    }
     func rowRect(_ entry: ParkingOutline.Entry) -> NSRect {
         guard let manager = layoutManager, let container = textContainer else { return .zero }
         manager.ensureLayout(for: container)

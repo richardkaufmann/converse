@@ -17,6 +17,7 @@ struct AppSupportCommand: Codable {
     var body: String? = nil
     var provider: String? = nil
     var directory: String? = nil
+    var enabled: Bool? = nil
     static func parse(_ text: String) -> AppSupportCommand? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.hasPrefix("```converse\n"), text.hasSuffix("\n```"),
@@ -27,7 +28,7 @@ struct AppSupportCommand: Codable {
 }
 
 enum AppSupport {
-    static let version = 5
+    static let version = 6
     static let title = "Converse App Support"
     static let connectionReply = "CONVERSE_CONNECTION_OK"
     static let guideLinks = "[Security and privacy](converse-help://security) · [Set up your first coding session](converse-help://first-session) · [Set up your first agent](converse-help://first-agent) · [Connect your devices into a Group](converse-help://first-group)"
@@ -56,6 +57,7 @@ enum AppSupport {
         Example operation: {"command":"app-control","action":"inspect"}
         Actions:
         - inspect: returns live session/agent IDs and safe configuration, not secrets or transcripts.
+        - set-substitutions: required enabled (true or false). Turns optional typed-text substitutions on/off for this Mac app, including conversation drafts and Parking Lots. Use this when the human asks; no manual file edits. Settings also has Text substitutions while typing. A typed space triggers standalone smileys/arrows/symbols; pasted text, Markdown code and command-like lines stay literal. Immediately undo with Command-Z or Backspace to restore the exact characters. After Undo, Turn off substitutions appears; while disabled, Turn on substitutions is available. Existing text is never converted when toggling.
         - help: optional query searches the installed README and returns actual documentation. Use this before explaining installation, Discord or the Meta Muse iPhone connector; do not invent instructions or assume a connection works.
         - open: target readme, first-session, first-agent, first-group, agents, discord, muse-iphone, devices or settings. Opens the real app control/help. For agents/discord an optional title identifies an existing agent; otherwise opens agent creation. Secure fields are where the human enters keys, never in chat.
         - create-session: optional provider (muse, claude, codex), title and directory (existing project folder). Defaults to your selected CLI provider and its configured working folder; reuses its saved login. Creates and displays an idle coding session without sending a prompt. Inspect first and use show-session for an existing intended session; retry with the same title/provider/folder returns the same session. No new authentication or permission bypass is enabled.
@@ -153,7 +155,11 @@ extension Store {
                 if let a = s.agent { row["agent"] = ["objective":a.objective,"repository":a.repository,"loopEnabled":a.enabled,"discordChannelID":a.discordChannelID ?? "","discordMentions":a.discordMentions ?? false,"jollyAllowed":a.jollyAllowed ?? false] }
                 return row
             }
-            return String(decoding: try JSONSerialization.data(withJSONObject: ["appVersion":ConverseAbout.versionBuild,"setupCompleted":setupCompleted,"health":converseHealth(),"sessions":rows], options: [.sortedKeys]), as: UTF8.self)
+            return String(decoding: try JSONSerialization.data(withJSONObject: ["appVersion":ConverseAbout.versionBuild,"setupCompleted":setupCompleted,"textSubstitutionsEnabled":TextSubstitutions.shared.enabled,"health":converseHealth(),"sessions":rows], options: [.sortedKeys]), as: UTF8.self)
+        case "set-substitutions":
+            guard let enabled = request.enabled else { throw AgentFailure.message("Specify enabled: true or false.") }
+            try TextSubstitutions.shared.setEnabled(enabled)
+            return "Text substitutions are now " + (enabled ? "on" : "off") + " for this Mac app. Existing text is unchanged."
         case "help":
             let book = try HelpBook.load()
             let found = book.search(request.query ?? "", limit: 6)
