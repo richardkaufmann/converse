@@ -1350,15 +1350,17 @@ final class ConversationScrollView: NSScrollView {
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if initialTailPending { needsLayout = true } }
     override func layout() {
         super.layout()
-        guard initialTailPending, window != nil, bounds.width > 0, bounds.height > 0 else { return }
-        initialTailPending = false
-        tile()
-        jumpToLatest()
+        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        if initialTailPending {
+            initialTailPending = false; tile(); jumpToLatest()
+        } else if followState.following && !selecting && !isFindBarVisible { followLatest() }
     }
     private(set) var followState = TranscriptFollowState()
     private var idleResume: DispatchWorkItem?
     private var interactionMonitor: Any?
     private var liveScrolling = false
+    private var lastScrollAt: TimeInterval = 0
+    private var settlingTail = false
     private let latest = LatestOutputButton(title: "Jump to latest", target: nil, action: nil)
     override init(frame frameRect: NSRect) { super.init(frame: frameRect); configureFollowing() }
     required init?(coder: NSCoder) { super.init(coder: coder); configureFollowing() }
@@ -1408,7 +1410,7 @@ final class ConversationScrollView: NSScrollView {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             if self.followState.resumeIfIdle(now: ProcessInfo.processInfo.systemUptime,
-                selecting: self.selecting || self.isFindBarVisible, scrolling: self.liveScrolling) {
+                selecting: self.selecting || self.isFindBarVisible, scrolling: self.liveScrolling && ProcessInfo.processInfo.systemUptime - self.lastScrollAt < 1) {
                 self.jumpToLatest()
             } else { self.scheduleResume() }
         }
@@ -1419,11 +1421,22 @@ final class ConversationScrollView: NSScrollView {
     @objc private func scrolled() { recordScroll() }
     @objc private func endedScrolling() { liveScrolling = false; recordScroll() }
     func recordScroll() {
+        lastScrollAt = ProcessInfo.processInfo.systemUptime
         initialTailPending = false
         followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
         scheduleResume(); refreshLatest()
     }
     override func scrollWheel(with event: NSEvent) { super.scrollWheel(with: event); recordScroll() }
+    func followLatest() {
+        guard !settlingTail, let text = documentView as? ConversationTextView else { return }
+        settlingTail = true; defer { settlingTail = false }
+        text.fitDocumentHeight()
+        let bottom = max(0, text.bounds.maxY - contentView.bounds.height)
+        if abs(contentView.bounds.minY - bottom) > 0.5 {
+            contentView.scroll(to: NSPoint(x: contentView.bounds.minX, y: bottom))
+            reflectScrolledClipView(contentView)
+        }
+    }
     @objc func jumpToLatest() {
         idleResume?.cancel(); followState.resume()
         (documentView as? ConversationTextView)?.explicitCursor = false
@@ -1431,7 +1444,7 @@ final class ConversationScrollView: NSScrollView {
             let tail = NSRange(location: (text.string as NSString).length, length: 0)
             text.setSelectedRange(tail); text.scrollRangeToVisible(tail)
         }
-        refreshLatest()
+        followLatest(); refreshLatest()
     }
     var showsLatest: Bool { !latest.isHidden }
     func refreshLatest() {
@@ -1499,6 +1512,7 @@ final class TranscriptFindClient: NSObject, NSTextFinderClient {
 }
 final class ConversationTextView: NSTextView {
     var explicitCursor = false
+    var handlingSelectionGesture = false
     var findOwnsSelection = false
     lazy var findClient = TranscriptFindClient(self)
     lazy var readOnlyFinder: NSTextFinder = {
@@ -1582,7 +1596,14 @@ final class ConversationTextView: NSTextView {
         findOwnsSelection = false
         (enclosingScrollView as? ConversationScrollView)?.interaction()
         if isInputWhitespace(convert(event.locationInWindow, from: nil)) { focusInput(); return }
+        handlingSelectionGesture = true
+        defer { handlingSelectionGesture = false; recordUserSelection() }
         super.mouseDown(with: event)
+    }
+    func recordUserSelection() {
+        guard !findOwnsSelection else { return }
+        explicitCursor = selectedRange().length > 0 || selectedRange().location < inputStart
+        (enclosingScrollView as? ConversationScrollView)?.interaction()
     }
     override func insertText(_ value: Any, replacementRange: NSRange) {
         if selectedRange().location < inputStart || (replacementRange.location != NSNotFound && replacementRange.location < inputStart) {
@@ -1722,6 +1743,8 @@ final class ConversationTextView: NSTextView {
     var imagePaste: ((NSImage) -> Void)?
     var droppedFileSourceDevice: String?
     override func keyDown(with event: NSEvent) {
+        handlingSelectionGesture = true
+        defer { handlingSelectionGesture = false }
         (enclosingScrollView as? ConversationScrollView)?.interaction()
         if event.keyCode == 53 { super.keyDown(with: event); return }
         if event.keyCode == 36 || event.keyCode == 76 {
@@ -1946,10 +1969,8 @@ struct ScrollingConversation: NSViewRepresentable {
             return allowed
         }
         func textViewDidChangeSelection(_ notification: Notification) {
-            if !rendering, let text = notification.object as? ConversationTextView, !text.findOwnsSelection,
-               let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown].contains(event.type) {
-                text.explicitCursor = text.selectedRange().location < (text.string as NSString).length
-                (text.enclosingScrollView as? ConversationScrollView)?.interaction()
+            if !rendering, let text = notification.object as? ConversationTextView, text.handlingSelectionGesture {
+                text.recordUserSelection()
             }
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
@@ -1962,7 +1983,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.refreshDecorations()
             text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
             text.fitDocumentHeight()
-            text.explicitCursor = text.selectedRange().length > 0 || text.selectedRange().location < length
+            text.explicitCursor = text.selectedRange().length > 0 || text.selectedRange().location < text.inputStart
             text.scrollRangeToVisible(text.selectedRange())
             if !text.explicitCursor { (text.enclosingScrollView as? ConversationScrollView)?.jumpToLatest() }
             else { (text.enclosingScrollView as? ConversationScrollView)?.interaction() }
@@ -2137,7 +2158,10 @@ struct ScrollingConversation: NSViewRepresentable {
             if addedAttachment {
                 nativeScroll?.jumpToLatest()
                 text.scrollRangeToVisible(NSRange(location: text.inputStart, length: 0))
-            } else if follow { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
+            } else if follow {
+                if let nativeScroll { nativeScroll.followLatest() }
+                else { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
+            }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
@@ -2833,7 +2857,10 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     check(scroll.contentView.bounds.maxY >= view.frame.maxY - 2, "Startup waits for the mounted pane layout before revealing the transcript tail")
     scroll.contentView.scroll(to: .zero)
     scroll.needsLayout = true; scroll.layoutSubtreeIfNeeded()
-    check(scroll.contentView.bounds.minY < 2, "Later layout does not repeat the one-time startup jump")
+    check(scroll.contentView.bounds.maxY >= view.frame.maxY - 2, "Later layout keeps automatic following at the actual document bottom")
+    scroll.contentView.scroll(to: .zero); scroll.recordScroll()
+    scroll.needsLayout = true; scroll.layoutSubtreeIfNeeded()
+    check(scroll.contentView.bounds.minY < 2, "Later layout preserves a deliberate user scroll")
     startupWindow.contentView = nil
     scroll.setFrameSize(NSSize(width: 700, height: 400)); scroll.tile()
     let longHeight = view.frame.height
@@ -2842,6 +2869,11 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     // Layout may change under us as output/images grow: that is not a user scroll.
     view.setFrameSize(NSSize(width: view.frame.width, height: view.frame.height + 500))
     check(scroll.prepareForRender(first: false), "Output growth alone never pauses automatic following")
+    view.delegate = coordinator
+    view.setSelectedRange(NSRange(location: 2, length: 0))
+    coordinator.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: view))
+    check(!view.explicitCursor, "Programmatic caret changes cannot impersonate a user planting a transcript cursor")
+    view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
     scroll.recordScroll()
     session.messages.append(Message(role: "assistant", text: "A later streamed answer"))

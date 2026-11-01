@@ -110,9 +110,13 @@ On Mac, **Command-F** (Edit → Find) searches the current transcript without ch
 
 ### Parking Lot (Mac)
 
-Click the grey **Parking Lot** in the sidebar to start keeping ideas, prompts and bugs under headings. It opens in a pane alongside your conversations. Return adds the next item; Shift-Return adds a line within an item. Collapse a heading to tuck its items away. Right-click to copy, paste, delete, or choose **Reorder** and drag the handles. Moving a heading moves its items with it. Notes save automatically on this Mac.
+Click the grey **Parking Lot** in the sidebar to keep ideas, prompts and bugs under headings. Use **P**, **1**, **2** or **3** to park it or place it beside your conversations. Return creates an item, even at the end of a heading; ⌘Return adds a line within the current entry. Right-click to create a heading, rename one, or delete an entry. There is always an empty item ready to type into at the end of each open section. Notes save automatically on this Mac.
 
-To let an agent help, select **Parking Lot · read and edit** in its existing session access list. Then ask, “Assess this feature idea and add your comments.” That shares the notes with its selected provider and permits edits. Agent comments appear beneath the idea, with the agent’s name. If you or another agent changes the notes during its run, stale edits are rejected so your work survives. Parking Lot is local to this Mac for now.
+Drag across text to select several items or headings, then copy, cut or paste normally. **Reorder** shows drag handles; moving a heading moves its items too. Click its chevron to collapse a section. Entries with comments show a comment count; right-click to read the comments and who wrote them.
+
+Ordinary sessions can help after **Teach Session To Talk To Other Sessions** (teach again after updating if needed). Try: “Look at the parking lot. Sort the ideas into Converse and KAOS headings, leaving unclear or shared ideas where they are.” The session uses the context it actually has, shows you its proposed changes, and asks before proceeding. Converse also presents the changes for review before saving. Seeing the session directory does not give the model every other session’s transcript.
+
+Agents opt in through **Parking Lot · read and edit** in their existing session access list. Then ask, “Assess this feature idea and add your comments.” That shares the notes with the selected provider and permits agent edits. Comments preserve the original idea. If you or another writer changes the notes during a run or review, stale edits are rejected so your work survives. Parking Lot is local to this Mac for now.
 
 ### Keep several sessions visible
 

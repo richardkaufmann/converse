@@ -64,6 +64,11 @@ final class ParkingLotStore: ObservableObject {
             throw AgentFailure.message("Parking Lot exceeds its size limit (500 entries, 20,000 characters per entry).")
         }
     }
+    func replaceUserRows(_ rows: [ParkingLotRow], revision: Int) throws {
+        guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
+        try Self.validate(rows)
+        if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows)) }
+    }
     func update(_ id: UUID, text: String) {
         var rows = document.rows
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].text != text else { return }
@@ -93,6 +98,10 @@ final class ParkingLotStore: ObservableObject {
     // Build and validate a whole transaction before saving. A user edit or a
     // second agent run invalidates the old revision instead of losing work.
     func apply(_ edits: ParkingLotEdits, author: String) throws {
+        let rows = try preview(edits, author: author)
+        if rows != document.rows { try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+    }
+    func preview(_ edits: ParkingLotEdits, author: String) throws -> [ParkingLotRow] {
         guard error.isEmpty else { throw AgentFailure.message(error) }
         guard edits.revision == document.revision else { throw AgentFailure.message("Parking Lot changed during this run. Read it again before editing; no edits applied.") }
         guard edits.operations.count <= 50 else { throw AgentFailure.message("Too many Parking Lot edits; no edits applied.") }
@@ -104,7 +113,9 @@ final class ParkingLotStore: ObservableObject {
                 guard let text = operation.text else { throw AgentFailure.message("A Parking Lot addition needs text.") }
                 let destination = operation.before.flatMap { id in rows.firstIndex(where: { $0.id == id }) }
                 guard operation.before == nil || destination != nil else { throw AgentFailure.message("Parking Lot destination no longer exists.") }
-                rows.insert(ParkingLotRow(heading: operation.heading ?? false, text: text, editedBy: author), at: destination ?? rows.count)
+                let id = operation.id ?? UUID()
+                guard !rows.contains(where: { $0.id == id }) else { throw AgentFailure.message("Parking Lot row ID already exists.") }
+                rows.insert(ParkingLotRow(id: id, heading: operation.heading ?? false, text: text, editedBy: author), at: destination ?? rows.count)
             case "update", "comment":
                 guard let index, let text = operation.text else { throw AgentFailure.message("Parking Lot entry no longer exists or text is missing.") }
                 if operation.action == "comment" {
@@ -124,7 +135,7 @@ final class ParkingLotStore: ObservableObject {
             }
         }
         try Self.validate(rows)
-        if rows != document.rows { try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+        return rows
     }
 }
 
@@ -142,13 +153,14 @@ struct ParkingLotSidebar: View {
                 Label("Parking Lot", systemImage: "note.text").foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
-            if lot.active {
+            HStack(spacing: 2) {
                 PaneButton(label: "P", selected: workspace.placements[ParkingLotStore.id] == nil) { workspace.park(ParkingLotStore.id) }
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: workspace.pane(for: ParkingLotStore.id, in: state.id) == pane) { show(pane) }
                 }
-            }
-        }.padding(.horizontal, 4).padding(.vertical, 5)
+                Color.clear.frame(width: 18, height: 19).accessibilityHidden(true)
+            }.frame(width: 98)
+        }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
     }
 }
 struct ParkingLotView: View {
@@ -244,16 +256,16 @@ struct ParkingLotView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Parking Lot").font(.headline).help("Return adds an item; Shift-Return adds a line. Collapse headings to focus. Moving a heading moves its items too.")
                 Spacer()
-                Button("Heading") { focused = lot.insert(heading: true) }
-                Button("Item") { focused = lot.insert() }
                 Button(reordering ? "Done" : "Reorder") { reordering.toggle() }
-            }.padding(10)
+            }.padding(8)
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
+            if !reordering {
+                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
+            } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(visibleRows) { row in
                         rowView(row)
                     }
@@ -262,6 +274,7 @@ struct ParkingLotView: View {
                 }.padding(.horizontal, 14)
             }.coordinateSpace(name: "parkingOutline")
                 .onPreferenceChange(ParkingLotFrames.self) { rowFrames = $0 }
+            }
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
     }
 }
@@ -273,6 +286,7 @@ private struct ParkingLotFrames: PreferenceKey {
 }
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
+    parkingOutlineSelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
     let lot = ParkingLotStore(folder: folder)
