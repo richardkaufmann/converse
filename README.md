@@ -114,7 +114,7 @@ On Mac, **Command-F** (Edit → Find) searches the current transcript without ch
 
 ### Parking Lots
 
-Keep ideas, prompts and bugs in named **Parking Lots**, alongside the sessions under their home device. Click the grey starter lot, or choose **Parking Lots…** or **File → New → Parking Lot…** to create another. Right-click a lot in the sidebar to rename or delete it. **P**, **1**, **2** and **3** work just as they do for conversations.
+Keep ideas, prompts and bugs in named **Parking Lots**, alongside the sessions under their home device. Click the grey starter lot, or choose **Parking Lots…** or **File → New → Parking Lot…** to create another. Right-click a lot in the sidebar to rename or delete it. **P**, **1**, **2** and **3** work just as they do for conversations. **X** deletes the lot after confirmation; a recovery copy stays on its home device.
 
 On Mac, Return creates an item, even at the end of a heading. Shift-Return creates a heading below; ⌘Return adds a line within the current entry. There is always an empty item ready to type into at the end of each open section. Notes save automatically. Right-click a heading or item for **Cut Heading**, **Copy Heading**, **Cut Item** or **Copy Item**. Cutting a heading takes its items with it. Paste those words straight into a conversation when you are ready to act on them.
 

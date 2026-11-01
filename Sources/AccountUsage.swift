@@ -80,6 +80,7 @@ struct AccountUsage: Codable, Equatable {
 struct AccountStatusView: View {
     var status: ToolStatus
     var refreshing: Bool
+    var compact: Bool = false
     var refresh: () -> Void
     @State private var showing = false
     private var usage: AccountUsage { status.accountUsage ?? AccountUsage() }
@@ -95,12 +96,12 @@ struct AccountStatusView: View {
             let warning = usage.notice != nil || limits.contains { $0.usedPercent >= 90 }
             Button { showing.toggle() } label: {
                 HStack(spacing: 4) {
-                    Text("Account")
+                    if !compact { Text("Account") }
                     Image(systemName: "circle.lefthalf.filled")
-                    Text(usage.context.map { "\($0.percent)%" } ?? "?")
+                    if !compact { Text(usage.context.map { "\($0.percent)%" } ?? "?") }
                     Image(systemName: warning ? "exclamationmark.triangle.fill" : "gauge.with.dots.needle.50percent")
                         .foregroundStyle(warning ? Color.orange : Color.secondary)
-                    Text(summary)
+                    if !compact { Text(summary) }
                     if old || reset { Image(systemName: "clock").foregroundStyle(.secondary) }
                 }
             }.buttonStyle(.plain).fixedSize()

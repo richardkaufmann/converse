@@ -2226,49 +2226,68 @@ struct Conversation: View {
                 }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(10)
             } else if session.agent != nil { AgentControls(session: session) } else {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 10) {
-                    Text(session.status)
-                    Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary)
-                    Button(store.sessionLoginLabel(session)) { AppDelegate.shared.chooseLogin(session) }
-                        .buttonStyle(.borderless).disabled(session.busy || session.changingSetting)
-                        .help("Choose an existing login, add a new login, or sign in again. /login opens the same picker.")
-                    Spacer(minLength: 0)
-                    Text("Last turn: " + session.toolStatus.usage)
-                    Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
-                }
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { settingControls }.fixedSize(horizontal: true, vertical: false)
-                    HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 10) {
+                            Text(session.status).help(session.status)
+                            Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary)
+                            loginButton
+                            Text("Last turn: " + session.toolStatus.usage).help("Last turn: " + session.toolStatus.usage)
+                            refreshButton
+                        }
+                        HStack(spacing: 12) { settingControls }.disabled(session.changingSetting)
+                        AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
+                    }.fixedSize(horizontal: true, vertical: false)
+                    HStack(spacing: 8) {
+                        Text(session.status).lineLimit(1).truncationMode(.tail).help(session.status)
+                        Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary).fixedSize()
                         Spacer(minLength: 0)
-                        Menu { settingControls } label: { Image(systemName: "ellipsis.circle") }
-                            .accessibilityLabel("Session settings").help("Model, effort, restrictions and context")
+                        AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus, compact: true) { store.refreshStatus(session, quota: true) }
+                        Menu {
+                            Text("Account: " + store.sessionLoginLabel(session))
+                            loginButton
+                            Text("Last turn: " + session.toolStatus.usage)
+                            Button("Refresh status") { store.refreshStatus(session, quota: true) }.disabled(session.probingStatus)
+                            Divider()
+                            Group { settingControls }.disabled(session.changingSetting)
+                        } label: { Image(systemName: "ellipsis.circle") }
+                            .fixedSize().accessibilityLabel("Session settings")
+                            .help("Account: " + store.sessionLoginLabel(session) + "\nLast turn: " + session.toolStatus.usage + "\nModel, effort, permissions and account settings")
                     }
-                }.disabled(session.changingSetting)
-                AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
+                }
                 if !session.settingNotice.isEmpty { Text(session.settingNotice).foregroundStyle(.primary).help(session.settingNotice) }
                 if !session.probeError.isEmpty { ProviderStatusRepairView(session: session) }
             }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .help("Settings can be selected while running. Muse permissions apply live, models at the next model call, and effort at the next turn. Other CLI settings apply next turn. The login belongs to this session; changing it preserves this conversation and leaves other sessions unchanged. Token usage is not account quota.")
             }
         }.background(Color(nsColor: .textBackgroundColor)).onAppear { Store.shared.refreshStatus(session) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if !session.busy { store.refreshStatus(session) } }
     }
+    private var loginButton: some View {
+        Button { AppDelegate.shared.chooseLogin(session) } label: {
+            Text(store.sessionLoginLabel(session)).lineLimit(1).truncationMode(.middle)
+        }.buttonStyle(.borderless).disabled(session.busy || session.changingSetting)
+            .help("Account: " + store.sessionLoginLabel(session) + "\nChoose an existing login, add a new login, or sign in again. /login opens the same picker.")
+    }
+    private var refreshButton: some View {
+        Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }
+            .buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
+    }
     @ViewBuilder private var settingControls: some View {
-                        Menu(session.toolStatus.model) {
+                        Menu("Model: " + session.toolStatus.model) {
                             if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "model") }; Divider() }
                             ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
                             Divider()
                             Button("Other model…") { store.chooseCustomModel(session) }
                         }.menuStyle(.borderlessButton).fixedSize()
-                        Menu(session.toolStatus.effort) {
+                        Menu("Effort: " + session.toolStatus.effort) {
                             if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "effort") }; Divider() }
                             if session.availableEfforts.isEmpty { Text(session.probingStatus ? "Loading supported effort levels…" : "This model has no reported effort options") }
                             ForEach(session.availableEfforts, id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
                             Divider()
                             Button("Other effort…") { store.chooseCustomEffort(session) }
                         }.menuStyle(.borderlessButton).fixedSize()
-                        Menu(session.toolStatus.access) {
+                        Menu("Permissions: " + session.toolStatus.access) {
                             if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "access") }; Divider() }
                             ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
                         }.menuStyle(.borderlessButton).fixedSize()
@@ -2279,6 +2298,29 @@ struct Conversation: View {
                         }
     }
 
+}
+
+struct SidebarActionButton: View {
+    let emoji: String
+    let title: String
+    let showTitle: Bool
+    let help: String
+    var badge: Int = 0
+    let action: () -> Void
+    @State private var hovered = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(emoji).font(.system(size: 15))
+                if showTitle { Text(title).font(.system(size: 11)).lineLimit(1).fixedSize() }
+                if badge > 0 { Text(String(badge)).font(.system(size: 10, weight: .bold)).foregroundStyle(.orange) }
+            }.frame(maxWidth: .infinity, minHeight: 28).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .background(hovered ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(hovered ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.12), lineWidth: 1))
+            .onHover { hovered = $0 }.help(help).accessibilityLabel(title)
+    }
 }
 
 struct RootView: View {
@@ -2309,11 +2351,15 @@ struct RootView: View {
                         OrderedDeviceSidebar(workspace: workspace, state: state)
                     }.padding(.top, 6)
                 }
-                Button("Parking Lots…") { ParkingLotLibrary.shared.promptNew() }.buttonStyle(.plain).padding(.vertical, 4)
-                Button("Agents…") { AgentWindows.shared.create() }.buttonStyle(.plain).padding(.vertical, 4)
-                Button { state.deviceConnect = true } label: {
-                    HStack { Text("Groups"); Spacer(); if !devices.groupRequests.isEmpty { Text(String(devices.groupRequests.count)).bold().foregroundStyle(.orange) } }
-                }.buttonStyle(.plain).padding(.vertical, 6)
+                HStack(spacing: 6) {
+                    SidebarActionButton(emoji: "🚗", title: "Parking Lots", showTitle: sidebar.size.width >= 320,
+                        help: "Create a Parking Lot") { ParkingLotLibrary.shared.promptNew() }
+                    SidebarActionButton(emoji: "😎", title: "Agents", showTitle: sidebar.size.width >= 320,
+                        help: "Create an agent") { AgentWindows.shared.create() }
+                    SidebarActionButton(emoji: "👥", title: "Groups", showTitle: sidebar.size.width >= 320,
+                        help: "Manage Groups" + (devices.groupRequests.isEmpty ? "" : " · \(devices.groupRequests.count) pairing requests"),
+                        badge: devices.groupRequests.count) { state.deviceConnect = true }
+                }.padding(.vertical, 4)
                 HStack {
                     Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }
                     Spacer()

@@ -181,15 +181,17 @@ struct ParkingLotSidebar: View {
     var body: some View {
         HStack(spacing: 3) {
             Button { show() } label: {
-                Label(lot.name, systemImage: "note.text").foregroundStyle(lot.active ? Color.primary : Color.secondary)
+                SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
+                    .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane) { show(pane) }
                 }
-                Color.clear.frame(width: 18, height: 19).accessibilityHidden(true)
+                PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
+                    .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")
             }.frame(width: 98)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .contextMenu {

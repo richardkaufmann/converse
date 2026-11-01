@@ -170,10 +170,9 @@ struct RemoteSidebarRow: View {
             }
             ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
                 .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
-            SessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            if showsModel {
-                if row.engine == "parking" { Image(systemName: "note.text").frame(width: 24) }
-                else { ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model) }
+            SessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent", isParkingLot: row.engine == "parking").frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            if showsModel && row.engine != "parking" {
+                ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.model)
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             HStack(spacing: 2) {
@@ -257,8 +256,8 @@ struct RemotePane: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
-                if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
-                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent").font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                if let engine = transcript?.engine, !engine.isEmpty, !isParkingLot { ProviderLogo(engine: engine) }
+                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent", isParkingLot: isParkingLot).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Text("on " + homeName).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.tail).help("This session runs on " + homeName + ".")
                 Spacer(minLength: 0)
@@ -390,8 +389,8 @@ struct RemotePane: View {
             if let transcript, !isParkingLot {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(transcript.status).lineLimit(1)
-                        if let account = transcript.accountName { Text(account).lineLimit(1) }
+                        Text(transcript.status).lineLimit(1).help(transcript.status)
+                        if let account = transcript.accountName { Text(account).lineLimit(1).truncationMode(.middle).help(account).layoutPriority(-1) }
                         Spacer(minLength: 0)
                     }
                     ViewThatFits(in: .horizontal) {

@@ -330,10 +330,12 @@ struct SessionPane: View {
 struct SessionName: View {
     let title: String
     let isAgent: Bool
+    var isParkingLot: Bool = false
     var body: some View {
         HStack(spacing: 4) {
             Text(title).lineLimit(1).truncationMode(.tail)
-            if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
+            if isAgent { Text("😎").fixedSize().help("Agent session").accessibilityLabel("Agent") }
+            if isParkingLot { Text("🚗").fixedSize().help("Parking Lot").accessibilityLabel("Parking Lot") }
         }
     }
 }
