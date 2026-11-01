@@ -7,8 +7,11 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <Version>0.5.57</Version>
-    <InformationalVersion>0.5.57+81</InformationalVersion>
+    <!-- Direct builds and tests use the same identity as packaged releases. -->
+    <ConverseVersionJson>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../VERSION.json'))</ConverseVersionJson>
+    <Version>$([System.Text.RegularExpressions.Regex]::Match('$(ConverseVersionJson)', '&quot;version&quot;\s*:\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</Version>
+    <ConverseBuildNumber>$([System.Text.RegularExpressions.Regex]::Match('$(ConverseVersionJson)', '&quot;build&quot;\s*:\s*(\d+)').Groups[1].Value)</ConverseBuildNumber>
+    <InformationalVersion>$(Version)+$(ConverseBuildNumber)</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute" Condition="'$(ConverseSourceCommit)' != ''">
