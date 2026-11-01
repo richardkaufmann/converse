@@ -6,7 +6,7 @@
 
 Converse is one app for conversations with **Muse, Claude Code, and Codex** (AI assistants from Meta, Anthropic and OpenAI). Each conversation is a **session**: a place to give a model a task, read its answers, and keep working with it. Answers appear as formatted, selectable text, with images alongside them.
 
-its standout features
+Its standout features:
 
 1. **[It’s multi-session.](#keep-several-sessions-visible)** You can have many sessions open simultaneously, and have up to three of them up, side by side, in each of the app’s desktop windows.
 2. **[It’s multi-account.](#accounts)** Each session is logged into its own provider account—e.g. a user can be logged into two different Muse accounts, three different Codex accounts, etc. In practice this is useful to balance token budgets, but also to get different perspectives on development efforts.
