@@ -41,3 +41,15 @@ The important next measurements are first successful provider response, setup co
 Open Converse Demo with no sessions. Choose a provider and complete the real login/check gate. Ask App Support what it can help set up. Open its Agent Setup to reveal that it is the same agent feature the user can create: a clear goal, the Converse repository, a 1,440-minute loop and no monitored sessions by default. Use Run once to show a sourced report, then pair a demo phone and continue the same conversation there. If nothing needs attention, let the agent say that plainly; do not manufacture a critical issue.
 
 Suggested narration: **“We built Converse using Converse. Its first assistant is also its own support agent: it teaches you the app, checks the project's health, and shows you how to give your own agents an ongoing job.”**
+
+## The user’s test: what can I actually do with it?
+
+Lead with combined workflows, not a catalogue of model names. Richard’s introduction makes the case concrete:
+
+- Ask a Mac session to coordinate a Windows build and installation with a Windows session.
+- Develop a Linux service from the same UI without maintaining a separate terminal workflow for every provider.
+- Paste an image into a session on another system; isolate the relevant objects with SAM before sending it.
+- Tell App Support what you want to set up. Let it read the detailed documentation and work through supported actions with you.
+- Use the same agent objectives, schedules and evidence tools to monitor Converse itself and your own projects.
+
+These examples strengthen the case for the combination of peer Groups, messaging, supervision and app control. They do not establish that no competitor can reproduce a particular workflow. Describe what the user gets before explaining the architecture. Keep platform/tool qualifications in the detailed guide. App Support and GitHub bug reporting do not depend on Discord; Discord is one optional integration.

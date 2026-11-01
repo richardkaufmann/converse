@@ -6,33 +6,31 @@
 
 Converse is one app for conversations with **Muse, Claude Code, and Codex** (AI assistants from Meta, Anthropic and OpenAI). Each conversation is a **session**: a place to give a model a task, read its answers, and keep working with it. Answers appear as formatted, selectable text, with images alongside them.
 
-Its standout features:
+its standout features
 
-1. **It’s multi-session.** Keep many conversations open, with up to three displayed side by side on desktop and iPad. On iPhone, one or two sessions stack vertically to fit the smaller screen.
-2. **It’s multi-provider.** Mix and match Meta, Anthropic and OpenAI. Use the assistant that suits each task without changing apps.
-3. **It’s multi-system.** Sessions can run on Mac, Windows and Linux. The app’s UI runs on Mac, Windows, iPad and iPhone.
-4. **It’s distributed.** Your systems can join persistent, securely paired, peer-to-peer **Groups**. Each app can display and control sessions from another system in its Group. The session’s **home** (the computer with its login, tools and files) continues to do the work; no central cloud coordinator is required for the Group.
-5. **It hosts agents.** An agent is a session with an ongoing objective. You can talk to it, run it once, or let it check periodically or respond to an enabled external trigger.
-6. **It’s chatty.** Sessions can talk to one another: **Tell** sends a message; **Ask** expects a reply. Agents can supervise selected sessions and assess progress toward shared goals. The **switchboard** (Converse’s session messaging system) tracks unanswered requests and can inject a queued message to break a detected mutual-wait logjam, with bounded recovery rather than endless retries.
-7. **It talks to the outside world.** Agents can use GitHub issues, pull requests and releases as evidence. On Mac, they can exchange Discord messages and respond through **Jolly** (the connector to Meta’s Muse mobile app). Meta API agents can also use optional web search to research topics and assess sentiment; available tools depend on the provider route and configured integrations.
-8. **It has polish.** Paste images into local or remote sessions. On Mac, right-click an image to use Meta’s **SAM** (image segmentation) tools and add just the relevant objects to your prompt, with transparent backgrounds. Responses render Markdown as headings, tables, lists and code. Copy whole prompts or responses from their context menus, or export a consolidated document from selected local and Group sessions on Mac. Quit and restart: your conversations, drafts and queued messages are still there. Active work requires the home app or Linux service to be running.
-9. **You can talk to your agent.** On Mac, explicitly start a spoken conversation, then stop it when you’re done. Voice and image helpers have their own Meta key and permission requirements, independent of the model answering your session.
+1. **It’s multi-session.** You can have many sessions open simultaneously, and have up to three of them up, side by side, in each of the app’s desktop windows.
+2. **It’s multi-provider.** Meta, OpenAI, Anthropic can be mixed and matched as desired.
+3. **It’s multi-system.** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
+4. **It’s distributed.** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent.
+5. **It hosts agent sessions.** These sessions have initiative and can start periodically or via an external stimulus.
+6. **It’s chatty.** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
+7. **It talks to the outside world.** Agents interact with GitHub (to track PRs, issues, updates), Discord (to send and receive messages), and Meta’s Muse mobile app (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
+8. **It has polish.** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
+9. **You can enter into spoken conversations with your agent.**
 
-These features combine in interesting ways. **Converse App Support** is a built-in agent taught how to use this README and the app’s setup controls. It can help you configure agents and understand provider setup, and—with the relevant integrations enabled—you can reach it through Discord or Muse Jolly. Its default daily check watches this repository for serious bugs and version updates. It uses the same agent framework you can use for your own projects: an objective, a schedule, selected evidence and a teaching prompt, backed by app controls. It reports updates; it does not silently install them.
+These features combine in interesting ways. There’s a built-in support agent that knows this README, and can help you avoid fiddly UIs to configure providers, agents, etc. You can talk with this support agent via Discord or Muse Jolly. And it checks daily for bugs and version updates of the app! This uses a teaching prompt injected into a normal Converse agent.
 
-You can build an app across systems. A session on a Mac can ask a Windows session to finish producing a Windows version and install it, using the tools and permissions available on that Windows machine. That is how we develop Converse itself.
+You can build an app that is multi-system. One session on a Mac, for example, can “tell” a Windows session to finish producing a Windows version of the app and install it. That’s how we build Converse!
 
-You can work on Linux apps and services from a Mac or PC without juggling different interfaces. Linux runs Converse as a **headless service** (without its own graphical window). After installing it, pairing it and configuring the providers you need, create and use its sessions from another Group member. Work runs where the files and tools live.
+You can build Linux apps and services on a Mac or PC without multiple windows, or having to deal with complex different UIs. Since Linux is headless, you log into it to set up Converse and its providers. From there you can start sessions on those providers from your Mac or PC.
 
-Cross-system sessions also make everyday tasks easier. Ask a session to generate an image, then paste that image into a session running on another system. The image travels with the prompt; you do not need to find a shared folder first. Dragging a filename is useful too, but deliberately inserts a file reference rather than uploading its contents.
+The cross-system session support also greatly eases development. Ask a session to generate an image, paste it into another session running on a different system. It just works!
 
-The rest of this README walks through installing Converse and using it, from your first session to agents and Groups. A friendly suggestion: you don’t have to read it all! Start with the Mac app, choose a provider, and let App Support walk you through sign-in and your first successful response. From there, ask what you want to set up. It can explain the steps, open the right controls and perform supported setup actions; you still enter secrets securely and confirm device pairing yourself. Windows agents are supported, but guided first-launch onboarding is currently available in the separate Windows Setup Preview and Demo editions.
-
-Have feedback? Ask App Support to help describe the problem and find the right place to report it. Filing a GitHub issue currently requires the GitHub interface or a coding session with suitable tools and access; it is not a built-in App Support action yet.
-
-This guide is also bundled with each app as searchable, offline **Converse Help**: open **Help → Converse Help** on desktop, or **Help** in the mobile app’s menu. GitHub may contain newer instructions than your installed version. The [security and privacy section](#security-and-privacy) explains what is shared, which permissions matter and how keys are stored.
+The rest of this README walks through installing Converse, and then using it. A friendly suggestion: AI wrote what follows (it’s kind of grim, to be honest). Let AI read the details! You tell App Support what you want to do; it can work through the instructions with you. Install the app on a Mac, and the support agent will walk you through provisioning your first provider on that system. From there you can just chat and have it help set up multiple systems (including headless Linux), agents, whatever. It’ll ask for what it needs. You can give feedback too: “File a bug about blah blah blah” gets a report ready for GitHub. You review it and send it. No Discord account needed.
 
 Enjoy.
+
+This guide is also bundled as searchable, offline **Converse Help**: open **Help → Converse Help** on desktop, or **Help** in the mobile menu. The [security and privacy section](#security-and-privacy) explains data sharing and key storage.
 
 ## Download
 
@@ -46,6 +44,9 @@ The repository and release links currently require access to the private reposit
 
 ## First launch
 
+You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later.
+
+
 You need **one working provider** before you can ask an assistant for help. A provider is the service behind the model: Meta Muse, Anthropic's Claude, or OpenAI's Codex. Its account and usage charges are separate from Converse.
 
 On a new Mac installation, Converse shows **Converse App Support** (the built-in assistant for help with this app) and asks you to pick a provider. Choose just one:
@@ -58,6 +59,20 @@ On a new Mac installation, Converse shows **Converse App Support** (the built-in
 App Support can explain the app, read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
 
 **Windows and existing installations:** use **Converse → Setup** and **Settings → Models & sessions** to select an installed provider, its login, and a working folder. The App Support first-launch flow is currently available in the isolated Windows Setup Preview, not normal Windows startup. Upgrading an existing installation preserves its sessions and does not rerun onboarding.
+
+### Report a bug
+
+Tell App Support what went wrong and ask it to file a bug. It prepares a title and description and opens a report you can edit. You can also choose **Help → Report a Bug on GitHub…** on desktop, or **Report a Bug on GitHub…** in the mobile menu.
+
+**Recommended: save a GitHub token once.** A token is an access credential you create on GitHub. Paste it into the masked **GitHub token** field in the report window or Agent Setup, then save. Converse manages it with your other credentials. After that, review your report and click **Submit report**; Converse files it and gives you the issue link. You do not need to leave the app or sign in each time.
+
+The token needs access to `richardkaufmann/converse` and permission to create issues. For a fine-grained token, select the repository and **Issues: read and write**. Read-only monitoring access is not enough. [GitHub’s token guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) explains creation and expiry. GitHub currently limits fine-grained tokens for outside collaborators and contributions to other owners’ public repositories; in those cases a classic token may be needed. A classic token’s `public_repo` scope covers public repositories; private-repository access needs `repo`, which is broader. Choose the smallest access that works for your account and repository.
+
+**Fallback: submit it yourself.** Without a token, Converse still prepares the report. Use **Copy description**, open GitHub, sign in, paste the text and submit. **Continue on GitHub…** can prefill a short report for you. This is the backup path; saving a token makes regular reporting easier. Mobile currently opens GitHub’s report form directly.
+
+Reports go to `richardkaufmann/converse`. While the repository is private, your GitHub account needs access; a login alone does not grant it. A report window or browser draft is not yet a filed issue. If sending fails or times out, check the issue list before trying again: Converse does not automatically repost. For a description too long for a browser link, use **Copy description** and paste it into a new issue on GitHub.
+
+Only the report text you review is included. Logs, screenshots, attachments and other conversations are not added automatically. If you use the browser route, its prefilled report link contains that text and may appear in browser history. Keep secrets and unrelated private information out of reports. Saved GitHub credentials stay in the Mac Keychain or Windows Credential Manager; they are never given to the model or placed in a report. Discord is not involved.
 
 ## Set up your first coding session
 
@@ -78,7 +93,7 @@ Muse can show approval questions in the pane. Claude and Codex run without their
 
 Your editable draft is **blue** at the bottom of the conversation. Sent prompts become *italic* in the normal text color; responses render headings, lists, code and tables. A spinning rainbow indicator means work is in progress. A waiting approval needs your attention; **Stop** interrupts an active turn.
 
-You can type the next request while the assistant works. Sending it adds it to a **queue** (the list of messages waiting to run, shown above the transcript). **Inject now** interrupts the current turn and sends that queued message next. **Inject all** sends the queue together in order. Stop also pauses the queue; use **Resume queue** when ready. Drafts, queued messages and attachments survive relaunch.
+You can type the next request while the assistant works. Sending it adds it to a **queue** (the list of messages waiting to run, shown above the transcript). **Inject now** interrupts the current turn and sends that queued message next. **Inject all** sends the queue together in order. Stop also pauses the queue; use **Resume queue** when ready. Drafts, queued messages and attachments survive relaunch. Quitting preserves the conversation; new work needs its home app or Linux service to be running.
 
 Scroll up to read earlier messages without being pulled back down by an idle timer. Typing in that pane or choosing **Jump to latest** returns you to the draft. Right-click a message to copy the whole prompt or response, or select just the text you want.
 
