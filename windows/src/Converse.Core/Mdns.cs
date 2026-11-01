@@ -20,6 +20,7 @@ public sealed class MdnsDiscovery : IDisposable
     private ConverseGroup? _group;
     private string _deviceId;
     private CancellationTokenSource? _shutdown;
+    private readonly MdnsResponseCache _responses = new();
     public event Action<MdnsService>? Found;
 
     public MdnsDiscovery(string instanceName, int port, ConverseGroup? group = null, string deviceId = "")
@@ -97,48 +98,9 @@ public sealed class MdnsDiscovery : IDisposable
             }
             return;
         }
-        string? instance = null;
-        string? host = null;
-        var port = 0;
-        Dictionary<string, string>? txt = null;
-        var addresses = new Dictionary<string, string>();
-        var records = answers + ((packet[8] << 8) | packet[9]) + ((packet[10] << 8) | packet[11]);
-        for (var i = 0; i < records && offset + 10 <= packet.Length; i++)
-        {
-            var name = ReadName(packet, ref offset);
-            var type = (packet[offset] << 8) | packet[offset + 1];
-            var rdLength = (packet[offset + 8] << 8) | packet[offset + 9];
-            var rdOffset = offset + 10;
-            if (type == 12 && string.Equals(name, ServiceType, StringComparison.OrdinalIgnoreCase))
-            {
-                var p = rdOffset;
-                instance = ReadName(packet, ref p);
-            }
-            else if (type == 33 && rdLength >= 7)
-            {
-                port = (packet[rdOffset + 4] << 8) | packet[rdOffset + 5];
-                var p = rdOffset + 6;
-                host = ReadName(packet, ref p);
-            }
-            else if (type == 1 && rdLength == 4)
-            {
-                addresses[name] = $"{packet[rdOffset]}.{packet[rdOffset + 1]}.{packet[rdOffset + 2]}.{packet[rdOffset + 3]}";
-            }
-            else if (type == 16 && rdLength > 0)
-            {
-                txt ??= new Dictionary<string, string>();
-                foreach (var (key, value) in ParseTxt(packet.Skip(rdOffset).Take(rdLength).ToArray()))
-                    txt[key] = value;
-            }
-            offset = rdOffset + rdLength;
-        }
-        if (instance is not null && host is not null && port > 0)
-        {
-            var display = instance.Split('.')[0];
-            if (!string.Equals(display, _instanceName, StringComparison.OrdinalIgnoreCase))
-                Found?.Invoke(new MdnsService(display, addresses.GetValueOrDefault(host, host), port,
-                    GroupHint(txt), txt?.GetValueOrDefault("device"), DateTime.UtcNow));
-        }
+        foreach (var service in _responses.Read(packet, DateTime.UtcNow))
+            if (!string.Equals(service.Name, _instanceName, StringComparison.OrdinalIgnoreCase))
+                Found?.Invoke(service);
     }
 
     private byte[] BuildResponse(string queryName)
