@@ -2339,7 +2339,7 @@ struct RootView: View {
                 HStack(spacing: 6) {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    Image(systemName: "sparkles").frame(width: 24).help("Assistant provider; hover over an icon for the model")
+                    Color.clear.frame(width: 24, height: 12).accessibilityHidden(true)
                     Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.reordering.toggle() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {

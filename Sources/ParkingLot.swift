@@ -179,11 +179,13 @@ struct ParkingLotSidebar: View {
         workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
     }
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 6) {
+            Color.clear.frame(width: 12, height: 12).accessibilityHidden(true)
             Button { show() } label: {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
+            }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
+            ProviderLogo(engine: "parking").frame(width: 24)
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
                     .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
@@ -192,7 +194,7 @@ struct ParkingLotSidebar: View {
                 }
                 PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")
-            }.frame(width: 98)
+            }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .contextMenu {
                 Button("Rename Parking Lot…") { ParkingLotLibrary.shared.promptRename(lot) }
