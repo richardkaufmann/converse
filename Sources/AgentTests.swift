@@ -73,6 +73,29 @@ import Foundation
     var config = AgentConfig(); config.enabled = true; config.turnLimit = 1; config.nextRunAt = now
     check(config.reserveRun(at: now) && config.turnLimit == 1 && config.enabled && !config.reserveRun(at: now), "Agent reserves a due loop once without exhausting future scheduled loops")
     do {
+        var daily = AgentConfig(); daily.enabled = true; daily.intervalSeconds = 86400
+        daily.nextRunAt = now
+        check(daily.reserveRun(at: now), "Daily loop records its first check")
+        var restored = try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(daily))
+        try restored.restoreSchedule(at: now.addingTimeInterval(3600))
+        check(restored.nextRunAt == now.addingTimeInterval(86400) && !restored.due(at: now.addingTimeInterval(3600)), "Restart an hour after a check preserves the remaining 23 hours")
+        let overdue = now.addingTimeInterval(3 * 86400)
+        try restored.restoreSchedule(at: overdue)
+        check(restored.reserveRun(at: overdue) && !restored.reserveRun(at: overdue) && restored.nextRunAt == overdue.addingTimeInterval(86400), "Several offline days produce one catch-up check and the next check a day later")
+        restored.nextRunAt = nil
+        try restored.restoreSchedule(at: overdue.addingTimeInterval(3600))
+        check(restored.nextRunAt == overdue.addingTimeInterval(86400), "Missing deadline reconstructs from persisted last loop instead of restart time")
+        var edit = restored.wire(home: "local"); edit.objective = "Updated objective"
+        try restored.apply(edit)
+        check(restored.nextRunAt == overdue.addingTimeInterval(86400), "Unrelated agent settings save preserves the deadline")
+        restored.enabled = false; restored.nextRunAt = nil
+        try restored.restoreSchedule(at: overdue)
+        check(!restored.due(at: overdue) && restored.nextRunAt == nil, "Restart never re-enables a paused loop")
+        var fresh = AgentConfig(); fresh.enabled = true; fresh.intervalSeconds = 86400
+        try fresh.restoreSchedule(at: now)
+        check(fresh.nextRunAt == now.addingTimeInterval(86400), "Never-run loop without saved history waits its first interval")
+    } catch { check(false, "Restart cadence fixture: " + error.localizedDescription) }
+    do {
         let instant = ISO8601DateFormatter().date(from: "2026-11-27T17:50:00Z")!
         var scheduled = AgentConfig(); scheduled.enabled = true; scheduled.turnLimit = 3
         scheduled.scheduleText = "every 20 minutes while the us stock market is open"; scheduled.scheduleTimeZone = "America/New_York"; scheduled.nextRunAt = instant

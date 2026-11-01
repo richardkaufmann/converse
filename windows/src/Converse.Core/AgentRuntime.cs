@@ -8,6 +8,7 @@ public sealed class AgentConfig
 {
     public DeviceAgentSettings Settings { get; set; } = new();
     public DateTime? NextRunUtc { get; set; }
+    public DateTime? LastLoopUtc { get; set; }
     public int? SupportDefaultsVersion { get; set; }
     public string Attention { get; set; } = "";
     public string Memory { get; set; } = "";
@@ -18,6 +19,14 @@ public sealed class AgentConfig
     public string? LastArtDirection { get; set; }
     public int LoopsSinceScoreboard { get; set; }
     public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
+    public void RestoreSchedule(DateTime now)
+    {
+        if (!CanSchedule) return;
+        var rule = AgentSchedule.Compile(Settings);
+        // Preserve overdue deadlines so one normal tick catches up, without
+        // replaying all missed intervals or resetting the clock on each launch.
+        NextRunUtc ??= rule.Next(LastLoopUtc ?? now);
+    }
     public string LoopStatus => !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.TurnLimit} maximum turns per loop";
     public void Apply(DeviceAgentSettings proposed)
     {
@@ -30,10 +39,14 @@ public sealed class AgentConfig
         var rule = AgentSchedule.Compile(proposed);
         var next = rule.Next(DateTime.UtcNow);
         if (proposed.Enabled && next is null) throw new ArgumentException("No future date in this calendar. Review the schedule.");
+        var keepDeadline = Settings.Enabled && proposed.Enabled && NextRunUtc is not null
+            && Settings.IntervalSeconds == proposed.IntervalSeconds
+            && Settings.ScheduleText == proposed.ScheduleText && Settings.ScheduleTimeZone == proposed.ScheduleTimeZone;
         proposed = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(proposed));
         proposed.ArtDirection ??= Settings.ArtDirection; // Old editors must preserve owner art direction.
         proposed.Revision = checked((Settings.Revision ?? 0) + 1);
-        Settings = proposed; NextRunUtc = proposed.Enabled ? next : null;
+        Settings = proposed;
+        if (!keepDeadline) NextRunUtc = proposed.Enabled ? next : null;
     }
 }
 
@@ -58,7 +71,7 @@ public sealed class AgentRuntime
     {
         _store = store; _devices = devices; store.AgentRun = RunAsync;
         foreach (var session in store.Sessions.Where(s => s.Agent?.CanSchedule == true))
-            try { session.Agent!.NextRunUtc = AgentSchedule.Compile(session.Agent.Settings).Next(DateTime.UtcNow); }
+            try { session.Agent!.RestoreSchedule(DateTime.UtcNow); }
             catch { session.Agent!.Settings.Enabled = false; session.Agent.Attention = "Review the saved schedule."; }
         store.Save();
     }
@@ -81,6 +94,7 @@ public sealed class AgentRuntime
                 var rule = AgentSchedule.Compile(config.Settings);
                 if (rule.Next(now) is null) throw new InvalidOperationException("Supported calendar exhausted. Update the schedule.");
                 if (config.NextRunUtc > now || !rule.Permits(now)) continue;
+                config.LastLoopUtc = now;
                 config.NextRunUtc = rule.Next(now);
                 session.Pending.Add(new PendingPrompt { Text = "[Agent loop tick] Check progress using current evidence. Refresh the scoreboard when due.", Autonomous = true, AgentLoopTick = true });
                 _store.Save(); _store.RunNext(session);

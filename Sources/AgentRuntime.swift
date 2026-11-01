@@ -15,9 +15,11 @@ import Foundation
         let namedSupport = Store.shared.sessions.filter { $0.title == AppSupport.title && $0.agent != nil }
         if namedSupport.count == 1 { namedSupport[0].supportAssistant = true }
         for session in Store.shared.sessions where session.supportAssistant { Store.shared.configureSupportAgent(session) }
-        // Sleep/relaunch never causes a burst of missed ticks.
+        // Resume persisted deadlines; the normal tick runs overdue work once,
+        // respecting paused queues, busy sessions and calendar windows.
         for session in Store.shared.sessions where session.agent?.enabled == true {
-            session.agent?.nextRunAt = session.agent?.nextScheduledRun(after: Date())
+            do { try session.agent?.restoreSchedule(at: Date()) }
+            catch { session.agent?.enabled = false; session.agent?.attention = "Review the saved schedule." }
         }
         Store.shared.save()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }

@@ -39,6 +39,7 @@ struct AgentConfig: Codable, Equatable {
     var loopsSinceScoreboard: Int? = nil
     var enabled = false
     var nextRunAt: Date? = nil
+    var lastLoopAt: Date? = nil
     var attention = ""
     var artDirection: String? = nil
     var lastArtDirection: String? = nil
@@ -88,9 +89,17 @@ struct AgentConfig: Codable, Equatable {
     var canSchedule: Bool { enabled && turnLimit > 0 }
     func scheduleRule() throws -> AgentSchedule { try AgentSchedule.compile(interval: intervalSeconds, text: scheduleText, zone: scheduleTimeZone) }
     func nextScheduledRun(after date: Date) -> Date? { (try? scheduleRule())?.next(after: date) }
+    mutating func restoreSchedule(at now: Date) throws {
+        guard canSchedule else { return }
+        let rule = try scheduleRule()
+        // The saved deadline already reflects the last reserved check. Keep it,
+        // including an overdue deadline: the normal tick coalesces missed runs.
+        if nextRunAt == nil { nextRunAt = rule.next(after: lastLoopAt ?? lastRunAt ?? now) }
+    }
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now && (try? scheduleRule().permits(now)) == true }
     mutating func reserveRun(at now: Date) -> Bool {
         guard due(at: now) else { return false }
+        lastLoopAt = now
         nextRunAt = nextScheduledRun(after: now)
         return true
     }
@@ -381,6 +390,7 @@ extension AgentConfig {
         }
         let schedule = try AgentSchedule.compile(interval: wire.intervalSeconds, text: wire.scheduleText, zone: wire.scheduleTimeZone)
         guard !wire.enabled || schedule.next(after: Date()) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
+        let keepDeadline = enabled && wire.enabled && (try? scheduleRule()) == schedule && nextRunAt != nil
         settingsChanged()
         if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
         objective = wire.objective; self.repository = repository; model = wire.model
@@ -391,7 +401,7 @@ extension AgentConfig {
         if let share = wire.discordShareSessionInformation { discordShareSessionInformation = share }
         if let direction = wire.artDirection { artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }
         generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
-        nextRunAt = enabled ? schedule.next(after: Date()) : nil
+        if !keepDeadline { nextRunAt = enabled ? schedule.next(after: Date()) : nil }
     }
 }
 

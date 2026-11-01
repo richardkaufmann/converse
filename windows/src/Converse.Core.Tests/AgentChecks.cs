@@ -8,6 +8,21 @@ static class AgentChecks
     public static async Task Run(Action<bool,string> check, Func<DeviceSyncService,DeviceSyncService,Func<bool>,Task<bool>> join)
     {
         DateTime D(string text) => DateTime.Parse(text, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+        var fired = D("2026-10-28T12:00:00Z");
+        var dailyLoop = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 86400 }, LastLoopUtc = fired, NextRunUtc = fired.AddDays(1) };
+        var restoredLoop = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(dailyLoop));
+        restoredLoop.RestoreSchedule(fired.AddHours(1));
+        check(restoredLoop.NextRunUtc == fired.AddDays(1), "Restart one hour after a daily check preserves the remaining 23 hours");
+        restoredLoop.RestoreSchedule(fired.AddDays(3));
+        check(restoredLoop.NextRunUtc == fired.AddDays(1), "Overdue deadline survives restart for catch-up on normal tick");
+        restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddHours(2));
+        check(restoredLoop.NextRunUtc == fired.AddDays(1), "Missing deadline reconstructs from persisted last loop");
+        var objectiveEdit = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(restoredLoop.Settings)); objectiveEdit.Objective = "Updated objective"; restoredLoop.Apply(objectiveEdit);
+        check(restoredLoop.NextRunUtc == fired.AddDays(1), "Unrelated settings edit preserves the loop deadline");
+        restoredLoop.Settings.Enabled = false; restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddDays(3));
+        check(!restoredLoop.CanSchedule && restoredLoop.NextRunUtc is null, "Restart leaves paused loops paused");
+        var freshLoop = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 86400 } }; freshLoop.RestoreSchedule(fired);
+        check(freshLoop.NextRunUtc == fired.AddDays(1), "Never-run loop without history waits its first interval");
         check(DeviceSyncService.ParseSwitchboardReply("```converse\n{\"command\":\"list-sessions\"}\n```")?["command"]?.GetValue<string>() == "list-sessions", "Whole final reply can execute a switchboard command");
         check(DeviceSyncService.ParseSwitchboardReply("Some prose\n```converse\n{\"command\":\"tell\"}\n```") is null, "Prose around switchboard fence never executes");
         var artConfig = new AgentConfig();
@@ -32,7 +47,19 @@ static class AgentChecks
         try
         {
             var store = new SessionStore(roots[0], new FakeRunner());
+            var restartAgent = store.CreateAgent("Restart cadence fixture");
+            restartAgent.Agent = dailyLoop; restartAgent.QueuePaused = true; store.Save();
+            store = new SessionStore(roots[0], new FakeRunner());
             using var home = new DeviceSyncService(roots[0], store, "AgentHome");
+            restartAgent = store.Sessions.Single(s => s.Title == "Restart cadence fixture");
+            check(restartAgent.Agent!.NextRunUtc == fired.AddDays(1), "Actual runtime startup keeps an archived overdue deadline");
+            home.Agents.Tick(fired.AddDays(3));
+            check(restartAgent.Pending.Count == 0 && restartAgent.Agent.NextRunUtc == fired.AddDays(1), "Overdue startup respects a human-paused queue");
+            store.AgentRun = (_, _, _) => Task.CompletedTask;
+            restartAgent.QueuePaused = false;
+            home.Agents.Tick(fired.AddDays(3)); home.Agents.Tick(fired.AddDays(3));
+            check(restartAgent.Agent.LastLoopUtc == fired.AddDays(3) && restartAgent.Agent.NextRunUtc == fired.AddDays(4), "Missed days coalesce into one check with the next interval from that check");
+            store.Sessions.Remove(restartAgent); store.AgentRun = home.Agents.RunAsync;
             var viewerStore = new SessionStore(roots[1], new FakeRunner());
             using var viewer = new DeviceSyncService(roots[1], viewerStore, "AgentViewer");
             var sender = store.Create(new AgentEntry { Name = "Hop sender", Engine = "codex" });
