@@ -15,13 +15,13 @@ enum TranscriptClipboard {
     }
 }
 
-// Reading has no timeout. Output may follow only while following is enabled;
-// typing, Jump to latest, or scrolling back down explicitly resumes it.
+// Only user navigation pauses following. Scrolling without a planted cursor
+// returns to the live tail after a short idle period.
 struct TranscriptFollowState {
     private(set) var following = true
     private(set) var unreadUpdates = 0
     private(set) var lastInteractionAt: TimeInterval = 0
-    static let idleDelay: TimeInterval = 5
+    static let idleDelay: TimeInterval = 30
     mutating func pause(now: TimeInterval) { following = false; lastInteractionAt = now }
     mutating func interaction(now: TimeInterval) { lastInteractionAt = now }
     mutating func scroll(nearBottom: Bool, now: TimeInterval) {
@@ -31,7 +31,8 @@ struct TranscriptFollowState {
     mutating func outputArrived() { if !following { unreadUpdates += 1 } }
     mutating func resume() { following = true; unreadUpdates = 0 }
     mutating func resumeIfIdle(now: TimeInterval, selecting: Bool, scrolling: Bool) -> Bool {
-        return false // Elapsed time alone must never move the viewport.
+        guard !following, !selecting, !scrolling, now - lastInteractionAt >= Self.idleDelay else { return false }
+        resume(); return true
     }
 }
 

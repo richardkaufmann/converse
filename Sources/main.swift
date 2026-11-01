@@ -1371,18 +1371,25 @@ final class ConversationScrollView: NSScrollView {
         latest.setAccessibilityLabel("Jump to latest output")
         addSubview(latest)
         interactionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
-            if let self, let window = self.window, event.window === window { self.interaction() }
+            if let self, let window = self.window, event.window === window {
+                let inside = self.bounds.contains(self.convert(event.locationInWindow, from: nil))
+                let focused = (window.firstResponder as? NSView)?.isDescendant(of: self) == true
+                if event.type == .keyDown ? focused : inside { self.interaction() }
+            }
             return event
         }
         NotificationCenter.default.addObserver(self, selector: #selector(startedScrolling), name: NSScrollView.willStartLiveScrollNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSScrollView.didLiveScrollNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(endedScrolling), name: NSScrollView.didEndLiveScrollNotification, object: self)
     }
-    var nearBottom: Bool { contentView.bounds.maxY >= (documentView?.bounds.height ?? 0) - 200 }
-    var selecting: Bool { ((documentView as? NSTextView)?.selectedRange().length ?? 0) > 0 || (documentView as? ConversationTextView)?.explicitCursor == true || NSEvent.pressedMouseButtons != 0 }
+    var nearBottom: Bool { contentView.bounds.maxY >= (documentView?.bounds.height ?? 0) - 2 }
+    var selecting: Bool {
+        guard let text = documentView as? ConversationTextView else { return false }
+        return text.explicitCursor || (text.selectedRange().length > 0 && !text.findOwnsSelection)
+    }
     func prepareForRender(first: Bool) -> Bool {
         if first { followState.resume() }
-        else if followState.following && (!nearBottom || selecting) {
+        else if followState.following && (selecting || isFindBarVisible) {
             followState.pause(now: ProcessInfo.processInfo.systemUptime); scheduleResume()
         }
         refreshLatest(); return followState.following
@@ -1391,14 +1398,26 @@ final class ConversationScrollView: NSScrollView {
     func interaction() {
         initialTailPending = false
         followState.interaction(now: ProcessInfo.processInfo.systemUptime)
-        if selecting && followState.following { followState.pause(now: ProcessInfo.processInfo.systemUptime) }
+        if (selecting || isFindBarVisible) && followState.following { followState.pause(now: ProcessInfo.processInfo.systemUptime) }
         scheduleResume()
     }
-    private func scheduleResume() { idleResume?.cancel() }
+    private func scheduleResume() {
+        idleResume?.cancel()
+        guard !followState.following else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.followState.resumeIfIdle(now: ProcessInfo.processInfo.systemUptime,
+                selecting: self.selecting || self.isFindBarVisible, scrolling: self.liveScrolling) {
+                self.jumpToLatest()
+            } else { self.scheduleResume() }
+        }
+        idleResume = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowState.idleDelay, execute: work)
+    }
     @objc private func startedScrolling() { liveScrolling = true; recordScroll() }
     @objc private func scrolled() { recordScroll() }
     @objc private func endedScrolling() { liveScrolling = false; recordScroll() }
-    private func recordScroll() {
+    func recordScroll() {
         initialTailPending = false
         followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
         scheduleResume(); refreshLatest()
@@ -1407,7 +1426,10 @@ final class ConversationScrollView: NSScrollView {
     @objc func jumpToLatest() {
         idleResume?.cancel(); followState.resume()
         (documentView as? ConversationTextView)?.explicitCursor = false
-        if let text = documentView as? NSTextView { text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0)) }
+        if let text = documentView as? NSTextView {
+            let tail = NSRange(location: (text.string as NSString).length, length: 0)
+            text.setSelectedRange(tail); text.scrollRangeToVisible(tail)
+        }
         refreshLatest()
     }
     var showsLatest: Bool { !latest.isHidden }
@@ -1444,8 +1466,57 @@ final class DraftImageRemoveButton: NSButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func removeImage() { remove?() }
 }
+// NSTextView must remain editable for the draft, but the finder gets a
+// read-only client. It cannot mutate either history or the unsent draft.
+final class TranscriptFindClient: NSObject, NSTextFinderClient {
+    weak var text: ConversationTextView?
+    init(_ text: ConversationTextView) { self.text = text }
+    var isEditable: Bool { false }
+    var isSelectable: Bool { true }
+    var allowsMultipleSelection: Bool { false }
+    var string: String { text?.string ?? "" }
+    var firstSelectedRange: NSRange { text?.selectedRange() ?? NSRange(location: 0, length: 0) }
+    var selectedRanges: [NSValue] {
+        get { text?.selectedRanges ?? [] }
+        set { text?.findOwnsSelection = true; text?.selectedRanges = newValue }
+    }
+    func scrollRangeToVisible(_ range: NSRange) { text?.scrollRangeToVisible(range) }
+    func shouldReplaceCharacters(inRanges ranges: [NSValue], with strings: [String]) -> Bool { false }
+    func replaceCharacters(in range: NSRange, with string: String) { /* Search is read-only. */ }
+    // Forward only geometry/drawing supplied by NSTextView's public finder
+    // client protocol. No editing selectors can escape through this proxy.
+    private func isGeometry(_ selector: Selector) -> Bool {
+        ["contentViewAtIndex:effectiveCharacterRange:", "rectsForCharacterRange:",
+         "visibleCharacterRanges", "drawCharactersInRange:forContentView:"].contains(NSStringFromSelector(selector))
+    }
+    override func responds(to selector: Selector!) -> Bool {
+        super.responds(to: selector) || (isGeometry(selector) && text?.responds(to: selector) == true)
+    }
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+        isGeometry(selector) ? text : super.forwardingTarget(for: selector)
+    }
+}
 final class ConversationTextView: NSTextView {
     var explicitCursor = false
+    var findOwnsSelection = false
+    lazy var findClient = TranscriptFindClient(self)
+    lazy var readOnlyFinder: NSTextFinder = {
+        let finder = NSTextFinder(); finder.client = findClient
+        finder.isIncrementalSearchingEnabled = true
+        return finder
+    }()
+    static func allowsFindAction(_ tag: Int) -> Bool {
+        [NSTextFinder.Action.showFindInterface, .nextMatch, .previousMatch, .setSearchString, .hideFindInterface].contains { $0.rawValue == tag }
+    }
+    override func performTextFinderAction(_ sender: Any?) {
+        let tag = (sender as? NSMenuItem)?.tag ?? (sender as? NSControl)?.tag ?? 0
+        guard Self.allowsFindAction(tag), let action = NSTextFinder.Action(rawValue: tag) else { return }
+        readOnlyFinder.findBarContainer = enclosingScrollView
+        if action == .showFindInterface { findOwnsSelection = true }
+        readOnlyFinder.performAction(action)
+        (enclosingScrollView as? ConversationScrollView)?.interaction()
+    }
+
     var draftImages: [(location: Int, path: String)] = []
     private(set) var draftImageButtons: [DraftImageRemoveButton] = []
     var imageRemove: ((String) -> Void)?
@@ -1507,6 +1578,7 @@ final class ConversationTextView: NSTextView {
         return point.y >= bottom + textContainerOrigin.y
     }
     override func mouseDown(with event: NSEvent) {
+        findOwnsSelection = false
         (enclosingScrollView as? ConversationScrollView)?.interaction()
         if isInputWhitespace(convert(event.locationInWindow, from: nil)) { focusInput(); return }
         super.mouseDown(with: event)
@@ -1677,6 +1749,10 @@ final class ConversationTextView: NSTextView {
         return nil
     }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(performTextFinderAction(_:)) {
+            guard Self.allowsFindAction(item.tag), let action = NSTextFinder.Action(rawValue: item.tag) else { return false }
+            return readOnlyFinder.validateAction(action)
+        }
         if item.action == #selector(paste(_:)), Self.clipboardImage(.general) != nil { return imagePaste != nil }
         return super.validateUserInterfaceItem(item)
     }
@@ -1760,6 +1836,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.autoresizingMask = [.width]; text.textContainer?.containerSize = NSSize(width: 700, height: CGFloat.greatestFiniteMagnitude)
         text.textContainer?.widthTracksTextView = true
         text.isEditable = true; text.isSelectable = true; text.isRichText = true
+        text.usesFindBar = true; text.isIncrementalSearchingEnabled = true
         text.importsGraphics = false; text.allowsUndo = true
         text.registerForDraggedTypes([.fileURL])
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
@@ -1863,10 +1940,12 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let text = textView as? ConversationTextView else { return false }
-            return rendering || affectedCharRange.location >= text.inputStart
+            let allowed = rendering || affectedCharRange.location >= text.inputStart
+            if allowed { text.readOnlyFinder.noteClientStringWillChange() }
+            return allowed
         }
         func textViewDidChangeSelection(_ notification: Notification) {
-            if !rendering, let text = notification.object as? ConversationTextView,
+            if !rendering, let text = notification.object as? ConversationTextView, !text.findOwnsSelection,
                let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown].contains(event.type) {
                 text.explicitCursor = text.selectedRange().location < (text.string as NSString).length
                 (text.enclosingScrollView as? ConversationScrollView)?.interaction()
@@ -2037,6 +2116,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 prefix = 0
             }
             lastReplacementStart = prefix
+            text.readOnlyFinder.noteClientStringWillChange()
             if prefix > 0 {
                 text.textStorage?.replaceCharacters(in: NSRange(location: prefix, length: current.length - prefix), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
             } else { text.textStorage?.setAttributedString(document) }
@@ -2190,6 +2270,7 @@ struct RootView: View {
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
+                        ParkingLotSidebar(workspace: workspace, state: state)
                         if let group = devices.currentGroup {
                             Text(group.name + " group").font(.system(size: 17, weight: .semibold)).foregroundStyle(Color.accentColor)
                                 .padding(.horizontal, 4).help("Converse group: " + group.name + ". Choose a pane number to bring a session here.")
@@ -2436,6 +2517,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
         for (name, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
+        e.addItem(.separator())
+        for (title, key, tag) in [("Find…", "f", NSTextFinder.Action.showFindInterface.rawValue), ("Find Next", "g", NSTextFinder.Action.nextMatch.rawValue), ("Find Previous", "G", NSTextFinder.Action.previousMatch.rawValue)] {
+            let item = e.addItem(withTitle: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
+            item.tag = Int(tag)
+        }
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
@@ -2670,13 +2756,24 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     let cleanCoordinator = ScrollingConversation.Coordinator(renamedSession)
     cleanCoordinator.resolveSessionName = { _ in "Muse" }; cleanCoordinator.render(cleanText)
     check(renamedText.string == cleanText.string && renamedText.string.contains("Let's get Linux up and into the group"), "An earlier resolved name change cannot leak history into or truncate the next prompt")
+    let findTest = ConversationTextView(frame: .zero)
+    findTest.string = "Saved transcript and unsent draft"
+    let originalFindText = findTest.string
+    for action in [NSTextFinder.Action.replace, .replaceAll, .replaceAndFind, .replaceAllInSelection, .showReplaceInterface] {
+        let item = NSMenuItem(title: "Forbidden replace", action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: "")
+        item.tag = action.rawValue
+        check(!findTest.validateUserInterfaceItem(item), "Find rejects replacement action \(action.rawValue)")
+        findTest.performTextFinderAction(item)
+    }
+    findTest.findClient.replaceCharacters(in: NSRange(location: 0, length: 5), with: "Changed")
+    check(!findTest.findClient.isEditable && findTest.string == originalFindText, "The finder client cannot replace transcript or draft text")
     var following = TranscriptFollowState()
     following.scroll(nearBottom: false, now: 10); following.outputArrived()
     check(!following.following && following.unreadUpdates == 1 && !following.resumeIfIdle(now: 14.9, selecting: false, scrolling: false), "Manual scroll pauses following and counts unread output without a deadline")
     following.interaction(now: 14)
     check(!following.resumeIfIdle(now: 18.9, selecting: false, scrolling: false), "Non-typing interaction does not resume following")
     check(!following.resumeIfIdle(now: 19, selecting: true, scrolling: false) && !following.resumeIfIdle(now: 19, selecting: false, scrolling: true), "Idle following never resumes while selecting text or actively scrolling")
-    check(!following.resumeIfIdle(now: 3600, selecting: false, scrolling: false) && !following.following && following.unreadUpdates == 1, "Even an hour idle never moves a paused viewport or clears unread output")
+    check(!following.resumeIfIdle(now: 43.9, selecting: false, scrolling: false) && following.resumeIfIdle(now: 44, selecting: false, scrolling: false) && following.following && following.unreadUpdates == 0, "Scrolling alone resumes at the tail after thirty idle seconds")
     following.scroll(nearBottom: false, now: 20); following.outputArrived(); following.scroll(nearBottom: true, now: 21)
     check(following.following && following.unreadUpdates == 0, "Scrolling back near the bottom resumes following immediately")
     let entry = Entry(name: "Layout fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")
@@ -2739,7 +2836,12 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     scroll.setFrameSize(NSSize(width: 700, height: 400)); scroll.tile()
     let longHeight = view.frame.height
     check(longHeight > 1000, "Native layout fixture produces a scrollable transcript")
+    scroll.jumpToLatest()
+    // Layout may change under us as output/images grow: that is not a user scroll.
+    view.setFrameSize(NSSize(width: view.frame.width, height: view.frame.height + 500))
+    check(scroll.prepareForRender(first: false), "Output growth alone never pauses automatic following")
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+    scroll.recordScroll()
     session.messages.append(Message(role: "assistant", text: "A later streamed answer"))
     coordinator.render(view)
     check(abs(scroll.contentView.bounds.minY - 100) < 1, "New output preserves the viewport while reading older messages")
@@ -3230,6 +3332,7 @@ func selfTest() {
     check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
+    parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     identitySelfTests(check)
     print("All checks passed")

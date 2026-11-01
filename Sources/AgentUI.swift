@@ -89,6 +89,11 @@ struct AgentSetupView: View {
                         Text("Sessions this agent may read and message · select explicitly").font(.headline)
                         // Keep the scope list in the form’s single scroll view so every row is reachable.
                         VStack(alignment: .leading) {
+                            Toggle("Parking Lot · read and edit", isOn: Binding(get: { settings.allows(local: ParkingLotStore.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
+                                settings.watchedSessions.removeAll { $0 == ParkingLotStore.id }
+                                if let home = DeviceSyncService.shared.localDeviceID { settings.watchedParticipants?.removeAll { $0 == DeviceGlobalID(home: home, session: ParkingLotStore.id).string } }
+                                if on { settings.watchedSessions.append(ParkingLotStore.id) }
+                            }))
                             ForEach(Store.shared.sessions.filter { $0.id != session.id }) { other in
                                 Toggle(other.title, isOn: Binding(get: { settings.allows(local: other.id, home: DeviceSyncService.shared.localDeviceID) }, set: { on in
                                     settings.watchedSessions.removeAll { $0 == other.id }
@@ -160,7 +165,7 @@ struct AgentSetupView: View {
     }
     private var availableScope: Set<String> {
         let service = DeviceSyncService.shared
-        return Set(service.participantHomes.flatMap { $0.rows.map(\.globalID) } + Store.shared.sessions.compactMap { session in service.localDeviceID.map { DeviceGlobalID(home: $0, session: session.id).string } })
+        return Set((service.localDeviceID.map { [DeviceGlobalID(home: $0, session: ParkingLotStore.id).string] } ?? []) + service.participantHomes.flatMap { $0.rows.map(\.globalID) } + Store.shared.sessions.compactMap { session in service.localDeviceID.map { DeviceGlobalID(home: $0, session: session.id).string } })
     }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func save() {

@@ -203,6 +203,7 @@ struct AgentReply: Decodable {
     struct Tell: Decodable { var to: String; var text: String; var replyExpected: Bool?; var inReplyTo: UUID? }
     var reply: String
     var appControl: AppSupportCommand?
+    var parkingLotEdits: ParkingLotEdits?
     var attention: String?
     var artPrompt: String?
     var tell: [Tell]?

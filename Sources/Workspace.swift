@@ -279,7 +279,9 @@ struct WorkspacePanes: View {
             } else {
                 HSplitView {
                     ForEach(occupied, id: \.self) { pane in
-                        if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
+                        if workspace.session(in: state.id, pane: pane) == ParkingLotStore.id {
+                            ParkingLotView()
+                        } else if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
                             SessionPane(session: session, workspace: workspace, pane: pane, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         } else if let id = workspace.session(in: state.id, pane: pane), let globalID = devices.globalID(forPlacement: id) {
                             RemotePane(globalID: globalID, pane: pane, workspace: workspace, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)

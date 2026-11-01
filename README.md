@@ -104,7 +104,15 @@ Your editable draft is **blue** at the bottom of the conversation. Sent prompts 
 
 You can type the next request while the assistant works. Sending it adds it to a **queue** (the list of messages waiting to run, shown above the transcript). **Inject now** interrupts the current turn and sends that queued message next. **Inject all** sends the queue together in order. Stop also pauses the queue; use **Resume queue** when ready. Drafts, queued messages and attachments survive relaunch. Quitting preserves the conversation; new work needs its home app or Linux service to be running.
 
-Scroll up to read earlier messages without being pulled back down by an idle timer. Typing in that pane or choosing **Jump to latest** returns you to the draft. Right-click a message to copy the whole prompt or response, or select just the text you want.
+On Mac, transcripts follow new output automatically. Scrolling up pauses this for 30 seconds after your last interaction; clicking into the transcript holds your place until you choose **Jump to latest** or return to the draft. An active Find bar also holds your place. Resizing a window balances its session panes and returns transcripts to the bottom. Right-click a message to copy the whole prompt or response, or select just the text you want.
+
+On Mac, **Command-F** (Edit → Find) searches the current transcript without changing any text. There is no Replace. Use the Find bar’s previous/next buttons, **Command-G** / **Shift-Command-G**, and its close control.
+
+### Parking Lot (Mac)
+
+Click the grey **Parking Lot** in the sidebar to start keeping ideas, prompts and bugs under headings. It opens in a pane alongside your conversations. Return adds the next item; Shift-Return adds a line within an item. Collapse a heading to tuck its items away. Right-click to copy, paste, delete, or choose **Reorder** and drag the handles. Moving a heading moves its items with it. Notes save automatically on this Mac.
+
+To let an agent help, select **Parking Lot · read and edit** in its existing session access list. Then ask, “Assess this feature idea and add your comments.” That shares the notes with its selected provider and permits edits. Agent comments appear beneath the idea, with the agent’s name. If you or another agent changes the notes during its run, stale edits are rejected so your work survives. Parking Lot is local to this Mac for now.
 
 ### Keep several sessions visible
 

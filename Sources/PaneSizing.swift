@@ -63,8 +63,8 @@ enum PaneSizing {
 }
 
 // Own sizing rather than accepting SwiftUI/AppKit's intermediate equalization
-// during a resize. A count change resets session proportions; a window resize
-// preserves them. Divider changes establish new user preferences.
+// during a resize. Count changes and window resizes equalize session panes.
+// Divider changes last until the next window resize.
 final class WindowPaneLayout {
     weak var window: NSWindow?
     private(set) var paneCount = -1
@@ -128,7 +128,13 @@ final class WindowPaneLayout {
     }
     private func windowResized() {
         guard !applying else { return }
+        weights = Array(repeating: 1, count: max(0, paneCount))
         schedule()
+        if let root = window?.contentView { followTail(in: root) }
+    }
+    private func followTail(in view: NSView) {
+        if let scroll = view as? ConversationScrollView { scroll.revealInitialTail() }
+        for child in view.subviews { followTail(in: child) }
     }
     private func dividerChanged() {
         guard !applying, let window, let outer = PaneSizing.split(in: window.contentView) else { return }
@@ -185,14 +191,14 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     func sizes() -> [CGFloat] { inner.arrangedSubviews.map { $0.frame.width } }
     layout.setPaneCount(3); settle()
     inner.setPosition(500, ofDividerAt: 0); settle()
-    let preferred = sizes(), weights = layout.weights
+    _ = sizes()
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()
     let larger = sizes()
-    check(abs(larger[0] / larger[1] - preferred[0] / preferred[1]) < 0.02, "Native window resize retains manually dragged session-pane proportions")
+    check(larger.max()! - larger.min()! < 2, "Window resize equalizes manually dragged session panes")
     window.setContentSize(NSSize(width: 834, height: 700)); settle()
     check((PaneSizing.sidebarWidth(in: window) ?? 999) < 200 && sizes().allSatisfy { $0 >= 219 }, "A small native window compresses the sidebar while preserving readable session panes (sidebar: \(PaneSizing.sidebarWidth(in: window) ?? -1), panes: \(sizes()))")
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()
-    check(zip(layout.weights, weights).allSatisfy { abs($0 - $1) < 1 } && abs(sizes()[0] / sizes()[1] - preferred[0] / preferred[1]) < 0.02, "Growing after minimum-width clamping restores original proportions")
+    check(sizes().max()! - sizes().min()! < 2, "Growing after minimum-width clamping keeps panes equal")
     outer.setPosition(420, ofDividerAt: 0); settle()
     window.setContentSize(NSSize(width: 1000, height: 700)); settle()
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()
