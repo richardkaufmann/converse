@@ -53,6 +53,9 @@ internal static class AppSupportChecks
                 check(session.MessagingEnabled && session.SupportTeachingVersion == AppSupportTeaching.Version && runner.Prompts.Last().Contains("list-sessions") && runner.Prompts.Last().Contains("app-control"), engine + " receives both teaching capabilities automatically");
                 check(session.DisplayedMessages.All(m => !m.Text.Contains("Connection check only") && !m.Text.Contains("setup and control teaching")) && session.Messages.Any(m => m.Text.Contains("setup and control teaching")), "Onboarding hides setup machinery without deleting provider context");
                 check(session.Agent?.Settings.Enabled == true && session.Agent.Settings.IntervalSeconds == 86400 && !session.Agent.Settings.GenerateArt && session.Agent.Settings.Repository == "richardkaufmann/converse" && AgentModels.Parse(session.Agent.Settings.Model)?.Engine == engine, "Support daily loop preserves the verified provider and has no mood art");
+                session.Title = "Renamed support"; session.Busy = true;
+                check(store.QuitActivity() == (0, 0), "Busy built-in support with an enabled loop never blocks Quit, regardless of title");
+                session.Busy = false;
                 session.Agent!.Settings.Enabled = false; SupportSetup.ConfigureAgent(store, session);
                 check(!session.Agent.Settings.Enabled, "Support migration preserves a user-paused loop");
                 var reopened = new SessionStore(store.Folder, runner).Sessions.Single();
@@ -80,6 +83,10 @@ internal static class AppSupportChecks
                 check(restoredStore.Create(restoredStore.Entries.First(e => e.Engine == engine)).Entry.AccountDirectory == session.Entry.AccountDirectory, "Verified login preference survives restart");
                 codingCommand["directory"] = Path.Combine(store.Folder, "missing");
                 check(Rejected(() => AppSupportActions.Execute(store, session, codingCommand, null)), "Missing project folder rejected");
+                agent.Title = AppSupportTeaching.Title; agent.Agent!.Settings.Enabled = true; agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.TurnLimit = 2;
+                normal.Busy = true;
+                check(store.QuitActivity() == (1, 1), "Ordinary running sessions and scheduled agents still warn, even when named App Support");
+                normal.Busy = false; agent.Agent.Settings.Enabled = false;
                 var configure = new JsonObject { ["command"] = "app-control", ["action"] = "configure-agent", ["target"] = agent.Id.ToString(), ["repository"] = "not a repository" };
                 var old = JsonSerializer.Serialize(agent.Agent);
                 check(Rejected(() => AppSupportActions.Execute(store, session, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");

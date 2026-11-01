@@ -243,12 +243,24 @@ import Foundation
     let quitStore = Store(folder: root.appendingPathComponent("quit-fixture"))
     let quitCLI = quitStore.create(Entry(name: "Quit fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
     check(ConverseQuitWarning(sessions: quitStore.sessions) == nil, "Idle ordinary sessions do not introduce an unnecessary quit confirmation")
+    let supportOnly = Store(folder: root.appendingPathComponent("support-quit-fixture"))
+    let support = supportOnly.supportSession(); support.agent = AgentConfig(); support.agent?.enabled = true
+    support.title = "Renamed support"; support.busy = true
+    check(ConverseQuitWarning(sessions: supportOnly.sessions) == nil, "Busy App Support with an enabled loop never introduces a quit warning, even when renamed")
+    var supportShutdowns = 0; var supportConfirmations = 0
+    check(supportOnly.requestApplicationQuit(confirm: { _ in supportConfirmations += 1; return false }, stopAgents: { supportShutdowns += 1 }) && supportConfirmations == 0 && supportShutdowns == 1, "Support-only Quit proceeds without a dialog and still runs normal agent shutdown")
+    check(Store(folder: supportOnly.folder).sessions.first?.agent?.enabled == true, "Support-only Quit preserves the daily loop for restart")
+    quitCLI.busy = true
+    check(ConverseQuitWarning(sessions: [support, quitCLI])?.title == "Quit with 1 running session?", "Busy support is excluded while ordinary active work still warns")
+    quitCLI.busy = false
     let quitAgent = quitStore.createAgent(title: "Quit fixture agent")
     quitAgent.queuePaused = true; quitAgent.draft = "Preserve this draft"
     quitAgent.pending = [PendingPrompt(text: "Keep this queued", images: [])]
     let pausedWarning = ConverseQuitWarning(sessions: quitStore.sessions)
     check(pausedWarning == nil, "Paused agents do not introduce an unnecessary quit warning")
+    quitAgent.title = AppSupport.title
     quitAgent.agent?.enabled = true
+    check(ConverseQuitWarning(sessions: [support, quitAgent])?.detail.contains("1 agent with enabled loops") == true, "An ordinary agent named Converse App Support still warns; the built-in role controls the exception")
     let loopWarning = ConverseQuitWarning(sessions: quitStore.sessions)
     check(loopWarning?.detail.contains("1 agent with enabled loops will not run until the app is restarted.") == true, "Quit warning counts enabled loops rather than every hosted agent")
     quitCLI.busy = true

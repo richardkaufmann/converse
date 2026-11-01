@@ -301,6 +301,11 @@ public sealed class SessionStore
         new AgentEntry { Name = "Muse", Command = "muse", Engine = "muse", Directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) },
     };
 
+    // Built-in support is excluded from warnings, not from shutdown or saving.
+    public (int Running, int ScheduledAgents) QuitActivity() =>
+        (Sessions.Count(s => !s.SupportAssistant && s.Busy),
+         Sessions.Count(s => !s.SupportAssistant && s.Agent?.CanSchedule == true));
+
     public ChatSession Create(AgentEntry entry, bool persist = true)
     {
         // Session-owned copy: the template reference must never be shared,

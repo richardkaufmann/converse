@@ -2312,10 +2312,13 @@ struct ConverseQuitWarning {
     let detail: String
     let quitButton: String
     init?(sessions: [Session]) {
-        let running = sessions.filter(\.busy).count
+        // Built-in support must never hold up Quit, even during a reply or check.
+        // Use its persisted role, not its editable display name.
+        let work = sessions.filter { !$0.supportAssistant }
+        let running = work.filter(\.busy).count
         // Store contains home sessions only; remote viewers must not warn about
         // agents whose execution continues on a different device.
-        let agents = sessions.filter { $0.agent?.canSchedule == true }.count
+        let agents = work.filter { $0.agent?.canSchedule == true }.count
         guard running > 0 || agents > 0 else { return nil }
         title = running > 0 ? "Quit with \(running) running session\(running == 1 ? "" : "s")?" : "Quit Converse?"
         quitButton = running > 0 ? "Stop and Quit" : "Quit Converse"

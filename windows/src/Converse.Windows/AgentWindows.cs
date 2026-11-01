@@ -26,8 +26,7 @@ public sealed partial class MainWindow
         {
             if (_quitAccepted) return;
             if (_supportDialog is not null) { _quitAccepted = true; return; }
-            var loops = _store.Sessions.Count(s => s.Agent?.CanSchedule == true);
-            var busy = _store.Sessions.Count(s => s.Busy);
+            var (busy, loops) = _store.QuitActivity();
             if (loops == 0 && busy == 0) return;
             e.Cancel = true;
             var text = (loops > 0 ? $"{loops} agent{(loops == 1 ? "" : "s")} with enabled loops will not run until the app is restarted.\n\n" : "") + (busy > 0 ? $"{busy} active turn(s) will stop.\n\n" : "") + "Your conversations and drafts are saved.";
