@@ -6,9 +6,33 @@
 
 Converse is one app for conversations with **Muse, Claude Code, and Codex** (AI assistants from Meta, Anthropic and OpenAI). Each conversation is a **session**: a place to give a model a task, read its answers, and keep working with it. Answers appear as formatted, selectable text, with images alongside them.
 
-Start with one session on one computer. When you want more, you can keep several sessions visible, give an assistant an ongoing job as an *agent* (an assistant with an objective and optional scheduled checks), or continue your work from another device. You do not need to configure all of that to get started.
+Its standout features:
 
-This guide follows that same order. It is also bundled with each app as searchable, offline **Converse Help**: open **Help → Converse Help** on desktop, or **Help** in the mobile app’s menu. GitHub may contain newer instructions than your installed version. The [security and privacy section](#security-and-privacy) is available whenever you want the details about data sharing and keys.
+1. **It’s multi-session.** Keep many conversations open, with up to three displayed side by side on desktop and iPad. On iPhone, one or two sessions stack vertically to fit the smaller screen.
+2. **It’s multi-provider.** Mix and match Meta, Anthropic and OpenAI. Use the assistant that suits each task without changing apps.
+3. **It’s multi-system.** Sessions can run on Mac, Windows and Linux. The app’s UI runs on Mac, Windows, iPad and iPhone.
+4. **It’s distributed.** Your systems can join persistent, securely paired, peer-to-peer **Groups**. Each app can display and control sessions from another system in its Group. The session’s **home** (the computer with its login, tools and files) continues to do the work; no central cloud coordinator is required for the Group.
+5. **It hosts agents.** An agent is a session with an ongoing objective. You can talk to it, run it once, or let it check periodically or respond to an enabled external trigger.
+6. **It’s chatty.** Sessions can talk to one another: **Tell** sends a message; **Ask** expects a reply. Agents can supervise selected sessions and assess progress toward shared goals. The **switchboard** (Converse’s session messaging system) tracks unanswered requests and can inject a queued message to break a detected mutual-wait logjam, with bounded recovery rather than endless retries.
+7. **It talks to the outside world.** Agents can use GitHub issues, pull requests and releases as evidence. On Mac, they can exchange Discord messages and respond through **Jolly** (the connector to Meta’s Muse mobile app). Meta API agents can also use optional web search to research topics and assess sentiment; available tools depend on the provider route and configured integrations.
+8. **It has polish.** Paste images into local or remote sessions. On Mac, right-click an image to use Meta’s **SAM** (image segmentation) tools and add just the relevant objects to your prompt, with transparent backgrounds. Responses render Markdown as headings, tables, lists and code. Copy whole prompts or responses from their context menus, or export a consolidated document from selected local and Group sessions on Mac. Quit and restart: your conversations, drafts and queued messages are still there. Active work requires the home app or Linux service to be running.
+9. **You can talk to your agent.** On Mac, explicitly start a spoken conversation, then stop it when you’re done. Voice and image helpers have their own Meta key and permission requirements, independent of the model answering your session.
+
+These features combine in interesting ways. **Converse App Support** is a built-in agent taught how to use this README and the app’s setup controls. It can help you configure agents and understand provider setup, and—with the relevant integrations enabled—you can reach it through Discord or Muse Jolly. Its default daily check watches this repository for serious bugs and version updates. It uses the same agent framework you can use for your own projects: an objective, a schedule, selected evidence and a teaching prompt, backed by app controls. It reports updates; it does not silently install them.
+
+You can build an app across systems. A session on a Mac can ask a Windows session to finish producing a Windows version and install it, using the tools and permissions available on that Windows machine. That is how we develop Converse itself.
+
+You can work on Linux apps and services from a Mac or PC without juggling different interfaces. Linux runs Converse as a **headless service** (without its own graphical window). After installing it, pairing it and configuring the providers you need, create and use its sessions from another Group member. Work runs where the files and tools live.
+
+Cross-system sessions also make everyday tasks easier. Ask a session to generate an image, then paste that image into a session running on another system. The image travels with the prompt; you do not need to find a shared folder first. Dragging a filename is useful too, but deliberately inserts a file reference rather than uploading its contents.
+
+The rest of this README walks through installing Converse and using it, from your first session to agents and Groups. A friendly suggestion: you don’t have to read it all! Start with the Mac app, choose a provider, and let App Support walk you through sign-in and your first successful response. From there, ask what you want to set up. It can explain the steps, open the right controls and perform supported setup actions; you still enter secrets securely and confirm device pairing yourself. Windows agents are supported, but guided first-launch onboarding is currently available in the separate Windows Setup Preview and Demo editions.
+
+Have feedback? Ask App Support to help describe the problem and find the right place to report it. Filing a GitHub issue currently requires the GitHub interface or a coding session with suitable tools and access; it is not a built-in App Support action yet.
+
+This guide is also bundled with each app as searchable, offline **Converse Help**: open **Help → Converse Help** on desktop, or **Help** in the mobile app’s menu. GitHub may contain newer instructions than your installed version. The [security and privacy section](#security-and-privacy) explains what is shared, which permissions matter and how keys are stored.
+
+Enjoy.
 
 ## Download
 
