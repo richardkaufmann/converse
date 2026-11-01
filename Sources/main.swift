@@ -2428,6 +2428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
         h.addItem(withTitle: "Converse Help…", action: #selector(showConverseHelp), keyEquivalent: "?")
+        h.addItem(withTitle: "Report a Bug on GitHub…", action: #selector(reportConverseBug), keyEquivalent: "")
         h.addItem(withTitle: "Security & Privacy…", action: #selector(showSecurityHelp), keyEquivalent: "")
         NSApp.mainMenu = menu
         NSApp.helpMenu = h
@@ -2466,6 +2467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
     @objc func showJolly() { guard Store.shared.setupCompleted else { helpController.show(topic: "jolly-mac", query: ""); return }; MainActor.assumeIsolated { jollyController.show() } }
+    @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }

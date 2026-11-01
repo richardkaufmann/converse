@@ -14,6 +14,7 @@ struct AppSupportCommand: Codable {
     var discordMentions: Bool? = nil
     var jollyAllowed: Bool? = nil
     var query: String? = nil
+    var body: String? = nil
     static func parse(_ text: String) -> AppSupportCommand? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.hasPrefix("```converse\n"), text.hasSuffix("\n```"),
@@ -24,7 +25,7 @@ struct AppSupportCommand: Codable {
 }
 
 enum AppSupport {
-    static let version = 2
+    static let version = 3
     static let title = "Converse App Support"
     static let connectionReply = "CONVERSE_CONNECTION_OK"
     static let guideLinks = "[Security and privacy](converse-help://security) · [Set up your first coding session](converse-help://first-session) · [Set up your first agent](converse-help://first-agent) · [Connect your devices into a Group](converse-help://first-group)"
@@ -55,6 +56,7 @@ enum AppSupport {
         - create-agent: required title and objective. Creates one paused agent (no speech, artwork, web search, monitoring or Discord enabled). Same-title agent is returned rather than duplicated. Agents can use enabled provider logins or the Meta API. Choose the provider and model in Agent Setup. Meta artwork and voice still require a Meta API key.
         - configure-agent: target is an exact ID from inspect; optional objective, repository (owner/name or empty), channelID (Discord numeric ID), discordMentions and jollyAllowed. Saves only these fields through the app; does not start loops or claim services tested. Never set sharing/mentions unless the human requested it. Open Agent Setup for keys and connection tests.
         - show-session: target is an exact local ID from inspect; displays that session.
+        - report-bug: required title and body. Prepare a concise GitHub bug report using only the problem the human asked to report, reproduction steps, expected/actual behavior and known version. Opens an editable review window for richardkaufmann/converse. Do not include credentials, private transcripts, file paths or attachments unless the human specifically asked to share that information. Never claim a report was filed merely because the review window/browser opened; only a confirmed issue URL proves submission. Recommend saving a GitHub token in the report window’s masked field or Agent Setup, then submitting directly. Converse manages it with other credentials. Without a token, prepare the report for copying/pasting and manual submission on GitHub as a fallback. Never ask for the token in chat. No Discord account, bot or setup is required for App Support or GitHub reports. Discord is optional.
         Results are supplied by Converse. A saved configuration is not a successful connection test. Report blockers honestly. Login/OAuth and pairing confirmation require the human's participation. Do not request pasted passwords, tokens or codes. The Meta Muse iPhone app connects through Jolly; it is separate from the native Converse iPhone/iPad viewer. Use the exact link label "Connect the Meta Muse iPhone app".
         Instructions remain attached to this session across restarts and compaction. Start with inspect/help when needed; don't perform setup until the user requests it.
         """
@@ -173,11 +175,22 @@ extension Store {
             let previous = target.agent; config.settingsChanged(); target.agent = config
             do { try saveChecked() } catch { target.agent = previous; throw error }
             return "Saved agent \(id.uuidString). Credentials and service connectivity have not been tested. Loop/speech settings were unchanged."
+        case "report-bug":
+            let report = try GitHubBugReport(title: request.title ?? "", body: request.body ?? "").validated()
+            if openUI {
+                MainActor.assumeIsolated {
+                    BugReportWindow.show(id: session.id, report: report) { [weak self, weak session] result in
+                        guard let self, let session else { return }
+                        session.messages.append(Message(role: "notice", text: "GitHub bug report: " + result)); self.save()
+                    }
+                }
+            }
+            return "Bug report prepared for GitHub review. Nothing has been submitted. Wait for the human to review and submit; do not reopen or retry automatically."
         case "show-session":
             guard let id = request.target.flatMap(UUID.init(uuidString:)), let target = sessions.first(where: { $0.id == id }) else { throw AgentFailure.message("Unknown local session ID.") }
             if openUI, let app = AppDelegate.shared, let state = app.windows.first?.1 { app.select(target, state: state) }
             return "Displayed \(target.title)."
-        default: throw AgentFailure.message("Unknown app action. Use inspect, help, open, create-agent, configure-agent or show-session.")
+        default: throw AgentFailure.message("Unknown app action. Use inspect, help, open, create-agent, configure-agent, show-session or report-bug.")
         }
     }
     func processAppSupport(_ session: Session) {

@@ -46,6 +46,7 @@ struct ConversePadApp: App {
             }
             CommandGroup(replacing: .help) {
                 Button("Converse Help…") { model.helpShown = true }.keyboardShortcut("?")
+                Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
                 Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
             }
         }
@@ -92,6 +93,7 @@ struct PadRoot: View {
                             Button("Converse Help…") { model.helpShown = true }
                             Divider()
                             Button("About Converse…") { model.aboutShown = true }
+                            Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
                             Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
                             Toggle("Line numbers", isOn: $model.lineNumbers)
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Converse menu")
@@ -366,6 +368,7 @@ struct PhoneSessionPicker: View {
                     Button("Help…") { open("help") }
                     Button("About Converse…") { open("about") }
                     Toggle("Message numbers", isOn: $model.lineNumbers)
+                    Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
                     Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
                 }
             }.navigationTitle("Sessions")

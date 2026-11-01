@@ -197,7 +197,9 @@ public sealed partial class MainWindow
                     if (result == "UI")
                     {
                         var target = command["target"]?.GetValue<string>() ?? "";
-                        if (command["action"]?.GetValue<string>() == "show-session")
+                        if (command["action"]?.GetValue<string>() == "report-bug")
+                        { result = await ShowBugReport(new GitHubBugReport(command["title"]!.GetValue<string>(), command["body"]!.GetValue<string>())); }
+                        else if (command["action"]?.GetValue<string>() == "show-session")
                         {
                             var session = _store.Sessions.FirstOrDefault(s => s.Id.ToString().Equals(target, StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException("Unknown local session ID.");
                             ShowSupportSession(session); result = "Session displayed.";

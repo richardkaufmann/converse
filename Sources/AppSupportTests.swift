@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-@MainActor func appSupportSelfTests(_ check: (Bool, String) -> Void) {
+@MainActor func appSupportSelfTests(_ check: @escaping (Bool, String) -> Void) {
     let oldAPI = AgentRuntime.shared.api, oldKeyReader = AgentRuntime.shared.keyReader
     defer { AgentRuntime.shared.api = oldAPI; AgentRuntime.shared.keyReader = oldKeyReader }
     AgentRuntime.shared.keyReader = { _ in nil }
@@ -16,9 +16,44 @@ import Foundation
     check(AppSupport.welcome.contains("[README](converse-help://readme)") && AppSupport.welcome.contains("[Discord](converse-help://discord)") && AppSupport.welcome.contains("[Connect the Meta Muse iPhone app](converse-help://muse-iphone)"), "Support welcome contains the three requested actionable links")
     let help = try! HelpBook.load()
     check(AppSupport.guideTopics.values.allSatisfy { id in help.topics.contains { $0.id == id } } && AppSupport.guideTopics.keys.allSatisfy { AppSupport.welcome.contains("converse-help://" + $0) }, "All three support getting-started links resolve to bundled Help topics")
+    let report = GitHubBugReport(title: "A & B / café", body: "Line one\n@someone &title=wrong # ?")
+    let browser = try! report.browserURL()
+    let query = URLComponents(url: browser, resolvingAgainstBaseURL: false)!.queryItems!
+    check(browser.host == "github.com" && browser.path == "/richardkaufmann/converse/issues/new" && query.first { $0.name == "title" }?.value == report.title && query.first { $0.name == "body" }?.value == report.body, "GitHub report URL preserves Unicode and query-like report text in the fixed repository")
+    check((try? GitHubBugReport(title: " ", body: "x").validated()) == nil && (try? GitHubBugReport(title: "x", body: String(repeating: "界", count: 2000)).browserURL()) == nil, "Bug reports reject empty titles and overly long browser URLs without truncating evidence")
+    var reportTestsFinished = false
+    Task { @MainActor in
+        defer { reportTestsFinished = true }
+        let api = AgentAPI(); var requests = 0
+        api.request = { request in
+            requests += 1
+            let body = try! JSONSerialization.jsonObject(with: request.httpBody!) as! [String: String]
+            check(request.httpMethod == "POST" && request.url?.absoluteString == "https://api.github.com/repos/richardkaufmann/converse/issues" && request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture" && body == ["title": report.title, "body": report.body], "GitHub submission sends only reviewed report text and keeps authorization out of its body")
+            return (Data("{\"number\":42,\"html_url\":\"https://github.com/richardkaufmann/converse/issues/42\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!)
+        }
+        let receipt = try? await report.submit(token: "fixture", api: api)
+        check(receipt?.absoluteString == "https://github.com/richardkaufmann/converse/issues/42" && requests == 1, "GitHub confirms a filed report with its exact issue receipt")
+        for status in [401, 403, 404, 429, 500] {
+            requests = 0
+            api.request = { request in requests += 1; return (Data("secret must not be echoed".utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!) }
+            do { _ = try await report.submit(token: "fixture", api: api); check(false, "GitHub failure must not report success") }
+            catch { check(requests == 1 && !error.localizedDescription.contains("secret must"), "GitHub HTTP \(status) fails once without reposting or echoing service content") }
+        }
+        requests = 0
+        api.request = { _ in requests += 1; throw URLError(.timedOut) }
+        do { _ = try await report.submit(token: "fixture", api: api); check(false, "Timeout cannot confirm filing") }
+        catch { check(requests == 1 && error.localizedDescription.contains("Check the issue list"), "Ambiguous network outcome asks to check GitHub and never automatically retries") }
+        api.request = { request in (Data("{\"number\":42,\"html_url\":\"https://example.invalid/issues/42\"}".utf8), HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!) }
+        check((try? await report.submit(token: "fixture", api: api)) == nil, "Foreign receipt URLs cannot become successful bug reports")
+    }
+    let reportDeadline = Date().addingTimeInterval(5)
+    while !reportTestsFinished && Date() < reportDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(reportTestsFinished, "GitHub reporting fixture tests complete without network or Discord")
     let command = AppSupportCommand(action: "create-agent", title: "Example", objective: "Help with this project")
     check((try? store.appSupportResult(command, session: session, openUI: false)) == nil, "Untaught sessions cannot control the app")
     session.supportTeachingVersion = AppSupport.version
+    let reportResult = try? store.appSupportResult(AppSupportCommand(action: "report-bug", target: "https://example.invalid", title: "Fixture", body: "Only this description"), session: session, openUI: false)
+    check(reportResult?.contains("Nothing has been submitted") == true && session.agent == nil, "Reporting prepares a review without requiring an agent, Discord or credentials, and does not claim filing")
     let result = try? store.appSupportResult(command, session: session, openUI: false)
     let agent = store.sessions.first { $0.agent != nil }!
     check(result?.contains("Created paused agent") == true && agent.agent?.enabled == false && agent.agent?.speak == false && agent.agent?.generateArt == false, "Support can create an agent without background work or speech")

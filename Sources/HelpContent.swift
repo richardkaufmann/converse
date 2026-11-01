@@ -7,6 +7,7 @@ enum ConverseAbout {
     static let copyright = "© 2026 Richard Kaufmann"
     static let license = "GPL version 3 or later, with a SAM codec exception. Third-party licenses apply."
     static let readme = URL(string: "https://github.com/richardkaufmann/converse#readme")!
+    static let bugReports = URL(string: "https://github.com/richardkaufmann/converse/issues/new")!
     static let licenseURL = URL(string: "https://github.com/richardkaufmann/converse/blob/main/LICENSING.md")!
 }
 

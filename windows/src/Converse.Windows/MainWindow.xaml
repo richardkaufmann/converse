@@ -109,6 +109,7 @@
             </MenuBarItem>
             <MenuBarItem Title="Help">
                 <MenuFlyoutItem Text="Converse Help" Click="OnHelpClick"/>
+                <MenuFlyoutItem Text="Report a Bug on GitHub…" Click="OnReportBug"/>
                 <MenuFlyoutItem Text="Security &amp; Privacy" Click="OnSecurityHelp"/>
                 <MenuFlyoutItem Text="About Converse…" Click="OnAboutClick"/>
             </MenuBarItem>

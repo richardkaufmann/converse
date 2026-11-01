@@ -10,6 +10,23 @@ internal static class AppSupportChecks
         var root = Directory.CreateTempSubdirectory("converse-support-check-").FullName;
         try
         {
+            var report = new GitHubBugReport("A & B / café", "Line one\n@someone &title=wrong # ?");
+            var uri = report.BrowserURL();
+            check(uri.Host == "github.com" && uri.AbsolutePath == "/richardkaufmann/converse/issues/new" && uri.Query.Contains(Uri.EscapeDataString(report.Body)), "GitHub draft URL preserves report text and fixes the destination");
+            check(Rejected(() => new GitHubBugReport(" ", "x").Validated()) && Rejected(() => new GitHubBugReport("x", new string('界', 2000)).BrowserURL()), "Invalid and oversized browser reports fail without truncation");
+            var transport = new ReportTransport(); using var client = new HttpClient(transport);
+            var receipt = await report.SubmitAsync("fixture", client);
+            check(receipt.AbsoluteUri == "https://github.com/richardkaufmann/converse/issues/42" && transport.Count == 1 && transport.ReportBody == System.Text.Json.JsonSerializer.Serialize(new { title = report.Title, body = report.Body }), "GitHub creation requires a real issue receipt and sends only reviewed text");
+            foreach (var status in new[] { 401, 403, 404, 429, 500 })
+            {
+                transport.Count = 0; transport.Status = status;
+                try { await report.SubmitAsync("fixture", client); check(false, "Rejected GitHub post cannot claim success"); }
+                catch (InvalidOperationException ex) { check(transport.Count == 1 && !ex.Message.Contains("fixture-secret"), "GitHub error fails without automatic retries or leaking service content"); }
+            }
+            transport.Status = 201; transport.ForeignReceipt = true;
+            try { await report.SubmitAsync("fixture", client); check(false, "Foreign issue receipt must fail"); } catch (InvalidOperationException) { check(true, "Foreign issue receipt rejected"); }
+            transport.FailNetwork = true; transport.Count = 0;
+            try { await report.SubmitAsync("fixture", client); check(false, "Timeout must fail"); } catch (InvalidOperationException ex) { check(transport.Count == 1 && ex.Message.Contains("Check the issue list"), "Ambiguous submission is not retried"); }
             foreach (var engine in new[] { "claude", "codex" })
             {
                 var runner = new SupportRunner(); var store = new SessionStore(Path.Combine(root, engine), runner);
@@ -50,6 +67,11 @@ internal static class AppSupportChecks
                 var configure = new JsonObject { ["command"] = "app-control", ["action"] = "configure-agent", ["target"] = agent.Id.ToString(), ["repository"] = "not a repository" };
                 var old = JsonSerializer.Serialize(agent.Agent);
                 check(Rejected(() => AppSupportActions.Execute(store, session, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");
+                var bug = new JsonObject { ["command"] = "app-control", ["action"] = "report-bug", ["title"] = "Fixture", ["body"] = "Only this description" };
+                check(AppSupportActions.Execute(store, session, bug, null) == "UI", "Report prepares native review without Discord or credentials");
+                session.ActiveBackground = true;
+                check(Rejected(() => AppSupportActions.Execute(store, session, bug, null)), "Background agents cannot open bug report submission");
+                session.ActiveBackground = false;
                 session.ActiveBackground = true;
                 check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "Background and forwarded turns cannot configure the app");
                 session.ActiveBackground = false; session.ActiveAppControlDepth = 8;
@@ -132,4 +154,19 @@ internal static class AppSupportChecks
             return Exit;
         }
     }
+    private sealed class ReportTransport : HttpMessageHandler
+    {
+        public int Count, Status = 201;
+        public bool ForeignReceipt, FailNetwork;
+        public string? ReportBody;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Count++;
+            if (request.RequestUri?.AbsoluteUri != "https://api.github.com/repos/richardkaufmann/converse/issues" || request.Headers.Authorization?.ToString() != "Bearer fixture" || request.Method != HttpMethod.Post) throw new Exception("Wrong report request");
+            ReportBody = await request.Content!.ReadAsStringAsync(token);
+            if (FailNetwork) throw new HttpRequestException("fixture-secret");
+            return new HttpResponseMessage((System.Net.HttpStatusCode)Status) { Content = new StringContent(Status == 201 ? "{\"number\":42,\"html_url\":\"https://" + (ForeignReceipt ? "example.invalid" : "github.com/richardkaufmann/converse") + "/issues/42\"}" : "fixture-secret") };
+        }
+    }
+
 }
