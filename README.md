@@ -118,11 +118,15 @@ On Mac, Return creates an item, even at the end of a heading. Shift-Return creat
 
 Drag across text to select several items or headings, then copy, cut or paste normally. **Reorder** shows drag handles; moving a heading moves its items too. Click its chevron to collapse a section. Entries with comments show a comment count; right-click to read the comments and who wrote them.
 
-Ask any taught session, “Look at the Parking Lot and think about how you’d implement this feature.” It can list and read the Parking Lots on its home. A session can propose edits, but Converse shows you the changes for approval before saving. When there are several lots, name the one you mean. Agents opt in to each named lot through their existing session access list; that shares its contents with the selected provider and allows edits. Stale edits are rejected if the notes change while the assistant is working.
+Ask any taught session, “Look at the Parking Lot and think about how you’d implement this feature.” It can list and read the Parking Lots on its home without a separate Parking Lot permission. A session can propose edits, but Converse shows you the changes for approval before saving. When there are several lots, name the one you mean.
+
+Group members may read your active lots. Agents need explicit access to each lot through their session access list: they act on their own initiative and can send content outside the Group—to a model provider, Discord, or another conversation. Agents start with no lot access. Ordinary sessions follow your live requests; an autonomous message cannot use that path to bypass an agent’s scope. Asking a session to read a lot shares that content with its selected provider, too. Stale edits are rejected if the notes change while the assistant is working.
 
 **Talk…** starts a voice conversation about the lot on Mac. Choose a model, then discuss ideas or ask it to organize them. The helper can read this lot; select any other sessions it needs in Agent Setup. You review proposed changes before they are saved. Voice transcription uses your saved Meta key. You can also type in the helper’s conversation. Sessions, agents and this conversational helper can change the notes. And yes, there’s Undo: **⌘Z** reverses the latest content change, including a cut, reorder or assistant edit; **⇧⌘Z** redoes it. Each lot keeps its own undo history while the app is open.
 
 Other devices in your Group can view a Mac’s Parking Lots and receive updates. Viewing is read only for now, and several devices can read the same lot without moving it away from its home. iPhone and iPad do not host their own lots yet.
+
+Undo covers saved changes. If a simultaneous edit is rejected because the lot has changed, it never enters the undo history. That can reject a whole paste, not just one keystroke; Undo cannot recover that rejected text.
 
 To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart.
 
