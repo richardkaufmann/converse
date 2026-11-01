@@ -43,13 +43,14 @@ public sealed partial class MainWindow
             try { if (_supportLogin is { HasExited: false }) _supportLogin.Kill(entireProcessTree: true); } catch { }
             foreach (var window in _supportHelpWindows.ToArray()) window.Close();
         };
-        if (!SetupPreview.Enabled) return;
-        foreach (var entry in _store.Entries)
+        if (SetupPreview.Enabled) foreach (var entry in _store.Entries)
         {
             entry.AccountDirectory = Path.Combine(_store.Folder, "SupportAccounts", entry.Engine);
             entry.UseDefaultAccountStore = false;
             Directory.CreateDirectory(entry.AccountDirectory);
         }
+        // Existing workspaces opt in through Help; a fresh workspace gets NUX.
+        if (_store.Sessions.Any(s => !s.SupportAssistant)) return;
         _store.Save();
         var setup = new SupportSetup(_store);
         var session = setup.Session();
@@ -58,8 +59,15 @@ public sealed partial class MainWindow
         {
             bool shown = false;
             if (Content is FrameworkElement root)
-                root.Loaded += async (_, _) => { if (!shown) { shown = true; await ShowSupportSetup(); } };
+                root.Loaded += async (_, _) => { if (!shown) { shown = true; await ShowSupportSetup(closeOnCancel: true); } };
         }
+    }
+
+    private async void OnAppSupport(object sender, RoutedEventArgs e)
+    {
+        var support = new SupportSetup(_store).Session();
+        ShowSupportSession(support);
+        if (!support.SupportSetupCompleted) await ShowSupportSetup();
     }
 
     private void ShowSupportSession(ChatSession session)
@@ -99,7 +107,7 @@ public sealed partial class MainWindow
         window.Content = new ScrollViewer { Content = panel }; window.AppWindow.Resize(new Windows.Graphics.SizeInt32(740, 650));
         _supportHelpWindows.Add(window); window.Closed += (_, _) => _supportHelpWindows.Remove(window); window.Activate();
     }
-    private async Task ShowSupportSetup()
+    private async Task ShowSupportSetup(bool closeOnCancel = false)
     {
         if (_supportDialog is not null || _supportCancellation.IsCancellationRequested) return;
         var setup = new SupportSetup(_store); var session = setup.Session();
@@ -176,7 +184,7 @@ public sealed partial class MainWindow
         };
         try { await dialog.ShowAsync(); }
         finally { _supportDialog = null; }
-        if (!session.SupportSetupCompleted) { _quitAccepted = true; Close(); }
+        if (!session.SupportSetupCompleted && closeOnCancel) { _quitAccepted = true; Close(); }
         else { Refresh(); _panes[0].FocusDraft(); }
     }
 

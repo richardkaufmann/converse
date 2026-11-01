@@ -2,6 +2,25 @@ import Foundation
 import AppKit
 import SwiftUI
 
+enum BugReportPrivacy {
+    // Allowlisted facts only. Do not serialize settings, hosts, sessions or logs.
+    static func summary(version: String, os: String, grouped: Bool, peers: Int, online: Int, sessions: Int, busy: Int) -> String {
+        "\n\nDiagnostic summary (names and identifiers omitted):\nConverse: \(version)\nOS: \(os)\nIn a Group: \(grouped ? "yes" : "no")\nKnown peers: \(peers); online: \(online)\nLocal sessions: \(sessions); busy: \(busy)"
+    }
+    static func scrub(_ text: String) -> String {
+        let patterns = [
+            #"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"#,
+            #"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{8,})"#,
+            #"(?i)\bBearer\s+[^\s\"',;]+"#,
+            #"(?i)\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\r\n]+"#,
+            #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#,
+            #"(?i)(?:/Users/|/home/|[A-Z]:\\Users\\)[^\r\n]+"#,
+            #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#
+        ]
+        return patterns.reduce(text) { value, pattern in value.replacingOccurrences(of: pattern, with: "[removed]", options: .regularExpression) }
+    }
+}
+
 // Fixed destination: model output can supply report text, never a host or credential.
 struct GitHubBugReport {
     static let repository = "richardkaufmann/converse"
@@ -85,6 +104,17 @@ private struct BugReportView: View {
             TextField("Title", text: $report.title).textFieldStyle(.roundedBorder).disabled(sending || receipt != nil)
             TextEditor(text: $report.body).font(.body).border(.secondary.opacity(0.3)).disabled(sending || receipt != nil)
             Text("Review what you’re sharing. No logs, attachments or other conversations are added automatically.").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Add diagnostic summary") {
+                    let store = Store.shared, homes = Store.shared.participantService.participantHomes
+                    report.body += BugReportPrivacy.summary(version: ConverseAbout.versionBuild, os: ProcessInfo.processInfo.operatingSystemVersionString, grouped: store.participantService.currentGroup != nil, peers: homes.count, online: homes.filter { $0.online }.count, sessions: store.sessions.count, busy: store.sessions.filter { $0.busy }.count)
+                    status = "Added only versions and counts. Review below before submitting."
+                }.disabled(sending || receipt != nil)
+                Button("Remove likely secrets") {
+                    report.title = BugReportPrivacy.scrub(report.title); report.body = BugReportPrivacy.scrub(report.body)
+                    status = "Common secrets, email addresses, home paths and IPv4 addresses removed locally. This cannot guarantee anonymity; review the entire report."
+                }.disabled(sending || receipt != nil)
+            }
             Text(hasToken ? "GitHub token saved. Submit reports directly from Converse." : "Recommended: save a GitHub token once, then submit reports here.").font(.callout)
             HStack {
                 SecureField(hasToken ? "Replace GitHub token (optional)" : "Paste GitHub token", text: $tokenInput)

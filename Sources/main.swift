@@ -1524,6 +1524,13 @@ final class ConversationTextView: NSTextView {
         let formatted: NSAttributedString
     }
     var copyBlocks: [CopyBlock] = []
+    override func copy(_ sender: Any?) {
+        let range = selectedRange()
+        guard let textStorage, range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= textStorage.length else { return }
+        let plain = TranscriptClipboard.plainText(textStorage.attributedSubstring(from: range))
+        super.copy(sender)
+        NSPasteboard.general.setString(plain, forType: .string)
+    }
     func copyBlock(_ index: Int, to pasteboard: NSPasteboard) {
         guard copyBlocks.indices.contains(index) else { return }
         let block = copyBlocks[index]

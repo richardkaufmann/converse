@@ -249,6 +249,16 @@ final class TailTextView: UITextView {
         guard isEditable else { return false }
         return itemProviders.contains { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) } || super.canPaste(itemProviders)
     }
+    override func copy(_ sender: Any?) {
+        let range = selectedRange
+        guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= textStorage.length else { return }
+        let plain = TranscriptClipboard.plainText(textStorage.attributedSubstring(from: range))
+        super.copy(sender)
+        var items = UIPasteboard.general.items
+        if items.isEmpty { items = [[:]] }
+        items[0][UTType.utf8PlainText.identifier] = plain
+        UIPasteboard.general.items = items
+    }
     override func paste(_ sender: Any?) {
         guard isEditable else { return }
         if let image = UIPasteboard.general.image, let data = image.pngData(), let coordinator = delegate as? PadTranscript.Coordinator { coordinator.parent.attach(data); return }

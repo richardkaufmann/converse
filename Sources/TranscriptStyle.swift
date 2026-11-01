@@ -1,5 +1,20 @@
 import Foundation
 
+// Keep destinations when a rich-text selection is pasted into a plain-text app.
+enum TranscriptClipboard {
+    static func plainText(_ selection: NSAttributedString) -> String {
+        let output = NSMutableString(string: selection.string)
+        var links: [(Int, String)] = []
+        selection.enumerateAttribute(NSAttributedString.Key("NSLink"), in: NSRange(location: 0, length: selection.length)) { value, range, _ in
+            let url = (value as? URL)?.absoluteString ?? value as? String ?? ""
+            guard !url.isEmpty, (selection.string as NSString).substring(with: range) != url else { return }
+            links.append((NSMaxRange(range), " (\(url))"))
+        }
+        for (offset, suffix) in links.reversed() { output.insert(suffix, at: offset) }
+        return output as String
+    }
+}
+
 // Reading has no timeout. Output may follow only while following is enabled;
 // typing, Jump to latest, or scrolling back down explicitly resumes it.
 struct TranscriptFollowState {

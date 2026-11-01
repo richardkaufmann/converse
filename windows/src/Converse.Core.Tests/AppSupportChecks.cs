@@ -7,6 +7,9 @@ internal static class AppSupportChecks
 {
     public static async Task Run(Action<bool, string> check)
     {
+        var scrubbed = BugReportPrivacy.Scrub("Bug 123\nBearer fixture-secret\ngithub_pat_fixture\nuser@example.com\n/Users/alice/private.txt\nC:\\Users\\alice\\private.txt\n192.168.1.2\n-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----");
+        check(scrubbed.Contains("Bug 123") && !scrubbed.Contains("alice") && !scrubbed.Contains("fixture") && !scrubbed.Contains("example.com") && !scrubbed.Contains("192.168"), "Local scrubber removes common credentials and identifiers while preserving symptoms");
+        check(BugReportPrivacy.Summary("test", "Windows", true, 2, 1, 3, 1).Contains("Known peers: 2; online: 1"), "Diagnostics contain only allowlisted versions and counts");
         var root = Directory.CreateTempSubdirectory("converse-support-check-").FullName;
         try
         {

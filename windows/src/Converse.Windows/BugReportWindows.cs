@@ -23,6 +23,20 @@ public sealed partial class MainWindow
         var panel = new StackPanel { Spacing = 10 };
         panel.Children.Add(new TextBlock { Text = "To: richardkaufmann/converse on GitHub" }); panel.Children.Add(title); panel.Children.Add(body);
         panel.Children.Add(new TextBlock { Text = "Review what you’re sharing. No logs, attachments or other conversations are added automatically.", TextWrapping = TextWrapping.Wrap });
+        var diagnostics = new Button { Content = "Add diagnostic summary" };
+        diagnostics.Click += (_, _) =>
+        {
+            var homes = _devices.Homes.Values.Where(h => _devices.IsParticipantAllowed(h.DeviceID, _devices.CurrentGroup?.Id)).ToArray();
+            body.Text += BugReportPrivacy.Summary(VersionBuild, Environment.OSVersion.VersionString, _devices.CurrentGroup is not null, homes.Length, homes.Count(h => h.Online), _store.Sessions.Count, _store.Sessions.Count(s => s.Busy));
+            status.Text = "Added only versions and counts. Review before submitting.";
+        };
+        var scrub = new Button { Content = "Remove likely secrets" };
+        scrub.Click += (_, _) =>
+        {
+            title.Text = BugReportPrivacy.Scrub(title.Text); body.Text = BugReportPrivacy.Scrub(body.Text);
+            status.Text = "Common secrets, email addresses, home paths and IPv4 addresses removed locally. This cannot guarantee anonymity; review the entire report.";
+        };
+        panel.Children.Add(diagnostics); panel.Children.Add(scrub);
         var credentialStatus = new TextBlock { Text = string.IsNullOrWhiteSpace(key) ? "Recommended: save a GitHub token once, then submit reports here." : "GitHub token saved. Submit reports directly from Converse.", TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(credentialStatus);
         var tokenInput = new PasswordBox { Header = "GitHub token · blank keeps saved token", PasswordRevealMode = PasswordRevealMode.Hidden };
@@ -68,6 +82,7 @@ public sealed partial class MainWindow
             try { current = new GitHubBugReport(title.Text, body.Text).Validated(); }
             catch (Exception ex) { status.Text = ex.Message; return; }
             attempted = true; dialog.IsPrimaryButtonEnabled = false; dialog.IsSecondaryButtonEnabled = false; title.IsEnabled = false; body.IsEnabled = false; saveToken.IsEnabled = false; tokenInput.IsEnabled = false;
+            diagnostics.IsEnabled = false; scrub.IsEnabled = false;
             var deferred = e.GetDeferral();
             try
             {

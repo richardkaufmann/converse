@@ -6,6 +6,18 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testCopySelectionPreservesLinkDestinations() {
+        let view = TailTextView()
+        let text = NSMutableAttributedString(string: "References: Café 🐈 and https://example.com")
+        text.addAttribute(.link, value: URL(string: "https://example.com/docs")!, range: NSRange(location: 12, length: 7))
+        let last = (text.string as NSString).range(of: "https://example.com")
+        text.addAttribute(.link, value: URL(string: "https://example.com")!, range: last)
+        view.attributedText = text; view.selectedRange = NSRange(location: 0, length: text.length)
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, "References: Café 🐈 (https://example.com/docs) and https://example.com")
+        view.selectedRange = NSRange(location: 12, length: 4); view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, "Café (https://example.com/docs)")
+    }
     func testPhonePaneCollapseKeepsEditorAndKeyboardFocus() async throws {
         guard UIDevice.current.userInterfaceIdiom == .phone else { return }
         let service = try service(), model = PadModel(service: service)

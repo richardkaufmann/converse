@@ -26,7 +26,7 @@ You can build Linux apps and services on a Mac or PC without multiple windows, o
 
 The cross-system session support also greatly eases development. Ask a session to generate an image, paste it into another session running on a different system. It just works!
 
-The rest of this README walks through installing Converse, and then using it. A friendly suggestion: AI wrote what follows (it’s kind of grim, to be honest). Let AI read the details! You tell App Support what you want to do; it can work through the instructions with you. Install the app on a Mac, and the support agent will walk you through provisioning your first provider on that system. From there you can just chat and have it help set up multiple systems (including headless Linux), agents, whatever. It’ll ask for what it needs. You can give feedback too: “File a bug about blah blah blah” gets a report ready for GitHub. You review it and send it. No Discord account needed.
+The rest of this README walks through installing Converse, and then using it. A friendly suggestion: AI wrote what follows (it’s kind of grim, to be honest). Let AI read the details! You tell App Support what you want to do; it can work through the instructions with you. Install the app on a Mac or Windows PC, and the support agent will walk you through provisioning your first provider on that system. From there you can just chat and have it help set up multiple systems (including headless Linux), agents, whatever. It’ll ask for what it needs. You can give feedback too: “File a bug about blah blah blah” gets a report ready for GitHub. You review it and send it. No Discord account needed.
 
 Enjoy.
 
@@ -49,16 +49,18 @@ You do not need Discord to use App Support, set up Converse or report a bug. App
 
 You need **one working provider** before you can ask an assistant for help. A provider is the service behind the model: Meta Muse, Anthropic's Claude, or OpenAI's Codex. Its account and usage charges are separate from Converse.
 
-On a new Mac installation, Converse shows **Converse App Support** (the built-in assistant for help with this app) and asks you to pick a provider. Choose just one:
+On a new Mac or Windows installation, Converse shows **Converse App Support** (the built-in assistant for help with this app) and asks you to pick a provider. Choose just one:
 
 1. **Install its command-line tool if needed.** Converse uses the provider's installed program, often called its *CLI*, to connect. Follow the installation link shown by setup, return, and retry the provider choice. You do not need all three tools.
 2. **Complete that provider's sign-in.** Converse opens its login flow in Terminal and/or your browser. Finish there, then return to Converse. Do not put passwords, API keys or login codes into the conversation.
 3. **Wait for the connection check.** Converse asks the model for one short response. This may use provider quota. A successful login alone is not enough: setup waits until the model actually answers. Failed or cancelled setup stays on this step so you can retry.
 4. **Meet App Support.** After the check, setup and teaching text disappear from view, and the support conversation is ready. Try: “What can I do in Converse?” or “Help me create a session for my project.”
 
+For a problem involving another Group system, App Support can find its support agent and ask for a scoped, read-only health report. It uses live session IDs, reports unavailable peers, and does not turn a peer message into permission to change settings.
+
 App Support can explain the app, read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
 
-**Windows and existing installations:** use **Converse → Setup** and **Settings → Models & sessions** to select an installed provider, its login, and a working folder. The App Support first-launch flow is currently available in the isolated Windows Setup Preview, not normal Windows startup. Upgrading an existing installation preserves its sessions and does not rerun onboarding.
+**Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Its provider login stays separate from existing sessions. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
 
 ### Report a bug
 
@@ -72,7 +74,11 @@ The token needs access to `richardkaufmann/converse` and permission to create is
 
 Reports go to `richardkaufmann/converse`. While the repository is private, your GitHub account needs access; a login alone does not grant it. A report window or browser draft is not yet a filed issue. If sending fails or times out, check the issue list before trying again: Converse does not automatically repost. For a description too long for a browser link, use **Copy description** and paste it into a new issue on GitHub.
 
+**Help us reproduce it without sharing your life.** In the desktop report window, **Add diagnostic summary** adds app/OS versions and Group/session counts. It leaves out Group and device names, IDs, addresses, file paths and conversations. **Remove likely secrets** locally removes common token/key patterns, email addresses, home paths and IPv4 addresses from the draft. This is a useful first pass, not a guarantee of anonymity: read the whole report, edit or remove anything private, then approve it with **Submit report**. The report may become public. An agent can help summarize symptoms, using Host A/Host B instead of real names; do not paste keys or raw logs into a model just to ask it to scrub them.
+
 Only the report text you review is included. Logs, screenshots, attachments and other conversations are not added automatically. If you use the browser route, its prefilled report link contains that text and may appear in browser history. Keep secrets and unrelated private information out of reports. Saved GitHub credentials stay in the Mac Keychain or Windows Credential Manager; they are never given to the model or placed in a report. Discord is not involved.
+
+Copying a selected passage on Mac, iPhone or iPad preserves link destinations in plain-text paste—for example, `Cursor Agent (https://cursor.com/docs/agent/overview)`. Copying a whole response also preserves its Markdown links.
 
 ## Set up your first coding session
 

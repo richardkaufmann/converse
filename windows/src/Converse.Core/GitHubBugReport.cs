@@ -4,6 +4,27 @@ using System.Text.Json;
 
 namespace Converse.Core;
 
+public static class BugReportPrivacy
+{
+    // Only numeric counts and public version strings; no profile serialization.
+    public static string Summary(string version, string os, bool grouped, int peers, int online, int sessions, int busy) =>
+        $"\n\nDiagnostic summary (names and identifiers omitted):\nConverse: {version}\nOS: {os}\nIn a Group: {(grouped ? "yes" : "no")}\nKnown peers: {peers}; online: {online}\nLocal sessions: {sessions}; busy: {busy}";
+    public static string Scrub(string text)
+    {
+        string[] patterns = [
+            @"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            @"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{8,})",
+            "(?i)\\bBearer\\s+[^\\s\"',;]+",
+            @"(?i)\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\r\n]+",
+            @"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            @"(?i)(?:/Users/|/home/|[A-Z]:\\Users\\)[^\r\n]+",
+            @"\b(?:\d{1,3}\.){3}\d{1,3}\b"
+        ];
+        foreach (var pattern in patterns) text = System.Text.RegularExpressions.Regex.Replace(text, pattern, "[removed]", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(1));
+        return text;
+    }
+}
+
 public sealed record GitHubBugReport(string Title, string Body)
 {
     public const string Repository = "richardkaufmann/converse";

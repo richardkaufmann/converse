@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 
 @MainActor func appSupportSelfTests(_ check: @escaping (Bool, String) -> Void) {
+    let linkText = NSMutableAttributedString(string: "Café 🐈 and docs")
+    linkText.addAttribute(.link, value: URL(string: "https://example.com/a?b=1")!, range: NSRange(location: 0, length: 7))
+    check(TranscriptClipboard.plainText(linkText) == "Café 🐈 (https://example.com/a?b=1) and docs", "Copy selection retains link destinations with Unicode ranges")
+    let privateReport = "Bug 123\nBearer fixture-secret\ngithub_pat_fixture\nuser@example.com\n/Users/alice/private.txt\nC:\\Users\\alice\\private.txt\n192.168.1.2\n-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+    let scrubbed = BugReportPrivacy.scrub(privateReport)
+    check(scrubbed.contains("Bug 123") && !scrubbed.contains("alice") && !scrubbed.contains("fixture") && !scrubbed.contains("example.com") && !scrubbed.contains("192.168"), "Bug report scrubber removes common credentials and identifiers locally while preserving symptoms")
+    check(BugReportPrivacy.summary(version: "test", os: "macOS", grouped: true, peers: 2, online: 1, sessions: 3, busy: 1).contains("Known peers: 2; online: 1"), "Diagnostics consist of allowlisted versions and counts")
     let oldAPI = AgentRuntime.shared.api, oldKeyReader = AgentRuntime.shared.keyReader
     defer { AgentRuntime.shared.api = oldAPI; AgentRuntime.shared.keyReader = oldKeyReader }
     AgentRuntime.shared.keyReader = { _ in nil }
