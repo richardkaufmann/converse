@@ -1128,6 +1128,28 @@ MdnsChecks.Run(Check);
     Cleanup(dir);
 }
 
+// Dissolve is a member action, including after leaving or changing groups.
+{
+    var root = Path.Combine(Path.GetTempPath(), "converse-dissolve-membership-" + Guid.NewGuid());
+    using (var service = new DeviceSyncService(root, new SessionStore(root, new FakeRunner()), "Local"))
+    {
+        var foreign = new ConverseGroup { Id = Guid.NewGuid().ToString(), Name = "Discovered", Creator = new string('f', 64) };
+        Check(!service.CanDissolveGroup(foreign.Id), "Dissolve is disabled for a discovered group before joining");
+        await service.DissolveGroupAsync(foreign);
+        Check(service.CurrentGroup is null && !service.KnownGroups.Any(g => g.Id == foreign.Id), "Nonmember dissolve creates no local tombstone");
+        await service.CreateGroupAsync("Own group");
+        var own = service.CurrentGroup!;
+        Check(service.CanDissolveGroup(own.Id) && !service.CanDissolveGroup(foreign.Id), "Only the current member group enables Dissolve");
+        await service.DissolveGroupAsync(foreign);
+        Check(service.CurrentGroup?.Id == own.Id && !service.KnownGroups.Any(g => g.Id == foreign.Id), "Dissolving another group cannot change current membership or its history");
+        await service.LeaveGroupAsync();
+        Check(!service.CanDissolveGroup(own.Id), "Leaving immediately disables an armed Dissolve action");
+        await service.DissolveGroupAsync(own);
+        Check(service.CurrentGroup is null && service.KnownGroups.Single(g => g.Id == own.Id).Dissolved == false, "Stale confirmation after leaving cannot dissolve a remembered group");
+    }
+    Cleanup(root);
+}
+
 // Group store: adopt/leave/dissolve, tombstone permanence, immutability, caps.
 {
     var dir = Directory.CreateTempSubdirectory("converse-groups-").FullName;

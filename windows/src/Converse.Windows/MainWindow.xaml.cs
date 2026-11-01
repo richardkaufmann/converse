@@ -944,6 +944,7 @@ public sealed partial class MainWindow : Window
     private void RenderGroupsDialog()
     {
         if (_groupsPanel is not { } panel) return;
+        if (_groupsArmDissolve is { } armed && !_devices.CanDissolveGroup(armed)) _groupsArmDissolve = null;
         var signature = new System.Text.StringBuilder();
         signature.Append("g:").Append(_devices.CurrentGroup?.Id ?? "none");
         foreach (var pairing in _devices.GroupPairingPrompts) signature.Append("|p:").Append(pairing.PeerId).Append(pairing.Code);
@@ -1067,9 +1068,12 @@ public sealed partial class MainWindow : Window
             {
                 Content = _groupsArmDissolve == group.Id ? "Confirm dissolve" : "Dissolve",
                 FontSize = 12,
+                IsEnabled = _devices.CanDissolveGroup(group.Id),
             };
             dissolve.Click += async (_, _) =>
             {
+                // Membership may change between rendering and either click.
+                if (!_devices.CanDissolveGroup(group.Id)) { _groupsArmDissolve = null; _groupsSignature = ""; Refresh(); return; }
                 // Two-step in place of a nested confirmation dialog.
                 if (_groupsArmDissolve != group.Id) { _groupsArmDissolve = group.Id; _groupsSignature = ""; Refresh(); return; }
                 _groupsArmDissolve = null;

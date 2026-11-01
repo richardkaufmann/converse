@@ -1263,9 +1263,12 @@ public sealed partial class DeviceSyncService : IDisposable
         foreach (var peer in old) Disconnect(peer);
     }
 
+    public bool CanDissolveGroup(string id) => !LocallyRemoved && CurrentGroup?.Id == id;
+
     public async Task DissolveGroupAsync(ConverseGroup group)
     {
         if (!group.Valid) { LastOutcome = "Unknown group."; return; }
+        if (!CanDissolveGroup(group.Id)) { LastOutcome = "Join this group before dissolving it."; return; }
         GroupStore.Dissolve(group);
         RefreshGroupMembers();
         Reannounce();
