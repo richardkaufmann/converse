@@ -11,12 +11,13 @@ its standout features
 1. **It’s multi-session.** You can have many sessions open simultaneously, and have up to three of them up, side by side, in each of the app’s desktop windows.
 2. **It’s multi-provider.** Meta, OpenAI, Anthropic can be mixed and matched as desired.
 3. **It’s multi-system.** Sessions can run on Mac, Windows and Linux. The app UI runs on Mac, Windows, iPads and iPhones.
-4. **It’s distributed.** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent.
+4. **It’s distributed.** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent. Systems rejoin when they come back online, including iPhones and iPads, as long as they can reach the other systems.
 5. **It hosts agent sessions.** These sessions have initiative and can start periodically or via an external stimulus.
 6. **It’s chatty.** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
 7. **It talks to the outside world.** Agents interact with GitHub (to track PRs, issues, updates), Discord (to send and receive messages), and Meta’s Muse mobile app (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
 8. **It has polish.** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
 9. **You can enter into spoken conversations with your agent.**
+10. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. You’ve been warned, though! Read the [security section](#security-and-privacy) to make sure this app is for you!
 
 These features combine in interesting ways. There’s a built-in support agent that knows this README, and can help you avoid fiddly UIs to configure providers, agents, etc. You can talk with this support agent via Discord or Muse Jolly. And it checks daily for bugs and version updates of the app! This uses a teaching prompt injected into a normal Converse agent.
 
@@ -277,6 +278,10 @@ A filename dropped into a remote session is labeled `file from <device name>: <f
 
 Hover a device heading for details. Right-click it, or use mobile actions, to **Rename device…**. The display name is shared with the Group, including devices that are offline and reconnect later. It does not change operating-system hostnames or internal identities.
 
+**Groups remember you.** Quit, restart, or take a device offline: its membership survives. When Converse is running again and the systems can reach each other, they reconnect without pairing again. This includes iPhone and iPad; reopen Converse after returning to the network. Leaving or dissolving the Group is different—it deliberately ends membership.
+
+**Take your Group on the road.** A [UniFi Travel Router (UTR)](https://store.ui.com/us/en/category/wifi-special-devices/collections/unifi-travel-router/products/utr) is a great tool for this. Set up its VPN tunnel into your home or office network, connect your devices to it, and work remotely wherever that tunnel can reach your Converse systems. Ubiquiti provides Teleport/Site Binding and WireGuard options. If discovery does not cross the tunnel, use **Host or IP** and the port shown in Converse Groups. You still approve pairing on both sides the first time; the router does not admit devices to your Group.
+
 If discovery is empty, check local-network permission, firewalls and reachability. **Host or IP** plus **Port** lets you join over a reachable VPN or a network without discovery; the same verification is required. **Leave** affects only this installation and preserves its local sessions. **Dissolve** ends the Group after confirmation. Groups do not merge.
 
 ### Use the native iPhone or iPad app
@@ -462,9 +467,15 @@ For how deployment, trust, and recovery work under the hood, see [Linux home con
 
 ## Security and privacy
 
-Converse brings your AI conversations together; you choose which provider receives each conversation, what extra material an agent may read, and which of your devices can access the workspace. Start with one provider and one project. Add access only when you need it. Enter secrets in the app’s masked credential fields, never in a conversation.
+**The basic deal: reach it, pair it, trust it.** If your Converse app can reach another system’s Converse port, it can ask to join that system’s Group. Compare the verification number and approve on both sides, just like pairing a phone to a car. Being on the same network—or knowing the port—is not enough to get in. Once you pair, that device can see and control sessions in the Group. Only pair systems you trust with that access.
 
-The details below describe where that information goes and what protection the current app provides.
+**Groups are persistent.** Devices remember their membership and reconnect when Converse is running and the network is reachable again. That includes iPhones and iPads. A VPN back to your own network lets you use the Group away from home; see [Take your Group on the road](#connect-your-devices-into-a-group) for the UniFi travel-router option.
+
+**What goes over the wire?** Group messages use ChaCha20-Poly1305 authenticated encryption, with the Noise XX handshake (`Noise_XX_25519_ChaChaPoly_SHA256`) and remembered device identities. Desktop and Linux homes normally listen on **TCP 48721**. Mobile apps and Demo editions can use an automatically selected port; check Converse Groups for the actual port. Discovery helps devices find each other, but **Host or IP** works across a routed network or VPN too. For remote access, use a VPN into your trusted network rather than exposing the Converse port directly to the internet.
+
+That’s the posture. Pairing is an invitation into your workspace, not just permission to look at one window. Read on to decide whether it fits how you want to work.
+
+You also choose which AI provider receives each conversation and what extra material an agent may read. Start with one provider and one project. Add access when you need it. Enter secrets in the app’s masked credential fields, never in a conversation.
 
 Desktop Converse runs sessions and agents on their **home system** while the app is open. A Linux home runs them in its background user service while that service is running, without a desktop window. Local storage does not mean local AI: your prompts and the context needed to answer them are sent to the **provider selected for that session or agent**. That provider's account terms, retention settings and privacy policy apply. Converse does not make a blanket promise that providers never retain data.
 
