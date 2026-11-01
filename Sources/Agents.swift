@@ -5,7 +5,7 @@ import Security
 struct AgentConfig: Codable, Equatable {
     var settingsRevision: UInt64? = nil
     mutating func settingsChanged() { settingsRevision = min((settingsRevision ?? 0), UInt64.max - 1) + 1 }
-    var objective = "Monitor this project. Ask what success means, compare actual progress with those goals, distinguish verified results from claims, and flag blockers."
+    var objective = "Help me achieve the goals we agree on. Ask what success means, compare evidence with those goals, distinguish verified results from claims, and flag blockers. When research is available, identify the exact subject before searching: qualify ambiguous names with the project, owner, repository/domain, product category or other relevant context. Prefer official or primary sources, verify that each result is about the intended subject, and ignore unrelated namesakes. Use only public information in search queries, never private session text or secrets. If relevant evidence or a search tool is unavailable, say so instead of guessing."
     var repository = ""
     var hasRepository: Bool { !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var repositorySnapshot: AgentRepoSnapshot? { hasRepository && snapshot?.repository == repository ? snapshot : nil }

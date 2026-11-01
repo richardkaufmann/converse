@@ -2,6 +2,7 @@
 """Check README indexing without network access or external packages."""
 import hashlib
 import importlib.util
+import re
 from pathlib import Path
 import unittest
 
@@ -12,6 +13,35 @@ spec.loader.exec_module(generator)
 
 
 class HelpContentTests(unittest.TestCase):
+    def test_native_onboarding_links_have_real_help_destinations(self):
+        source = (root / 'README.md').read_text()
+        topics = {topic['id'] for topic in generator.build_book(source)['topics']}
+        swift = (root / 'Sources/AppSupport.swift').read_text()
+        csharp = (root / 'windows/src/Converse.Core/AppSupport.cs').read_text()
+        # Extract the actual routing tables, so renaming a README topic cannot
+        # silently break a welcome link while a text-search fallback hides it.
+        swift_routes = re.search(r'static let guideTopics = (\[[^\n]+\])', swift).group(1)
+        cs_routes = re.search(r'Topics = new\(\)\s*\{(.*?)\};', csharp, re.S).group(1)
+        destinations = re.findall(r':\s*"([a-z-]+)"', swift_routes)
+        destinations += re.findall(r'\]\s*=\s*"([a-z-]+)"', cs_routes)
+        destinations += re.findall(r'helpController.show\(topic: "([a-z-]+)"', swift)
+        for destination in destinations:
+            with self.subTest(topic=destination):
+                self.assertIn(destination, topics)
+
+    def test_walkthrough_local_links_resolve(self):
+        source = (root / 'README.md').read_text()
+        headings = re.findall(r'^#{1,6}\s+(.+)$', source, re.M)
+        anchors = {re.sub(r'[^a-z0-9 -]', '', heading.lower()).replace(' ', '-') for heading in headings}
+        for target in re.findall(r'\]\(([^\s)]+)\)', source):
+            if '://' in target:
+                continue
+            with self.subTest(target=target):
+                if target.startswith('#'):
+                    self.assertIn(target[1:], anchors)
+                else:
+                    self.assertTrue((root / target.split('#')[0]).exists())
+
     def test_code_fences_do_not_create_help_topics(self):
         source = '# Converse\nIntro.\n## Sending\n```converse\n## This is code\n{"command":"list-sessions"}\n```\n### Detail\nKeep this.\n## Accounts\nLog in.\n'
         book = generator.build_book(source)

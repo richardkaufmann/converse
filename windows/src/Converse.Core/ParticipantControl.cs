@@ -268,7 +268,7 @@ public sealed partial class DeviceSyncService
                         throw new ArgumentException("This provider is not configured on home.");
                     created = _store.Create(entry, persist: false); session = created;
                     detail = "Session created on home. Choose 1, 2 or 3 to display it."; break;
-                case "agent.create": created = _store.CreateAgent(request.Title ?? "New Agent", false); session = created; detail = "Agent created paused. Add a Meta key on its home computer."; break;
+                case "agent.create": created = _store.CreateAgent(request.Title ?? "New Agent", false); session = created; detail = "Agent created paused. Choose a provider/model in Agent Setup on its home computer."; break;
                 case "agent.configure":
                     if (session?.Agent is null || request.Settings is null || request.Settings.Watched.Any(w => DeviceGlobalID.Parse(w) is not { } r || !IsParticipantAllowed(r.Home, group))) throw new ArgumentException("Agent missing or scope outside this group.");
                     session.Agent.Apply(request.Settings); if (request.Settings.Enabled && session.Pending.Count == 0) session.QueuePaused = false; detail = "Settings saved on home."; break;

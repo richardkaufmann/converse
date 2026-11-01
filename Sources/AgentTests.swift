@@ -459,6 +459,7 @@ import Foundation
     let currentWork = store.create(recipient.entry)
     currentWork.title = "Currently working fixture"; currentWork.busy = true; currentWork.status = "Working…"
     currentWork.messages = [Message(role: "user", text: "are you working?"), Message(role: "assistant", text: "")]
+    agent.supportTeachingVersion = 1 // Existing teaching must receive the current research policy.
     agent.agent?.watchedSessions = [recipient.id, currentWork.id]
     runtime.api.request = { request in
         requests.append(request)
@@ -487,6 +488,9 @@ import Foundation
     let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
     check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
     let requestBody = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let supportPolicy = requestBody?["instructions"] as? String ?? ""
+    check(supportPolicy.contains("Never search the web for bare") && supportPolicy.contains("site:github.com/richardkaufmann/converse") && supportPolicy.contains("no relevant result is found"), "Previously taught agents receive current scoped research policy in the actual model request")
+    agent.supportTeachingVersion = nil
     let evidenceInput = (requestBody?["input"] as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")

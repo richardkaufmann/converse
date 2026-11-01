@@ -1,0 +1,128 @@
+# Desktop reference
+
+Detailed controls for readers who have completed the [getting-started walkthrough](../README.md). The main README is also bundled as offline Help.
+
+## Use
+
+The Mac sidebar groups sessions by device, with an alphabetized, indented list under each bold green device heading. Offline devices have a lighter green heading and hide their sessions. Click the local device’s **+**, choose Claude, Codex or Muse, then choose a session name, working folder, and an existing login or **New login…**. A new login opens authentication in Terminal; finish there and return. Settings (**⌘,**) follows the same model → session → login structure, with advanced CLI configuration below each model.
+
+- **Return** sends, or queues the draft while a turn is active. Queue rows have **Inject now** to interrupt and send that message next. **Inject all** interrupts and sends the entire queue together in order, preserving attachments and the current draft. Escape has no send or interrupt binding. **⌘Return** inserts a newline; Shift-Return also works. These keys have the same meaning for all assistants.
+- Queued messages appear above the transcript, with Pause/Resume, Edit, and Clear controls. Stop pauses the queue; failures pause it too. Queued text and attachments survive relaunch, paused until you resume. You can keep editing a separate draft while the queue runs.
+- **Inject now** immediately shows **Interrupting — your queued prompt is next**, then confirms when the prompt starts. Repeated clicks while stopping do not send additional interrupts. Remote queue controls wait for a home acknowledgment; stale items and blocked injections show a reason instead of false success. **Check home** resolves an outstanding request without submitting it again.
+- Draft image previews have a small **×** in the upper-right corner. Click or tap it to remove that image before sending; your text and other images stay in place. This also works in remote panes and on iPad.
+- Muse turns wait for the previous local host to exit before starting queued input. If another host owns the session, Converse holds the unsubmitted prompt in a paused queue and shows **Session in use · input held**. Close that host, then use **Resume queue** or **Inject now**. Newer draft text and attachments stay intact.
+- Your draft is **blue**. Submitted input becomes *italic* in the default system text color, enclosed by subtle separator rules. The app follows macOS light/dark appearance.
+- Assistant Markdown renders natively: headings, bold/italic text, lists, inline and fenced code, block quotes, clickable links, and pipe tables. Tool chatter is hidden; the assistant's answer remains visible. Individual failed Muse tool attempts remain in diagnostic activity while the assistant can recover; an actual failed Muse turn is shown explicitly. Muse's workspace root/trust diagnostics are hidden.
+- Gaps of ten seconds or more before answer text get grey markers such as `[10 sec]` or `[10.5 minutes]`. Timing starts at Send, then follows visible answer text; hidden tool events do not reset it.
+- Right-click in the transcript for **Copy this prompt** or **Copy this response**, using the exchange under the pointer. Rich-text targets receive formatted text (RTF/HTML), including tables and links; plain-text targets receive the original Markdown. Copies omit delay markers.
+- Paste screenshots with **⌘V**, or attach images with the paperclip. Attachments are saved as PNG files and supplied to the assistant.
+- Images returned by an assistant appear in the conversation and travel to remote panes. Converse asks the assistant to save output images in its session output folder and return Markdown image references. Local output images and public HTTPS image URLs are copied into bounded PNG attachments on the session’s home computer and travel to viewers. HTTPS downloads use no saved cookies or credentials, enforce byte/pixel limits, and reject private-network destinations and redirects. While loading, or if loading fails, a web image’s caption remains a clickable link. Code examples and paths outside the permitted output folders are not imported.
+- The **message numbers** checkbox controls the transcript gutter. Each visible message receives one number in a single sequence: prompt numbers are blue and response numbers are grey. Wrapped lines, paragraphs, images, and the editable draft do not add numbers. Numbers from Mac homes continue through history paging. The checkbox defaults on and remembers your choice.
+- Input stays at the bottom; the window follows typing. Click blank space below the transcript to focus the input line. The editable document fills the window, including tall windows. Older text stays selectable and protected from edits.
+- Scrolling up pauses following. **Jump to latest** shows the number of new output updates and immediately returns to the tail. There is no idle timeout: leaving the cursor at the tail does not pull you away from older text. Typing in that pane or pressing Jump to latest returns to the draft. New output follows only when you have not paused following by scrolling up or selecting history.
+- Remote drafts identify the home device and version they were restored from. If a lease refresh supplies a different draft while you have unsent edits, choose **Keep my draft** or **Use home draft**; Converse preserves your local text and images until you choose.
+
+On iPad, an empty display in an existing group explains how to take a session using its sidebar buttons; joining is offered only when no group is selected.
+
+The sidebar gutter can be dragged down to 160 points wide. A compact provider-icon column on Mac, iPad, and Windows identifies each session’s provider; narrowing truncates conversation titles with an ellipsis while keeping the activity indicator and P/1/2/3/X buttons aligned. The full model and title remain in hover details.
+
+Click the **pin** to the left of **Conversation** to hide the sidebar. A small restore pin stays at the top-left of the conversation area. Click it again to restore your previous sidebar width, constrained by the space available. Each window has its own pin state. Hiding the sidebar leaves its displayed conversations and work running.
+
+**Converse → Setup…** reopens account and session setup. **Help → Converse Help…** opens searchable, selectable documentation built from this README and bundled with the app for offline use. Search matches topic titles and article text and highlights matches. Command-F focuses Help search when the Help window is active.
+
+On Mac and Windows, drag files or folders from Finder or Explorer into a conversation pane to insert their full paths at the draft cursor (or at the end of the draft when reading history). Multiple paths are separated by spaces and quoted as needed. This inserts references without uploading or attaching the files; remote drafts label each reference `file from <device name>: <full path>` so its source is clear. Use Paste or Attach to include an image itself. iPad does not insert desktop paths.
+
+Prompts and responses have a blank line between them. In light mode prompt line-number blocks have a light blue background; responses have white. In dark mode the gutter is black, with blue prompt numbers and white response numbers. JSON blobs and switchboard/tell traffic use orange.
+
+Each sidebar row shows a spinning rainbow beachball while the assistant is working (blank when idle or waiting for you), the conversation title, its provider icon, and **P 1 2 3 X**. Agent names have a **🕵️** marker on the right in Mac, iPad, and Windows sidebars and pane headers; the stored name stays unchanged. Hover over the row for account email, profile, model, effort, access, state, current window/pane, usage, quota, directory, queued input, draft/attachment counts and session IDs. Identity comes from the account's CLI: Codex account metadata, Claude initialization/auth status, or Muse's non-secret auth identity fields. The observation time is included; missing identity and probe failures are stated explicitly. Hover refreshes stale metadata without submitting a model prompt.
+
+- **P** parks the conversation: no right pane displays it, and active work continues.
+- **1 / 2 / 3** move it into that pane in this window. Each pane holds one conversation; its previous occupant is parked. Moving from another window vacates the original pane immediately.
+- **X** asks before closing the conversation, stopping active work and removing it from every sidebar and remote display pane. A group member can also close it remotely when its home supports remote close; older homes keep remote X disabled. A recovery snapshot retains transcript, draft and attachments; **File → Restore Closed Conversation** restores it. Closing a conversation leaves the window open and its pane empty.
+
+Hover details appear in a native scrollable panel after a short pause over any part of a session row. Moving into the panel keeps it open so its text can be selected and copied; moving away closes it.
+
+The selected P/1/2/3 button has a green background and white text. Other buttons have white backgrounds, black text and faint borders. X turns dark red while its confirmation is open. A conversation displayed elsewhere shows P in this window; hover gives its exact location, and its context menu can bring the owning window forward. P always parks it globally.
+
+**File → New Window** (**⌘N**) opens a separate window with the same complete sidebar and up to three independently resizable panes on the right. Changing the number of visible session panes divides their available space equally and preserves the sidebar width. Manual pane widths remain when the count is unchanged. Empty slots take no space; a numbered header identifies each visible pane, with its provider’s logo, a larger session title and a **P** button to park it. New windows start empty. Right-click the window name in the title bar to rename it; the **Window** menu uses these names to bring windows forward. Names are unique among open windows. Closing a window parks all its conversations and leaves their work running. Quit warns about active commands and any agents hosted on this Mac, even paused agents: exiting makes them unreachable and stops their loops until Converse restarts. Confirmed quit preserves configured loop settings for restart; Keep Running changes nothing. Pane assignments belong to open windows; after relaunch, choose 1, 2 or 3 to display saved conversations again.
+
+Adding or removing a visible pane evenly redistributes the conversation widths. Adding a pane caps an overly wide sidebar just below the model-column threshold without expanding a sidebar you deliberately made narrow; removing a pane leaves it alone when space permits. Replacing a conversation in an existing pane keeps the gutter positions. Resizing the window preserves your session-pane proportions, temporarily clamps panes at readable minimums, and restores those proportions when space returns. The sidebar scales down in smaller windows and returns toward your chosen width as the window grows. Gutters remain adjustable; the window grows only if needed to fit the minimum sidebar and session widths.
+
+Right-click a conversation for Configure, pane moves, Park, Show in its owning window, or Close. Configure is disabled while work runs. Session titles update immediately everywhere after Save. Changing a session’s working folder applies to its next CLI turn, retaining its login and conversation ID; no new conversation is needed. The current working folder is included in the next prompt’s local context. Missing folders are rejected before saving. Assistant headers retain Configure and New Session actions. Conversations, drafts, attachments and last-observed account identities survive relaunches. Bold assistant names indicate that conversations exist.
+
+A compact bottom status line shows the current state, model, reasoning effort, access setting, and last-turn input/output token counts. Opening a Muse session queries `muse serve` through read-only `session/read` and `usage/read` calls. No turn is submitted and the session is not resumed or attached. The app combines retained session metadata and the session log with saved settings: the model and access profile are session-derived, while a saved effort without a retained override is explicitly labeled `(config)`. The log supplies last-turn and cumulative session token counts across relaunches. The refresh button queries again. Model, effort and access dropdowns work for all three assistants. Codex queries its app server for its catalog, effective configuration and retained thread metadata; Claude uses its prompt-free SDK initialization catalog and retained transcript. Effort menus use the selected model’s reported supported levels. Custom model IDs and effort levels are also available; the CLI validates custom choices. Click the model, effort or access value to choose a conversation setting. Existing sessions use Muse's durable setters; new conversations retain choices for their first turn. Controls remain editable during active work and metadata refresh; they briefly disable while a setting transaction awaits acknowledgment. Global settings and other conversations are unchanged. Values persist and also refresh after turns. For subscription quota, Converse also runs the installed CLI's `/usage` command in an invisible, ephemeral terminal (`--no-session-log`), with no model prompt. This retrieves current-window and weekly percentages and reset times. It refreshes on open (cached for five minutes), `/usage`, or the refresh button. The displayed timestamp identifies the CLI observation when available, otherwise the query time. Failures are shown explicitly; token counts are never presented as remaining quota.
+
+The Mac's local time zone and send time are supplied as context to the assistant, and the child process receives the matching `TZ`. Local time is preferred unless another time zone is requested.
+
+### Account status
+
+**Status unavailable:** click the orange status warning for **Retry status**, **Login settings**, **Session settings**, and troubleshooting help. A CLI status timeout does not by itself mean the login expired. Retry, check that the session command points to the installed CLI, then use Login settings if the provider reports an authentication problem. Muse uses its installed CLI login; follow its sign-in instructions in Terminal and return to retry.
+
+**Agent settings missing:** choose an enabled provider and model in **Agent Setup**. CLI choices use that account’s login; Meta API models use the saved Meta API key. Click **Open Agent Setup** (also available by right-clicking the session). If its configuration is missing, execution stays paused and the setup form explains that it starts with an empty session scope and automatic loops off. Review the objective, selected sessions, schedule and optional Discord settings before saving. This does not restore lost settings from a backup. The existing transcript, draft and saved credentials are retained.
+
+On Mac, **Configuration Diagnostics** in the Converse data folder records startup/quit, archive save origins, configuration field changes, and unexpected archive replacement by another writer. Events include process/run and build identity, but omit configuration values, session titles, transcripts and credentials. Logs rotate and retain a bounded history. Private **Agent Recovery** files retain the latest and previous valid configuration per agent; these can contain objectives and working notes, are owner-readable only, and are never restored automatically. Keep recovery files private; review them before sharing diagnostics. Missing configurations retain the agent marker and cannot launch a CLI.
+
+The compact **Account** control follows Approvals in each local session footer. It shows the last reported context utilization and the highest reported account-limit percentage. Click for individual allowance windows, reset times, and refresh. Codex reports context from its last model call and account rate limits; Muse reports current-window and weekly allowances. Providers that do not expose a value show `?`, including API agents whose account allowance is not reported. These are observations, not guarantees of remaining capacity; account allowances may be shared with other sessions. A clock marks old, unknown-age, or expired observations. Refresh runs off the UI thread and does not send a model prompt.
+
+### Compact session context
+
+For retained Codex and Claude sessions hosted on Mac, **Compact** appears in yellow near the lower-right of the transcript when the latest provider observation is at least 80% of its reported context window. Observations older than ten minutes, unknown limits, cumulative billing totals, and observations from before a known compaction do not trigger a recommendation. A ten-minute cooldown prevents repeated recommendations immediately after compaction. The session-actions menu also offers manual compaction without a recommendation.
+
+Compaction runs at the session's home. If a turn is active, it waits for that turn to finish and runs before queued prompts; **Cancel compact** cancels that waiting request. The full displayed transcript, session identity, draft, and draft images stay intact. Provider compaction summarizes the model's working context and can omit details. Converse waits for a provider completion event; an acknowledgement alone is not success. Interrupted or unconfirmed compaction pauses queued input and is never automatically retried after restart.
+
+Mac and iPad remote viewers use the home's advertised capability and existing display lease. Older or unsupported homes do not show the action. Muse's native context usage events are recorded when supplied, but manual Muse compaction remains unavailable in this preview pending a verified host implementation. This feature does not change any provider's automatic compaction policy.
+
+### About and responsive controls
+
+Mac, iPad, and Windows have **About Converse** with the installed version/build, copyright, and GPLv3-or-later statement and SAM codec exception. Mac and Windows also show version/build in the main window title. On iPad, open **… → About Converse**; **Converse Help** always includes a link to the GitHub README. Linux prints the same information with `converse --about`.
+
+Model, effort, and access controls appear directly when the pane has room. In a narrow pane, a single **…** menu replaces them; it does not duplicate visible controls.
+
+## Local slash commands
+
+These are handled by Converse without sending a prompt or spending model tokens:
+
+| Command | Behavior |
+| --- | --- |
+| `/model`, `/models` | Read model, effort, access and their sources |
+| `/usage` | Read last-turn and session-total token usage, plus any observed account quota |
+| `/status` | Refresh and display all session details |
+| `/stop` | Interrupt the current turn |
+| `/login` | Choose an existing login, create a new login, or sign in again; uses the same picker as session creation |
+| `/clear` | Mac: hide the current transcript without resetting model context or teaching |
+| `/unclear` | Mac: restore the hidden transcript |
+| `/help` | Show local command help |
+
+Muse queries run automatically when a conversation is opened. Read-only metadata commands do not change model, permissions or effort. `/usage` additionally invokes the built-in CLI usage view to fetch subscription quota; it never submits a model request. The status pickers, by contrast, explicitly update the selected conversation's model, effort or access profile. Muse uses its durable setters. Codex and Claude save per-conversation overrides and pass them on each subsequent turn, including resumed turns. CLI defaults are labeled when the CLI does not report a resolved effort. Claude and Codex also refresh their model catalogs and account/session metadata without submitting a model prompt. These commands do not implement the full CLI slash-command menus. Unrecognized commands remain ordinary prompts.
+
+## Model, effort and access options
+
+On Mac, catalogs come from the installed CLI and selected login. Windows and Linux currently discover Codex catalogs; their other providers use built-in model options. Codex includes hidden catalog rows and follows pagination; availability still depends on the account. Effort menus use each model’s reported supported levels. Custom model/effort entries remain available.
+
+| Assistant | Access controls |
+| --- | --- |
+| Claude | Manual, Accept edits, Auto, Plan, Don’t ask (deny unapproved), Bypass permissions |
+| Codex | CLI default, Approve for me (workspace write with automatic approval review), Full access (unrestricted filesystem access without approval prompts) |
+| Muse | The host’s available permission profiles; current built-ins include read-only, ask-me, auto-review, unrestricted |
+
+**Claude’s Don’t ask denies actions needing approval. Bypass permissions is the separate mode for skipping permission checks.** Converse passes the selected mode to every turn, including resumed turns. CLI/organization restrictions still apply. Claude and Codex run headlessly here, so terminal approval dialogs are not embedded. Muse’s host supplies native approval choices. Claude/Codex model, effort and access menus can return to CLI defaults.
+
+For a session running on another device, including a headless Linux home, use the **⋯ Session settings** menu in its pane. **Model**, **Effort**, and **Restrictions** remain reachable in narrow panes on Mac, iPad, and Windows. Codex homes query their installed CLI for model names and model-specific effort levels, including on Linux and Windows. Choose **Custom model…** if discovery is unavailable or to enter a provider model ID. Changes are sent to and saved by the home; Codex and Claude use them on the next turn. The viewer must hold the session’s display lease.
+
+**X** also closes remote sessions from any member of the group, without taking the session first. Confirming stops work on the home, removes the session from every viewer, and preserves its transcript and draft in the home’s `Deleted Sessions` recovery folder. A home running an older release must be updated before remote X is enabled.
+
+Sources checked against the installed CLI help and schemas: [Claude permission modes](https://code.claude.com/docs/en/permission-modes), [Codex command reference](https://learn.chatgpt.com/docs/developer-commands), and Muse’s offline MSP schema (`muse schema generate-json-schema`). Muse’s reported effort variants and profile availability take precedence over its broader CLI vocabulary.
+
+## Accounts
+
+Settings → Models & sessions groups sessions and saved logins under their model. Click the login identity in the conversation footer, type **/login**, or use **Login…** in Settings. Choosing an existing login binds it to this session without changing that login or any other session. Authenticating another account always stages a fresh isolated login for the selected session. The session keeps its ID, history, draft, attachments and retained CLI transcript; only that conversation’s transcript is copied to the selected CLI store, never credentials or other conversations. Missing or conflicting context leaves the binding unchanged with an error. Closing windows keeps active work alive.
+
+Default accounts use the standard CLI stores (`~/.codex` and `~/.claude`); Muse reuses its current CLI sign-in. Add more named Codex or Claude accounts in Settings. Each additional account gets a separate configuration directory under Converse’s local data folder. Use **Sign in…** for each account, complete the official CLI flow in Terminal/browser, then return to Converse. Claude desktop accounts are separate from Claude Code accounts. No account names, credentials or configuration are bundled with the app.
+
+Click a conversation’s login identity or type **/login** to open its login picker. **Sign in to another account for this session** opens authentication in a fresh private CLI configuration folder. Finish in Terminal/browser, then return to Converse and retry your message or resume its held queue. Authentication cannot overwrite a saved login used by another session. Signing into one session does not block or pause peers. A conversation’s title does not select its login.
+
+Claude’s normal installed CLI login is kept distinct from an explicit `CLAUDE_CONFIG_DIR` store, even when both refer to `~/.claude`: their macOS authentication namespaces can differ. Both are selectable without copying credentials or requiring another sign-in when they are already authenticated.
+
+Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
+
+Each distributed preview advances its visible patch version and build number (for example, **0.5.1 (26)** → **0.5.2 (27)**). Check **Converse → About Converse** on Mac or the **…** menu on iPad to identify the installed update. `VERSION.json` is the shared version source for both apps.

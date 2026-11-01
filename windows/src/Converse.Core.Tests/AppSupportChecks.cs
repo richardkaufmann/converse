@@ -30,13 +30,13 @@ internal static class AppSupportChecks
                 check(!session.SupportSetupCompleted, "Cancelled connection probe remains gated");
                 check(await setup.VerifyAsync(TimeSpan.FromSeconds(3)), engine + " actual successful final response unlocks setup");
                 await WaitIdle(session);
-                check(session.MessagingEnabled && session.SupportTeachingVersion == 1 && runner.Prompts.Last().Contains("list-sessions") && runner.Prompts.Last().Contains("app-control"), engine + " receives both teaching capabilities automatically");
+                check(session.MessagingEnabled && session.SupportTeachingVersion == AppSupportTeaching.Version && runner.Prompts.Last().Contains("list-sessions") && runner.Prompts.Last().Contains("app-control"), engine + " receives both teaching capabilities automatically");
                 check(session.DisplayedMessages.All(m => !m.Text.Contains("Connection check only") && !m.Text.Contains("setup and control teaching")) && session.Messages.Any(m => m.Text.Contains("setup and control teaching")), "Onboarding hides setup machinery without deleting provider context");
                 check(session.Agent?.Settings.Enabled == true && session.Agent.Settings.IntervalSeconds == 86400 && !session.Agent.Settings.GenerateArt && session.Agent.Settings.Repository == "richardkaufmann/converse" && AgentModels.Parse(session.Agent.Settings.Model)?.Engine == engine, "Support daily loop preserves the verified provider and has no mood art");
                 session.Agent!.Settings.Enabled = false; SupportSetup.ConfigureAgent(store, session);
                 check(!session.Agent.Settings.Enabled, "Support migration preserves a user-paused loop");
                 var reopened = new SessionStore(store.Folder, runner).Sessions.Single();
-                check(reopened.SupportSetupCompleted && reopened.MessagingEnabled && reopened.SupportTeachingVersion == 1 && reopened.ClearedThroughMessageID == session.ClearedThroughMessageID, "Support setup, teaching and display boundary survive restart");
+                check(reopened.SupportSetupCompleted && reopened.MessagingEnabled && reopened.SupportTeachingVersion == AppSupportTeaching.Version && reopened.ClearedThroughMessageID == session.ClearedThroughMessageID, "Support setup, teaching and display boundary survive restart");
                 session.Attachments.Add("untouched.png"); session.Pending.Add(new PendingPrompt { Text = "Preserve queue" }); session.QueuePaused = true;
                 var count = session.Messages.Count; session.Draft = "/clear"; store.Submit(session);
                 check(!session.DisplayedMessages.Any() && session.Messages.Count == count && session.Attachments.Count == 1 && session.Pending.Count == 1, "/clear preserves context, images and queued work");
@@ -75,6 +75,7 @@ internal static class AppSupportChecks
                 store.AppSupportRequest = (_, command) => { calls++; return Task.CompletedTask; };
                 session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 0 && instructions.Contains("optional appControl object"), "Native-agent teaching preserves JSON format and never executes prose commands");
+                check(instructions.Contains("Never search the web for bare") && instructions.Contains("site:github.com/richardkaufmann/converse") && instructions.Contains("no relevant result is found"), "Previously taught agents receive current scoped research policy on their next request");
                 explicitAction = true; session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 1, "Native agents dispatch only the explicit appControl operation");
             }

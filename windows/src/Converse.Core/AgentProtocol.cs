@@ -19,7 +19,7 @@ public sealed class DeviceAgentWidget
 
 public sealed class DeviceAgentSettings
 {
-    [JsonPropertyName("objective")] public string Objective { get; set; } = "Monitor progress and report blockers.";
+    [JsonPropertyName("objective")] public string Objective { get; set; } = "Help me achieve the goals we agree on. Ask what success means, compare evidence with those goals, distinguish verified results from claims, and flag blockers. When research is available, identify the exact subject before searching: qualify ambiguous names with the project, owner, repository/domain, product category or other relevant context. Prefer official or primary sources, verify that each result is about the intended subject, and ignore unrelated namesakes. Use only public information in search queries, never private session text or secrets. If relevant evidence or a search tool is unavailable, say so instead of guessing.";
     [JsonPropertyName("repository")] public string Repository { get; set; } = "";
     [JsonPropertyName("modelOptions")] public List<DeviceChoiceDto>? ModelOptions { get; set; }
     [JsonPropertyName("model")] public string Model { get; set; } = "muse-spark-1.3";

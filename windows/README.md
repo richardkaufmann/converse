@@ -16,7 +16,7 @@ cannot drift from `Sources/Device*.swift`.
 |---|---|---|
 | `DeviceProtocol.swift` | `Converse.Core/Protocol.cs` | Same JSON keys, kinds, limits. Swift `Data` ↔ base64 `byte[]`. |
 | `DeviceCrypto.swift` | `Converse.Core/Noise.cs` + `X25519.cs` | Noise `XX_25519_ChaChaPoly_SHA256`, prologue `Converse/1`, 128-bit verification code (8 groups). |
-| `DeviceIdentity.swift` (Keychain) | `Converse.Core` identity + DPAPI (app layer) | Core stores via file for tests; app protects key with DPAPI `CurrentUser`. Only *missing* key may create identity. |
+| `DeviceIdentity.swift` (Keychain) | `Converse.Core` identity file | The current app stores its device key in the user profile; DPAPI protection remains planned. Only *missing* key may create identity. |
 | `DeviceSync.swift` | `Converse.Core/Stores.cs` | Lease epochs persisted fail-closed, command store `accepted→running→completed`, `uncertain` recovery, viewer outbox, draft versions keyed by global ID. |
 | `DeviceTransport.swift` (Network.framework) | `Converse.Core` service over `TcpListener/TcpClient` (app milestone) | TCP port 48721, manual address for VPN. mDNS `_converse._tcp` via Windows `Dnssd` APIs later behind the same interface. |
 | `Store`/`Session` + providers | `Converse.Core` session engine (milestone 2) | Spawn `claude`, `codex`, `muse` from PATH; parse the same JSONL/MSP events; `%LocalAppData%\Converse` data folder (was `~/.converse`). |
@@ -75,7 +75,7 @@ cannot drift from `Sources/Device*.swift`.
    the authoritative root `VERSION.json`; code fences never create
    topics; relative links become absolute GitHub links; unknown metadata
    is ignored on load). The script's default output is repo-root
-   `Help/Content.json`; the Windows build passes `--out
+   `.build/Help/Content.json`; the Windows build passes `--out
    Assets/help.json`, which is generated and never checked in.
    `Converse.Core/Help.cs` loads either name and searches case-insensitively
    with title hits ranked first.
@@ -111,13 +111,14 @@ skeleton in `src/Converse.Windows` is authored for first compile on the PC.
   `device-commands.json`, `device-outbox.json`, `device-drafts.json`,
   `device-sync.json` — same filenames and semantics as macOS.
   `window-layout.json` holds only sidebar pin/width intent.
-- Device private key: DPAPI-protected blob in the same folder (app layer);
-  test/core file storage is plain and must never ship as the app default.
+- Device private key: `device-key.bin` in the same profile folder. It is currently
+  a plain key file, not DPAPI-protected. Protect the OS account and backups; this
+  differs from API/GitHub tokens stored in Windows Credential Manager.
 
 
 ## Agents (0.5.22)
 
-Windows can create and host paused agents, store its Meta API key in Windows Credential Manager, run bounded loops, search the web, generate sentiment art, and show scoreboards. Agent Setup accepts fixed intervals or supported text schedules and previews upcoming runs. Session scope is explicit and group-bound; remote controls use durable IDs and revision-checked settings without acquiring display leases. Mac and iPad can create/configure/run a Windows-hosted agent; Windows can do the same on a Mac home.
+Windows can create and host paused agents using enabled Muse, Claude or Codex CLI logins, or Meta Model API credentials. CLI-backed agents use Converse-supplied evidence with native web/shell tools disabled; only the Meta API route supports hosted web search. Optional art uses Meta independently of the reasoning provider. API/GitHub keys use Windows Credential Manager. Agents support bounded loops and scoreboards. Agent Setup accepts fixed intervals or supported text schedules and previews upcoming runs. Session scope is explicit and group-bound; remote controls use durable IDs and revision-checked settings without acquiring display leases. Mac and iPad can create/configure/run a Windows-hosted agent; Windows can do the same on a Mac home.
 
 Voice, Discord alerts, and file triggers remain Mac-home features in this release. Windows rejects enabling those unsupported options rather than silently accepting them. Jolly remains routed through the existing Mac bridge. A local or group session must be taught switchboard messaging before accepting messages; the sidebar context menu provides that action. Commands execute only from a complete authoritative final response consisting of one `converse` fenced JSON block.
 

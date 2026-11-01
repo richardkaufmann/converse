@@ -316,7 +316,7 @@ public sealed class SessionStore
     {
         if (string.IsNullOrWhiteSpace(title) || System.Text.Encoding.UTF8.GetByteCount(title) > 200) throw new ArgumentException("Choose a name of 1–200 bytes.");
         var session = new ChatSession { Title = title.Trim(), Agent = new(), MessagingEnabled = true, Entry = new AgentEntry { Name = "Agent", Engine = "agent" } };
-        session.Messages.Add(new ChatMessage { Role = "assistant", Text = "Open Agent Setup to add a Meta API key on this computer and select the sessions I may read. Automatic loops start paused." });
+        session.Messages.Add(new ChatMessage { Role = "assistant", Text = "Open Agent Setup to choose a provider/model and select the sessions I may read. Review the editable objective, including its search-scope guidance. Automatic loops start paused." });
         Sessions.Add(session); if (persist) Save(); return session;
     }
 

@@ -113,8 +113,7 @@ app users, which are not currently measured.
 
 ## Web research and general scoreboards (Mac)
 
-Agent runs enable Meta Responses hosted web_search, with at most four built-in
-calls. No extra search credential is required. Users can disable research in
+Agents may use enabled Muse, Claude or Codex CLI logins, or Meta Model API credentials. CLI-backed agent runs receive Converse-supplied evidence with native web/shell tools disabled. Only the Meta Model API route enables hosted `web_search`, with at most four built-in calls. Saving a Meta key does not add search to a CLI-backed agent. No extra search credential is required. Users can disable research in
 Agent Setup. Tool output remains untrusted evidence; selected session scope and
 host-enforced messaging limits still apply. Progress messages emitted during
 search are not treated as the actionable final JSON.
@@ -156,7 +155,7 @@ Loop settings accept either a numeric interval (minutes in the UI, seconds on th
 
 Calendar windows anchor intervals at their opening time. The NYSE regular-session calendar uses New York time, holidays and early closes from the [official calendar](https://www.nyse.com/trade/hours-calendars), verified October 29, 2026 and bounded through 2028. It does not detect emergency closures or individual trading halts. An exhausted calendar pauses the loop visibly. Daily schedules skip nonexistent DST times and use the first occurrence of repeated times.
 
-There are no overlapping runs or catch-up bursts. Relaunch schedules a future check. Queued loop checks revalidate their window before starting; a skipped check does not consume a future activation. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.
+There are no overlapping runs or catch-up bursts. Relaunch preserves the saved deadline. An overdue enabled agent runs once when its queue and schedule window permit; fixed intervals then count from that catch-up check. Future deadlines retain their remaining wait. The last reserved loop time is persisted to recover a missing deadline, and unrelated settings saves preserve the deadline. Paused loops stay paused. Queued loop checks revalidate their window before starting; a skipped check does not consume a future activation. Human requests, Run once, and allowed external stimuli are not restricted by the timer window. Text schedules require the home capability `agent-schedule-v1`; older editors cannot silently erase them. Settings are revision checked.
 
 
 ## Cross-platform release boundary (0.5.22)
@@ -234,7 +233,7 @@ and [rate limits](https://docs.discord.com/developers/topics/rate-limits).
 
 ### Per-loop limits and iPad controls
 
-Schedules continue until paused; `maxTurnsPerLoop` is an optional archive/wire field replacing the lifetime meaning of `remainingRuns`. Old counters remain decodable, with an exhausted counter becoming a minimum one-turn cap, but disabled loops stay disabled. Each activation currently makes one model response with bounded hosted search and output tokens. It never automatically chains another response. The cap is a ceiling, not a request to repeat the objective N times. Queue capacity, message deduplication, the eight-hop switchboard bound, and pause-on-error remain in force.
+Schedules continue until paused; `maxTurnsPerLoop` is an optional archive/wire field replacing the lifetime meaning of `remainingRuns`. Old counters remain decodable, with an exhausted counter becoming a minimum one-turn cap, but disabled loops stay disabled. Each activation currently makes one model response with bounded hosted search and output tokens. It never automatically chains another response. The cap is a ceiling, not a request to repeat the objective N times. Queue capacity, message deduplication, the 100-hop switchboard bound, and pause-on-error remain in force.
 
 iPad Agent Setup uses explicit Save/Cancel. Save and run once persists the edited schedule first, and only requests the run after home acknowledges it. Unsupported text schedules display the parser error. The clipboard button uses the system clipboard; the adjacent Photos button opens the library.
 
