@@ -1411,7 +1411,7 @@ final class ConversationScrollView: NSScrollView {
             guard let self else { return }
             if self.followState.resumeIfIdle(now: ProcessInfo.processInfo.systemUptime,
                 selecting: self.selecting || self.isFindBarVisible, scrolling: self.liveScrolling && ProcessInfo.processInfo.systemUptime - self.lastScrollAt < 1) {
-                self.jumpToLatest()
+                self.resumeFollowing()
             } else { self.scheduleResume() }
         }
         idleResume = work
@@ -1438,12 +1438,17 @@ final class ConversationScrollView: NSScrollView {
         }
     }
     @objc func jumpToLatest() {
-        idleResume?.cancel(); followState.resume()
         (documentView as? ConversationTextView)?.explicitCursor = false
         if let text = documentView as? NSTextView {
             let tail = NSRange(location: (text.string as NSString).length, length: 0)
             text.setSelectedRange(tail); text.scrollRangeToVisible(tail)
         }
+        resumeFollowing()
+    }
+    // Automatic following changes the viewport, never the user's insertion point.
+    // Only the explicit Jump to latest command moves the caret to the tail.
+    func resumeFollowing() {
+        idleResume?.cancel(); followState.resume()
         followLatest(); refreshLatest()
     }
     var showsLatest: Bool { !latest.isHidden }
@@ -1985,7 +1990,7 @@ struct ScrollingConversation: NSViewRepresentable {
             text.fitDocumentHeight()
             text.explicitCursor = text.selectedRange().length > 0 || text.selectedRange().location < text.inputStart
             text.scrollRangeToVisible(text.selectedRange())
-            if !text.explicitCursor { (text.enclosingScrollView as? ConversationScrollView)?.jumpToLatest() }
+            if !text.explicitCursor { (text.enclosingScrollView as? ConversationScrollView)?.resumeFollowing() }
             else { (text.enclosingScrollView as? ConversationScrollView)?.interaction() }
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
@@ -2905,6 +2910,25 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     scroll.setFrameSize(NSSize(width: 700, height: 900)); scroll.tile()
     scroll.setFrameSize(NSSize(width: 700, height: 250)); scroll.tile()
     check(view.frame.height <= scroll.contentView.bounds.height + 1, "Reducing the window height cannot retain the previous tall document frame")
+    // Keep the real scroll container: the regression was in the follow-output
+    // callback, so a standalone NSTextView does not exercise it.
+    session.draft = "original prompt"; coordinator.render(view)
+    view.setSelectedRange(NSRange(location: view.inputStart, length: 0))
+    view.insertText("A", replacementRange: view.selectedRange())
+    check(session.draft == "Aoriginal prompt" && view.selectedRange().location == view.inputStart + 1, "Typing at the start of a prompt preserves the caret after the inserted character")
+    view.insertText("B", replacementRange: view.selectedRange())
+    check(session.draft == "ABoriginal prompt", "Consecutive characters stay at the chosen prompt position instead of jumping to the end")
+    view.setSelectedRange(NSRange(location: view.inputStart + 2, length: 9))
+    view.insertText("edited ", replacementRange: view.selectedRange())
+    check(session.draft == "ABedited prompt" && view.selectedRange().location == view.inputStart + 9, "Replacing a prompt selection preserves the replacement insertion point")
+    session.messages.append(Message(role: "assistant", text: "Streaming while editing")); coordinator.render(view)
+    check(view.selectedRange().location == view.inputStart + 9, "Streamed output preserves the draft-relative insertion point")
+    scroll.resumeFollowing()
+    check(view.selectedRange().location == view.inputStart + 9, "Automatic idle following does not move the draft caret")
+    view.insertText("middle ", replacementRange: view.selectedRange())
+    check(session.draft == "ABedited middle prompt", "Typing in the middle remains correct after output and automatic following")
+    scroll.jumpToLatest()
+    check(view.selectedRange().location == (view.string as NSString).length, "Explicit Jump to latest still moves the caret to the prompt end")
 }
 
 func selfTest() {
