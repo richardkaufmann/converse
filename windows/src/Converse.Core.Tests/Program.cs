@@ -976,13 +976,17 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => !session.Busy && session.Status == "Ready"), "Gated turn completes after release");
 
         var injected = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        gated.CancellationExitGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         injected.Draft = "one";
         store.Submit(injected);
+        Check(await Until(() => gated.Prompts.Contains("one")), "Injected-turn fixture waits for the original runner to start");
         injected.Draft = "two";
         store.Submit(injected);
         var target = injected.Pending[0].Id;
         store.InjectPending(injected, target);
+        Check(await Until(() => gated.CancellationObserved.Task.IsCompleted), "Injected-turn fixture observes cancellation before testing wind-down");
         Check(injected.Pending.Count == 1 && injected.Busy, "Inject while busy holds the prompt for the wind-down");
+        gated.CancellationExitGate.SetResult(true);
         Check(await Until(() => injected.Messages.Any(m => m.Role == "user" && m.Text == "two") && injected.Pending.Count == 0),
             "Injected prompt runs after the interrupted turn, never alongside");
         gated.Gate.SetResult(true);
@@ -2284,13 +2288,20 @@ return failures == 0 ? 0 : 1;
 sealed class GatedRunner : Converse.Core.IAgentRunner
 {
     public TaskCompletionSource<bool> Gate { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<bool>? CancellationExitGate { get; set; }
+    public TaskCompletionSource<bool> CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public List<string> Prompts { get; } = new();
     public async Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
         Action<string> onLine, CancellationToken cancellationToken)
     {
         Prompts.Add(prompt);
         var done = await Task.WhenAny(Gate.Task, Task.Delay(-1, cancellationToken));
-        if (done != Gate.Task) return 1;
+        if (done != Gate.Task)
+        {
+            CancellationObserved.TrySetResult(true);
+            if (CancellationExitGate is { } exitGate) await exitGate.Task;
+            return 1;
+        }
         Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         onLine("{\"type\":\"thread.started\",\"thread_id\":\"t\"}");
         onLine("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"gated reply\"}}");
