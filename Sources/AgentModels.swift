@@ -1,5 +1,17 @@
 import Foundation
 
+// Bound historical excerpts, but never cut the request this activation must answer.
+// Teaching and onboarding requests can be longer than an ordinary chat message.
+enum AgentPromptContext {
+    static func conversation(_ messages: [Message], excluding responseID: UUID) -> [[String: String]] {
+        let recent = Array(messages.filter { ["user", "assistant"].contains($0.role) && $0.id != responseID }.suffix(24))
+        let request = recent.lastIndex { $0.role == "user" }
+        return recent.enumerated().map { index, message in
+            ["role": message.role, "text": index == request ? message.text : String(message.text.prefix(6000))]
+        }
+    }
+}
+
 // A model selection identifies its provider AND local login. Never infer a
 // provider from a model name or silently fall back to another account.
 enum AgentModels {

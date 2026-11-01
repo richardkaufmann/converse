@@ -133,6 +133,13 @@ import Foundation
     let script = ProviderCommand.script(entry: profile, arguments: ["login"])
     check(script.contains("MUSE_AUTH_PATH") && script.contains("XDG_CONFIG_HOME") && script.contains("unset META_API_KEY"), "Support Muse login uses its own credential store rather than the production account")
     check(SupportNUXController.loginArguments("claude") == ["auth","login"] && SupportNUXController.loginArguments("codex") == ["login"], "Setup invokes provider-owned login commands before prompting a model")
+    // A long teaching message must retain its trailing request in model input.
+    let longRequest = String(repeating: "Teaching context. ", count: 600) + "Introduce yourself as Converse App Support and show the welcome links."
+    let oldRequest = Message(role: "user", text: String(repeating: "old", count: 3000))
+    let currentRequest = Message(role: "user", text: longRequest)
+    let response = Message(role: "assistant", text: "")
+    let input = AgentPromptContext.conversation([oldRequest, currentRequest, response], excluding: response.id)
+    check(input.count == 2 && input[0]["text"]?.count == 6000 && input[1]["text"] == longRequest, "Agent input preserves the full current request beyond 6000 characters while bounding history")
     // Exercise the real provider subprocess/parser and login-completion polling
     // with a deterministic local CLI. No account or external model is used.
     let journey = Store(folder: folder.appendingPathComponent("journey"))
@@ -176,6 +183,7 @@ import Foundation
     let drain = Date().addingTimeInterval(20)
     while (taught.busy || !taught.pending.isEmpty) && Date() < drain { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     check(taught.agent?.lastOutcome == "Completed", "The taught support agent completes its first turn using the selected CLI provider")
+    check(taught.displayedMessages.contains { $0.role == "assistant" && $0.text.contains("Welcome to Converse!") }, "Provider handoff displays the welcome after clearing login and teaching")
     check(taught.clearedThroughMessageID != nil && !taught.displayedMessages.contains { $0.role == "user" || $0.text.contains("[Converse setup and control teaching") } && taught.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Support onboarding clears login and teaching from display while retaining learned context")
 
     // Regression: onboarding's verified login must be reused, even after restart

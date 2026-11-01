@@ -165,7 +165,7 @@ import Foundation
                         guard let target = DeviceGlobalID(reference), let group = service.currentGroup?.id else { return false }
                         return service.acceptsParticipant(home: target.home, groupID: group)
                     })),
-                    "conversation": session.messages.filter { ["user", "assistant"].contains($0.role) && $0.id != responseID }.suffix(24).map { ["role": $0.role, "text": String($0.text.prefix(6000))] }]
+                    "conversation": AgentPromptContext.conversation(session.messages, excluding: responseID)]
                 let input = String(decoding: try JSONSerialization.data(withJSONObject: evidence), as: UTF8.self)
                 var research = AgentResearch()
                 let instructions = """
