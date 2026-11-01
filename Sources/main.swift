@@ -308,7 +308,7 @@ final class Store: ObservableObject {
     }
     func create(_ entry: Entry, persist: Bool = true) -> Session {
         var entry = entry
-        if entry.accountDirectory == nil, let profile = accounts.first(where: { $0.id == (entry.accountID ?? entry.engine + "-default") }) {
+        if entry.accountDirectory == nil, let profile = (entry.accountID.flatMap { id in accounts.first { $0.id == id && $0.engine == entry.engine } } ?? (entry.accountID == nil ? preferredLogin(engine: entry.engine) : nil)) {
             entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         }
         let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s

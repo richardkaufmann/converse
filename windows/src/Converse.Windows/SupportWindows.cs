@@ -202,6 +202,11 @@ public sealed partial class MainWindow
                 {
                     if (background || depth >= 8) throw new ArgumentException("This turn cannot configure the app.");
                     result = AppSupportActions.Execute(_store, source, command, _help);
+                    if (result.StartsWith("Coding session ready: ") && Guid.TryParse(result[22..], out var createdID))
+                    {
+                        ShowSupportSession(_store.Sessions.First(s => s.Id == createdID));
+                        result += ". Displayed with the saved provider login; no prompt was sent.";
+                    }
                     if (result == "UI")
                     {
                         var target = command["target"]?.GetValue<string>() ?? "";

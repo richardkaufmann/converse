@@ -221,7 +221,7 @@ struct AgentControls: View {
             }
             HStack(spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
-                    Text(session.agent?.model ?? "Agent").font(.caption).foregroundStyle(.secondary)
+                    Text(session.agent.map { AgentModels.label($0.model) } ?? "Agent").font(.caption).foregroundStyle(.secondary)
                     Text("\(session.agent?.turnLimit ?? 0) maximum turns per loop").font(.caption).foregroundStyle(.secondary)
                     if session.agent?.discordMentions == true {
                         TimelineView(.periodic(from: .now, by: 5)) { _ in

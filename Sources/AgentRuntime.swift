@@ -389,8 +389,11 @@ extension Store {
     @discardableResult func createAgent(title: String = "Converse Steward", persist: Bool = true) -> Session {
         let session = create(Entry(name: "Agent", command: "", directory: NSTemporaryDirectory(), engine: "agent"), persist: false)
         session.title = title; session.agent = AgentConfig()
+        if setupCompleted, let support = sessions.first(where: { $0.supportAssistant }), let model = support.agent?.model {
+            session.agent?.model = model
+        }
         session.switchboardEnabled = true
-        session.toolStatus.model = "muse-spark-1.3"; session.toolStatus.access = "Monitor selected sessions"
+        session.toolStatus.model = AgentModels.label(session.agent!.model); session.toolStatus.access = "Monitor selected sessions"
         session.messages.append(Message(role: "notice", text: "I’m your project steward. Open Agent Setup to choose a provider/model and the sessions I may read. Review the editable objective, including its search-scope guidance. Tell me what you’re building and what success looks like. Automatic loops start paused."))
         if persist { save() }; return session
     }

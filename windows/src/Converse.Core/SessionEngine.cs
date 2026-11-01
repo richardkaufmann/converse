@@ -305,7 +305,7 @@ public sealed class SessionStore
     {
         // Session-owned copy: the template reference must never be shared,
         // or a later Configure leaks across sessions and the template.
-        var session = new ChatSession { Entry = entry.Copy(), Title = entry.Name };
+        var session = new ChatSession { Entry = SupportSetup.SessionEntry(this, entry), Title = entry.Name };
         session.Messages.Add(new ChatMessage { Role = "system", Text = "", CreatedAt = DateTime.UtcNow });
         Sessions.Add(session);
         if (persist) Save();
@@ -316,6 +316,7 @@ public sealed class SessionStore
     {
         if (string.IsNullOrWhiteSpace(title) || System.Text.Encoding.UTF8.GetByteCount(title) > 200) throw new ArgumentException("Choose a name of 1–200 bytes.");
         var session = new ChatSession { Title = title.Trim(), Agent = new(), MessagingEnabled = true, Entry = new AgentEntry { Name = "Agent", Engine = "agent" } };
+        if (Sessions.FirstOrDefault(s => s.SupportAssistant && s.SupportSetupCompleted)?.Agent is { } support) session.Agent.Settings.Model = support.Settings.Model;
         session.Messages.Add(new ChatMessage { Role = "assistant", Text = "Open Agent Setup to choose a provider/model and select the sessions I may read. Review the editable objective, including its search-scope guidance. Automatic loops start paused." });
         Sessions.Add(session); if (persist) Save(); return session;
     }

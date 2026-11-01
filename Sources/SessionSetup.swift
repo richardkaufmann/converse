@@ -15,6 +15,14 @@ extension Store {
     var assistantFamilies: [String] {
         Array(Set(entries.map(\.engine) + sessions.map { $0.entry.engine })).filter { $0 != "agent" }.sorted()
     }
+    // Reuse the provider verified by onboarding, including after it becomes an agent.
+    // Keep credentials in the same edition's profile; never copy them between apps.
+    func preferredLogin(engine: String) -> AccountProfile? {
+        if setupCompleted, let support = sessions.first(where: { $0.supportAssistant }),
+           let route = support.agent.flatMap({ AgentModels.parse($0.model) }), route.engine == engine,
+           let profile = accounts.first(where: { $0.id == route.account && $0.engine == engine }) { return profile }
+        return accounts.first { $0.engine == engine }
+    }
     func defaultEntry(engine: String) -> Entry {
         entries.first { $0.engine == engine } ?? SetupCatalog.entries.first { $0.engine == engine }!
     }
@@ -56,7 +64,7 @@ final class SessionSetupProgress: ObservableObject {
         let session = Store.shared.sessions.first { $0.id == request.sessionID }
         let entry = session?.entry ?? Store.shared.defaultEntry(engine: request.engine)
         engine = request.engine
-        accountID = session?.entry.accountID ?? Store.shared.accounts.first { $0.engine == request.engine }?.id ?? "new"
+        accountID = session?.entry.accountID ?? Store.shared.preferredLogin(engine: request.engine)?.id ?? "new"
         title = session?.title ?? ""; directory = entry.directory
     }
 }
@@ -90,7 +98,7 @@ struct SessionSetupView: View {
                 Picker("Model / assistant", selection: $progress.engine) {
                     ForEach(store.assistantFamilies, id: \.self) { Text(AssistantFamily.name($0)).tag($0) }
                 }.onChange(of: engine) { _, value in
-                    progress.accountID = store.accounts.first { $0.engine == value }?.id ?? "new"
+                    progress.accountID = store.preferredLogin(engine: value)?.id ?? "new"
                     progress.directory = store.defaultEntry(engine: value).directory
                 }
                 TextField("Session name (optional)", text: $progress.title)
@@ -123,7 +131,7 @@ struct SessionSetupView: View {
                 Toggle("Sign in to another account for this session", isOn: $progress.signIn)
                 Text("Reusing a saved login does not change it. Signing into another account creates an isolated login for this session and preserves its conversation.").font(.callout).foregroundStyle(.secondary)
             } else {
-                Text("Muse uses its installed CLI login and permission profiles.").font(.callout).foregroundStyle(.secondary)
+                Text("Muse uses the selected saved login and permission profiles. Your setup login can be reused by other sessions in this app.").font(.callout).foregroundStyle(.secondary)
             }
             if let session, session.started || session.remoteID != nil || !session.messages.isEmpty || !session.pending.isEmpty {
                 Text("Changing the login preserves this session’s history, draft and retained CLI context. Other sessions are unchanged.").font(.callout).foregroundStyle(.secondary)

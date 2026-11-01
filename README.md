@@ -58,9 +58,9 @@ On a new Mac or Windows installation, Converse shows **Converse App Support** (t
 
 For a problem involving another Group system, App Support can find its support agent and ask for a scoped, read-only health report. It uses live session IDs, reports unavailable peers, and does not turn a peer message into permission to change settings.
 
-App Support can explain the app, read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
+Ask App Support to “open a Muse coding session” and it creates and displays one, using your saved login. Ask how to do it and it explains the steps. It can also read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
 
-**Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Its provider login stays separate from existing sessions. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
+**Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Existing sessions keep their logins. New sessions and agents default to the provider login verified during setup; you can choose another login in setup. Demo and the normal app keep separate credentials. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
 
 ### Report a bug
 

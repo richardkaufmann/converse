@@ -162,4 +162,35 @@ import Foundation
     check(taught.agent?.lastOutcome == "Completed", "The taught support agent completes its first turn using the selected CLI provider")
     check(taught.clearedThroughMessageID != nil && !taught.displayedMessages.contains { $0.role == "user" || $0.text.contains("[Converse setup and control teaching") } && taught.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Support onboarding clears login and teaching from display while retaining learned context")
 
+    // Regression: onboarding's verified login must be reused, even after restart
+    // and after App Support is converted from a CLI session into an agent.
+    for engine in ["muse", "claude", "codex"] {
+        let fresh = Store(folder: folder.appendingPathComponent("reuse-" + engine))
+        let verified = fresh.makeLogin(engine: engine, name: "Verified setup login")
+        let support = fresh.supportSession()
+        support.entry = fresh.defaultEntry(engine: engine); support.entry.accountID = verified.id
+        support.entry.accountDirectory = verified.directory
+        fresh.setupCompleted = true; fresh.configureSupportAgent(support)
+        let reloaded = Store(folder: fresh.folder)
+        let restoredSupport = reloaded.sessions.first { $0.supportAssistant }!
+        check(reloaded.preferredLogin(engine: engine)?.id == verified.id, "New-session picker prefers the verified onboarding login after restart: " + engine)
+        let ordinary = reloaded.create(reloaded.defaultEntry(engine: engine))
+        check(ordinary.entry.accountID == verified.id && ordinary.entry.accountDirectory == verified.directory, "Ordinary session creation shares the verified login: " + engine)
+        let operation = AppSupportCommand(action: "create-session", title: "My project", provider: engine, directory: folder.path)
+        let outcome = try? reloaded.appSupportResult(operation, session: restoredSupport, openUI: false)
+        let coding = reloaded.sessions.first { $0.title == "My project" }!
+        check(outcome?.contains(coding.id.uuidString) == true && coding.entry.accountID == verified.id && !coding.busy && coding.draft.isEmpty, "App Support creates a coding session with the verified login and no model request: " + engine)
+        _ = try? reloaded.appSupportResult(operation, session: restoredSupport, openUI: false)
+        check(reloaded.sessions.filter { $0.title == "My project" }.count == 1, "Retried session creation does not duplicate: " + engine)
+        let beforeInvalid = reloaded.sessions.count
+        check((try? reloaded.appSupportResult(AppSupportCommand(action: "create-session", provider: engine, directory: folder.path + "/missing"), session: restoredSupport, openUI: false)) == nil && reloaded.sessions.count == beforeInvalid, "Invalid project folder cannot create a session: " + engine)
+        let newAgent = reloaded.createAgent(title: "Next agent")
+        check(newAgent.agent?.model == restoredSupport.agent?.model, "New agents inherit the working provider instead of requiring a Meta key: " + engine)
+        let label = AgentModels.label(restoredSupport.agent!.model)
+        check(!label.contains("cli|") && label.contains("CLI default"), "Encoded login routing is never a user-facing model label: " + engine)
+        let explicit = reloaded.makeLogin(engine: engine, name: "Other")
+        var bound = reloaded.defaultEntry(engine: engine); bound.accountID = explicit.id
+        check(reloaded.create(bound).entry.accountID == explicit.id && ordinary.entry.accountID == verified.id, "Explicit alternate login and existing session bindings are preserved: " + engine)
+    }
+
 }
