@@ -1,4 +1,4 @@
-Converse — macOS 0.5.58 (83)
+Converse — macOS
 
 OPEN
 Double-click Converse.app. The download supports Apple Silicon and Intel Macs running macOS 14 or later.
@@ -16,6 +16,27 @@ App Support learns app setup/control and the switchboard, then welcomes you
 with links to Help and guides for sessions, agents, Discord and Groups.
 Existing installations retain their sessions, accounts, drafts and paired-device
 identity. Converse > Setup reopens the assistant/account wizard.
+
+PARKING LOTS AND FIND
+Command-F opens Find in the current text pane. Search is read-only; there is no Replace.
+Parking Lots keep persistent outlines under their home device in the sidebar.
+Create one through Parking Lots or File > New > Parking Lot. Return creates an item;
+Shift-Return creates a heading; Command-Return adds a line inside an item.
+New item and New Heading inputs stay available. Right-click to cut or copy an item
+or a heading with its children. Reorder moves items and whole headings. Undo works.
+Paste images into items; their attachments follow structural cut/copy and reordering.
+File > Export includes Parking Lots. HTML embeds images; text lists their filenames.
+Group members can view active lots. Ordinary user-directed sessions can propose
+changes for approval; autonomous agents need explicit Parking Lot scope.
+Talk on Mac supports conversation about a lot and review of proposed changes.
+Physical cross-device viewing and live Talk testing are still being completed.
+
+OPTIONAL TEXT SUBSTITUTIONS
+A typed space converts standalone shortcuts such as :-) and --> in prose.
+Paste, code and command-like lines stay literal. Command-Z or immediate Backspace
+undoes a conversion. A ten-second button offers to turn substitutions off, or on
+when a matching shortcut is typed while they are disabled. Settings and App Support
+can also change this preference. Existing text is never rewritten by toggling it.
 
 USE
 Click + beside an assistant to start a separate conversation.
