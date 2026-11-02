@@ -99,6 +99,11 @@ extension Store {
                             if !session.messages[index].images.contains(file.path) { session.messages[index].images.append(file.path) }
                         } catch { session.messages.append(Message(role: "notice", text: "Image could not be saved. Its link remains available.")) }
                     case .failure:
+                        // A dead image reads as its caption plus an X, never
+                        // a hanging blank or a re-clickable trap.
+                        let failed = NSMutableString(string: session.messages[index].text)
+                        for item in refs.reversed() { failed.replaceCharacters(in: item.range, with: item.caption + " ❌") }
+                        session.messages[index].text = failed as String
                         session.messages.append(Message(role: "notice", text: ResponseImages.unreachableNotice(url: ref.url)))
                     }
                     self.saveSoon()
@@ -191,6 +196,12 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         ResponseImageFixture.lastRequestURL = nil
         localOnly.messages = [Message(role: "assistant", text: "Photo\n![Grasshopper](" + input.absoluteString + ")")]
         check(store.importResponseImages(localOnly, allowRemote: false) && localOnly.messages[0].images.count == 1 && !localOnly.messages[0].text.contains("![") && ResponseImageFixture.lastRequestURL == nil, "Launch imports local captures without remote requests")
+        let broken = store.create(Entry(name: "Broken image", command: "unused", directory: allowed.path, engine: "claude"))
+        broken.messages = [Message(role: "assistant", text: "![Nope](https://images.example.invalid/missing)")]
+        store.importResponseImages(broken)
+        let brokenDeadline = Date().addingTimeInterval(5)
+        while broken.messages[0].text.contains("![") && Date() < brokenDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        check(broken.messages[0].text == "Nope ❌" && broken.messages.last?.text.hasPrefix("Image could not be loaded from images.example.invalid") == true, "A dead image reads as its caption plus an X with a host-first notice")
 
     } catch { check(false, "Response image fixture: " + error.localizedDescription) }
 }

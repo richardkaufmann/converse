@@ -2104,6 +2104,9 @@ MdnsChecks.Run(Check);
         var outside = new ChatMessage { Role = "assistant", Text = "![x](/etc/hosts)" };
         Check(!await ResponseImages.ImportAsync(dataDir, session, outside) && outside.Images.Count == 0
             && outside.Text.Contains("!["), "Refs outside the roots stay untouched");
+        var dead = new ChatMessage { Role = "assistant", Text = "See ![gone](https://example.invalid/gone.png) here." };
+        Check(await ResponseImages.ImportAsync(dataDir, session, dead) && dead.Images.Count == 0
+            && dead.Text == "See gone ❌ here.", "Unreachable images collapse to caption plus X");
         Check(ResponseImages.CanonicalWebImageUrl("https://h.example/p?x=1#f")?.AbsoluteUri == "https://h.example/p",
             "Image fetch drops query and fragment");
         Check(ResponseImages.CanonicalWebImageUrl("https://h.example:443/p")?.AbsoluteUri == "https://h.example/p",

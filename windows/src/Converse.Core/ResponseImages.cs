@@ -227,6 +227,7 @@ public static class ResponseImages
         if (!string.IsNullOrWhiteSpace(working) && working != "/" && working != Path.GetPathRoot(working))
             roots.Add(working);
         var takes = new List<(int Start, int Length, string Caption, byte[] Bytes)>();
+        var failed = new List<(int Start, int Length, string Caption)>();
         foreach (var (start, length, caption, target) in ParseFileRefs(message.Text))
         {
             if (takes.Count >= budget) break;
@@ -246,12 +247,16 @@ public static class ResponseImages
         {
             if (takes.Count >= budget) break;
             var bytes = await DownloadWebImageAsync(url);
-            if (bytes is null) continue;
+            if (bytes is null) { failed.Add((start, length, caption)); continue; }
             takes.Add((start, length, caption, bytes));
         }
-        if (takes.Count == 0) return false;
-        Directory.CreateDirectory(output);
+        // A dead image reads as its caption plus an X, never a hanging
+        // blank or a re-clickable trap.
         var text = message.Text;
+        foreach (var (start, length, caption) in failed.OrderByDescending(t => t.Start))
+            text = text[..start] + caption + " ❌" + text[(start + length)..];
+        if (takes.Count == 0) { message.Text = text; return failed.Count > 0; }
+        Directory.CreateDirectory(output);
         foreach (var (start, length, caption, bytes) in takes.OrderByDescending(t => t.Start))
         {
             var hash = DeviceBlob.Sha256Hex(bytes);
