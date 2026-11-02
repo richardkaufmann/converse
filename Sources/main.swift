@@ -130,6 +130,8 @@ final class Session: ObservableObject, Identifiable {
     // An agent loop Richard did not leave running: red in the sidebar.
     var agentLoopPaused: Bool { agent != nil && agent?.enabled == false }
     @Published var injectionNotice = ""
+    // Momentary share confirmation shown as a row, never a modal alert.
+    @Published var shareNotice = ""
     var injectionTargetID: UUID?
     var injectionAll = false
     var turnFailed = false
@@ -342,6 +344,15 @@ final class Store: ObservableObject {
         s.status = "Stopping…"; p.interrupt()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { if p.isRunning { s.status = "Still stopping… · queued input is held" } }
+    }
+    // A share confirmation lives as a momentary row for ten seconds, never a
+    // modal alert. A newer notice replaces an older one and gets its own
+    // ten seconds: the timer only clears the text it set.
+    func flashShareNotice(_ s: Session, _ text: String) {
+        s.shareNotice = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak s] in
+            if s?.shareNotice == text { s?.shareNotice = "" }
+        }
     }
     func attach(_ s: Session, image: NSImage) {
         do {
@@ -1781,15 +1792,22 @@ final class ConversationTextView: NSTextView {
             guard let self, self.isEditable else { return }; self.imagePaste?(image)
         })
     }
+    private func shareNotice() -> (String) -> Void {
+        weak let session = (delegate as? ScrollingConversation.Coordinator)?.session
+        return { text in
+            guard let session else { return }
+            Store.shared.flashShareNotice(session, text)
+        }
+    }
     @objc private func saveImageToPhotos(_ sender: NSMenuItem) {
         guard let image = sender.representedObject as? NSImage else { return }
-        PhotoImageShare.save(image)
+        PhotoImageShare.save(image, notice: shareNotice())
     }
     override func orderFrontSharingServicePicker(_ sender: Any?) {
         // NSTextView otherwise shares an attributed-text/HTML wrapper, which
         // Photos silently ignores even when the selection is just an image.
         if selectedRange().length == 1, let image = imageToolsItem(at: selectedRange().location, hasMetaKey: true)?.representedObject as? NSImage {
-            PhotoImageShare.showPicker(image, from: self)
+            PhotoImageShare.showPicker(image, from: self, notice: shareNotice())
         } else { super.orderFrontSharingServicePicker(sender) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -2298,6 +2316,13 @@ struct Conversation: View {
                 if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
                 if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
             }.padding(.horizontal, 10).padding(.vertical, 5)
+            if !session.shareNotice.isEmpty {
+                HStack {
+                    Text(session.shareNotice).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                }.padding(.horizontal, 10).padding(.vertical, 3)
+                Divider()
+            }
             Divider()
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {

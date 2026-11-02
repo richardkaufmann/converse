@@ -7,8 +7,10 @@ import SwiftUI
     private var service: NSSharingService?
     private var file: URL?
     private var picker: NSSharingServicePicker?
-    static func showPicker(_ image: NSImage, from view: NSView) {
+    private var notice: (String) -> Void = { _ in }
+    static func showPicker(_ image: NSImage, from view: NSView, notice: @escaping (String) -> Void) {
         let owner = PhotoImageShare()
+        owner.notice = notice
         do {
             let file = try owner.prepare(image)
             let picker = NSSharingServicePicker(items: [file]); owner.picker = picker; picker.delegate = owner
@@ -22,8 +24,9 @@ import SwiftUI
         try png.write(to: file, options: .atomic); self.file = file
         return file
     }
-    static func save(_ image: NSImage) {
+    static func save(_ image: NSImage, notice: @escaping (String) -> Void) {
         let owner = PhotoImageShare()
+        owner.notice = notice
         do {
             let file = try owner.prepare(image)
             guard let service = NSSharingService(named: .addToIPhoto), service.canPerform(withItems: [file]) else { throw ImageAssistError.invalid("The Photos sharing service is unavailable on this Mac.") }
@@ -39,13 +42,17 @@ import SwiftUI
     }
     func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) { finish(error: nil) }
     func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) { finish(error: error) }
+    static func noticeText(photos: Bool, serviceTitle: String?, errorMessage: String?) -> String {
+        if let errorMessage { return "Couldn't share image: " + errorMessage }
+        if photos { return "Photo sent to Photos." }
+        if let serviceTitle, !serviceTitle.isEmpty { return "Image shared via " + serviceTitle + "." }
+        return "Image shared."
+    }
     private func finish(error: Error?) {
-        let alert = NSAlert()
         let photos = picker == nil || service?.title == NSSharingService(named: .addToIPhoto)?.title
-        alert.messageText = error == nil ? (photos ? "Sent to Photos" : "Image shared") : "Could not share image"
-        alert.informativeText = error?.localizedDescription ?? (photos ? "Photos accepted the image on this Mac. It will appear on your other devices after iCloud Photos syncs." : "The sharing service accepted the image.")
+        let text = Self.noticeText(photos: photos, serviceTitle: service?.title, errorMessage: error?.localizedDescription)
         NSLog("Converse Photos share %@: %@", id.uuidString, error?.localizedDescription ?? "accepted")
-        alert.runModal()
+        notice(text)
         // Keep a successful share's file available while Photos finishes reading.
         // macOS manages the temporary directory; no user attachment is removed.
         Self.pending.removeValue(forKey: id)
@@ -63,6 +70,13 @@ enum MacImageSource {
         guard let rendered = context.makeImage(), let data = NSBitmapImageRep(cgImage: rendered).representation(using: .png, properties: [:]), data.count <= 8 * 1024 * 1024 else { throw ImageAssistError.invalid("This image is too large for image tools.") }
         return data
     }
+}
+
+@MainActor func photoShareSelfTests(_ check: (Bool, String) -> Void) {
+    check(PhotoImageShare.noticeText(photos: true, serviceTitle: nil, errorMessage: nil) == "Photo sent to Photos.", "Photos success reads as a short sent row")
+    check(PhotoImageShare.noticeText(photos: false, serviceTitle: "Mail", errorMessage: nil) == "Image shared via Mail.", "Other services name their destination")
+    check(PhotoImageShare.noticeText(photos: false, serviceTitle: nil, errorMessage: nil) == "Image shared.", "A missing service name still confirms the share")
+    check(PhotoImageShare.noticeText(photos: true, serviceTitle: nil, errorMessage: "No photos here") == "Couldn't share image: No photos here", "Share failures keep their reason in the row instead of a modal")
 }
 
 @MainActor final class MacImageToolsWindow: NSObject, NSWindowDelegate {
