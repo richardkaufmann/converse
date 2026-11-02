@@ -163,7 +163,6 @@ struct SessionSetupView: View {
             if isNew { guard store.signInSession(target, freshProfile: profile) else { return } }
             else if signIn { guard store.signInSession(target, name: profile.name) else { return } }
         }
-        AppDelegate.shared.select(target, state: state)
         dismiss()
     }
 }

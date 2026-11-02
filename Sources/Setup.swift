@@ -207,8 +207,7 @@ struct LegacySetupView: View {
         accountID = store.accounts.first { $0.id == entry.accountID && $0.engine == entry.engine }?.id ?? store.accounts.first { $0.engine == entry.engine }?.id ?? ""
     }
     private func finish(createSession: Bool) {
-        let session = store.completeSetup(selected: selected, sessionEntryID: createSession ? sessionEntryID : nil, accountID: accountID)
+        _ = store.completeSetup(selected: selected, sessionEntryID: createSession ? sessionEntryID : nil, accountID: accountID)
         state.setup = false
-        if let session { AppDelegate.shared.select(session, state: state) }
     }
 }

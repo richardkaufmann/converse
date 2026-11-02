@@ -536,7 +536,6 @@ struct AgentCreationView: View {
         #if os(macOS)
         if home == "local" {
             let session = Store.shared.createAgent(title: title)
-            if let (_, state) = AppDelegate.shared.windows.first(where: { $0.0.isKeyWindow }) ?? AppDelegate.shared.windows.last { AppDelegate.shared.select(session, state: state) }
             onClose(); AgentWindows.shared.setup(session)
             return
         }

@@ -66,10 +66,7 @@ final class ParkingLotLibrary: ObservableObject {
     }
     func promptNew() {
         promptName(title: "New Parking Lot", initial: "") { name in
-            let lot = try self.create(name: name)
-            if let (_, state) = AppDelegate.shared.windows.first(where: { $0.0.isKeyWindow }) ?? AppDelegate.shared.windows.last {
-                Workspace.shared.assign(lot.id, to: state.id, pane: Workspace.shared.firstAvailablePane(in: state.id))
-            }
+            try self.create(name: name)
         }
     }
     func promptRename(_ lot: ParkingLotStore) { promptName(title: "Rename Parking Lot", initial: lot.name) { try self.rename(lot.id, to: $0) } }
@@ -251,11 +248,6 @@ struct ParkingLotTalkView: View {
             guard (try? AgentSecrets.read("meta")) != nil else { throw AgentFailure.message("Add a Meta API key in Agent Setup to enable voice transcription. You can still discuss the lot by typing to any taught session.") }
             lot.open()
             let session = try store.parkingLotTalkSession(lot: lot, model: model)
-            if let (_, state) = AppDelegate.shared.windows.first(where: { $0.0.isKeyWindow }) ?? AppDelegate.shared.windows.last {
-                let free = (1...3).first { Workspace.shared.session(in: state.id, pane: $0) == nil }
-                let pane = free ?? (1...3).first { Workspace.shared.session(in: state.id, pane: $0) != lot.id } ?? 1
-                Workspace.shared.assign(session.id, to: state.id, pane: pane)
-            }
             dismiss(); AgentConversation.shared.start(session, store: store)
         } catch { self.error = error.localizedDescription }
     }

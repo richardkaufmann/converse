@@ -200,9 +200,8 @@ struct SidebarSession: View {
     var body: some View {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
-            Button { AppDelegate.shared.select(session, state: state) } label: {
-                SessionName(title: session.title, isAgent: session.isAgentSession).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain).layoutPriority(-1)
+            SessionName(title: session.title, isAgent: session.isAgentSession).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
+                .help("Use 1, 2 or 3 to show this session in a pane. Clicking its name never moves panes.")
             if showsModel {
                 ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
             }

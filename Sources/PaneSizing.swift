@@ -9,6 +9,7 @@ final class PaneDividerHandle: NSView {
     let dividerIndex: Int
     private var tracking: NSTrackingArea?
     private var dragStart: (pointer: CGFloat, divider: CGFloat)?
+    private var lastDragEvent = Date.distantPast
     private var pendingPosition: CGFloat?
     private var dragFrame: DispatchWorkItem?
     private var frozenText: [(NSTextContainer, Bool)] = []
@@ -36,12 +37,14 @@ final class PaneDividerHandle: NSView {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
+        lastDragEvent = Date()
         freezeText(in: window?.contentView)
         dragBegan?()
         NSCursor.resizeLeftRight.set()
     }
     override func mouseDragged(with event: NSEvent) {
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
+        lastDragEvent = Date()
         pendingPosition = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
         // Consume only the newest pointer position each display interval.
         // Reflowing every queued mouse event makes long transcripts lag behind.
@@ -83,6 +86,17 @@ final class PaneDividerHandle: NSView {
         applyDragFrame()
         dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
+    }
+    // AppKit delivers mouseUp to the view under the cursor, not necessarily
+    // this handle, so releasing outside the gutter never calls mouseUp here.
+    // Without this sweep a missed release freezes transcript wrapping and the
+    // layout loop forever. Returns true when it ended a stale drag.
+    func cancelStaleDrag(now: Date = Date()) -> Bool {
+        guard dragStart != nil, now.timeIntervalSince(lastDragEvent) > 2 else { return false }
+        dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
+        dragStart = nil; thawText(); dragEnded?()
+        window?.invalidateCursorRects(for: self)
+        return true
     }
 }
 
@@ -240,6 +254,14 @@ final class WindowPaneLayout {
             sidebarLimit = 480; restoreSidebarCap = nil
         }
         schedule()
+        // A late-mounting pane (remote transcript, heavy history) can miss the
+        // short retries and stay narrow. One last attempt a second later adopts
+        // it; if layout already settled this succeeds immediately as a no-op.
+        let token = revision
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, self.revision == token else { return }
+            self.schedule()
+        }
     }
     private func windowResized() {
         guard !applying else { return }
@@ -283,7 +305,16 @@ final class WindowPaneLayout {
         revision += 1; let token = revision; pending = true
         DispatchQueue.main.async { [weak self] in self?.arrange(token, attempts: 8) }
     }
+    private func cancelStaleDrags(now: Date = Date()) {
+        guard let window, let contentView = window.contentView else { return }
+        func sweep(_ view: NSView) {
+            if let handle = view as? PaneDividerHandle { _ = handle.cancelStaleDrag(now: now) }
+            for child in view.subviews { sweep(child) }
+        }
+        sweep(contentView)
+    }
     private func arrange(_ token: Int, attempts: Int) {
+        cancelStaleDrags()
         guard token == revision, !draggingDivider, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
         let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : countChangeSidebar ?? PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
@@ -375,6 +406,19 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         settle()
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Final gutter layout preserves the user's released position")
     }
+    if let staleHandle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
+        let probe = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        content.addSubview(probe)
+        func staleEvent(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: content.convert(NSPoint(x: staleHandle.frame.midX, y: staleHandle.frame.midY), to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        staleHandle.mouseDown(with: staleEvent(.leftMouseDown))
+        check(!probe.textContainer!.widthTracksTextView, "A gutter grab suspends transcript wrapping")
+        check(!staleHandle.cancelStaleDrag(now: Date()), "An active gutter drag is not mistaken for a stale one")
+        check(staleHandle.cancelStaleDrag(now: Date().addingTimeInterval(10)), "A missed gutter release is recovered as stale")
+        check(probe.textContainer!.widthTracksTextView, "Recovering a missed release restores transcript wrapping")
+        probe.removeFromSuperview()
+    } else { check(false, "Stale-drag fixture handle exists") }
     longText.removeFromSuperview()
     inner.setPosition(500, ofDividerAt: 0); settle()
     _ = sizes()
