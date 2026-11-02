@@ -114,6 +114,17 @@ import Foundation
     stopAgent.resumeAfterInterrupt = false
     AgentRuntime().cancel(stopAgent)
     check(stopAgent.agent?.enabled == false && stopAgent.agent?.attention.contains("Agent Setup") == true && stopAgent.agent?.lastOutcome == "Paused by Stop.", "Stop explains a paused loop instead of silently disabling it")
+    let strayStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-cancel-" + UUID().uuidString))
+    let strayAgent = strayStore.createAgent(title: "Cancel fixture agent")
+    strayAgent.agent?.enabled = true
+    AgentRuntime().finishCancelledTurn(strayAgent, store: strayStore)
+    check(strayAgent.agent?.enabled == true && strayAgent.agent?.attention == "Turn cancelled; loop remains on." && strayAgent.agent?.lastOutcome == "Turn cancelled; loop remains on.", "A cancelled turn that was not this session's Stop leaves the loop on")
+    let ownStop = strayStore.createAgent(title: "Own Stop fixture agent")
+    ownStop.agent?.enabled = true
+    ownStop.queuePaused = true
+    AgentRuntime().cancel(ownStop)
+    AgentRuntime().finishCancelledTurn(ownStop, store: strayStore)
+    check(ownStop.agent?.enabled == false && ownStop.agent?.attention.contains("Agent Setup") == true && ownStop.agent?.lastOutcome == "Paused by Stop.", "A Stop on the agent's own session keeps its paused explanation after the turn settles")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")

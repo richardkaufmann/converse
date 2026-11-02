@@ -63,6 +63,14 @@ final class Workspace: ObservableObject {
         next[sessionID] = destination; placements = next
     }
     func showsParkedApproval(_ session: Session) -> Bool { session.needsApproval && placements[session.id] == nil }
+    // A completed turn earns an unread marker only for an ordinary session
+    // whose transcript nobody is looking at: agents report through attention,
+    // and a visible pane means the response was seen.
+    func flagsUnseenResponse(_ session: Session, success: Bool, interrupted: Bool) -> Bool {
+        guard success, !interrupted, !session.isAgentSession, placements[session.id] == nil else { return false }
+        guard let last = session.messages.last, last.role == "assistant", !last.text.isEmpty || !last.images.isEmpty else { return false }
+        return true
+    }
     func park(_ sessionID: UUID) {
         MainActor.assumeIsolated {
             if AgentConversation.shared.active && AgentConversation.shared.sessionID == sessionID { AgentConversation.shared.stop() }
@@ -110,6 +118,11 @@ struct SessionActivity: View {
                 }
                 if session.busy {
                     ConversationActivity(busy: true, status: "Agent thinking", waiting: false)
+                } else if session.agentLoopPaused {
+                    Image(systemName: "pause.circle.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(Color.red)
+                        .frame(width: 12, height: 12)
+                        .accessibilityLabel("Agent loop paused")
+                        .help(agent.attention.isEmpty ? (agent.lastOutcome.isEmpty ? "Loop paused. Re-enable it in Agent Setup / Loop." : agent.lastOutcome) : agent.attention)
                 } else {
                     Image(systemName: agent.canSchedule && !session.queuePaused ? "arrow.triangle.2.circlepath" : "pause.circle")
                         .font(.system(size: 11)).foregroundStyle(agent.canSchedule && !session.queuePaused ? Color.green : Color.secondary)
@@ -173,6 +186,7 @@ extension Session {
                   "Messages: \(messages.count) · queued: \(pending.count)\(queuePaused ? " (paused)" : "")",
                   "Draft: \(draft.count) characters · attached images: \(attachments.count)",
                   "Conversation ID: \(id.uuidString)", "CLI session ID: \(remoteID ?? "Not started")"]
+        if unseenResponse && !isAgentSession { lines.insert("UNSEEN RESPONSE — take with 1, 2 or 3 to read it.", at: 0) }
         if let approval = toolStatus.approval { lines.append("Approvals: " + approval) }
         if let directory = entry.accountDirectory, !directory.isEmpty { lines.append("Account directory: \(directory)") }
         if let observed = toolStatus.accountObservedAt { lines.append("Account observed: " + DateFormatter.localizedString(from: observed, dateStyle: .short, timeStyle: .medium)) }
@@ -200,7 +214,7 @@ struct SidebarSession: View {
     var body: some View {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
-            SessionName(title: session.title, isAgent: session.isAgentSession).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
+            SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused, unread: !session.isAgentSession && session.unseenResponse).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
                 .help("Use 1, 2 or 3 to show this session in a pane. Clicking its name never moves panes.")
             if showsModel {
                 ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
@@ -314,7 +328,7 @@ struct SessionPane: View {
             HStack(spacing: 8) {
                 Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 ProviderLogo(engine: session.entry.engine)
-                SessionName(title: session.title, isAgent: session.isAgentSession).font(.system(size: 15, weight: .medium))
+                SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
@@ -330,9 +344,16 @@ struct SessionName: View {
     let title: String
     let isAgent: Bool
     var isParkingLot: Bool = false
+    var isPaused: Bool = false
+    var unread: Bool = false
     var body: some View {
         HStack(spacing: 4) {
-            Text(title).lineLimit(1).truncationMode(.tail)
+            if unread { Text("👀").fixedSize().help("Unseen response: take with 1, 2 or 3 to read it.").accessibilityLabel("Unseen response") }
+            if isPaused {
+                Text(title).lineLimit(1).truncationMode(.tail).bold(unread).foregroundStyle(Color.red)
+            } else {
+                Text(title).lineLimit(1).truncationMode(.tail).bold(unread)
+            }
             if isAgent { Text("😎").fixedSize().help("Agent session").accessibilityLabel("Agent") }
             if isParkingLot { Text("🚗").fixedSize().help("Parking Lot").accessibilityLabel("Parking Lot") }
         }

@@ -89,6 +89,23 @@ import Foundation
             session.agent?.lastOutcome = "Paused by Stop."
         }
     }
+    // A cancelled turn never ran, so cancellation alone must not read as a
+    // broken loop. A Stop on this session already disabled it synchronously in
+    // cancel(), and that explanation survives; anything else leaves the loop on.
+    func finishCancelledTurn(_ session: Session, store: Store) {
+        let wasEnabled = session.agent?.enabled == true
+        let stopPressed = session.queuePaused
+        finish(session, store: store, success: false, error: "Agent stopped. Your draft and queued messages are preserved.")
+        guard !shuttingDown else { return }
+        if wasEnabled {
+            session.agent?.enabled = true
+            session.agent?.attention = "Turn cancelled; loop remains on."
+            session.agent?.lastOutcome = "Turn cancelled; loop remains on."
+        } else if stopPressed {
+            session.agent?.attention = "Loop paused by Stop. Re-enable it in Agent Setup / Loop."
+            session.agent?.lastOutcome = "Paused by Stop."
+        }
+    }
     func run(_ session: Session, store: Store, responseID: UUID, loopTick: Bool = false) {
         guard !shuttingDown, let config = session.agent else { return }
         session.started = true
@@ -277,7 +294,7 @@ import Foundation
                 self.finish(session, store: store, success: true)
                 AgentConversation.shared.completed(session, responseID: responseID, text: decoded.reply, intent: decoded.speechIntent ?? "calm", success: true)
             } catch is CancellationError {
-                self.finish(session, store: store, success: false, error: "Agent stopped. Your draft and queued messages are preserved.")
+                self.finishCancelledTurn(session, store: store)
                 AgentConversation.shared.completed(session, responseID: responseID, text: "", intent: "neutral", success: false)
             } catch {
                 // URL errors and local errors are safe; API errors never include bodies.

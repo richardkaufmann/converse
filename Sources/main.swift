@@ -124,6 +124,11 @@ final class Session: ObservableObject, Identifiable {
     var switchboardHop = 0
     var interrupted = false
     var resumeAfterInterrupt = false
+    // An assistant response landed while this session sat in no local pane.
+    // Transient presentation state: never archived, cleared on take (1/2/3).
+    @Published var unseenResponse = false
+    // An agent loop Richard did not leave running: red in the sidebar.
+    var agentLoopPaused: Bool { agent != nil && agent?.enabled == false }
     @Published var injectionNotice = ""
     var injectionTargetID: UUID?
     var injectionAll = false
@@ -476,6 +481,7 @@ final class Store: ObservableObject {
         if s.injectionNotice == "Injected prompt started." { s.injectionNotice = "" }
     }
     func finishQueue(_ s: Session, success: Bool) {
+        if Workspace.shared.flagsUnseenResponse(s, success: success, interrupted: s.interrupted) { s.unseenResponse = true }
         importResponseImages(s)
         finishSupportProbe(s, success: success)
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
@@ -2779,6 +2785,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func assign(_ session: Session, to state: WindowState, pane: Int) {
         guard Store.shared.sessions.contains(where: { $0.id == session.id }) else { return }
+        // Taking a session shows its transcript: any unseen response is seen.
+        session.unseenResponse = false
         DeviceSyncService.shared.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: session.id)
         DeviceSyncService.shared.localTake(sessionID: session.id)
         Workspace.shared.assign(session.id, to: state.id, pane: pane)

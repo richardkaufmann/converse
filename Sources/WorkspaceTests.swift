@@ -54,6 +54,28 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     check(workspace.showsParkedApproval(session), "Parked approval requests flag the sidebar row")
     workspace.assign(session.id, to: second.id, pane: 3)
     check(!workspace.showsParkedApproval(session), "Approval requests already displayed in another window stay out of the sidebar alert")
+    do {
+        let store = Workspace()
+        let window = WindowState(workspace: store)
+        let chat = Session(entry: Entry(name: "Chat", command: "claude", directory: "~", engine: "claude", accountName: "Work"))
+        check(!chat.agentLoopPaused && !chat.unseenResponse, "Ordinary sessions start with no paused loop and no unread marker")
+        chat.messages.append(Message(role: "user", text: "hi"))
+        check(!store.flagsUnseenResponse(chat, success: true, interrupted: false), "A turn ending on the user's own message earns no unread marker")
+        chat.messages.append(Message(role: "assistant", text: "hello"))
+        check(store.flagsUnseenResponse(chat, success: true, interrupted: false), "A parked session with a fresh answer earns an unread marker")
+        check(!store.flagsUnseenResponse(chat, success: false, interrupted: false) && !store.flagsUnseenResponse(chat, success: true, interrupted: true), "Failed or interrupted turns earn no unread marker")
+        store.assign(chat.id, to: window.id, pane: 1)
+        check(!store.flagsUnseenResponse(chat, success: true, interrupted: false), "A session on screen earns no unread marker")
+        chat.unseenResponse = true
+        check(chat.sidebarSummary(workspace: store, windowID: window.id).contains("UNSEEN RESPONSE"), "Row hover surfaces an unseen response with its take hint")
+        let agentSession = Session(entry: Entry(name: "Helper", command: "", directory: "~", engine: "agent", accountName: "Work"))
+        agentSession.agent = AgentConfig()
+        agentSession.messages.append(Message(role: "assistant", text: "done"))
+        check(agentSession.agentLoopPaused, "A disabled agent loop reads as paused")
+        check(!store.flagsUnseenResponse(agentSession, success: true, interrupted: false), "Agent answers report through attention, never the unread marker")
+        agentSession.agent?.enabled = true
+        check(!agentSession.agentLoopPaused, "An enabled agent loop reads as running")
+    }
     session.requests = []
     let detail = session.sidebarSummary(workspace: workspace, windowID: first.id)
     check(detail.contains("person@example.invalid") && detail.contains("test-model") && detail.contains("Research · pane 3") && detail.contains("Parked in this window") && detail.contains("queued: 1"), "Row hover includes account email, model, activity, queue and exact window location")
