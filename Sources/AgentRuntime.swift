@@ -19,7 +19,7 @@ import Foundation
         // respecting paused queues, busy sessions and calendar windows.
         for session in Store.shared.sessions where session.agent?.enabled == true {
             do { try session.agent?.restoreSchedule(at: Date()) }
-            catch { session.agent?.enabled = false; session.agent?.attention = "Review the saved schedule." }
+            catch { session.agent?.enabled = false; session.agent?.attention = "Review the saved schedule."; session.agent?.lastOutcome = "Paused: schedule could not be restored at startup." }
         }
         for session in Store.shared.sessions { Store.shared.refreshSwitchboardReceipts(session) }
         Store.shared.save()
@@ -34,13 +34,14 @@ import Foundation
             if session.agent?.nextScheduledRun(after: now) == nil {
                 session.agent?.enabled = false
                 session.agent?.attention = "Loop paused: no future run in the supported schedule/calendar. Review Loop settings."
+                session.agent?.lastOutcome = "Paused: schedule has no future run."
                 store.save()
             }
         }
         for session in store.sessions where !session.busy && !session.queuePaused && session.pending.isEmpty {
             guard !AgentConversation.shared.owns(session), var config = session.agent, config.reserveRun(at: now) else { continue }
             session.agent = config
-            do { try store.saveChecked() } catch { session.agent?.enabled = false; session.agent?.attention = "Could not save the run budget. Loop paused."; continue }
+            do { try store.saveChecked() } catch { session.agent?.enabled = false; session.agent?.attention = "Could not save the run budget. Loop paused."; session.agent?.lastOutcome = "Paused: run budget could not be saved."; continue }
             store.enqueueSwitchboard(session, text: "[Agent loop tick] Work on your configured objective using current evidence and web research when needed. Report progress against our success criteria, update your scoreboard, and ask for attention only when needed.", reservedAgentRun: true, agentLoopTick: true)
         }
     }
@@ -85,6 +86,7 @@ import Foundation
         if !session.resumeAfterInterrupt, session.agent?.enabled == true {
             session.agent?.enabled = false
             session.agent?.attention = "Loop paused by Stop. Re-enable it in Agent Setup / Loop."
+            session.agent?.lastOutcome = "Paused by Stop."
         }
     }
     func run(_ session: Session, store: Store, responseID: UUID, loopTick: Bool = false) {

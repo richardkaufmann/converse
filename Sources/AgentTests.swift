@@ -113,7 +113,7 @@ import Foundation
     stopAgent.agent?.enabled = true
     stopAgent.resumeAfterInterrupt = false
     AgentRuntime().cancel(stopAgent)
-    check(stopAgent.agent?.enabled == false && stopAgent.agent?.attention.contains("Agent Setup") == true, "Stop explains a paused loop instead of silently disabling it")
+    check(stopAgent.agent?.enabled == false && stopAgent.agent?.attention.contains("Agent Setup") == true && stopAgent.agent?.lastOutcome == "Paused by Stop.", "Stop explains a paused loop instead of silently disabling it")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")
