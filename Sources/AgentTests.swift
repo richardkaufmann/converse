@@ -108,6 +108,12 @@ import Foundation
         do { try scheduled.apply(oldEditor); check(false, "Old editor cannot erase a text schedule") }
         catch { check(scheduled.scheduleText == restored.scheduleText, "Old editor cannot erase a text schedule") }
     } catch { check(false, "Schedule integration fixture: " + error.localizedDescription) }
+    let stopStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-stop-" + UUID().uuidString))
+    let stopAgent = stopStore.createAgent(title: "Stop fixture agent")
+    stopAgent.agent?.enabled = true
+    stopAgent.resumeAfterInterrupt = false
+    AgentRuntime().cancel(stopAgent)
+    check(stopAgent.agent?.enabled == false && stopAgent.agent?.attention.contains("Agent Setup") == true, "Stop explains a paused loop instead of silently disabling it")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")

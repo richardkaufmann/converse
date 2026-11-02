@@ -82,7 +82,10 @@ import Foundation
     }
     func cancel(_ session: Session) {
         tasks.removeValue(forKey: session.id)?.cancel()
-        if !session.resumeAfterInterrupt { session.agent?.enabled = false }
+        if !session.resumeAfterInterrupt, session.agent?.enabled == true {
+            session.agent?.enabled = false
+            session.agent?.attention = "Loop paused by Stop. Re-enable it in Agent Setup / Loop."
+        }
     }
     func run(_ session: Session, store: Store, responseID: UUID, loopTick: Bool = false) {
         guard !shuttingDown, let config = session.agent else { return }
