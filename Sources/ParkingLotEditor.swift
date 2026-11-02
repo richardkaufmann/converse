@@ -156,12 +156,16 @@ struct ParkingLotEditor: NSViewRepresentable {
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
                 if length > 0 { body.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: length)) }
             }
+            for entry in projection.entries where entry.range.length > 0 {
+                body.addAttribute(.foregroundColor, value: ParkingOutlineText.color(for: entry.row), range: entry.range)
+            }
             text.textStorage?.setAttributedString(body)
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
             let anchor = caret ?? oldAnchor
             if let anchor, let entry = projection.entries.first(where: { $0.row.id == anchor.0 }) {
                 text.setSelectedRange(NSRange(location: entry.range.location + min(anchor.1, entry.range.length), length: caret == nil ? min(oldSelection.length, max(0, body.length - entry.range.location - min(anchor.1, entry.range.length))) : 0))
             } else { text.setSelectedRange(NSRange(location: min(oldSelection.location, body.length), length: 0)) }
+            text.updateCommentButtons()
             text.needsDisplay = true
             if caret != nil { text.scrollRangeToVisible(text.selectedRange()) }
         }
@@ -218,6 +222,51 @@ struct ParkingLotEditor: NSViewRepresentable {
 private var emptyPlaceholders: [String: UUID] = [:]
 
 final class ParkingOutlineText: NSTextView {
+    static let headingColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.48, green: 0.75, blue: 1, alpha: 1)
+            : NSColor(srgbRed: 0.05, green: 0.25, blue: 0.55, alpha: 1)
+    }
+    static func color(for row: ParkingLotRow) -> NSColor {
+        row.isDone ? .secondaryLabelColor : (row.heading ? headingColor : .textColor)
+    }
+    private var commentButtons: [UUID: NSButton] = [:]
+    func updateCommentButtons() {
+        guard let owner else { return }
+        let entries = owner.projection.entries.filter { !($0.row.notes ?? []).isEmpty }
+        let ids = Set(entries.map { $0.row.id })
+        for id in Array(commentButtons.keys) where !ids.contains(id) { commentButtons.removeValue(forKey: id)?.removeFromSuperview() }
+        for entry in entries {
+            let button: NSButton
+            if let existing = commentButtons[entry.row.id] { button = existing }
+            else {
+                button = NSButton(title: "", target: self, action: #selector(openComments(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(entry.row.id.uuidString)
+                button.isBordered = false; button.font = .systemFont(ofSize: 10)
+                button.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "Comments")
+                button.imagePosition = .imageLeading; button.contentTintColor = .secondaryLabelColor
+                button.setButtonType(.momentaryPushIn)
+                commentButtons[entry.row.id] = button; addSubview(button)
+            }
+            let count = entry.row.notes!.count
+            button.title = "\(count)"
+            button.toolTip = "Show \(count) \(count == 1 ? "comment" : "comments")"
+            button.setAccessibilityLabel(button.toolTip)
+            let rect = rowRect(entry)
+            button.frame = NSRect(x: max(rect.minX, bounds.width - 38), y: rect.minY - 1, width: 34, height: max(18, rect.height))
+        }
+    }
+    override func layout() { super.layout(); updateCommentButtons() }
+    @objc private func openComments(_ sender: NSButton) {
+        guard let value = sender.identifier?.rawValue, let id = UUID(uuidString: value) else { return }
+        showComments(id)
+    }
+    func showComments(_ id: UUID) {
+        guard let notes = owner?.parent.lot.document.rows.first(where: { $0.id == id })?.notes, !notes.isEmpty else { return }
+        let alert = NSAlert(); alert.messageText = "Comments"
+        alert.informativeText = notes.map { $0.author + ": " + $0.text }.joined(separator: "\n\n")
+        if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+    }
     static let rowsType = NSPasteboard.PasteboardType("app.converse.parking-rows")
     private var imageCache: [String: NSImage] = [:]
     weak var owner: ParkingLotEditor.Coordinator?
@@ -366,9 +415,6 @@ final class ParkingOutlineText: NSTextView {
             if entry.placeholder {
                 ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.placeholderTextColor])
             }
-            if let notes = entry.row.notes, !notes.isEmpty {
-                ("💬\(notes.count)" as NSString).draw(at: NSPoint(x: max(rect.minX, bounds.width - 34), y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 10)])
-            }
         }
     }
     override func mouseDown(with event: NSEvent) {
@@ -402,6 +448,11 @@ final class ParkingOutlineText: NSTextView {
         item(entry.row.heading ? "Cut Heading" : "Cut Item") { owner.copyEntry(entry.row.id, cut: true) }
         item("Paste") { self.paste(nil) }
         item("Reorder") { owner.parent.reorder() }
+        if !entry.placeholder {
+            item(entry.row.isDone ? "Mark Not Done" : "Mark Done") {
+                owner.parent.lot.setDone(entry.row.id, !entry.row.isDone); owner.render()
+            }
+        }
         if !(entry.row.images ?? []).isEmpty {
             item("Remove Images") {
                 let document = owner.parent.lot.document
@@ -413,9 +464,7 @@ final class ParkingOutlineText: NSTextView {
         }
         if let notes = entry.row.notes, !notes.isEmpty {
             item("Comments (\(notes.count))…") {
-                let alert = NSAlert(); alert.messageText = "Comments"
-                alert.informativeText = notes.map { $0.author + ": " + $0.text }.joined(separator: "\n\n")
-                alert.runModal()
+                self.showComments(entry.row.id)
             }
         }
         return menu

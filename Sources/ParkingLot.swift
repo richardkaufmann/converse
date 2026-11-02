@@ -13,6 +13,8 @@ struct ParkingLotRow: Codable, Equatable, Identifiable {
     var editedBy: String? = nil
     var notes: [ParkingLotNote]? = nil
     var images: [String]? = nil
+    var done: Bool? = nil
+    var isDone: Bool { done == true }
 }
 struct ParkingLotDocument: Codable, Equatable {
     var revision: Int = 0
@@ -25,6 +27,7 @@ struct ParkingLotEdits: Decodable {
         var text: String?
         var heading: Bool?
         var before: UUID?
+        var done: Bool? = nil
     }
     var revision: Int
     var operations: [Operation]
@@ -112,6 +115,15 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try Self.validate(rows)
         if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows)) }
     }
+    func setDone(_ id: UUID, _ done: Bool) {
+        var rows = document.rows
+        guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].isDone != done else { return }
+        undoManager.beginUndoGrouping()
+        defer { undoManager.endUndoGrouping() }
+        rows[index].done = done; rows[index].editedBy = nil; commit(rows)
+        let actionName: String = done ? "Mark Done" : "Mark Not Done"
+        undoManager.setActionName(actionName)
+    }
     func update(_ id: UUID, text: String) {
         var rows = document.rows
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].text != text else { return }
@@ -133,7 +145,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         var number = 0
         return rows.map { row in
             if row.heading { number = 0 } else { number += 1 }
-            let line = (row.heading ? "# " : "\(number). ") + row.text.replacingOccurrences(of: "\n", with: "\n   ")
+            let line = (row.heading ? "# " : "\(number). ") + (row.isDone ? "[Done] " : "") + row.text.replacingOccurrences(of: "\n", with: "\n   ")
             return line + (row.images ?? []).map { "\n   [Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { "\n   > " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: "\n   > ") }.joined()
         }.joined(separator: "\n")
     }
@@ -172,12 +184,15 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                 guard operation.before == nil || destination != nil else { throw AgentFailure.message("Parking Lot destination no longer exists.") }
                 let id = operation.id ?? UUID()
                 guard !rows.contains(where: { $0.id == id }) else { throw AgentFailure.message("Parking Lot row ID already exists.") }
-                rows.insert(ParkingLotRow(id: id, heading: operation.heading ?? false, text: text, editedBy: author), at: destination ?? rows.count)
-            case "update", "comment":
+                rows.insert(ParkingLotRow(id: id, heading: operation.heading ?? false, text: text, editedBy: author, done: operation.done), at: destination ?? rows.count)
+            case "update":
+                guard let index, operation.text != nil || operation.done != nil else { throw AgentFailure.message("Parking Lot entry no longer exists or no changes were supplied.") }
+                if let text = operation.text { rows[index].text = text }
+                if let done = operation.done { rows[index].done = done }
+                rows[index].editedBy = author
+            case "comment":
                 guard let index, let text = operation.text else { throw AgentFailure.message("Parking Lot entry no longer exists or text is missing.") }
-                if operation.action == "comment" {
-                    rows[index].notes = (rows[index].notes ?? []) + [ParkingLotNote(author: author, text: text)]
-                } else { rows[index].text = text; rows[index].editedBy = author }
+                rows[index].notes = (rows[index].notes ?? []) + [ParkingLotNote(author: author, text: text)]
             case "delete":
                 guard let index else { throw AgentFailure.message("Parking Lot entry no longer exists.") }
                 rows.remove(at: index)
@@ -257,6 +272,7 @@ struct ParkingLotView: View {
     private func rowField(_ row: ParkingLotRow) -> some View {
                 TextField(row.heading ? "Heading" : "Write an idea, prompt or bug…", text: Binding(get: { lot.document.rows.first(where: { $0.id == row.id })?.text ?? "" }, set: { lot.update(row.id, text: $0) }), axis: .vertical)
                     .font(row.heading ? .headline : .body).textFieldStyle(.plain)
+                    .foregroundColor(Color(nsColor: ParkingOutlineText.color(for: row)))
                     .disabled(reordering).focused($focused, equals: row.id)
                     .onKeyPress(keys: [.return]) { press in
                         if press.modifiers.contains(.shift) { return KeyPress.Result.ignored }
@@ -394,6 +410,25 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
         let reply = AgentReply.decode("{\"reply\":\"Assessment\",\"parkingLotEdits\":{\"revision\":1,\"operations\":[{\"action\":\"add\",\"text\":\"Prototype\"}]}}")
         check(reply?.parkingLotEdits?.operations.first?.text == "Prototype", "Agent reply parses structured Parking Lot edits")
     } catch { check(false, "Parking Lot checks: " + error.localizedDescription) }
+    let completed = ParkingLotStore(folder: folder.appendingPathComponent("completion")); completed.open()
+    let headingID = completed.document.rows[0].id, itemID = completed.document.rows[1].id
+    completed.setDone(headingID, true)
+    check(completed.document.rows[0].isDone && !completed.document.rows[1].isDone, "Completing a heading preserves its children's individual states")
+    completed.undoManager.undo()
+    check(!completed.document.rows[0].isDone, "Undo restores a heading's completion state")
+    completed.undoManager.redo()
+    check(ParkingLotStore(folder: folder.appendingPathComponent("completion")).document.rows[0].isDone, "Redo completion persists across reopening")
+    do {
+        let editJSON = "{\"revision\":\(completed.document.revision),\"operations\":[{\"action\":\"update\",\"id\":\"\(itemID)\",\"done\":true}]}"
+        let edits = try JSONDecoder().decode(ParkingLotEdits.self, from: Data(editJSON.utf8))
+        try completed.apply(edits, author: "Reviewer")
+        check(completed.document.rows[1].isDone && completed.document.rows[1].text.isEmpty && completed.document.rows[1].editedBy == "Reviewer", "Session and agent edits can mark Done without replacing the item's text")
+        try completed.apply(ParkingLotEdits(revision: completed.document.revision, operations: [.init(action: "update", id: itemID, done: false)]), author: "Reviewer")
+        check(!completed.document.rows[1].isDone, "Structured Done false reopens an item")
+        let legacy = try JSONDecoder().decode(ParkingLotRow.self, from: Data("{\"id\":\"\(UUID())\",\"heading\":false,\"text\":\"Old idea\"}".utf8))
+        check(!legacy.isDone, "Old Parking Lot files without done decode as unfinished")
+        check(completed.exportMessages[0].text.contains("[Done]"), "Completed headings remain identified in exports and Group snapshots")
+    } catch { check(false, "Completion state tests: " + error.localizedDescription) }
     let corrupt = folder.appendingPathComponent("bad")
     try? FileManager.default.createDirectory(at: corrupt, withIntermediateDirectories: true)
     try? Data("broken".utf8).write(to: corrupt.appendingPathComponent("parking-lot.json"))

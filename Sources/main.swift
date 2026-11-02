@@ -2190,6 +2190,14 @@ struct ScrollingConversation: NSViewRepresentable {
                         if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
                     }
                 }
+                if let timestamp = message.createdAt {
+                    let hint = "Recorded " + timestamp.formatted(date: .abbreviated, time: .standard)
+                    var ranges: [NSRange] = []
+                    body.enumerateAttribute(.toolTip, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                        if value == nil { ranges.append(range) }
+                    }
+                    for range in ranges { body.addAttribute(.toolTip, value: hint, range: range) }
+                }
                 let contentLength = TranscriptStyle.blockContentLength(body.string)
                 body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
                 if body.length == 0 && message.images.isEmpty { continue }

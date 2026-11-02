@@ -489,10 +489,20 @@ import Foundation
     agent.agent?.generateArt = false; agent.agent?.enabled = false; agent.pending = []; agent.queuePaused = true
     agent.messages.append(Message(role: "user", text: "How is the project doing?"))
     let responseID = UUID(); agent.messages.append(Message(id: responseID, role: "assistant", text: "")); agent.busy = true
+    agent.lastOutputAt = ProcessInfo.processInfo.systemUptime - 12
     runtime.run(agent, store: store, responseID: responseID)
     let deadline = Date().addingTimeInterval(8)
     while agent.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(!agent.busy && agent.messages.contains { $0.text == "Measured progress" } && agent.agent?.snapshot?.stars == 12 && agent.agent?.snapshot?.visitors14d == 7 && agent.needsApproval, "Direct API agent completes a measured report and raises yellow attention")
+    let response = agent.messages.first { $0.id == responseID }!
+    check(response.delays?.first?.offset == 0 && (response.delays?.first?.seconds ?? 0) >= 12, "Real agent response path records the same first-output delay as sessions")
+    let responseView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    let responseCoordinator = ScrollingConversation.Coordinator(agent); responseCoordinator.render(responseView)
+    check(responseView.messageLabels.count == agent.messages.filter { !$0.text.isEmpty || !$0.images.isEmpty }.count && responseView.messageLabels.last?.timestamp == response.createdAt,
+          "Agent transcript numbers all visible messages and retains their timestamp labels")
+    let answerRange = (responseView.string as NSString).range(of: "Measured progress")
+    check(answerRange.location != NSNotFound && responseView.textStorage?.attribute(.toolTip, at: answerRange.location, effectiveRange: nil) as? String != nil && responseView.string.contains(Store.delayLabel(response.delays?.first?.seconds ?? 0)),
+          "Agent response body provides a timestamp hover and rendered delay hint")
     check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its scoreboard after the model response")
     let archive = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.workingMemory == "Keep release acceptance criteria", "Agent's learned human criteria survive archive reload beyond the recent conversation window")
