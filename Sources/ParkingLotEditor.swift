@@ -263,7 +263,13 @@ final class ParkingOutlineText: NSTextView {
             button.frame = NSRect(x: max(rect.minX, bounds.width - 38), y: rect.minY - 1, width: 34, height: max(18, rect.height))
         }
     }
-    override func layout() { super.layout(); updateCommentButtons() }
+    override func layout() {
+        super.layout(); updateCommentButtons()
+        // Resizes land here after the container tracks the new width, so
+        // image spacing follows live resizes. render()'s width guard keeps
+        // this a no-op when nothing changed.
+        owner?.render()
+    }
     @objc private func openComments(_ sender: NSButton) {
         guard let value = sender.identifier?.rawValue, let id = UUID(uuidString: value) else { return }
         showComments(id)
@@ -618,17 +624,27 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let spacedStyle = imageText.textStorage?.attribute(.paragraphStyle, at: spacedEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
     check(spacedStyle != nil && abs(spacedStyle!.paragraphSpacing - expectedSpacing) < 0.5, "Image rows reserve their drawn height, not a fixed stride")
     check(imageText.lotImageSizes(["/nonexistent/missing.png"], width: 320).compactMap { $0 }.isEmpty, "Unloadable images reserve no space")
+    // A live resize must re-reserve image height without an edit and without
+    // calling render() directly: the layout pass triggers it. Both images are
+    // width-limited here, so the reserved total changes with the pane.
+    let beforeStyle = imageText.textStorage?.attribute(.paragraphStyle, at: spacedEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
+    let beforeSpacing: CGFloat = beforeStyle?.paragraphSpacing ?? -1
+    imageText.textContainer?.widthTracksTextView = true
+    imageText.setFrameSize(NSSize(width: 260, height: 600))
+    if let layout = imageText.layoutManager, let container = imageText.textContainer {
+        layout.ensureLayout(for: container)
+    }
+    imageText.layout()
+    let liveWidth: CGFloat = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    let liveScaleA: CGFloat = min(liveWidth / 100, 106 / 50)
+    let liveScaleB: CGFloat = min(liveWidth / 400, 106 / 40)
+    let liveExpected: CGFloat = 5 + 6 + (50 * liveScaleA + 6) + (40 * liveScaleB + 6)
+    let liveEntry = imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!
+    let liveStyle = imageText.textStorage?.attribute(.paragraphStyle, at: liveEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
+    let liveSpacing: CGFloat = liveStyle?.paragraphSpacing ?? -1
+    check(abs(liveSpacing - liveExpected) < 1 && abs(liveExpected - beforeSpacing) > 1, "Resizing the pane re-reserves image height without an edit")
     imageText.undo(nil)
     check(imageLot.document.rows.first { $0.id == imageRow.id }!.images == savedImages, "Undo removes the second pasted image and restores single-image state")
-    // Narrowing the pane must re-reserve the smaller drawn height.
-    imageText.textContainer?.containerSize.width = 210
-    imageCoordinator.render()
-    let narrowedWidth: CGFloat = min(320, 210 - 10)
-    let narrowedScale: CGFloat = min(narrowedWidth / 100, 106 / 50)
-    let narrowedHeight: CGFloat = 50 * narrowedScale
-    let narrowedEntry = imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!
-    let narrowedStyle = imageText.textStorage?.attribute(.paragraphStyle, at: narrowedEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
-    check(narrowedStyle != nil && abs(narrowedStyle!.paragraphSpacing - (5 + 6 + narrowedHeight + 6)) < 0.5, "Resizing the pane re-reserves image height without an edit")
     imageCoordinator.copyEntry(imageRow.id, cut: true, board: board)
     check(!imageLot.document.rows.contains { $0.id == imageRow.id }, "Cut Item removes the item and its attached image together")
     imageText.setSelectedRange(imageCoordinator.projection.entries.last!.range)
