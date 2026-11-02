@@ -1303,6 +1303,15 @@ extension DeviceSyncService {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseResume.rawValue, sessionID: id, epoch: epoch))
         }
     }
+    // A saved pane has no lease during startup/reconnect. Do not present this
+    // transient state as an invitation to take control from another device.
+    func remoteDisplayReconnecting(_ id: String) -> Bool {
+        guard let global = DeviceGlobalID(id), let peer = peerForHome(global.home),
+              !remoteOffline.contains(id) else { return true }
+        if pendingTakes[id] != nil { return true }
+        if remoteLeases[id] != nil { return remoteTranscripts[id] == nil }
+        return resumeEpochs[id] != nil && peer.hello?.capabilities.contains("lease-resume-v1") == true
+    }
     func acquireRemote(globalID: String) {
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { lastOutcome = "Home is offline."; return }
         // Coalesce: moving panes or double-clicking must not mint a second

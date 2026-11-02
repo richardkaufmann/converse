@@ -432,7 +432,14 @@ struct PadPane: View {
                 Button("P") { model.park(id) }.accessibilityLabel("Park this conversation")
             }.padding(8)
             Divider()
-            if model.isParkingLot(id), service.remoteLeases[id] != nil, !service.remoteOffline.contains(id) {
+            if service.remoteDisplayReconnecting(id) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Reconnecting…")
+                    Spacer()
+                }.font(.callout).padding(10).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("session-reconnecting")
+            } else if model.isParkingLot(id), service.remoteLeases[id] != nil, !service.remoteOffline.contains(id) {
                 Text("Parking Lot · read only").font(.caption).foregroundStyle(.secondary).padding(8)
             } else if !model.canControl(id) {
                 HStack {

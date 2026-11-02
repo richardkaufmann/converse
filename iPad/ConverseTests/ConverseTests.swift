@@ -407,6 +407,16 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testSavedPaneStartsReconnectingWithoutInvitingTake() throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: String(repeating: "b", count: 64), session: UUID()).string
+        model.state.placements[0] = id
+        XCTAssertTrue(service.remoteDisplayReconnecting(id))
+        XCTAssertFalse(model.canControl(id))
+        service.remoteOffline.insert(id)
+        XCTAssertTrue(service.remoteDisplayReconnecting(id))
+        XCTAssertEqual(model.state.placements[0], id, "Reconnect presentation preserves the saved pane")
+    }
     func testParkingLotSnapshotsAreReadOnlyAndTrackRenameAndDeletion() throws {
         let service = try service(), model = PadModel(service: service)
         let home = String(repeating: "b", count: 64), sid = UUID()
@@ -454,6 +464,7 @@ final class ConverseTests: XCTestCase {
         try await eventually("Parking Lot item image reaches mobile") { service.blobCache[hash] != nil }
         XCTAssertNotNil(UIImage(contentsOfFile: try XCTUnwrap(service.blobCache[hash]).path))
         let model = PadModel(service: service)
+        model.state.placements[0] = row.globalID // Preserve the subscription when PadModel installs isPlaced.
         XCTAssertTrue(model.isParkingLot(row.globalID)); XCTAssertFalse(model.canControl(row.globalID))
         XCTAssertNil(service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "submit", text: "Must not send")))
         let oldRevision = snapshot.draftVersion
@@ -1031,9 +1042,11 @@ final class ConverseTests: XCTestCase {
         service.blobCache = [:] // Simulate losing the in-memory cache index on relaunch.
         let restored = PadModel(service: service)
         XCTAssertEqual(restored.draft(row.globalID).hashes, [hash])
+        XCTAssertTrue(service.remoteDisplayReconnecting(row.globalID), "Backgrounded pane says Reconnecting, not Take")
         try service.startNetworkForTesting(); service.connectManual(host: "127.0.0.1", port: port)
         try await eventually("Trusted home reconnects") { service.homes[DeviceGlobalID(row.globalID)!.home]?.online == true }
         try await eventually("Saved iPad pane restores automatically after background without Take") { (service.remoteLeases[row.globalID] ?? 0) > firstEpoch && service.remoteTranscripts[row.globalID] != nil }
+        XCTAssertFalse(service.remoteDisplayReconnecting(row.globalID), "Reconnecting clears once the lease and transcript arrive")
         restored.reconcile()
         try await eventually("Cached PNG is resent and verified on home") { service.blobReady[hash] == true }
         XCTAssertEqual(service.blobCache[hash], cached, "Recovery rediscovers the verified file without an in-memory cache index")
