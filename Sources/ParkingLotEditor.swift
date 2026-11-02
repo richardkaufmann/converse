@@ -158,6 +158,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
             for entry in projection.entries where entry.range.length > 0 {
                 body.addAttribute(.foregroundColor, value: ParkingOutlineText.color(for: entry.row), range: entry.range)
+                if entry.row.isDone { body.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: entry.range) }
             }
             text.textStorage?.setAttributedString(body)
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
@@ -549,6 +550,11 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     check(lot.document.rows[0].text == "Another writer", "Redo restores the newest lot change before continuing edits")
     lot.error = ""
     lot.update(lot.document.rows[1].id, text: "Existing item"); coordinator.render()
+    lot.setDone(lot.document.rows[1].id, true); coordinator.render()
+    let doneRange = coordinator.projection.entries.first { $0.row.id == lot.document.rows[1].id }!.range
+    let openRange = coordinator.projection.entries.first { $0.row.id == lot.document.rows[0].id }!.range
+    check((text.textStorage?.attribute(.strikethroughStyle, at: doneRange.location, effectiveRange: nil) as? Int) == NSUnderlineStyle.single.rawValue, "Completed items render with strikethrough")
+    check(text.textStorage?.attribute(.strikethroughStyle, at: openRange.location, effectiveRange: nil) == nil, "Open items render without strikethrough")
     let ready = coordinator.projection.entries.first { $0.placeholder }!
     let nextHeading = ready.before!
     coordinator.add(heading: true, after: ready)

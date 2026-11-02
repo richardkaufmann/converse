@@ -279,6 +279,7 @@ struct ParkingLotView: View {
                 TextField(row.heading ? "Heading" : "Write an idea, prompt or bug…", text: Binding(get: { lot.document.rows.first(where: { $0.id == row.id })?.text ?? "" }, set: { lot.update(row.id, text: $0) }), axis: .vertical)
                     .font(row.heading ? .headline : .body).textFieldStyle(.plain)
                     .foregroundColor(Color(nsColor: ParkingOutlineText.color(for: row)))
+                    .strikethrough(row.isDone)
                     .disabled(reordering).focused($focused, equals: row.id)
                     .onKeyPress(keys: [.return]) { press in
                         if press.modifiers.contains(.shift) { return KeyPress.Result.ignored }

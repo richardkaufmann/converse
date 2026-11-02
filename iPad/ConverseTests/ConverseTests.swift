@@ -177,6 +177,26 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(restored.state.placements, model.state.placements)
         XCTAssertEqual(restored.draft(ids[0]).text, "Unsent phone draft")
     }
+    func testPhonePickerToggleOffStaysOffAcrossHomeTraffic() throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "b", count: 64), sid = UUID()
+        let id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        let row = DeviceSidebarRow(globalID: id, sessionID: sid, title: "Work", assistant: "Muse", engine: "muse", model: "", effort: "", access: "read only", status: "Ready", busy: false, queued: 0, queuePaused: false)
+        func sidebar(_ sequence: UInt64) throws {
+            let payload = DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: sequence, rows: [row])
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: sequence, payload: try JSONEncoder().encode(payload)))
+        }
+        try sidebar(10)
+        model.togglePhoneSession(id)
+        XCTAssertTrue(model.state.placements.contains(id), "Selecting checks the session")
+        model.togglePhoneSession(id)
+        XCTAssertFalse(model.state.placements.contains(id), "Unchecking closes the session")
+        try sidebar(11)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertFalse(model.state.placements.contains(id), "Later home traffic must not recheck an unchecked session")
+    }
     func testTranscriptFocusSelectsPaneWithoutEditingDraft() {
         var focusCount = 0
         let parent = PadTranscript(messages: [], draft: "Untouched", images: [:], editable: true, lineNumbers: true,
@@ -1056,6 +1076,26 @@ final class ConverseTests: XCTestCase {
         restored.clearImages(row.globalID)
         restored.edit(row.globalID, text: "home draft"); restored.flush(row.globalID)
         try await eventually("Fixture restored for other interop checks") { service.remoteTranscripts[row.globalID]?.draft == "home draft" && service.remoteTranscripts[row.globalID]?.draftImageHashes == [] }
+    }
+    func testPhonePickerToggleOffSurvivesRealHomeRoundTrip() async throws {
+        guard let port = ProcessInfo.processInfo.environment["CONVERSE_INTEROP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with an isolated Mac home") }
+        let service = try service(); defer { service.suspendViewer() }
+        try service.startNetworkForTesting()
+        service.connectManual(host: "127.0.0.1", port: port)
+        try await eventually("Pair isolated home") { service.pairingPrompt != nil }
+        service.confirmPairing()
+        try await eventually("Load home directory") { service.homes.values.contains { !$0.rows.isEmpty } }
+        let row = try XCTUnwrap(service.homes.values.flatMap(\.rows).first)
+        let model = PadModel(service: service)
+        model.togglePhoneSession(row.globalID)
+        try await eventually("Take initial lease") { service.remoteLeases[row.globalID] != nil }
+        XCTAssertTrue(model.state.placements.contains(row.globalID))
+        model.togglePhoneSession(row.globalID)
+        XCTAssertFalse(model.state.placements.contains(row.globalID), "Unchecking closes the session")
+        try await Task.sleep(for: .seconds(3))
+        model.reconcile()
+        XCTAssertFalse(model.state.placements.contains(row.globalID), "Unchecking a live session must close it, not recheck")
+        XCTAssertNil(service.remoteLeases[row.globalID], "A parked session holds no lease")
     }
     func testMacHomeInteroperability() async throws {
         guard let port = ProcessInfo.processInfo.environment["CONVERSE_INTEROP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with an isolated Mac home") }
