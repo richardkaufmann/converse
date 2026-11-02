@@ -453,6 +453,16 @@ extension Store {
         session.pending.append(PendingPrompt(autonomous: true, text: "[Human-requested agent run] Check progress and refresh the scoreboard.", images: []))
         save(); runNext(session)
     }
+    // A scoreboard-only refresh: a narrow prompt instead of a full
+    // progress-check turn. Split for tests: requesting only queues.
+    @discardableResult func requestScoreboardRefresh(_ session: Session) -> Bool {
+        guard session.agent != nil, (session.agent?.turnLimit ?? 0) > 0 else {
+            session.agent?.attention = "Review the per-loop turn limit in Agent Setup before refreshing the scoreboard."; save(); return false
+        }
+        session.pending.append(PendingPrompt(autonomous: true, text: "[Human-requested scoreboard refresh] Return an updated scoreboard now, without other actions.", images: []))
+        save(); return true
+    }
+    func queueScoreboardRefresh(_ session: Session) { if requestScoreboardRefresh(session) { runNext(session) } }
     @discardableResult func createAgent(title: String = "Converse Steward", persist: Bool = true) -> Session {
         let session = create(Entry(name: "Agent", command: "", directory: NSTemporaryDirectory(), engine: "agent"), persist: false)
         session.title = title; session.agent = AgentConfig()

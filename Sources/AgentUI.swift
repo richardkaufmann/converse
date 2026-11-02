@@ -242,6 +242,9 @@ struct AgentControls: View {
                     Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }
                         .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
+                    Button("Refresh scoreboard now") { Store.shared.queueScoreboardRefresh(session) }
+                        .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
+                        .help("Ask the agent for a fresh scoreboard without a full progress-check turn")
                     Button("Scoreboard") { AgentWindows.shared.widget(session) }
                     Divider()
                     Button("Loop controls…") { loopSettings = true }

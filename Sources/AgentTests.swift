@@ -126,6 +126,12 @@ import Foundation
     AgentRuntime().cancel(ownStop)
     AgentRuntime().finishCancelledTurn(ownStop, store: strayStore)
     check(ownStop.agent?.enabled == false && ownStop.agent?.attention.contains("Agent Setup") == true && ownStop.agent?.lastOutcome == "Paused by Stop.", "A Stop on the agent's own session keeps its paused explanation after the turn settles")
+    let boardStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-board-" + UUID().uuidString))
+    let boardAgent = boardStore.createAgent(title: "Scoreboard fixture agent")
+    boardAgent.agent?.turnLimit = 1
+    check(boardStore.requestScoreboardRefresh(boardAgent) && boardAgent.pending.last?.text.contains("scoreboard") == true, "Scoreboard refresh queues a scoreboard-only prompt")
+    boardAgent.agent?.turnLimit = 0
+    check(!boardStore.requestScoreboardRefresh(boardAgent) && boardAgent.agent?.attention.contains("turn limit") == true, "Scoreboard refresh without a turn limit asks for setup instead")
     let setupSwitch = strayStore.createAgent(title: "Setup switch fixture agent")
     setupSwitch.agent?.enabled = true
     setupSwitch.agent?.attention = "Stale alarm."
