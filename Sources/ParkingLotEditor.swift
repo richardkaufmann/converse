@@ -152,7 +152,9 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
             for entry in projection.entries where !(entry.row.images ?? []).isEmpty {
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle
-                style.paragraphSpacing = 5 + CGFloat(entry.row.images!.count) * 116
+                let width = min(ParkingOutlineText.lotImageWidth, (text.textContainer?.containerSize.width ?? 400) - 10)
+                let sizes = text.lotImageSizes(entry.row.images!, width: width).compactMap { $0 }
+                style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
                 if length > 0 { body.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: length)) }
             }
@@ -270,6 +272,24 @@ final class ParkingOutlineText: NSTextView {
     }
     static let rowsType = NSPasteboard.PasteboardType("app.converse.parking-rows")
     private var imageCache: [String: NSImage] = [:]
+    static let lotImageWidth: CGFloat = 320
+    static let lotImageHeight: CGFloat = 106
+    static let lotImageGap: CGFloat = 6
+    /// Aspect-fit destination sizes parallel to paths. Unloadable paths yield nil
+    /// and reserve no space, so a missing file never leaves a blank stride.
+    func lotImageSizes(_ paths: [String], width: CGFloat) -> [NSSize?] {
+        paths.map { path in
+            if imageCache[path] == nil { imageCache[path] = NSImage(contentsOfFile: path) }
+            guard let image = imageCache[path], image.size.width > 0, image.size.height > 0 else { return nil }
+            let scale = min(width / image.size.width, Self.lotImageHeight / image.size.height)
+            return NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        }
+    }
+    /// Reserved space below an image row: one gap above, each drawn height plus a
+    /// gap, keeping the standard trailing space. Matches the drawing loop above.
+    static func lotImageSpacing(_ sizes: [NSSize]) -> CGFloat {
+        5 + lotImageGap + sizes.reduce(0) { $0 + $1.height + lotImageGap }
+    }
     weak var owner: ParkingLotEditor.Coordinator?
     private var suppressSubstitutions = false
     private var immediateSubstitution: ImmediateSubstitution?
@@ -399,15 +419,15 @@ final class ParkingOutlineText: NSTextView {
                 let end = max(entry.range.location, NSMaxRange(entry.range) - 1)
                 let glyph = manager.glyphIndexForCharacter(at: min(end, max(0, (string as NSString).length - 1)))
                 let line = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
-                for (i, path) in paths.enumerated() {
-                    let area = NSRect(x: textContainerOrigin.x + 5, y: textContainerOrigin.y + line.maxY + 6 + CGFloat(i) * 116, width: min(320, container.containerSize.width - 10), height: 106)
-                    guard area.intersects(dirtyRect) else { continue }
-                    if imageCache[path] == nil { imageCache[path] = NSImage(contentsOfFile: path) }
-                    if let image = imageCache[path] {
-                        let scale = min(area.width / max(1, image.size.width), area.height / max(1, image.size.height))
-                        let dest = NSRect(x: area.minX, y: area.minY, width: image.size.width * scale, height: image.size.height * scale)
+                let width = min(Self.lotImageWidth, container.containerSize.width - 10)
+                var y = textContainerOrigin.y + line.maxY + Self.lotImageGap
+                for (path, size) in zip(paths, lotImageSizes(paths, width: width)) {
+                    guard let size, let image = imageCache[path] else { continue }
+                    let dest = NSRect(x: textContainerOrigin.x + 5, y: y, width: size.width, height: size.height)
+                    if dest.intersects(dirtyRect) {
                         image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     }
+                    y += size.height + Self.lotImageGap
                 }
             }
             guard rect.intersects(dirtyRect) else { continue }
@@ -576,6 +596,26 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     check(imageLot.document.rows[1].images == nil, "Undo removes the image association without destroying the attachment file")
     imageText.redo(nil)
     check(imageLot.document.rows[1].images == savedImages, "Redo restores the item's pasted image")
+    // A wide-short screenshot must reserve only its drawn height, not a fixed stride.
+    let wideBoard = NSPasteboard.withUniqueName()
+    let wide = NSImage(size: NSSize(width: 400, height: 40), flipped: false) { rect in NSColor.green.setFill(); rect.fill(); return true }
+    wideBoard.writeObjects([wide])
+    imageText.setSelectedRange(imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!.range)
+    imageText.paste(from: wideBoard)
+    wideBoard.releaseGlobally()
+    let bothImages = imageLot.document.rows.first { $0.id == imageRow.id }!.images ?? []
+    check(bothImages.count == 2, "A second pasted image attaches to the same item")
+    let slotWidth = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    // 100x50 scales to the full 106pt height; 400x40 aspect-fits to 32pt.
+    let tallHeight = 50 * min(slotWidth / 100, 106 / 50)
+    let wideHeight = 40 * min(slotWidth / 400, 106 / 40)
+    let expectedSpacing = 5 + 6 + (tallHeight + 6) + (wideHeight + 6)
+    let spacedEntry = imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!
+    let spacedStyle = imageText.textStorage?.attribute(.paragraphStyle, at: spacedEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
+    check(spacedStyle != nil && abs(spacedStyle!.paragraphSpacing - expectedSpacing) < 0.5, "Image rows reserve their drawn height, not a fixed stride")
+    check(imageText.lotImageSizes(["/nonexistent/missing.png"], width: 320).compactMap { $0 }.isEmpty, "Unloadable images reserve no space")
+    imageText.undo(nil)
+    check(imageLot.document.rows.first { $0.id == imageRow.id }!.images == savedImages, "Undo removes the second pasted image and restores single-image state")
     imageCoordinator.copyEntry(imageRow.id, cut: true, board: board)
     check(!imageLot.document.rows.contains { $0.id == imageRow.id }, "Cut Item removes the item and its attached image together")
     imageText.setSelectedRange(imageCoordinator.projection.entries.last!.range)
