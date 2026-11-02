@@ -39,7 +39,7 @@ import AppKit
             (text + "oops", "object ID"),
             (text.replacingOccurrences(of: "x1=2", with: "x1=+2"), "coordinates"),
             (text.replacingOccurrences(of: "w=20", with: "w=21"), "source image"),
-            (text.replacingOccurrences(of: "data=5,5,", with: "data=4,5,"), "mask dimensions"),
+            (text.replacingOccurrences(of: "data=5,5,", with: "data=0,5,"), "mask dimensions"),
             (text.replacingOccurrences(of: "x=0", with: "x=1"), "offsets"),
             (text.replacingOccurrences(of: "h=10", with: "h=10;future=1;future=2"), "duplicate box field"),
             (text.replacingOccurrences(of: payload, with: "~" + payload.dropFirst()), "lossless encoding"),
@@ -52,6 +52,15 @@ import AppKit
                 check(error.localizedDescription.contains(reason) && !error.localizedDescription.contains(payload), "SAM explains " + reason + " without leaking the payload")
             }
         }
+        let small: [UInt8] = [1, 0, 0, 1, 0, 1]
+        let scaled = try SAMMask.resampled(small, width: 3, height: 2, targetWidth: 6, targetHeight: 4)
+        check(scaled == [1,1,0,0,0,0, 1,1,0,0,0,0, 1,1,0,0,1,1, 1,1,0,0,1,1], "SAM scales real mask pixels into box coordinates without filling holes or flipping rows")
+        let reducedPayload = try SAMMask.encode(small, width: 3, height: 2)
+        let reduced = "<0f>7<|box;x1=2;y1=3;x2=7;y2=6;w=20;h=10|><|mask;x=0;y=0;data=2,3,\(reducedPayload)|>"
+        let scaledWire = try ImageAssist.segments(reduced, label: "scaled", width: 20, height: 10)
+        let scaledSegment = try ImageSegment(scaledWire[0])
+        check(scaledSegment.pixels == scaled && scaledSegment.contains(x: 2, y: 3) && !scaledSegment.contains(x: 4, y: 3), "SAM accepts lower-resolution service masks and uses normalized pixels for hit testing")
+        check(try JSONDecoder().decode(DeviceImageSegment.self, from: JSONEncoder().encode(scaledWire[0])) == scaledWire[0], "Scaled SAM masks keep the existing remote wire format")
         let emptyPayload = try SAMMask.encode([UInt8](repeating: 0, count: 25), width: 5, height: 5)
         check((try? ImageAssist.segments(text.replacingOccurrences(of: payload, with: emptyPayload), label: "empty", width: 20, height: 10)) == nil, "SAM never substitutes a box for an empty mask")
         let tooMany = "<0f>" + (0..<33).map { String($0) + box + mask }.joined(separator: ",")

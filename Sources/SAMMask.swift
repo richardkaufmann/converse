@@ -110,6 +110,21 @@ enum SAMMask {
         if let payload, payload != encoded { throw invalid("mask failed the canonical arithmetic-code check") }
         return (result, encoded)
     }
+    static func resampled(_ pixels: [UInt8], width: Int, height: Int, targetWidth: Int, targetHeight: Int) throws -> [UInt8] {
+        guard [width, height, targetWidth, targetHeight].allSatisfy({ $0 > 0 && $0 <= 2048 }),
+              pixels.count == width * height else { throw invalid("invalid dimensions for mask scaling") }
+        // Sample pixel centers; never fill the bounding box or interpolate a
+        // binary mask into new coverage. Preserve orientation and interior holes.
+        var result = [UInt8](repeating: 0, count: targetWidth * targetHeight)
+        for y in 0..<targetHeight {
+            let sourceY = min(height - 1, ((2 * y + 1) * height) / (2 * targetHeight))
+            for x in 0..<targetWidth {
+                let sourceX = min(width - 1, ((2 * x + 1) * width) / (2 * targetWidth))
+                result[y * targetWidth + x] = pixels[sourceY * width + sourceX]
+            }
+        }
+        return result
+    }
     static func decode(_ payload: String, width: Int, height: Int) throws -> [UInt8] { try raster(payload, input: nil, width: width, height: height).0 }
     static func encode(_ bytes: [UInt8], width: Int, height: Int) throws -> String { try raster(nil, input: bytes, width: width, height: height).1 }
 }

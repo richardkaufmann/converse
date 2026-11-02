@@ -138,14 +138,26 @@ extension ImageAssist {
                 }
                 guard integer(mask["x"]) == 0, integer(mask["y"]) == 0 else { throw SAMMask.invalid("mask offsets must be zero") }
                 let values = mask["data"]!.split(separator: ",", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-                guard values.count == 3, integer(values[0]) == y2 - y + 1, integer(values[1]) == x2 - x + 1 else {
-                    throw SAMMask.invalid("mask dimensions do not match its box")
+                guard values.count == 3, let maskHeight = integer(values[0]), let maskWidth = integer(values[1]),
+                      maskHeight > 0, maskWidth > 0, maskHeight <= 2048, maskWidth <= 2048 else {
+                    throw SAMMask.invalid("mask dimensions are invalid or exceed 2048 pixels per side")
                 }
                 budget += (x2 - x + 1) * (y2 - y + 1)
                 guard budget <= 24_000_000 else { throw SAMMask.invalid("decoded masks exceed the 24 megapixel limit") }
-                let pixels = try SAMMask.decode(values[2], width: x2 - x + 1, height: y2 - y + 1)
+                let pixels = try SAMMask.decode(values[2], width: maskWidth, height: maskHeight)
                 guard pixels.contains(1) else { throw SAMMask.invalid("object mask contains no selected pixels") }
-                result.append(DeviceImageSegment(region: DeviceImageRegion(x: x, y: y, width: x2 - x + 1, height: y2 - y + 1, imageWidth: width, imageHeight: height), label: label, mask: values[2]))
+                // Meta's reference renderer scales the mask raster into its box;
+                // the service can return a lower-resolution raster (e.g. 1024 wide).
+                // Normalize once so existing local and remote consumers keep the
+                // same box-sized wire representation, including transparent holes.
+                let normalized: String
+                if maskWidth == x2 - x + 1 && maskHeight == y2 - y + 1 { normalized = values[2] }
+                else {
+                    let scaled = try SAMMask.resampled(pixels, width: maskWidth, height: maskHeight,
+                        targetWidth: x2 - x + 1, targetHeight: y2 - y + 1)
+                    normalized = try SAMMask.encode(scaled, width: x2 - x + 1, height: y2 - y + 1)
+                }
+                result.append(DeviceImageSegment(region: DeviceImageRegion(x: x, y: y, width: x2 - x + 1, height: y2 - y + 1, imageWidth: width, imageHeight: height), label: label, mask: normalized))
             }
         }
         for reason in warnings.sorted() { warning?("SAM returned \(reason), which were ignored.") }
