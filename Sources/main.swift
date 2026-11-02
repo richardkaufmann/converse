@@ -1643,9 +1643,11 @@ final class ConversationTextView: NSTextView {
             focusInput(); super.insertText(value, replacementRange: selectedRange()); return
         }
         super.insertText(value, replacementRange: replacementRange)
-        guard typedSpace, TextSubstitutions.shared.enabled, let manager = undoManager, manager.groupingLevel <= 1,
+        guard typedSpace, let manager = undoManager, manager.groupingLevel <= 1,
               !manager.isUndoing, !manager.isRedoing, selectedRange().location >= inputStart,
               let match = TextSubstitutions.match(in: (string as NSString).substring(from: inputStart), caret: selectedRange().location - inputStart) else { return }
+        substitutionFeedback.converted()
+        guard TextSubstitutions.shared.enabled else { return }
         let caret = selectedRange().location
         let before = (string as NSString).substring(from: inputStart)
         let after = (before as NSString).replacingCharacters(in: match.range, with: match.replacement)

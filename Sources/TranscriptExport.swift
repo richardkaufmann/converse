@@ -32,10 +32,14 @@ struct ExportSession: Identifiable {
     let provider: String
     var messages: [Message]
     var remoteID: String? = nil
+    var isParkingLot = false
     init(_ session: Session) { id = session.id; title = session.title; provider = session.entry.name; messages = session.messages }
+    init(lot: ParkingLotStore) {
+        id = lot.id; title = lot.name; provider = "Parking Lot"; messages = lot.exportMessages; isParkingLot = true
+    }
     init(row: DeviceSidebarRow, home: String, id: UUID) {
         self.id = id; title = row.title + " · " + home; provider = row.assistant
-        messages = []; remoteID = row.globalID
+        messages = []; remoteID = row.globalID; isParkingLot = row.engine == "parking"
     }
 }
 final class TranscriptExportSelection: ObservableObject {
@@ -82,7 +86,7 @@ struct TranscriptExportOptionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Sessions").fontWeight(.semibold)
+                Text("Sessions and Parking Lots").fontWeight(.semibold)
                 Text("\(selection.selected.count) selected").foregroundStyle(.secondary)
                 Spacer()
             }
@@ -91,7 +95,7 @@ struct TranscriptExportOptionsView: View {
                     ExportSelectAllCheckbox(state: selection.selectionState, enabled: !selection.sessions.isEmpty, action: selection.toggleAll)
                         .frame(width: 24, height: 18).help(selection.selectionState == .on ? "Clear all sessions" : "Select all sessions")
                     Text("Session").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Model").frame(width: 120, alignment: .leading)
+                    Text("Type / Model").frame(width: 120, alignment: .leading)
                 }.font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.vertical, 6)
                 Divider()
                 ScrollView {
@@ -118,7 +122,7 @@ struct TranscriptExportOptionsView: View {
                 ForEach(TranscriptExportFormat.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
             Toggle("Line numbers", isOn: $selection.lineNumbers).disabled(selection.format == .text)
-            Text(selection.format == .html ? "Formatted HTML with embedded images. Drafts and tool activity are excluded." : "UTF-8 text preserves Markdown source; images are listed by filename. No line numbers, drafts or tool activity.").font(.caption).foregroundStyle(.secondary)
+            Text(selection.format == .html ? "Formatted HTML with embedded images. Parking Lots include every item. Drafts and tool activity are excluded." : "UTF-8 text preserves Markdown source; images are listed by filename. No line numbers, drafts or tool activity.").font(.caption).foregroundStyle(.secondary)
             if selection.order == .interleaved && selection.includesUntimedMessages {
                 Text("Older messages have no recorded times. They appear after timed messages in their original session order, labeled “Time unavailable.”").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -180,7 +184,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     }
     func panel(_ sender: Any, validate url: URL) throws {
         guard !selection.selected.isEmpty else { throw TranscriptExport.error("Select at least one session to export.") }
-        guard selection.chosen.contains(where: { $0.remoteID != nil || $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || !$0.images.isEmpty) } }) else {
+        guard selection.chosen.contains(where: { $0.remoteID != nil || $0.isParkingLot || $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || !$0.images.isEmpty) } }) else {
             throw TranscriptExport.error("There are no submitted messages matching these options.")
         }
     }
@@ -231,7 +235,7 @@ extension AppDelegate {
         let remote = service.homes.values.sorted { $0.deviceName < $1.deviceName }.flatMap { home in
             home.rows.map { ExportSession(row: $0, home: home.deviceName, id: service.placementID(forGlobal: $0.globalID)) }
         }
-        let exporter = TranscriptExportController(sessions: Store.shared.sessions.map(ExportSession.init) + remote)
+        let exporter = TranscriptExportController(sessions: Store.shared.sessions.map(ExportSession.init) + ParkingLotLibrary.shared.lots.filter(\.active).map(ExportSession.init(lot:)) + remote)
         transcriptExporter = exporter
         exporter.completed = { [weak self] in self?.transcriptExporter = nil }
         exporter.show(for: windows.first(where: { $0.0.isKeyWindow })?.0 ?? windows.last?.0)
@@ -245,7 +249,7 @@ enum TranscriptExport {
         guard !selected.isEmpty else { throw error("There are no submitted messages matching these options.") }
         let date = DateFormatter(); date.dateStyle = .medium; date.timeStyle = .medium; date.timeZone = .current
         var output = "Converse Transcripts\n====================\n\(sessions.count) sessions · \(content.rawValue) · \(order.rawValue)\nTimes: \(TimeZone.current.identifier)\n"
-        if selected.contains(where: { $0.message.createdAt == nil }) {
+        if selected.contains(where: { !$0.session.isParkingLot && $0.message.createdAt == nil }) {
             output += "Older messages without recorded times are labeled Time unavailable. When interleaved they follow timed messages in their original session order.\n"
         }
         var previousSession: UUID?
@@ -256,7 +260,7 @@ enum TranscriptExport {
             }
             let message = item.message
             let time = message.createdAt.map { date.string(from: $0) } ?? "Time unavailable"
-            output += "\n[\(message.role == "user" ? "Prompt" : "Response") · \(item.session.title) · \(time)]\n"
+            if !item.session.isParkingLot { output += "\n[\(message.role == "user" ? "Prompt" : "Response") · \(item.session.title) · \(time)]\n" }
             output += Store.visibleText(message.text) + "\n"
             for image in message.images { output += "[Attached image: \((image as NSString).lastPathComponent)]\n" }
         }
@@ -289,7 +293,7 @@ enum TranscriptExport {
     static func items(sessions: [ExportSession], order: TranscriptExportOrder, content: TranscriptExportContent) -> [Item] {
         var result: [Item] = []
         for session in sessions {
-            for message in session.messages where content.includes(message.role) && (!Store.visibleText(message.text).isEmpty || !message.images.isEmpty) {
+            for message in session.messages where (session.isParkingLot || content.includes(message.role)) && (!Store.visibleText(message.text).isEmpty || !message.images.isEmpty) {
                 result.append(Item(session: session, message: message, position: result.count))
             }
         }
@@ -322,7 +326,8 @@ enum TranscriptExport {
             let prompt = message.role == "user"
             let time = message.createdAt.map { date.string(from: $0) } ?? "Time unavailable"
             let label = (prompt ? "Prompt" : "Response") + " · " + item.session.title
-            body += "<article class=\"message \(prompt ? "prompt" : "response")\"><header><b>" + escape(label) + "</b><time>" + escape(time) + "</time></header>"
+            body += "<article class=\"message \(prompt ? "prompt" : "response")\">"
+            if !item.session.isParkingLot { body += "<header><b>" + escape(label) + "</b><time>" + escape(time) + "</time></header>" }
             let lines = Store.visibleText(message.text).components(separatedBy: "\n")
             var index = 0
             while index < lines.count {

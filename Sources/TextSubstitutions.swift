@@ -67,21 +67,34 @@ final class TextSubstitutions: ObservableObject {
 
 final class SubstitutionFeedback: ObservableObject {
     @Published private(set) var offeredGeneration: Int?
+    private var expiration: DispatchWorkItem?
+    private(set) var deadline: Date?
+    deinit { expiration?.cancel() }
     func converted() {
-        let generation = TextSubstitutions.shared.generation
-        if offeredGeneration != generation { offeredGeneration = generation }
+        expiration?.cancel()
+        offeredGeneration = TextSubstitutions.shared.generation
+        deadline = Date().addingTimeInterval(10)
+        let work = DispatchWorkItem { [weak self] in self?.expire() }
+        expiration = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
+    }
+    func expire(now: Date = Date()) {
+        guard let deadline, now >= deadline else { return }
+        offeredGeneration = nil; self.deadline = nil; expiration = nil
     }
     func rejected() { converted() }
     func offersDisable(_ preferences: TextSubstitutions) -> Bool { offeredGeneration == preferences.generation }
+
 }
 
 struct SubstitutionButton: View {
     @ObservedObject var preferences = TextSubstitutions.shared
     @ObservedObject var feedback: SubstitutionFeedback
     var body: some View {
-        if !preferences.enabled || feedback.offersDisable(preferences) {
+        if feedback.offersDisable(preferences) {
             Button(preferences.enabled ? "Turn off substitutions" : "Turn on substitutions") {
                 preferences.changeFromUI(!preferences.enabled)
+                feedback.converted()
             }.font(.system(size: 12)).buttonStyle(.bordered)
                 .help("Change typed-text substitutions for this Mac app. Existing text stays unchanged.")
         }

@@ -12,6 +12,7 @@ struct ParkingLotRow: Codable, Equatable, Identifiable {
     var text: String
     var editedBy: String? = nil
     var notes: [ParkingLotNote]? = nil
+    var images: [String]? = nil
 }
 struct ParkingLotDocument: Codable, Equatable {
     var revision: Int = 0
@@ -42,12 +43,37 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     @Published private(set) var active = false
     @Published var error = ""
     private let file: URL
+    let attachmentFolder: URL
     init(folder: URL, id: UUID = ParkingLotStore.id, name: String = "Parking Lot") {
         self.id = id; self.name = name
+        attachmentFolder = folder.appendingPathComponent("Attachments/" + id.uuidString)
         file = id == Self.id ? folder.appendingPathComponent("parking-lot.json") : folder.appendingPathComponent("ParkingLots/" + id.uuidString + ".json")
         if FileManager.default.fileExists(atPath: file.path) {
             do { document = try JSONDecoder().decode(ParkingLotDocument.self, from: Data(contentsOf: file)); active = true }
             catch { self.error = "Could not read Parking Lot. The saved file has been left intact." }
+        }
+    }
+    func saveImage(_ image: NSImage) throws -> String {
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]), png.count <= 25_000_000 else {
+            throw AgentFailure.message("Choose an image smaller than 25 MB.")
+        }
+        try FileManager.default.createDirectory(at: attachmentFolder, withIntermediateDirectories: true)
+        let url = attachmentFolder.appendingPathComponent(UUID().uuidString + ".png")
+        try png.write(to: url, options: .atomic)
+        return url.path
+    }
+    var exportMessages: [Message] {
+        var number = 0
+        return document.rows.map { row in
+            if row.heading { number = 0 } else { number += 1 }
+            var copy = row
+            // The ordinary Markdown helper numbers a standalone item as one.
+            // Preserve the section's actual numbering in the exported message.
+            copy.images = nil
+            var text = Self.markdown([copy])
+            if !row.heading, text.hasPrefix("1. ") { text = "\(number). " + text.dropFirst(3) }
+            return Message(id: row.id, role: "assistant", text: text, images: row.images ?? [], createdAt: nil)
         }
     }
     func open() {
@@ -108,7 +134,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         return rows.map { row in
             if row.heading { number = 0 } else { number += 1 }
             let line = (row.heading ? "# " : "\(number). ") + row.text.replacingOccurrences(of: "\n", with: "\n   ")
-            return line + (row.notes ?? []).map { "\n   > " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: "\n   > ") }.joined()
+            return line + (row.images ?? []).map { "\n   [Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { "\n   > " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: "\n   > ") }.joined()
         }.joined(separator: "\n")
     }
     func move(_ id: UUID, before destination: UUID?) {

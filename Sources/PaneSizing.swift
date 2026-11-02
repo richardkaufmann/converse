@@ -11,9 +11,10 @@ final class PaneDividerHandle: NSView {
     private var dragStart: (pointer: CGFloat, divider: CGFloat)?
     private var pendingPosition: CGFloat?
     private var dragFrame: DispatchWorkItem?
+    private var frozenText: [(NSTextContainer, Bool)] = []
     var dragBegan: (() -> Void)?
     var dragEnded: (() -> Void)?
-    deinit { dragFrame?.cancel() }
+    deinit { dragFrame?.cancel(); thawText() }
     init(split: NSSplitView, index: Int) {
         self.split = split; dividerIndex = index
         super.init(frame: .zero)
@@ -35,6 +36,7 @@ final class PaneDividerHandle: NSView {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
+        freezeText(in: window?.contentView)
         dragBegan?()
         NSCursor.resizeLeftRight.set()
     }
@@ -57,12 +59,29 @@ final class PaneDividerHandle: NSView {
         let constrained = max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex)))
         if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 { split.setPosition(constrained, ofDividerAt: dividerIndex) }
     }
+    // Width changes invalidate every line in TextKit 1, including offscreen
+    // transcript history. Keep wrapping fixed during the gesture; clipping is
+    // cheap and the final width reflows once at release. Never replace the
+    // editor or its selection/Undo stack with a new view.
+    private func freezeText(in view: NSView?) {
+        guard let view else { return }
+        if let text = view as? NSTextView, let container = text.textContainer {
+            frozenText.append((container, container.widthTracksTextView))
+            container.widthTracksTextView = false
+        }
+        for child in view.subviews { freezeText(in: child) }
+    }
+    private func thawText() {
+        let saved = frozenText; frozenText.removeAll()
+        for (container, tracks) in saved { container.widthTracksTextView = tracks }
+    }
+
     override func mouseUp(with event: NSEvent) {
         guard let split, let start = dragStart else { return }
         dragFrame?.cancel(); dragFrame = nil
         pendingPosition = start.divider + split.convert(event.locationInWindow, from: nil).x - start.pointer
         applyDragFrame()
-        dragStart = nil; dragEnded?()
+        dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
     }
 }
@@ -323,6 +342,12 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         check(NSCursor.current == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
         NSCursor.arrow.set()
     } else { check(false, "Session gutter handle is installed") }
+    let longText = NSTextView(frame: inner.arrangedSubviews[0].bounds)
+    longText.autoresizingMask = [.width, .height]
+    longText.textContainer!.widthTracksTextView = true
+    longText.string = String(repeating: "Long transcript text that wraps as the pane gets narrower. More prose for realistic wrapping.\n", count: 10000)
+    inner.arrangedSubviews[0].addSubview(longText)
+    longText.layoutManager!.ensureLayout(for: longText.textContainer!)
     for target in [outer, inner] {
         guard let handle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === target && $0.dividerIndex == 0 }) else { check(false, "Burst-drag fixture handle exists"); continue }
         let before = target.arrangedSubviews[0].frame.maxX
@@ -332,18 +357,25 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         }
         var notifications = 0
         let observer = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: target, queue: .main) { _ in notifications += 1 }
+        let wrapping = longText.textContainer!.containerSize.width
+        let selection = longText.selectedRange()
         handle.mouseDown(with: event(.leftMouseDown, 0))
+        check(!longText.textContainer!.widthTracksTextView, "Gutter drag suspends full-history wrapping on a 10,000-line transcript")
         for step in 1...100 { handle.mouseDragged(with: event(.leftMouseDragged, CGFloat(step) * 0.3)) }
         RunLoop.current.run(until: Date().addingTimeInterval(0.04))
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && notifications < 10,
               "\(target === outer ? "Sidebar" : "Session") gutter coalesces a 100-event burst while following the latest pointer (resize notifications: \(notifications))")
+        longText.layoutManager!.ensureLayout(for: longText.textContainer!)
+        check(longText.textContainer!.containerSize.width == wrapping, "TextKit wrapping width stays fixed throughout the gutter gesture")
         handle.mouseDragged(with: event(.leftMouseDragged, 37))
         handle.mouseUp(with: event(.leftMouseUp, 37))
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Gutter release applies the final pointer position without waiting for a timer")
+        check(longText.textContainer!.widthTracksTextView && longText.selectedRange() == selection, "Release restores native wrapping and preserves the editor selection")
         NotificationCenter.default.removeObserver(observer)
         settle()
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Final gutter layout preserves the user's released position")
     }
+    longText.removeFromSuperview()
     inner.setPosition(500, ofDividerAt: 0); settle()
     _ = sizes()
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()

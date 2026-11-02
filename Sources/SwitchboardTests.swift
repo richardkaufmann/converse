@@ -147,6 +147,22 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         _ = pump { exportDone }
         check(exportDone && exportFailure == nil && exportResult?.0.messages.count == 45 && exportResult?.1.count == 1 && exportResult?.0.messages.last?.createdAt == Date(timeIntervalSince1970: 44), "Remote export fetches every page, original timestamps, and hash-verified image data")
         check(a.remoteLeases.isEmpty && b.remoteLeases.isEmpty && target.draft == "Unsent human draft" && sb.participantReceipts.count == exportReceipts, "Read-only export needs no display lease, changes no draft, and writes no mutation receipts")
+        let exportLot = try b.parkingLibrary.create(name: "Exported ideas")
+        var lotRows = exportLot.document.rows
+        lotRows[1].text = "An illustrated idea"; lotRows[1].images = [exportFile.path]
+        try exportLot.replaceUserRows(lotRows, revision: exportLot.document.revision)
+        var lotChoice = ExportSession(lot: exportLot)
+        lotChoice.remoteID = DeviceGlobalID(home: bid, session: exportLot.id).string
+        var lotExport: (ExportSession, [String: Data])?, lotFailure: String?, lotDone = false
+        Task { @MainActor in
+            do { lotExport = try await TranscriptExportController.load(lotChoice, includeImages: true, service: a) }
+            catch { lotFailure = error.localizedDescription }; lotDone = true
+        }
+        _ = pump { lotDone }
+        check(lotDone && lotFailure == nil && lotExport?.0.isParkingLot == true && lotExport?.0.messages.contains { $0.text.contains("An illustrated idea") && $0.images.count == 1 } == true && lotExport?.1.count == 1,
+              "Remote Parking Lot export retains item/image binding and verifies attachment bytes")
+        check(exportLot.document.rows == lotRows && a.remoteLeases.isEmpty && sb.participantReceipts.count == exportReceipts,
+              "Exporting a Group Parking Lot leaves its document, leases, and mutation receipts untouched")
         target.messages = beforeExport
         let renameID = UUID(), priorTitle = target.title
         let renamed = request("session.rename", target: gid, title: "Renamed remotely", id: renameID)

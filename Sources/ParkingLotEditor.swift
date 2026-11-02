@@ -15,7 +15,7 @@ struct ParkingOutline {
     var string = ""
     init(rows: [ParkingLotRow], collapsed: Set<UUID>, placeholders: inout [String: UUID]) {
         var projected: [(ParkingLotRow, UUID?, Bool, Int)] = []
-        var section = "root", hidden = false, count = 0, lastEmpty = false
+        var section = "root", hidden = false, count = 0
         func empty(_ heading: Bool, before: UUID?) {
             let key = heading ? "heading" : section
             let cached = placeholders[key]
@@ -25,14 +25,15 @@ struct ParkingOutline {
         }
         for row in rows {
             if row.heading {
-                if !hidden && !lastEmpty && !projected.isEmpty { empty(false, before: row.id) }
-                section = row.id.uuidString; hidden = collapsed.contains(row.id); count = 0; lastEmpty = false
+                if !hidden && !projected.isEmpty { empty(false, before: row.id) }
+                section = row.id.uuidString; hidden = collapsed.contains(row.id); count = 0
                 projected.append((row, nil, false, 0))
             } else if !hidden {
-                count += 1; projected.append((row, nil, false, count)); lastEmpty = row.text.isEmpty
+                count += 1; projected.append((row, nil, false, count))
             }
         }
-        if !hidden && !lastEmpty && !projected.isEmpty { empty(false, before: nil) }
+        if !hidden && !projected.isEmpty { empty(false, before: nil) }
+        empty(true, before: nil)
         for (row, before, placeholder, number) in projected {
             if !entries.isEmpty { string += "\n" }
             let text = row.text.replacingOccurrences(of: "\n", with: "\u{2028}")
@@ -77,6 +78,13 @@ struct ParkingOutline {
                 }
             }
             newRows.append(row)
+        }
+        // Backspace/Delete across the paragraph separator merges entries.
+        // Keep attachments from both sides instead of losing the second row's
+        // images when its identity is removed.
+        if start != end && insertion.isEmpty && range.length == 1 && firstOffset == firstText.length && lastOffset == 0 {
+            let images = (first.row.images ?? []) + (last.row.images ?? [])
+            if !images.isEmpty { newRows[0].images = images }
         }
         let caretLine = (prefix + insertion).components(separatedBy: "\n").count - 1
         let rawCaret = (prefix + insertion).components(separatedBy: "\n").last! as NSString
@@ -142,6 +150,12 @@ struct ParkingLotEditor: NSViewRepresentable {
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle; style.paragraphSpacingBefore = 7
                 if entry.range.length > 0 { body.addAttributes([.font: NSFont.boldSystemFont(ofSize: 13), .paragraphStyle: style], range: entry.range) }
             }
+            for entry in projection.entries where !(entry.row.images ?? []).isEmpty {
+                let style = standard.mutableCopy() as! NSMutableParagraphStyle
+                style.paragraphSpacing = 5 + CGFloat(entry.row.images!.count) * 116
+                let length = min(body.length - entry.range.location, max(1, entry.range.length))
+                if length > 0 { body.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: length)) }
+            }
             text.textStorage?.setAttributedString(body)
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
             let anchor = caret ?? oldAnchor
@@ -192,6 +206,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             let rows = Array(document.rows[range])
             board.clearContents()
             board.setString(ParkingLotStore.markdown(rows), forType: .string)
+            if let data = try? JSONEncoder().encode(rows) { board.setData(data, forType: ParkingOutlineText.rowsType) }
             if cut { var next = document.rows; next.removeSubrange(range); save(next, expected: document) }
         }
         func toggle(_ id: UUID) {
@@ -203,6 +218,8 @@ struct ParkingLotEditor: NSViewRepresentable {
 private var emptyPlaceholders: [String: UUID] = [:]
 
 final class ParkingOutlineText: NSTextView {
+    static let rowsType = NSPasteboard.PasteboardType("app.converse.parking-rows")
+    private var imageCache: [String: NSImage] = [:]
     weak var owner: ParkingLotEditor.Coordinator?
     private var suppressSubstitutions = false
     private var immediateSubstitution: ImmediateSubstitution?
@@ -217,7 +234,9 @@ final class ParkingOutlineText: NSTextView {
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
         super.insertText(value, replacementRange: replacementRange)
-        guard typedSpace, TextSubstitutions.shared.enabled, let owner, let match = TextSubstitutions.match(in: string, caret: selectedRange().location) else { return }
+        guard typedSpace, let owner, let match = TextSubstitutions.match(in: string, caret: selectedRange().location) else { return }
+        owner.parent.lot.substitutionFeedback.converted()
+        guard TextSubstitutions.shared.enabled else { return }
         let revision = owner.parent.lot.document.revision
         let caret = selectedRange().location
         undoManager?.beginUndoGrouping()
@@ -231,7 +250,19 @@ final class ParkingOutlineText: NSTextView {
     }
     override func deleteBackward(_ sender: Any?) {
         if immediateSubstitution?.matches(self) == true, undoManager?.undoActionName == TextSubstitutions.undoName { undo(sender); return }
-        immediateSubstitution = nil; super.deleteBackward(sender)
+        immediateSubstitution = nil
+        if let owner, selectedRange().length == 0,
+           let index = owner.projection.index(at: selectedRange().location) {
+            let entry = owner.projection.entries[index]
+            if !entry.placeholder && !entry.row.heading && entry.row.text.isEmpty && (entry.row.images ?? []).isEmpty {
+                let document = owner.parent.lot.document
+                let previous = owner.projection.entries.prefix(index).last { !$0.placeholder }
+                owner.save(document.rows.filter { $0.id != entry.row.id }, expected: document,
+                           caret: previous.map { ($0.row.id, $0.range.length) })
+                return
+            }
+        }
+        super.deleteBackward(sender)
     }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
@@ -253,9 +284,38 @@ final class ParkingOutlineText: NSTextView {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(owner.projection.markdown(selectedRange()), forType: .string)
     }
     override func cut(_ sender: Any?) { guard selectedRange().length > 0 else { return }; copy(sender); insertText("", replacementRange: selectedRange()) }
-    override func paste(_ sender: Any?) {
+    override func paste(_ sender: Any?) { paste(from: .general) }
+    func paste(from board: NSPasteboard) {
         suppressSubstitutions = true; defer { suppressSubstitutions = false }
-        if let value = NSPasteboard.general.string(forType: .string) { insertText(value, replacementRange: selectedRange()) }
+        guard let owner, let index = owner.projection.index(at: selectedRange().location) else { return }
+        let entry = owner.projection.entries[index]
+        let document = owner.parent.lot.document
+        if let data = board.data(forType: Self.rowsType),
+           var pasted = try? JSONDecoder().decode([ParkingLotRow].self, from: data), !pasted.isEmpty {
+            // Copied entries get new identities; attachment files are immutable
+            // and retained for Undo and for other lots using the same image.
+            for i in pasted.indices { pasted[i].id = UUID() }
+            var rows = document.rows
+            let destination = entry.placeholder ? entry.before.flatMap { id in rows.firstIndex { $0.id == id } } ?? rows.count : rows.firstIndex { $0.id == entry.row.id }.map { $0 + 1 } ?? rows.count
+            rows.insert(contentsOf: pasted, at: destination)
+            owner.save(rows, expected: document, caret: (pasted[0].id, 0)); return
+        }
+        if let image = NSImage(pasteboard: board) {
+            do {
+                let path = try owner.parent.lot.saveImage(image)
+                var rows = document.rows
+                let target: Int
+                if !entry.placeholder && !entry.row.heading, let existing = rows.firstIndex(where: { $0.id == entry.row.id }) { target = existing }
+                else {
+                    target = entry.placeholder ? entry.before.flatMap { id in rows.firstIndex { $0.id == id } } ?? rows.count : rows.firstIndex { $0.id == entry.row.id }.map { $0 + 1 } ?? rows.count
+                    rows.insert(ParkingLotRow(heading: false, text: ""), at: target)
+                }
+                rows[target].images = (rows[target].images ?? []) + [path]
+                owner.save(rows, expected: document, caret: (rows[target].id, rows[target].text.utf16.count))
+            } catch { owner.parent.lot.error = error.localizedDescription }
+            return
+        }
+        if let value = board.string(forType: .string) { insertText(value, replacementRange: selectedRange()) }
     }
     func rowRect(_ entry: ParkingOutline.Entry) -> NSRect {
         guard let manager = layoutManager, let container = textContainer else { return .zero }
@@ -279,11 +339,26 @@ final class ParkingOutlineText: NSTextView {
         }
         for entry in owner.projection.entries {
             let rect = rowRect(entry)
+            if let manager = layoutManager, let container = textContainer, let paths = entry.row.images, !paths.isEmpty {
+                let end = max(entry.range.location, NSMaxRange(entry.range) - 1)
+                let glyph = manager.glyphIndexForCharacter(at: min(end, max(0, (string as NSString).length - 1)))
+                let line = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
+                for (i, path) in paths.enumerated() {
+                    let area = NSRect(x: textContainerOrigin.x + 5, y: textContainerOrigin.y + line.maxY + 6 + CGFloat(i) * 116, width: min(320, container.containerSize.width - 10), height: 106)
+                    guard area.intersects(dirtyRect) else { continue }
+                    if imageCache[path] == nil { imageCache[path] = NSImage(contentsOfFile: path) }
+                    if let image = imageCache[path] {
+                        let scale = min(area.width / max(1, image.size.width), area.height / max(1, image.size.height))
+                        let dest = NSRect(x: area.minX, y: area.minY, width: image.size.width * scale, height: image.size.height * scale)
+                        image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                    }
+                }
+            }
             guard rect.intersects(dirtyRect) else { continue }
             let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : "\(entry.number)."
             (marker as NSString).draw(at: NSPoint(x: 12, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor])
-            if entry.row.text.isEmpty {
-                ((entry.row.heading ? "Heading" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.placeholderTextColor])
+            if entry.placeholder {
+                ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.placeholderTextColor])
             }
             if let notes = entry.row.notes, !notes.isEmpty {
                 ("💬\(notes.count)" as NSString).draw(at: NSPoint(x: max(rect.minX, bounds.width - 34), y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 10)])
@@ -321,6 +396,15 @@ final class ParkingOutlineText: NSTextView {
         item(entry.row.heading ? "Cut Heading" : "Cut Item") { owner.copyEntry(entry.row.id, cut: true) }
         item("Paste") { self.paste(nil) }
         item("Reorder") { owner.parent.reorder() }
+        if !(entry.row.images ?? []).isEmpty {
+            item("Remove Images") {
+                let document = owner.parent.lot.document
+                var rows = document.rows
+                if let index = rows.firstIndex(where: { $0.id == entry.row.id }) {
+                    rows[index].images = nil; owner.save(rows, expected: document)
+                }
+            }
+        }
         if let notes = entry.row.notes, !notes.isEmpty {
             item("Comments (\(notes.count))…") {
                 let alert = NSAlert(); alert.messageText = "Comments"
@@ -346,7 +430,7 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let rows = [heading, first, second, other, hidden]
     var placeholders: [String: UUID] = [:]
     let outline = ParkingOutline(rows: rows, collapsed: [], placeholders: &placeholders)
-    check(outline.entries.filter(\.placeholder).count == 2 && outline.entries.filter(\.placeholder).allSatisfy { !$0.row.heading }, "Outline provides one ready item per section; new headings require right-click")
+    check(outline.entries.filter(\.placeholder).count == 3 && outline.entries.last?.row.heading == true, "Outline provides one ready item per section and a trailing New Heading input")
     let again = ParkingOutline(rows: rows, collapsed: [], placeholders: &placeholders)
     check(outline.entries.map { $0.row.id } == again.entries.map { $0.row.id }, "Empty outline inputs retain stable identity without being saved")
     let afterHeading = outline.replacing(NSRange(location: heading.text.utf16.count, length: 0), with: "\n", rows: rows)!
@@ -354,12 +438,22 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let firstRange = outline.entries.first { $0.row.id == first.id }!.range
     let afterItem = outline.replacing(NSRange(location: NSMaxRange(firstRange), length: 0), with: "\n", rows: rows)!
     check(afterItem.rows[1] == first && !afterItem.rows[2].heading && afterItem.caretID == afterItem.rows[2].id, "Return after an item creates a new item and places its caret there")
+    let blankOutline = ParkingOutline(rows: afterItem.rows, collapsed: [], placeholders: &placeholders)
+    check(blankOutline.entries.contains { $0.row.id == afterItem.caretID && !$0.placeholder } && blankOutline.entries.filter { $0.placeholder && !$0.row.heading }.count == 2,
+          "A real blank Return item coexists with each section's New item input")
+    let illustrated = [ParkingLotRow(heading: false, text: "First", images: ["a.png"]), ParkingLotRow(heading: false, text: "Second", images: ["b.png"])]
+    let illustratedOutline = ParkingOutline(rows: illustrated, collapsed: [], placeholders: &placeholders)
+    let joined = illustratedOutline.replacing(NSRange(location: 5, length: 1), with: "", rows: illustrated)!
+    check(joined.rows[0].text == "FirstSecond" && joined.rows[0].images == ["a.png", "b.png"], "Joining items with Backspace preserves both sets of images")
+    let emptyOutline = ParkingOutline(rows: [], collapsed: [], placeholders: &placeholders)
+    check(emptyOutline.entries.count == 1 && emptyOutline.entries[0].placeholder && emptyOutline.entries[0].row.heading,
+          "An empty lot always offers New Heading")
     let soft = outline.replacing(NSRange(location: NSMaxRange(firstRange), length: 0), with: "\u{2028}Details", rows: rows)!
     check(soft.rows.count == rows.count && soft.rows[1].text == "Fix scrolling\nDetails" && soft.rows[1].notes == first.notes, "Command-Return inserts a line within the entry and preserves comments")
     let placeholder = outline.entries.first { $0.placeholder }!
     let typed = outline.replacing(placeholder.range, with: "Another feature", rows: rows)!
     let projected = ParkingOutline(rows: typed.rows, collapsed: [], placeholders: &placeholders)
-    check(typed.rows[3].text == "Another feature" && projected.entries.filter(\.placeholder).count == 2 && Set(projected.entries.map { $0.row.id }).count == projected.entries.count, "Typing in the ready item saves it in its section and provides another empty item")
+    check(typed.rows[3].text == "Another feature" && projected.entries.filter(\.placeholder).count == 3 && Set(projected.entries.map { $0.row.id }).count == projected.entries.count, "Typing in the ready item saves it in its section and provides another empty item")
     let headingRange = outline.entries.first { $0.row.id == other.id }!.range
     let cutRange = NSRange(location: firstRange.location, length: headingRange.location - firstRange.location)
     let cut = outline.replacing(cutRange, with: "", rows: rows)!
@@ -405,6 +499,35 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.add(heading: true, after: ready)
     let position = lot.document.rows.firstIndex { $0.id == nextHeading }!
     check(lot.document.rows[position - 1].heading && lot.document.rows[position - 1].text.isEmpty, "Right-click creation at a ready input inserts at that section, not at the end of the document")
+    let imageLot = ParkingLotStore(folder: folder.appendingPathComponent("images")); imageLot.open()
+    let imageCoordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: imageLot, collapsed: .constant([]), reorder: {}))
+    let imageText = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 600))
+    imageText.owner = imageCoordinator; imageText.delegate = imageCoordinator; imageText.isRichText = false
+    imageCoordinator.text = imageText; imageCoordinator.render()
+    let imageRow = imageLot.document.rows[1]
+    imageText.setSelectedRange(imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!.range)
+    let board = NSPasteboard.withUniqueName()
+    let image = NSImage(size: NSSize(width: 100, height: 50), flipped: false) { rect in NSColor.blue.setFill(); rect.fill(); return true }
+    board.writeObjects([image]); imageText.paste(from: board)
+    let savedImages = imageLot.document.rows[1].images ?? []
+    check(savedImages.count == 1 && FileManager.default.fileExists(atPath: savedImages[0]), "Pasting an image saves an immutable attachment on the selected item")
+    imageText.undo(nil)
+    check(imageLot.document.rows[1].images == nil, "Undo removes the image association without destroying the attachment file")
+    imageText.redo(nil)
+    check(imageLot.document.rows[1].images == savedImages, "Redo restores the item's pasted image")
+    imageCoordinator.copyEntry(imageRow.id, cut: true, board: board)
+    check(!imageLot.document.rows.contains { $0.id == imageRow.id }, "Cut Item removes the item and its attached image together")
+    imageText.setSelectedRange(imageCoordinator.projection.entries.last!.range)
+    imageText.paste(from: board)
+    check(imageLot.document.rows.last?.images == savedImages && imageLot.document.rows.last?.id != imageRow.id, "Structural paste retains images and creates a distinct item identity")
+    let reloaded = ParkingLotStore(folder: folder.appendingPathComponent("images"))
+    check(reloaded.document.rows == imageLot.document.rows, "Item image associations survive persistence and reopening")
+    let exported = ExportSession(lot: imageLot)
+    let exportedHTML = try? TranscriptExport.html(sessions: [exported], order: .sequential, content: .prompts, lineNumbers: false, imageData: { try? Data(contentsOf: URL(fileURLWithPath: $0)) })
+    let exportedText = try? TranscriptExport.text(sessions: [exported], order: .sequential, content: .prompts)
+    check(exportedHTML?.contains("data:image/png;base64,") == true && exportedText?.contains("[Attached image:") == true, "Parking Lot exports include items and embedded HTML images regardless of conversation role filters")
+    check(exportedHTML?.contains("Time unavailable</time>") == false, "Parking Lot exports do not invent conversation timestamps")
+    board.releaseGlobally()
     let entry = Entry(name: "Parking reader", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
     let session = Session(entry: entry); session.switchboardEnabled = true
     let read = SwitchboardCommand(command: "parking-lot-read")

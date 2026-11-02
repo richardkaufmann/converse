@@ -797,8 +797,8 @@ extension DeviceSyncService {
             guard peer.leasedSessions.contains(sessionID), let home = identity?.deviceID else { return }
             let payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: lot.id).string,
                 homeSeq: stateStore?.nextSeq() ?? 0, epoch: 0, boot: boot,
-                messages: [DeviceWireMessage(id: lot.id, role: "assistant", text: ParkingLotStore.markdown(lot.document.rows))],
-                total: 1, draft: "", draftVersion: UInt64(max(0, lot.document.revision)), busy: false,
+                messages: lot.exportMessages.map(wireMessage),
+                total: lot.document.rows.count, draft: "", draftVersion: UInt64(max(0, lot.document.revision)), busy: false,
                 status: "Parking Lot · read only", title: lot.name, engine: "parking")
             if let data = try? JSONEncoder().encode(payload) {
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: 0, payload: data))
@@ -1943,9 +1943,10 @@ extension DeviceSyncService {
         let global = request.target.flatMap(DeviceGlobalID.init)
         let session = global.flatMap { reference in reference.home == identity?.deviceID ? store.sessions.first(where: { $0.id == reference.session }) : nil }
         if request.action == "session.export" {
-            guard let session, let q = request.exportRequest, q.offset >= 0 else { reject("Invalid export target or offset."); return true }
+            let lot = global.flatMap { reference in reference.home == identity?.deviceID ? parkingLibrary.lot(reference.session) : nil }
+            guard session != nil || lot?.active == true, let q = request.exportRequest, q.offset >= 0 else { reject("Invalid export target or offset."); return true }
             do {
-                let messages = session.messages.filter { ["user", "assistant"].contains($0.role) }
+                let messages = lot?.exportMessages ?? session!.messages.filter { ["user", "assistant"].contains($0.role) }
                 if let hash = q.imageHash {
                     guard messages.flatMap(\.images).contains(where: { imageHash(path: $0) == hash }), let path = blobPaths[hash],
                           let size = try URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey]).fileSize,
@@ -1960,7 +1961,7 @@ extension DeviceSyncService {
                 let snapshot = Array(messages.prefix(total))
                 let fingerprint = DeviceBlob.sha256Hex(try DeviceCanonical.encode(snapshot))
                 guard q.fingerprint == nil || q.fingerprint == fingerprint else { reject("Transcript changed while exporting; try again when the turn finishes."); return true }
-                let page = DeviceExportPage(title: session.title, provider: session.entry.name, offset: q.offset, total: total, fingerprint: fingerprint,
+                let page = DeviceExportPage(title: lot?.name ?? session!.title, provider: lot != nil ? "Parking Lot" : session!.entry.name, offset: q.offset, total: total, fingerprint: fingerprint,
                     messages: snapshot.dropFirst(q.offset).prefix(20).map { wireMessage($0) })
                 let response = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Read-only transcript export.", target: request.target, exportPage: page)
                 guard try JSONEncoder().encode(response).count <= 2_000_000 else { reject("A message is too large for remote export."); return true }

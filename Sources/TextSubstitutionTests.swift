@@ -31,6 +31,12 @@ import SwiftUI
     type("Hello :-) ")
     check(session.draft == "Hello 🙂 ", "Native prompt substitutes a typed token")
     check(text.substitutionFeedback.offersDisable(shared), "Conversion immediately offers the off button without Undo")
+    let expiry = text.substitutionFeedback.deadline!
+    text.substitutionFeedback.expire(now: expiry.addingTimeInterval(-0.01))
+    check(text.substitutionFeedback.offersDisable(shared), "Substitution control remains available before ten seconds")
+    text.substitutionFeedback.expire(now: expiry)
+    check(!text.substitutionFeedback.offersDisable(shared), "Substitution control disappears at ten seconds")
+
     text.undo(nil)
     check(session.draft == "Hello :-) " && text.substitutionFeedback.offersDisable(shared), "Undo restores exact typed prompt and offers disabling")
     text.redo(nil)
@@ -46,6 +52,7 @@ import SwiftUI
     check(!text.substitutionFeedback.offersDisable(shared), "Changing preference dismisses the old rejection hint")
     type(":-) ")
     check(session.draft.hasSuffix(":-) "), "Disabled substitutions leave typed characters literal")
+    check(text.substitutionFeedback.offersDisable(shared), "An eligible literal shortcut while disabled offers the on control")
     try! shared.setEnabled(true)
     let lot = ParkingLotStore(folder: folder.appendingPathComponent("lot")); lot.open()
     let editor = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))

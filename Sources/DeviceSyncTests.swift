@@ -310,7 +310,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         lot.update(lot.document.rows[1].id, text: "New shared idea")
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: lotID, epoch: 0))
         let updatedLot = try capturedEnvelopes(); captured = []
-        check(updatedLot.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first?.messages.first?.text.contains("New shared idea") == true, "A subscribed viewer receives current note edits")
+        check(updatedLot.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first?.messages.contains { $0.text.contains("New shared idea") } == true, "A subscribed viewer receives current note edits")
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: lotID, epoch: 0))
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: lotID, epoch: 0))
         check(captured.isEmpty && !peer.leasedSessions.contains(lot.id) && reader.leasedSessions.contains(lot.id), "Parking one lot viewer leaves another reader subscribed and stops its own snapshots")
