@@ -301,7 +301,7 @@ struct WorkspacePanes: View {
                 HSplitView {
                     ForEach(occupied, id: \.self) { pane in
                         if let id = workspace.session(in: state.id, pane: pane), let lot = parkingLots.lot(id) {
-                            ParkingLotView(lot: lot)
+                            ParkingLotPane(lot: lot, workspace: workspace, pane: pane, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         } else if let id = workspace.session(in: state.id, pane: pane), let session = store.sessions.first(where: { $0.id == id }) {
                             SessionPane(session: session, workspace: workspace, pane: pane, leadingInset: state.sidebarCollapsed && pane == occupied.first ? 28 : 0)
                         } else if let id = workspace.session(in: state.id, pane: pane), let globalID = devices.globalID(forPlacement: id) {
@@ -322,6 +322,26 @@ extension Store {
         if let attempted = session.sidebarProbeAttemptAt, now.timeIntervalSince(attempted) < 60 { return }
         session.sidebarProbeAttemptAt = now
         refreshStatus(session)
+    }
+}
+
+struct ParkingLotPane: View {
+    @ObservedObject var lot: ParkingLotStore
+    @ObservedObject var workspace: Workspace
+    let pane: Int
+    var leadingInset: CGFloat = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
+                ProviderLogo(engine: "parking")
+                SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
+                Spacer(minLength: 0)
+                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+            }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
+            ParkingLotView(lot: lot)
+        }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
