@@ -487,7 +487,11 @@ import Foundation
         return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
     agent.agent?.generateArt = false; agent.agent?.enabled = false; agent.pending = []; agent.queuePaused = true
-    agent.messages.append(Message(role: "user", text: "How is the project doing?"))
+    let visualFile = store.folder.appendingPathComponent("agent-input.png")
+    let visualFixture = NSImage(size: NSSize(width: 80, height: 40), flipped: false) { rect in NSColor.blue.setFill(); rect.fill(); return true }
+    try! MacImageSource.normalized(visualFixture).write(to: visualFile)
+    let userImage = Message(role: "user", text: "How is the project doing?", images: [visualFile.path])
+    agent.messages.append(userImage)
     let responseID = UUID(); agent.messages.append(Message(id: responseID, role: "assistant", text: "")); agent.busy = true
     agent.lastOutputAt = ProcessInfo.processInfo.systemUptime - 12
     runtime.run(agent, store: store, responseID: responseID)
@@ -510,10 +514,31 @@ import Foundation
     let modelInput = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
     check(!modelInput.contains("private scope canary"), "Scope revoked during repository collection is excluded from the next model request")
     let requestBody = requests.first { $0.url?.path == "/v1/responses" }?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let visualMessages = requestBody?["input"] as? [[String: Any]]
+    let visualContent = visualMessages?.first?["content"] as? [[String: Any]] ?? []
+    check(visualContent.contains { $0["type"] as? String == "input_image" && ($0["image_url"] as? String)?.hasPrefix("data:image/png;base64,") == true } && visualContent.contains { ($0["text"] as? String)?.contains(userImage.id.uuidString) == true }, "Real agent runtime sends attached pixels and associates them with the originating user message")
+    let inputs = try! AgentPromptContext.images([userImage, Message(role: "assistant", text: "Generated art", images: ["missing-art.png"])], excluding: UUID())
+    check(inputs.count == 1, "Agent vision excludes assistant artwork")
+    let historyImages = (0..<10).map { Message(role: "user", text: "Image \($0)", images: [visualFile.path]) }
+    let recentImages = try! AgentPromptContext.images(historyImages, excluding: UUID())
+    check(recentImages.count == 8 && recentImages.first?.label.contains(historyImages[2].id.uuidString) == true, "Agent image history is bounded to the newest eight with stable message labels")
+    check((try? AgentPromptContext.images([Message(role: "user", text: "Missing", images: [store.folder.appendingPathComponent("missing.png").path])], excluding: UUID())) == nil, "Unreadable attached images fail explicitly instead of silently sending text only")
+    let oldMissing = Message(role: "user", text: "Old image", images: [store.folder.appendingPathComponent("missing-old.png").path])
+    let recovered = try! AgentPromptContext.imageContext([oldMissing, userImage], excluding: UUID())
+    check(recovered.images.count == 1 && recovered.omitted.first?.contains(oldMissing.id.uuidString) == true, "Unavailable historical image is explicitly omitted and does not block a new image request")
+    let claudeVisual = try! JSONSerialization.jsonObject(with: AgentCLI.claudeInput("Question", images: inputs)) as! [String: Any]
+    let claudeContent = (claudeVisual["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+    check(claudeContent.contains { $0["type"] as? String == "image" && ($0["source"] as? [String: String])?["media_type"] == "image/png" }, "Claude agent stream input contains native image blocks")
+    let claudeStream = Data("{\"type\":\"assistant\",\"message\":{}}\n{\"type\":\"result\",\"is_error\":false,\"result\":\"Image read\"}\n".utf8)
+    check((try? AgentCLI.finalReply(engine: "claude", data: claudeStream, final: nil)) == "Image read", "Claude image turns consume the terminal streamed result, not intermediate messages")
     let supportPolicy = requestBody?["instructions"] as? String ?? ""
     check(supportPolicy.contains("Never search the web for bare") && supportPolicy.contains("site:github.com/richardkaufmann/converse") && supportPolicy.contains("no relevant result is found"), "Previously taught agents receive current scoped research policy in the actual model request")
     agent.supportTeachingVersion = nil
-    let evidenceInput = (requestBody?["input"] as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    func evidenceText(_ body: [String: Any]?) -> String? {
+        if let text = body?["input"] as? String { return text }
+        return (((body?["input"] as? [[String: Any]])?.first?["content"] as? [[String: Any]])?.first?["text"] as? String)
+    }
+    let evidenceInput = evidenceText(requestBody).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
     check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
@@ -534,7 +559,7 @@ import Foundation
     while agent.busy && Date() < noRepoDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(!agent.busy && agent.agent?.lastOutcome == "Completed" && requests.count == 1 && requests.first?.url?.host == "api.meta.ai", "Agent without a repository completes using only Meta, with GitHub credentials inaccessible")
     let noRepoBody = requests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    let noRepoEvidence = (noRepoBody?["input"] as? String)?.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let noRepoEvidence = evidenceText(noRepoBody)?.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     check(noRepoEvidence?["repository"] is NSNull, "General agent evidence explicitly omits repository data")
     let noRepoHTML = AgentWidgetExport.html(agent)
     check(noRepoHTML.contains("AGENT SCOREBOARD") && !noRepoHTML.contains("Repository data unavailable") && !noRepoHTML.contains("<div class=grid>"), "General scoreboard retains its report without GitHub warnings or metric tiles")
@@ -557,7 +582,7 @@ import Foundation
     let discordDeadline = Date().addingTimeInterval(8)
     while agent.busy && Date() < discordDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     let discordBody = requests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    check(agent.agent?.lastOutcome == "Completed" && agent.agent?.discordLastMessageID == "100" && (discordBody?["input"] as? String)?.contains("The window is clipped") == true, "Agent run supplies Discord evidence to the model and commits its read cursor on a valid response")
+    check(agent.agent?.lastOutcome == "Completed" && agent.agent?.discordLastMessageID == "100" && evidenceText(discordBody)?.contains("The window is clipped") == true, "Agent run supplies Discord evidence to the model and commits its read cursor on a valid response")
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.discordLastMessageID == "100", "Successful Discord read cursor survives session archive reload")
     agent.agent?.discordLastMessageID = "99"
     runtime.api.request = { request in
@@ -685,4 +710,44 @@ func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
         check(blockedReopened.sessions.first?.agent == blockedAgent.agent && blockedReopened.sessions.first?.draft == blockedAgent.draft,
               "Unavailable diagnostics never prevent saving and reopening the agent configuration and draft")
     } catch { check(false, "Configuration diagnostics fixture: \(error)") }
+}
+
+// Explicit opt-in live probe. Uses a fresh temporary profile and no actions,
+// watched sessions, Discord, repository, artwork, or scheduled work.
+@MainActor func agentImageLiveTest() -> Bool {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-live-vision-" + UUID().uuidString)
+    do {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let code = "VISION-" + String(UUID().uuidString.prefix(8))
+        let fixture = NSImage(size: NSSize(width: 900, height: 320), flipped: false) { rect in
+            NSColor.white.setFill(); rect.fill()
+            NSColor.blue.setFill(); NSRect(x: 30, y: 35, width: 180, height: 130).fill()
+            (code as NSString).draw(at: NSPoint(x: 30, y: 220), withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 48, weight: .bold), .foregroundColor: NSColor.black])
+            return true
+        }
+        let file = folder.appendingPathComponent("visual-fixture.png")
+        try MacImageSource.normalized(fixture).write(to: file)
+        let store = Store(folder: folder)
+        let session = store.create(Entry(name: "Vision test", command: "/usr/bin/false", directory: folder.path, engine: "agent"))
+        var config = AgentConfig(); config.generateArt = false; config.webSearch = false
+        if let engine = ProcessInfo.processInfo.environment["CONVERSE_VISION_TEST_ENGINE"], ["muse", "claude", "codex"].contains(engine) {
+            let archiveFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Converse/sessions.json")
+            let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: archiveFile))
+            store.entries = archive.entries; store.accounts = archive.accounts ?? []
+            guard let account = store.accounts.first(where: { $0.engine == engine }) else { throw AgentFailure.message("No existing login for this test provider.") }
+            config.model = AgentModels.reference(engine: engine, account: account.id)
+        }
+        config.objective = "Answer the user's image question. Do not request or perform actions."
+        session.agent = config
+        session.messages = [Message(role: "user", text: "Read the exact code printed in this image and name the color of the rectangle.", images: [file.path])]
+        let reply = UUID(); session.messages.append(Message(id: reply, role: "assistant", text: "")); session.busy = true
+        let runtime = AgentRuntime(); runtime.run(session, store: store, responseID: reply)
+        let deadline = Date().addingTimeInterval(120)
+        while session.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        let result = session.messages.first { $0.id == reply }?.text ?? ""
+        let passed = !session.busy && result.contains(code) && result.localizedCaseInsensitiveContains("blue")
+        print("Live agent image test: \(passed ? "PASS" : "FAIL")\n\(result)\nAttention: \(session.agent?.attention ?? "")\nArtifacts: \(folder.path)")
+        runtime.prepareForQuit()
+        return passed
+    } catch { print("Live agent image test failed: " + error.localizedDescription); return false }
 }

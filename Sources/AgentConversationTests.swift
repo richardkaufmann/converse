@@ -101,6 +101,9 @@ import AppKit
     session.agent?.speak = true
     talk.stop(resumeQueued: false)
     let priorSpeechCount = speeches.count
+    // Earlier lifecycle tests intentionally use a nonexistent draft attachment;
+    // this model-backed turn must not submit that synthetic path as an image.
+    session.attachments = []
     session.draft = "An ordinary typed question"
     store.send(session)
     let silentDeadline = Date().addingTimeInterval(4)

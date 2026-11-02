@@ -291,10 +291,29 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         }
         let lot = try home.parkingLibrary.create(name: "Shared ideas")
         let lotID = DeviceGlobalID(home: homeIdentity.deviceID, session: lot.id).string
+        var lotRows = lot.document.rows; lotRows[1].images = [draftImage.path]
+        try lot.replaceUserRows(lotRows, revision: lot.document.revision)
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: lotID))
         let lotFrames = try capturedEnvelopes(); captured = []
         let lotSnapshot = lotFrames.compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } }.first
         check(lotSnapshot?.engine == "parking" && lotSnapshot?.title == "Shared ideas" && lotSnapshot?.draft == "" && lotSnapshot?.epoch == 0, "Group viewers receive read-only named Parking Lot snapshots")
+        let lotBlobRequest = DeviceEnvelope(kind: DeviceMessageKind.blobRequest.rawValue, sessionID: lotID, epoch: 0,
+            payload: try JSONEncoder().encode(DeviceBlobPayload(sha256Hex: DeviceBlob.sha256Hex(draftBytes))))
+        home.handleEnvelope(peer, lotBlobRequest)
+        let lotBlobFrames = try capturedEnvelopes(); captured = []
+        let lotBlob = lotBlobFrames.first { $0.kind == DeviceMessageKind.blobData.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceBlobPayload.self, from: $0) }
+        check(lotBlob?.chunk == draftBytes && lotBlob?.done == true, "An authenticated lot subscriber downloads its item image without a session editing lease")
+        var deniedBlob = lotBlobRequest; deniedBlob.epoch = 99
+        home.handleEnvelope(peer, deniedBlob)
+        check(captured.isEmpty, "Lot image requests reject a nonzero subscription epoch")
+        let otherLot = try home.parkingLibrary.create(name: "Other images")
+        deniedBlob = lotBlobRequest; deniedBlob.sessionID = DeviceGlobalID(home: homeIdentity.deviceID, session: otherLot.id).string
+        peer.leasedSessions.insert(otherLot.id)
+        home.handleEnvelope(peer, deniedBlob)
+        check(captured.isEmpty, "A lot subscription cannot fetch an image belonging only to another lot")
+        peer.leasedSessions.remove(otherLot.id); try home.parkingLibrary.delete(otherLot.id)
+        peer.trustedReady = false; home.handleEnvelope(peer, lotBlobRequest); peer.trustedReady = true
+        check(captured.isEmpty, "An untrusted peer cannot fetch a known lot image")
         let reader = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: false, displayName: "Second reader")
         reader.hello = DeviceHello(deviceID: "second-reader", deviceName: "Second reader", converseVersion: "test")
         reader.keys = peer.keys; reader.trustedReady = true; reader.testSink = { _ in }
@@ -314,6 +333,8 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseRelease.rawValue, sessionID: lotID, epoch: 0))
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: lotID, epoch: 0))
         check(captured.isEmpty && !peer.leasedSessions.contains(lot.id) && reader.leasedSessions.contains(lot.id), "Parking one lot viewer leaves another reader subscribed and stops its own snapshots")
+        home.handleEnvelope(peer, lotBlobRequest)
+        check(captured.isEmpty, "A parked lot viewer cannot download its images without a current subscription")
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseResume.rawValue, sessionID: lotID, epoch: 0))
         _ = try capturedEnvelopes(); captured = []
         check(peer.leasedSessions.contains(lot.id), "A read-only lot subscription can resume after reconnect")
@@ -323,6 +344,8 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(reader, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: lotID))
         check(!reader.leasedSessions.contains(lot.id), "An untrusted peer cannot subscribe to Parking Lot contents")
         try home.parkingLibrary.delete(lot.id)
+        peer.leasedSessions.insert(lot.id); home.handleEnvelope(peer, lotBlobRequest); peer.leasedSessions.remove(lot.id)
+        check(captured.isEmpty, "Deleting a lot revokes image access even for a stale reader subscription")
         let globalString = DeviceGlobalID(home: homeIdentity.deviceID, session: session.id).string
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: globalString))
         let grantFrames = try capturedEnvelopes()
@@ -628,6 +651,13 @@ func runIPadHomeFixture() {
         let groupService = DeviceSyncService()
         try groupService.configureForTesting(folder: folder.appendingPathComponent("groups"))
         try groupService.enableGroupsForTesting(); groupService.createGroup(name: "Simulator Group")
+        // Real read-only Parking Lot viewer fixture, isolated from the user's lots.
+        let parking = try groupService.parkingLibrary.create(name: "Mobile Parking Lot fixture")
+        let parkingImage = try parking.saveImage(NSImage(contentsOf: imageFile)!)
+        let liveRow = ParkingLotRow(heading: false, text: "Live update 0")
+        try parking.replaceUserRows([ParkingLotRow(heading: true, text: "Mobile ideas"),
+            ParkingLotRow(heading: false, text: "Image belongs to this item", images: [parkingImage]), liveRow], revision: parking.document.revision)
+        var lastParkingUpdate = Date(), parkingUpdate = 0
         groupService.imageAssistKey = { "synthetic-test-key" }
         var imageCalls = 0
         groupService.imageAssistAPI.request = { request in
@@ -641,6 +671,11 @@ func runIPadHomeFixture() {
         var announced = false
         while Date() < deadline {
             _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            if Date().timeIntervalSince(lastParkingUpdate) >= 1 {
+                parkingUpdate += 1
+                parking.update(liveRow.id, text: "Live update \(parkingUpdate)")
+                lastParkingUpdate = Date()
+            }
             if !announced, let port = service.testingPort, let groupPort = groupService.testingPort {
                 try Data(String(groupPort).utf8).write(to: folder.appendingPathComponent("group-port"), options: .atomic)
                 try Data(String(port).utf8).write(to: folder.appendingPathComponent("port"), options: .atomic); announced = true

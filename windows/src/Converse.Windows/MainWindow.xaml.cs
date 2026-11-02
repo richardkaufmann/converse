@@ -162,7 +162,9 @@ public sealed partial class MainWindow : Window
         Activated += (_, _) => ClampWindowWidth();
         ApplyLayout();
         Refresh();
-        InitializeSupport();
+        // Native pane checks use a disposable profile and must not launch
+        // first-run onboarding, which intentionally selects its support session.
+        if (Environment.GetEnvironmentVariable("CONVERSE_UI_TEST") != "1") InitializeSupport();
     }
 
 

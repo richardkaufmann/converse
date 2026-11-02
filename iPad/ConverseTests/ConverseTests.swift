@@ -407,6 +407,60 @@ final class ConverseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
         return service
     }
+    func testParkingLotSnapshotsAreReadOnlyAndTrackRenameAndDeletion() throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "b", count: 64), sid = UUID()
+        let id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        var row = DeviceSidebarRow(globalID: id, sessionID: sid, title: "Ideas", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only", status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false)
+        func sidebar(_ sequence: UInt64, _ rows: [DeviceSidebarRow]) throws {
+            let payload = DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: sequence, rows: rows)
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: sequence, payload: try JSONEncoder().encode(payload)))
+        }
+        try sidebar(10, [row])
+        XCTAssertTrue(model.isParkingLot(id), "Sidebar type prevents editing even before a transcript arrives")
+        model.state.placements[0] = id; service.remoteLeases[id] = 0
+        let message = DeviceWireMessage(id: UUID(), role: "assistant", text: "# Ideas\n1. [Done] Tested item")
+        let snapshot = DeviceTranscriptPayload(globalID: id, homeSeq: 11, epoch: 0, messages: [message], total: 1, draft: "", draftVersion: 4, busy: false, status: "Parking Lot · read only", title: "Ideas", engine: "parking")
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "transcript.snapshot", sessionID: id, epoch: 0, payload: try JSONEncoder().encode(snapshot)))
+        XCTAssertFalse(model.canControl(id)); XCTAssertFalse(model.canSend(id))
+        XCTAssertNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "submit", text: "Must not send")))
+        let view = TailTextView.native()
+        let parent = PadTranscript(messages: try XCTUnwrap(service.remoteTranscripts[id]?.messages), draft: "", images: [:], editable: false, lineNumbers: true, edit: { _ in XCTFail("Read-only lot edited") }, send: { XCTFail("Read-only lot sent") }, attach: { _ in XCTFail("Read-only lot attached") })
+        parent.update(view, coordinator: PadTranscript.Coordinator(parent))
+        XCTAssertFalse(view.isEditable); XCTAssertTrue(view.text.contains("Tested item")); XCTAssertTrue(view.text.contains("[Done]"))
+        row.title = "Renamed ideas"; try sidebar(12, [row])
+        XCTAssertEqual(service.remoteRow(globalID: id)?.title, "Renamed ideas")
+        try sidebar(13, [])
+        XCTAssertNil(model.state.placements[0]); XCTAssertNil(service.remoteTranscripts[id]); XCTAssertNil(service.remoteLeases[id])
+    }
+    func testParkingLotMacGroupDiscoveryImagesLiveUpdatesAndReopen() async throws {
+        guard let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else { throw XCTSkip("Run iPad/test.sh --interop with the Parking Lot Mac fixture") }
+        let service = try service(); try service.enableGroupsForTesting(); try service.startNetworkForTesting()
+        defer { service.suspendViewer() }
+        service.joinGroupByAddress(host: "127.0.0.1", port: port)
+        try await eventually("Parking Lot viewer receives pairing code") { service.pairingPrompt != nil }
+        service.confirmPairing()
+        try await eventually("Group advertises Mac Parking Lot") { service.homes.values.flatMap(\.rows).contains { $0.engine == "parking" && $0.title == "Mobile Parking Lot fixture" } }
+        let row = try XCTUnwrap(service.homes.values.flatMap(\.rows).first { $0.engine == "parking" && $0.title == "Mobile Parking Lot fixture" })
+        service.isPlaced = { $0 == row.globalID }; service.acquireRemote(globalID: row.globalID)
+        try await eventually("Parking Lot snapshot opens") { service.remoteTranscripts[row.globalID]?.engine == "parking" }
+        let snapshot = try XCTUnwrap(service.remoteTranscripts[row.globalID])
+        XCTAssertTrue(snapshot.messages.contains { $0.text.contains("Mobile ideas") })
+        let imageMessage = try XCTUnwrap(snapshot.messages.first { $0.text.contains("Image belongs to this item") })
+        let hash = try XCTUnwrap(imageMessage.imageHashes.first)
+        service.fetchBlob(globalID: row.globalID, hash: hash)
+        try await eventually("Parking Lot item image reaches mobile") { service.blobCache[hash] != nil }
+        XCTAssertNotNil(UIImage(contentsOfFile: try XCTUnwrap(service.blobCache[hash]).path))
+        let model = PadModel(service: service)
+        XCTAssertTrue(model.isParkingLot(row.globalID)); XCTAssertFalse(model.canControl(row.globalID))
+        XCTAssertNil(service.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "submit", text: "Must not send")))
+        let oldRevision = snapshot.draftVersion
+        try await eventually("Home Parking Lot edits arrive without reopening") { (service.remoteTranscripts[row.globalID]?.draftVersion ?? 0) > oldRevision }
+        service.releaseRemote(globalID: row.globalID); service.acquireRemote(globalID: row.globalID)
+        try await eventually("Parking Lot reopens with attached image") { service.remoteTranscripts[row.globalID]?.messages.contains { $0.imageHashes.contains(hash) } == true }
+    }
     func testClosedHomeSessionDisappearsFromIPadAndRejectsLateSnapshots() throws {
         let service = try service(), model = PadModel(service: service)
         let home = String(repeating: "a", count: 64), sid = UUID()

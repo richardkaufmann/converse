@@ -462,7 +462,7 @@ struct PadPane: View {
                     HStack {
                         Text("\(snapshot.pending.count) queued"); Spacer()
                         Button(snapshot.queuePaused ? "Resume" : "Pause") { command(snapshot.queuePaused ? "resumeQueue" : "pauseQueue") }
-                        Button("Inject all") { command("injectAll") }
+                        if snapshot.pending.count > 1 { Button("Inject all") { command("injectAll") } }
                         Button("Clear") { command("clearQueue") }
                     }
                     ForEach(snapshot.pending) { item in HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }

@@ -1228,8 +1228,20 @@ extension DeviceSyncService {
             }
         #if os(macOS)
         case DeviceMessageKind.blobRequest.rawValue:
-            guard let (session, _) = homeSession(envelope), let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data) else { return }
-            guard requireLease(peer, envelope, session), let path = blobPaths[blob.sha256Hex], let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
+            guard let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data) else { return }
+            let path: String
+            if let lot = homeParkingLot(envelope) {
+                // Lot readers have a nonexclusive epoch-zero subscription, not a session lease.
+                // Never use the global blob cache to authorize access to another lot's images.
+                guard envelope.epoch == 0, peer.leasedSessions.contains(lot.id),
+                      let image = lot.document.rows.flatMap({ $0.images ?? [] }).first(where: { imageHash(path: $0) == blob.sha256Hex }) else { return }
+                path = image
+            } else {
+                guard let (session, _) = homeSession(envelope), requireLease(peer, envelope, session),
+                      let image = blobPaths[blob.sha256Hex] else { return }
+                path = image
+            }
+            guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= DeviceBlob.maxBlob else { return }
             var offset = 0
             while offset < bytes.count {
                 let chunk = Data(bytes.dropFirst(offset).prefix(32_768)); offset += chunk.count

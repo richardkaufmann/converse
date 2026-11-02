@@ -179,3 +179,28 @@ network discovery, creates only disposable sessions, writes
 check covers nonempty → empty → nonempty, return to the previous session, and
 an unassigned pane. An empty new session must contain only its draft control;
 previous transcript blocks must be removed even when both diff caches are empty.
+
+### Mac Parking Lot interoperability check
+
+Windows opens shared Mac Parking Lots as read-only Group views, including
+item-bound images and live updates. Native Parking Lot editing and Talk remain
+Mac features. Image downloads use the active lot view's epoch-zero grant; they
+do not acquire an editable session lease.
+
+For a real cross-platform check, run the Mac app's `--ipad-home-fixture` with
+`CONVERSE_TEST_COMMAND=isolated-fixture` and a fresh `CONVERSE_DATA_DIR` beneath
+`/tmp/converse-ipad-interop.<unique>/data`. Use only this disposable fixture:
+it automatically approves test Group joins and exits after three minutes.
+Read its `group-port` file, then on Windows run:
+
+```powershell
+dotnet run --project windows/src/Converse.Core.Tests -c Release -- --mac-parking-interop <Mac-address> <group-port>
+```
+
+The Windows probe uses its own temporary profile and an outbound authenticated
+connection, with discovery disabled. It checks lot discovery, snapshots,
+SHA-256-verified item-image bytes, live edits, rejection of editing commands,
+and reopening the lot and image after a client restart. It does not alter the
+production app, profile, Group, or firewall. The native pane isolation check
+also skips first-run onboarding so onboarding cannot replace its selected
+fixture session during delayed-render checks.

@@ -3558,6 +3558,7 @@ func selfTest() {
     print("All checks passed")
 }
 signal(SIGPIPE, SIG_IGN)
+if CommandLine.arguments.contains("--agent-image-live-test") { exit(MainActor.assumeIsolated { agentImageLiveTest() } ? 0 : 1) }
 if CommandLine.arguments.contains("--probe-muse-quota") {
     do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"))); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }

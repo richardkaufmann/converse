@@ -285,8 +285,8 @@ final class AgentAPI {
         catch { throw AgentFailure.message("Could not complete the GitHub test. Check the network and try again.") }
     }
     static let outputTokenLimit = 8192
-    func respond(model: String, instructions: String, input: String, key: String, webSearch: Bool = false, research: ((AgentResearch) -> Void)? = nil, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
-        var body: [String: Any] = ["model": model, "instructions": instructions, "input": input, "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false]
+    func respond(model: String, instructions: String, input: String, key: String, images: [AgentInputImage] = [], webSearch: Bool = false, research: ((AgentResearch) -> Void)? = nil, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
+        var body: [String: Any] = ["model": model, "instructions": instructions, "input": AgentPromptContext.visualInput(input, images: images), "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false]
         if webSearch { body["tools"] = [["type": "web_search"]]; body["include"] = ["web_search_call.results"]; body["max_tool_calls"] = 4 }
         let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: body, key: key)
         guard let response = raw as? [String: Any] else { throw AgentFailure.message("Agent service returned an invalid response. No actions applied.") }

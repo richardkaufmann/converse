@@ -819,6 +819,9 @@ public sealed partial class DeviceSyncService : IDisposable
                     var hello = DeviceJson.Decode<DeviceHello>(payload);
                     if (hello.ProtocolVersion != 1) { peer.Client.Dispose(); return; }
                     peer.Hello = hello;
+                    // Raw-address Group joins learn the target from message two,
+                    // before the final Noise hello asks the sponsor for admission.
+                    if (peer.WantsJoin && peer.JoiningGroupID is null) peer.JoiningGroupID = hello.Group?.Id;
                 }
                 var finished = TryFinish(handshake);
                 if (finished is null)

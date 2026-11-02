@@ -14,6 +14,8 @@ if (args.FirstOrDefault() == "--echo-stdin")
     Console.Write(await Console.In.ReadToEndAsync());
     return 0;
 }
+if (args.Length == 3 && args[0] == "--mac-parking-interop")
+    return await MacParkingInteropChecks.Run(args[1], int.Parse(args[2]));
 var failures = 0;
 var failedLabels = new List<string>();
 void Check(bool ok, string label)
@@ -2328,6 +2330,60 @@ await SwitchboardSupervisionChecks.Run(Check, JoinPair);
 await AppSupportChecks.Run(Check);
 await AgentChecks.Run(Check, JoinPair);
 await HeadlessSessionChecks.Run(Check, JoinPair);
+
+// A raw-address join must advertise the learned Group ID in its final Noise
+// hello. Learning it only after finishing the handshake never asks the sponsor.
+{
+    var root = Directory.CreateTempSubdirectory("converse-address-join-").FullName;
+    try
+    {
+        using var home = new DeviceSyncService(Path.Combine(root, "home"), new SessionStore(Path.Combine(root, "home"), new FakeRunner()));
+        using var joiner = new DeviceSyncService(Path.Combine(root, "joiner"), new SessionStore(Path.Combine(root, "joiner"), new FakeRunner()));
+        joiner.PairingConfirmation = _ => Task.FromResult(true);
+        await home.CreateGroupAsync("Raw address fixture");
+        await home.StartAsync(0, false); await joiner.StartAsync(0, false);
+        await joiner.JoinGroupByAddressAsync("127.0.0.1", home.ListeningPort, "");
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (home.GroupRequests.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(25);
+        Check(home.GroupRequests.Count == 1, "Raw-address Group join learns target before final Noise hello");
+        if (home.GroupRequests.Count == 1)
+        {
+            await home.ReviewGroupRequestAsync(home.GroupRequests[0]); await home.ApproveGroupReviewAsync();
+            deadline = DateTime.UtcNow.AddSeconds(10);
+            while (joiner.CurrentGroup?.Id != home.CurrentGroup!.Id && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Check(joiner.CurrentGroup?.Id == home.CurrentGroup!.Id, "Raw-address Group admission completes after both approvals");
+        }
+    }
+    finally { Cleanup(root); }
+}
+
+// Mac Parking Lots use the same snapshot transport, but viewers must never
+// turn their empty composer into a submit/rename/control command.
+{
+    var root = Directory.CreateTempSubdirectory("converse-parking-view-").FullName;
+    try
+    {
+        using var viewer = new DeviceSyncService(root, new SessionStore(root, new FakeRunner()), "Parking viewer");
+        var gid = new DeviceGlobalID(new string('a', 64), Guid.NewGuid()).ToString();
+        var imageHash = new string('b', 64);
+        var snapshot = new DeviceTranscriptPayload {
+            GlobalID = gid, HomeSeq = 8, Engine = "parking", Title = "Shared ideas", Status = "Parking Lot · read only",
+            Messages = [new DeviceWireMessage { Id = Guid.NewGuid(), Role = "assistant", Text = "# Features\n1. [Done] Tested idea", ImageHashes = [imageHash] }]
+        };
+        var decoded = DeviceJson.Decode<DeviceTranscriptPayload>(DeviceJson.Encode(snapshot));
+        Check(decoded.Engine == "parking" && decoded.Messages.Single().ImageHashes.SequenceEqual([imageHash])
+            && decoded.Messages.Single().Text.Contains("[Done]"),
+            "Parking Lot snapshots retain completion text and item image associations on Windows");
+        viewer.RemoteTranscripts[gid] = decoded;
+        foreach (var action in new[] { "submit", "draft", "rename", "stop", "setting" })
+        {
+            var result = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = action, Text = "must not alter lot" });
+            Check(result is null && viewer.LastOutcome == "Parking Lots are read only on Group viewers." && viewer.Unresolved(gid).Count == 0,
+                "Parking Lot viewer refuses " + action + " without creating a command/outbox record");
+        }
+    }
+    finally { Cleanup(root); }
+}
 
 Console.WriteLine(failures == 0 ? "All core checks passed" : $"{failures} checks FAILED");
 foreach (var label in failedLabels) Console.WriteLine("FAILED: " + label);

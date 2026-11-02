@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 // Bound historical excerpts, but never cut the request this activation must answer.
 // Teaching and onboarding requests can be longer than an ordinary chat message.
@@ -7,8 +8,59 @@ enum AgentPromptContext {
         let recent = Array(messages.filter { ["user", "assistant"].contains($0.role) && $0.id != responseID }.suffix(24))
         let request = recent.lastIndex { $0.role == "user" }
         return recent.enumerated().map { index, message in
-            ["role": message.role, "text": index == request ? message.text : String(message.text.prefix(6000))]
+            ["id": message.id.uuidString, "role": message.role, "text": index == request ? message.text : String(message.text.prefix(6000)), "imageCount": String(message.images.count)]
         }
+    }
+}
+
+// Only images explicitly attached to this agent's own user messages travel with
+// its conversation. Watched-session and Discord attachments are not imported.
+struct AgentInputImage: Sendable {
+    var label: String
+    var png: Data
+    var dataURL: String { "data:image/png;base64," + png.base64EncodedString() }
+}
+extension AgentPromptContext {
+    static func images(_ messages: [Message], excluding responseID: UUID) throws -> [AgentInputImage] {
+        try imageContext(messages, excluding: responseID).images
+    }
+    static func imageContext(_ messages: [Message], excluding responseID: UUID) throws -> (images: [AgentInputImage], omitted: [String]) {
+        let recent = messages.filter { ["user", "assistant"].contains($0.role) && $0.id != responseID }.suffix(24)
+        let requestID = recent.last(where: { $0.role == "user" })?.id
+        let attachments = recent.filter { $0.role == "user" }.flatMap { message in
+            message.images.enumerated().map { (message.id, $0.offset + 1, $0.element) }
+        }
+        var bytes = 0, images: [AgentInputImage] = [], omitted: [String] = []
+        // Reserve the bounded payload for newest attachments before older history.
+        for (id, index, path) in attachments.suffix(8).reversed() {
+            let label = "Image \(index) attached to user message \(id.uuidString)"
+            do {
+                let url = URL(fileURLWithPath: path)
+                guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                      size <= 32_000_000, let image = NSImage(contentsOf: url) else {
+                    throw AgentFailure.message("Could not read an attached agent image. Reattach it in a new message and retry.")
+                }
+                let png = try MacImageSource.normalized(image)
+                guard bytes + png.count <= 24_000_000 else { throw AgentFailure.message("Agent images exceed the request limit. Use fewer or smaller images.") }
+                bytes += png.count
+                images.append(AgentInputImage(label: label, png: png))
+            } catch {
+                // A failed current request must be explicit. A missing historical
+                // attachment must not poison every subsequent turn or prevent retry.
+                if id == requestID { throw error }
+                omitted.append(label + " (unavailable or exceeds the request limit)")
+            }
+        }
+        return (Array(images.reversed()), Array(omitted.reversed()))
+    }
+    static func visualInput(_ input: String, images: [AgentInputImage]) -> Any {
+        guard !images.isEmpty else { return input }
+        var content: [[String: Any]] = [["type": "input_text", "text": input]]
+        for image in images {
+            content.append(["type": "input_text", "text": image.label])
+            content.append(["type": "input_image", "image_url": image.dataURL])
+        }
+        return [["type": "message", "role": "user", "content": content]]
     }
 }
 
@@ -99,9 +151,25 @@ enum AgentCLI {
         if !model.isEmpty { args += ["--model", model] }
         return args
     }
+    static func claudeInput(_ text: String, images: [AgentInputImage]) throws -> Data {
+        var content: [[String: Any]] = [["type": "text", "text": text]]
+        for image in images {
+            content.append(["type": "text", "text": image.label])
+            content.append(["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": image.png.base64EncodedString()]])
+        }
+        var data = try JSONSerialization.data(withJSONObject: ["type": "user", "message": ["role": "user", "content": content]])
+        data.append(10); return data
+    }
     static func finalReply(engine: String, data: Data, final: String?) throws -> String {
         if engine == "codex", let final, !final.isEmpty { return final }
-        if engine == "claude", let root = try JSONSerialization.jsonObject(with: data) as? [String: Any], root["is_error"] as? Bool != true, let text = root["result"] as? String { return text }
+        if engine == "claude" {
+            let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                ?? data.split(separator: 10).reversed().compactMap { line -> [String: Any]? in
+                    guard let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any], row["type"] as? String == "result" else { return nil }
+                    return row
+                }.first
+            if let root, root["is_error"] as? Bool != true, let text = root["result"] as? String { return text }
+        }
         if engine == "muse" {
             for line in data.split(separator: 10).reversed() {
                 if let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any], row["payload_type"] as? String == "run.terminal.completed",
@@ -110,7 +178,7 @@ enum AgentCLI {
         }
         throw AgentFailure.message("Provider did not return a completed final response. No actions applied.")
     }
-    static func respond(entry: Entry, model: String, instructions: String, input: String) async throws -> String {
+    static func respond(entry: Entry, model: String, instructions: String, input: String, images: [AgentInputImage] = []) async throws -> String {
         let control = AgentCLIControl()
         return try await withTaskCancellationHandler(operation: {
             try await Task.detached {
@@ -118,12 +186,25 @@ enum AgentCLI {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions:0o700])
                 defer { try? FileManager.default.removeItem(at: folder) }
                 let prompt = folder.appendingPathComponent("prompt.txt"), output = folder.appendingPathComponent("final.txt"), log = folder.appendingPathComponent("stdout.txt")
-                try Data((instructions + "\nUse only the supplied evidence. Tool-based research is unavailable for this CLI activation. Return the required JSON only.\n" + input).utf8).write(to: prompt)
+                let text = instructions + "\nUse only the supplied evidence. Tool-based research is unavailable for this CLI activation. Return the required JSON only.\n" + input
+                var args = arguments(engine: entry.engine, model: model, prompt: prompt.path, output: output.path)
+                if entry.engine == "claude", !images.isEmpty {
+                    if let format = args.firstIndex(of: "--output-format") { args[format + 1] = "stream-json" }
+                    args += ["--input-format", "stream-json", "--verbose"]
+                    try claudeInput(text, images: images).write(to: prompt)
+                } else {
+                    try Data((text + images.map { "\n" + $0.label }.joined()).utf8).write(to: prompt)
+                    for (index, image) in images.enumerated() {
+                        let file = folder.appendingPathComponent("image-\(index + 1).png")
+                        try image.png.write(to: file)
+                        args += ["--image", file.path]
+                    }
+                }
                 FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions:0o600])
                 let inputHandle = try FileHandle(forReadingFrom: prompt), outputHandle = try FileHandle(forWritingTo: log)
                 defer { try? inputHandle.close(); try? outputHandle.close() }
                 var isolated = entry; isolated.directory = folder.path
-                let process = ProviderCommand.process(entry: isolated, arguments: arguments(engine: entry.engine, model: model, prompt: prompt.path, output: output.path))
+                let process = ProviderCommand.process(entry: isolated, arguments: args)
                 process.standardInput = inputHandle; process.standardOutput = outputHandle; process.standardError = FileHandle.nullDevice
                 try control.attach(process)
                 let deadline = Date().addingTimeInterval(180)
