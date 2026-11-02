@@ -267,6 +267,12 @@ final class ParkingOutlineText: NSTextView {
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        // Plain NSTextView validation rejects image-only clipboards before the
+        // Edit menu can dispatch Command-V to our custom paste implementation.
+        if item.action == #selector(paste(_:)),
+           NSPasteboard.general.data(forType: Self.rowsType) != nil || ConversationTextView.clipboardImage(.general) != nil {
+            return isEditable && owner != nil
+        }
         return super.validateUserInterfaceItem(item)
     }
     override func keyDown(with event: NSEvent) {
@@ -300,7 +306,7 @@ final class ParkingOutlineText: NSTextView {
             rows.insert(contentsOf: pasted, at: destination)
             owner.save(rows, expected: document, caret: (pasted[0].id, 0)); return
         }
-        if let image = NSImage(pasteboard: board) {
+        if let image = ConversationTextView.clipboardImage(board) {
             do {
                 let path = try owner.parent.lot.saveImage(image)
                 var rows = document.rows
@@ -527,6 +533,33 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let exportedText = try? TranscriptExport.text(sessions: [exported], order: .sequential, content: .prompts)
     check(exportedHTML?.contains("data:image/png;base64,") == true && exportedText?.contains("[Attached image:") == true, "Parking Lot exports include items and embedded HTML images regardless of conversation role filters")
     check(exportedHTML?.contains("Time unavailable</time>") == false, "Parking Lot exports do not invent conversation timestamps")
+    // Exercise native menu validation, not only direct paste(from:) calls.
+    let previousClipboard = (NSPasteboard.general.pasteboardItems ?? []).map { item -> NSPasteboardItem in
+        let copy = NSPasteboardItem()
+        for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+        return copy
+    }
+    defer { NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects(previousClipboard) }
+    let png = try! Data(contentsOf: URL(fileURLWithPath: savedImages[0]))
+    NSPasteboard.general.clearContents(); NSPasteboard.general.setData(png, forType: .png)
+    let pasteCommand = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    let plainText = NSTextView(); plainText.isRichText = false
+    check(!plainText.validateUserInterfaceItem(pasteCommand), "Native plain-text validation reproduces the disabled image-only Paste command")
+    check(imageText.validateUserInterfaceItem(pasteCommand), "Parking Lot enables Edit Paste and Command-V for image-only clipboard")
+    let beforeKeyboardPaste = imageLot.document.rows
+    imageText.paste(pasteCommand)
+    check(imageLot.document.rows.reduce(0) { $0 + ($1.images?.count ?? 0) } == beforeKeyboardPaste.reduce(0) { $0 + ($1.images?.count ?? 0) } + 1,
+          "Menu Paste attaches the clipboard PNG to the Parking Lot")
+    imageText.undo(nil)
+    check(imageLot.document.rows == beforeKeyboardPaste, "Undo restores the lot after image-only menu paste")
+    imageText.isEditable = false
+    check(!imageText.validateUserInterfaceItem(pasteCommand), "Image Paste remains disabled in a noneditable Parking Lot")
+    imageText.isEditable = true
+    board.clearContents(); board.writeObjects([URL(fileURLWithPath: savedImages[0]) as NSURL])
+    imageText.paste(from: board)
+    check(imageLot.document.rows.reduce(0) { $0 + ($1.images?.count ?? 0) } == beforeKeyboardPaste.reduce(0) { $0 + ($1.images?.count ?? 0) } + 1,
+          "Pasting a copied image file attaches its pixels to the Parking Lot")
+    imageText.undo(nil)
     board.releaseGlobally()
     let entry = Entry(name: "Parking reader", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
     let session = Session(entry: entry); session.switchboardEnabled = true
