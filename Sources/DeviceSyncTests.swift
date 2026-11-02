@@ -880,3 +880,87 @@ func fabricRevocationReconnectTests(_ check: (Bool, String) -> Void) {
         check(readmitted.removed != true && (readmitted.generation ?? 0) > (removed.generation ?? 0) && readmitted.changedBy == aid, "Fresh readmission is issued by the human-approving sponsor")
     } catch { check(false, "Reconnect revocation regression: " + error.localizedDescription) }
 }
+
+// Keep a real approval sheet open beyond the transport's 20-second timeout.
+// Uses two isolated homes and real sockets, never production pairing or notes.
+func parkingLotReviewConnectivitySelfTests(_ check: (Bool, String) -> Void) {
+    _ = NSApplication.shared
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-review-network-" + UUID().uuidString)
+    let home = DeviceSyncService(), viewer = DeviceSyncService()
+    let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 640, height: 480), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    window.title = "Isolated Parking Lot approval test"; window.isReleasedWhenClosed = false
+    defer { home.suspendViewer(); viewer.suspendViewer(); window.close(); try? FileManager.default.removeItem(at: root) }
+    func pump(seconds: TimeInterval = 8, _ ready: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline {
+            for service in [home, viewer] where service.pairingPrompt != nil { service.confirmPairing() }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return ready()
+    }
+    do {
+        try home.configureForTesting(folder: root.appendingPathComponent("home"))
+        try viewer.configureForTesting(folder: root.appendingPathComponent("viewer"))
+        home.deviceNameOverride = "Approval QA home"; viewer.deviceNameOverride = "Approval QA viewer"
+        try home.startNetworkForTesting(); try viewer.startNetworkForTesting()
+        guard pump({ home.testingPort != nil && viewer.testingPort != nil }) else { check(false, "Approval test listeners ready"); return }
+        viewer.connectManual(host: "127.0.0.1", port: Int(home.testingPort!))
+        guard pump({ home.homes[viewer.localDeviceID ?? ""]?.online == true && viewer.homes[home.localDeviceID ?? ""]?.online == true }) else { check(false, "Approval test peers connect"); return }
+        let lot = ParkingLotStore(folder: root.appendingPathComponent("lot")); lot.open()
+        let row = lot.document.rows[0].id
+        let session = Session(entry: Entry(name: "Review fixture", command: "unused", directory: root.path, engine: "codex"))
+        var outcome: String?, failure: Error?, allowed = true
+        func startReview() -> Task<Void, Never> {
+            outcome = nil; failure = nil
+            let edits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: row, text: "Reviewed heading")])
+            return Task { @MainActor in
+                do { outcome = try await Store.shared.reviewParkingLotAsync(edits, session: session, lot: lot, window: window, allowed: { allowed }) }
+                catch { failure = error }
+            }
+        }
+        window.orderFront(nil)
+        let first = startReview()
+        guard pump({ window.attachedSheet != nil }) else { first.cancel(); check(false, "Approval sheet opens asynchronously"); return }
+        var ticks = 0, callbacks = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            ticks += 1; DispatchQueue.main.async { callbacks += 1 }
+        }
+        let until = Date().addingTimeInterval(22)
+        _ = pump(seconds: 24) { Date() >= until }
+        timer.invalidate()
+        check(window.attachedSheet != nil && outcome == nil && failure == nil && ticks > 150 && callbacks > 150,
+              "Pending native Parking Lot review keeps default timers and main-queue callbacks running for 22 seconds")
+        check(home.homes[viewer.localDeviceID ?? ""]?.online == true && viewer.homes[home.localDeviceID ?? ""]?.online == true,
+              "Two real connected homes stay online beyond the 20-second timeout while approval is pending")
+        lot.update(row, text: "Human edited during review")
+        window.endSheet(window.attachedSheet!, returnCode: .alertSecondButtonReturn)
+        _ = pump { outcome != nil || failure != nil }
+        check(failure?.localizedDescription.contains("changed during") == true && lot.document.rows[0].text == "Human edited during review",
+              "Asynchronous Apply rejects a revision changed while its native sheet was open")
+        _ = pump { window.attachedSheet == nil }
+        let second = startReview()
+        guard pump({ window.attachedSheet != nil }) else { second.cancel(); check(false, "Second approval opens"); return }
+        window.endSheet(window.attachedSheet!, returnCode: .alertFirstButtonReturn)
+        _ = pump { outcome != nil || failure != nil }
+        check(outcome?.contains("declined") == true && lot.document.rows[0].text == "Human edited during review", "Native Cancel saves no Parking Lot changes")
+        _ = pump { window.attachedSheet == nil }
+        let third = startReview()
+        guard pump({ window.attachedSheet != nil }) else { third.cancel(); check(false, "Third approval opens"); return }
+        window.endSheet(window.attachedSheet!, returnCode: .alertSecondButtonReturn)
+        _ = pump { outcome != nil || failure != nil }
+        check(outcome?.contains("approved and saved") == true && lot.document.rows[0].text == "Reviewed heading", "Native asynchronous Apply saves a current reviewed edit")
+        _ = pump { window.attachedSheet == nil }
+        lot.update(row, text: "Keep on cancellation")
+        let fourth = startReview()
+        guard pump({ window.attachedSheet != nil }) else { fourth.cancel(); check(false, "Cancellation approval opens"); return }
+        fourth.cancel()
+        _ = pump { failure != nil && window.attachedSheet == nil }
+        check(failure is CancellationError && window.attachedSheet == nil && lot.document.rows[0].text == "Keep on cancellation", "Cancelled agent review dismisses its sheet and cannot apply edits")
+        let fifth = startReview()
+        guard pump({ window.attachedSheet != nil }) else { fifth.cancel(); check(false, "Revocation approval opens"); return }
+        allowed = false
+        window.endSheet(window.attachedSheet!, returnCode: .alertSecondButtonReturn)
+        _ = pump { outcome != nil || failure != nil }
+        check(failure?.localizedDescription.contains("access changed") == true && lot.document.rows[0].text == "Keep on cancellation", "Revoked scope is rechecked after native approval")
+    } catch { check(false, "Approval connectivity: " + error.localizedDescription) }
+}

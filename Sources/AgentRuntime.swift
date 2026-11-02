@@ -215,7 +215,9 @@ import Foundation
                         throw AgentFailure.message("Choose one explicitly allowed Parking Lot. No Parking Lot edits applied.")
                     }
                     if current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
-                        parkingOutcome = try store.reviewParkingLot(edits, session: session, lot: lot)
+                        parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
+                            store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true
+                        })
                     } else { try lot.apply(edits, author: session.title) }
                 }
                 session.supportPendingCommand = decoded.appControl

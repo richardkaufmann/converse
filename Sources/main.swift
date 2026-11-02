@@ -3398,7 +3398,10 @@ func selfTest() {
     store.consume(#"{"type":"thread.started","thread_id":"thread-123"}"#, session: x, responseID: r)
     store.consume(#"{"type":"item.completed","item":{"type":"agent_message","text":"Done"}}"#, session: x, responseID: r)
     check(x.remoteID == "thread-123" && x.messages.last?.text == "Done", "Codex structured response and resume identity")
-    let image = NSImage(size: NSSize(width: 16, height: 16)); image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 16, height: 16).fill(); image.unlockFocus()
+    // Use pixels, not lockFocus points (which become 32 pixels on Retina displays).
+    let imageBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    for y in 0..<16 { for x in 0..<16 { imageBitmap.setColor(.red, atX: x, y: y) } }
+    let image = NSImage(size: NSSize(width: 16, height: 16)); image.addRepresentation(imageBitmap)
     store.attach(s, image: image)
     check(s.attachments.count == 1 && FileManager.default.fileExists(atPath: s.attachments[0]), "Pasted image saved as PNG")
     let imageDraft = store.create(entry)
@@ -3555,6 +3558,8 @@ func selfTest() {
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     identitySelfTests(check)
+    // Native approval UI runs after image fixtures that intentionally precede AppKit initialization.
+    parkingLotReviewConnectivitySelfTests(check)
     print("All checks passed")
 }
 signal(SIGPIPE, SIG_IGN)
