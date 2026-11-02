@@ -49,7 +49,7 @@ The repository and release links currently require access to the private reposit
 
 ## First launch
 
-You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later.
+You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later. See [Set up Discord, Jolly and GitHub](#set-up-discord-jolly-and-github) to connect your own accounts and services.
 
 
 You need **one working provider** before you can ask an assistant for help. A provider is the service behind the model: Meta Muse, Anthropic's Claude, or OpenAI's Codex. Its account and usage charges are separate from Converse.
@@ -256,8 +256,8 @@ Optional **mood art** uses Meta's image service independently of the agent's rea
 
 Discord is optional. It lets an agent read a chosen channel during checks, post alerts, or answer people who mention it. Begin with one agent and one channel:
 
-1. Create a dedicated bot in [Discord's Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, and invite it to your server with **View Channel**, **Read Message History** and **Send Messages** permission in that channel.
-2. Enable Discord Developer Mode and copy the channel's numeric ID.
+1. Create a Discord account and a server you control, or ask its administrator for permission to install a bot. Create a dedicated bot in [Discord's Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, and invite it to your server with **View Channel**, **Read Message History** and **Send Messages** permission in that channel.
+2. In the portal’s **Bot** page, obtain the bot token (reset it if necessary). Use **Installation** with a server install and the `bot` scope to invite it with the permissions above; Administrator permission is not needed. In Discord **User Settings → Advanced**, enable **Developer Mode**, then right-click the destination channel and choose **Copy Channel ID**. The token, application ID and channel ID are different values. [Discord’s setup guide](https://docs.discord.com/developers/quick-start/getting-started) covers bot creation and installation.
 3. On the Mac, open the agent's **Agent Setup**. Put the bot token in the masked Discord field and the channel ID in its channel field. The Mac's agents share that saved bot token.
 4. Choose reading and/or alerts. **Test Discord** posts a labeled test message and reads it back; it does not send session content. Save the settings after testing.
 5. If you want direct questions, enable **Anyone in this channel may @mention this agent**. Use a real bot mention: `@Converse Project Steward: what needs attention?` A **Default agent for this channel** also accepts `@Converse question`.
@@ -266,6 +266,29 @@ Anyone able to post in the configured channel can use enabled mentions. By defau
 
 The Mac app must be open. Mention checks run independently of the agent's loop; pausing a daily loop does not disable enabled mentions. Windows/Linux do not host Discord integration yet. [Detailed Discord behavior](docs/agents.md#discord-bot-integration).
 
+## Set up Discord, Jolly and GitHub
+
+Tell App Support what you want: “Help me connect my own Discord server,” “Let me ask my agent questions from Muse on my phone,” or “Watch my GitHub repository for new issues.” It can walk you through the relevant guide and open supported settings. You supply your own accounts and credentials; installing Converse does not give you access to the developer’s services.
+
+| Connection | What you need | Where to start | How to confirm it works |
+| --- | --- | --- | --- |
+| Discord | Your server, permission to install a bot, a bot token and a channel ID; a Mac home running Converse | [Discord setup](#connect-discord-on-a-mac), then Agent Setup on the Mac | Test Discord, then send a real bot mention and receive the intended agent’s reply |
+| Jolly / Meta Muse phone app | A Muse account with connector access, your Mac, a bridge, your own reachable HTTPS address and a bearer token | [Jolly setup](#jolly-mac); an operator prepares the connection first | List allowed agents, ask one by name, and receive its correlated reply on the phone |
+| GitHub | A repository you can access; a token for private access or report submission | [GitHub setup](#connect-your-own-github-repository), then Agent Setup or the report window | Test GitHub, run a check, and inspect the evidence; a submitted report must return an issue URL |
+
+Each connection is optional and independent. Start with one agent and one service. GitHub monitoring works on Mac and Windows; Discord and Jolly currently need a Mac home. A paired iPhone/iPad can view desktop work, but does not host these integrations. Keep the home app open and the computer awake and connected when you expect replies.
+
+Credentials go in the app’s masked fields or the connector’s authentication settings, never in a conversation. An agent also needs explicit access to any sessions or Parking Lots you want it to discuss: enable those in Agent Setup. Connecting Discord or Jolly does not grant that access. Start with a harmless question before asking about private work.
+
+### Connect your own GitHub repository
+
+1. Create or choose a repository on GitHub. In your agent’s **Agent Setup**, enter **Repository** as `owner/repository`, for example `your-name/your-project`, and give the agent an objective such as “Watch releases and open bugs; tell me what needs attention.” This does not clone the repository or configure a coding session’s Git login.
+2. For public monitoring, try **Test GitHub** without a token first. For private repositories or authenticated access, create a token in GitHub **Settings → Developer settings → Personal access tokens**. Prefer a fine-grained token limited to the intended repository, with an expiry. For repository evidence, grant read access to **Contents**, **Issues** and **Pull requests**, with the required **Metadata** access. Organization approval or SSO authorization may also be required. See [GitHub’s token guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) and [endpoint permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+3. Paste it into the masked **GitHub token** field and save. On Mac, this saved token is shared by the app’s agents; replacing it can affect their repository access. **Test GitHub** checks access without modifying the repository. Run an agent check and inspect its issue/release evidence too: basic repository access does not prove every optional statistic is available. Visitor statistics can require additional repository permissions; missing statistics are not zero activity.
+4. Enable a schedule only if you want repeated checks. If access fails, check the repository name, account access, token expiry, selected repositories and organization approval. A private repository can look missing to an unauthorized account.
+
+Monitoring does not submit issues or push code. To report a Converse bug, use [Report a bug](#report-a-bug): that separate workflow targets `richardkaufmann/converse`, requires issue-writing permission for direct submission, and lets you review the exact report. A token for your own repository does not automatically grant access to Converse. Coding sessions use their own Git/CLI authentication. Automatic GitHub-to-Parking-Lot synchronization is planned, not available yet.
+
 ## Jolly (Mac)
 
 **Connect the Meta Muse iPhone app** means letting Meta's phone assistant, Jolly, send requests to allowed Converse agents on your Mac. For example: “Ask Project Steward what is blocking the release,” or “Ask Converse whether the app is up.” General app-health questions route to an allowed Converse App Support agent, which can report the app's state and the connected devices it knows about.
@@ -273,6 +296,27 @@ The Mac app must be open. Mention checks run independently of the agent's loop; 
 This is optional and separate from the **Converse iPhone/iPad app**. Jolly is a conversational connector; the native Converse mobile app displays session panes. Connecting Jolly does not require changing an agent to a Meta reasoning model.
 
 **This integration still needs operator setup.** It requires a **bridge** (a small background service) on the Mac, an **HTTPS endpoint** (a secure web address the phone can reach), a **bearer token** (the secret that authorizes requests), and a **connector schema** (the description of available actions) loaded into the Meta Muse app. Opening **Converse → Jolly…** alone does not create that infrastructure. The current [bridge installer](scripts/install-jolly-bridge.py) is intended for an operator who has prepared the token and endpoint; it does not provision a tunnel or a Muse account.
+
+### Preparing your own Jolly connection
+
+Ask App Support to walk through this with the person administering your Mac. First confirm that your Meta Muse account actually offers connector configuration; Converse cannot enable that service-side capability. The steps below describe what the operator must supply, rather than promise a particular Muse settings screen.
+
+1. Obtain the matching Converse source scripts and a Python 3.9 or newer runtime. Generate a long random bearer token and store it in a private file readable only by your user (mode `0600`). Use a different token from your Meta API key, Discord bot token or GitHub token.
+2. Arrange an HTTPS reverse proxy or tunnel on an address you control, forwarding to the bridge on `127.0.0.1:4691`. Keep the local listener on loopback. The phone must reach that address even when it is off your home Wi-Fi. Converse does not supply a hosted endpoint, domain or tunnel account.
+3. Run the bridge with your own public address. From the source checkout, this example uses placeholders for the token file and HTTPS address:
+
+   ```sh
+   python3 scripts/jolly_bridge.py \
+     --root "$HOME/Library/Application Support/Converse/Jolly" \
+     --token-file /absolute/path/to/your-private-token-file \
+     --public-base https://your-bridge.example
+   ```
+
+   Keep the process running for the first test, then have the operator arrange a persistent service. **Always set `--public-base` to your address**: the script’s current default is the developer’s endpoint, used for returned image links. The existing `install-jolly-bridge.py` is a migration helper and does not pass a custom public address; it is not a complete new-user installer. Do not run it unchanged for someone else’s endpoint.
+4. In Muse’s connector configuration, load `https://your-bridge.example/openapi.json` and set its server/base URL to your HTTPS address. The schema does not supply a server URL. Configure bearer authentication using your private token in the connector’s secure credential field. The schema names the integration **Ask Converse**.
+5. Open Converse, allow the intended agents in **Converse → Jolly…**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but art does not, check the public base address and tunnel image route.
+
+Treat the bearer token as access to the enabled agents. Limit their scope before sharing the connector. Returned artwork uses opaque image URLs that can be retrieved without the bearer token; anyone with such a URL can view that image. To stop new agent requests, disable its Jolly access. To revoke the connector itself, stop the bridge or rotate the token and update the connector’s credential; disabling an agent does not erase saved replies or images.
 
 Once that bridge is configured:
 
