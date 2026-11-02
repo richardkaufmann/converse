@@ -30,6 +30,7 @@ import SwiftUI
     text.setSelectedRange(NSRange(location: text.inputStart, length: 0))
     type("Hello :-) ")
     check(session.draft == "Hello 🙂 ", "Native prompt substitutes a typed token")
+    check(text.substitutionFeedback.offersDisable(shared), "Conversion immediately offers the off button without Undo")
     text.undo(nil)
     check(session.draft == "Hello :-) " && text.substitutionFeedback.offersDisable(shared), "Undo restores exact typed prompt and offers disabling")
     text.redo(nil)
@@ -56,6 +57,7 @@ import SwiftUI
     outline.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
     for ch in " :-) " { outline.insertText(String(ch), replacementRange: outline.selectedRange()) }
     check(lot.document.rows.first { $0.id == row.id }?.text == "Idea 🙂 ", "Parking Lot typing substitutes without changing row identity")
+    check(lot.substitutionFeedback.offersDisable(shared), "Parking Lot conversion immediately offers the off button")
     outline.undo(nil)
     check(lot.document.rows.first { $0.id == row.id }?.text == "Idea :-) " && lot.substitutionFeedback.offersDisable(shared), "Parking Lot Undo restores literal token and offers disabling")
     outline.redo(nil)

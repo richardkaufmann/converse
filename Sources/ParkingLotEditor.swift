@@ -226,6 +226,7 @@ final class ParkingOutlineText: NSTextView {
         guard owner.parent.lot.document.revision != revision else { return }
         setSelectedRange(NSRange(location: caret + (match.replacement as NSString).length - match.range.length, length: 0))
         undoManager?.setActionName(TextSubstitutions.undoName)
+        owner.parent.lot.substitutionFeedback.converted()
         immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
     }
     override func deleteBackward(_ sender: Any?) {

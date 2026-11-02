@@ -66,9 +66,13 @@ final class TextSubstitutions: ObservableObject {
 }
 
 final class SubstitutionFeedback: ObservableObject {
-    @Published private(set) var rejectedGeneration: Int?
-    func rejected() { rejectedGeneration = TextSubstitutions.shared.generation }
-    func offersDisable(_ preferences: TextSubstitutions) -> Bool { rejectedGeneration == preferences.generation }
+    @Published private(set) var offeredGeneration: Int?
+    func converted() {
+        let generation = TextSubstitutions.shared.generation
+        if offeredGeneration != generation { offeredGeneration = generation }
+    }
+    func rejected() { converted() }
+    func offersDisable(_ preferences: TextSubstitutions) -> Bool { offeredGeneration == preferences.generation }
 }
 
 struct SubstitutionButton: View {

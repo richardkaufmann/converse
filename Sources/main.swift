@@ -1661,6 +1661,7 @@ final class ConversationTextView: NSTextView {
         let beforeCaret = caret - inputStart, afterCaret = selectedRange().location - inputStart
         manager.registerUndo(withTarget: self) { view in view.restoreSubstitution(expected: after, replacement: before, caret: beforeCaret, inverseCaret: afterCaret) }
         breakUndoCoalescing(); manager.setActionName(TextSubstitutions.undoName); manager.endUndoGrouping()
+        substitutionFeedback.converted()
         substitutionUndo = (after, before, beforeCaret, afterCaret)
         immediateSubstitution = ImmediateSubstitution(text: after, caret: NSRange(location: afterCaret, length: 0))
     }

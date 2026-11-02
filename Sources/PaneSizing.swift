@@ -9,6 +9,11 @@ final class PaneDividerHandle: NSView {
     let dividerIndex: Int
     private var tracking: NSTrackingArea?
     private var dragStart: (pointer: CGFloat, divider: CGFloat)?
+    private var pendingPosition: CGFloat?
+    private var dragFrame: DispatchWorkItem?
+    var dragBegan: (() -> Void)?
+    var dragEnded: (() -> Void)?
+    deinit { dragFrame?.cancel() }
     init(split: NSSplitView, index: Int) {
         self.split = split; dividerIndex = index
         super.init(frame: .zero)
@@ -28,17 +33,36 @@ final class PaneDividerHandle: NSView {
     override func mouseExited(with event: NSEvent) { if dragStart == nil { NSCursor.arrow.set() } }
     override func mouseDown(with event: NSEvent) {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
+        dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
+        dragBegan?()
         NSCursor.resizeLeftRight.set()
     }
     override func mouseDragged(with event: NSEvent) {
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
-        let position = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
-        split.setPosition(max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex))), ofDividerAt: dividerIndex)
+        pendingPosition = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
+        // Consume only the newest pointer position each display interval.
+        // Reflowing every queued mouse event makes long transcripts lag behind.
+        if dragFrame == nil {
+            let frame = DispatchWorkItem { [weak self] in self?.applyDragFrame() }
+            dragFrame = frame
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60, execute: frame)
+        }
         NSCursor.resizeLeftRight.set()
     }
+    private func applyDragFrame() {
+        dragFrame = nil
+        guard let split, let position = pendingPosition, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
+        pendingPosition = nil
+        let constrained = max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex)))
+        if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 { split.setPosition(constrained, ofDividerAt: dividerIndex) }
+    }
     override func mouseUp(with event: NSEvent) {
-        dragStart = nil
+        guard let split, let start = dragStart else { return }
+        dragFrame?.cancel(); dragFrame = nil
+        pendingPosition = start.divider + split.convert(event.locationInWindow, from: nil).x - start.pointer
+        applyDragFrame()
+        dragStart = nil; dragEnded?()
         window?.invalidateCursorRects(for: self)
     }
 }
@@ -118,6 +142,7 @@ final class WindowPaneLayout {
     private var lastWidth: CGFloat
     private var lastSidebar: CGFloat = 340
     private var applying = false
+    private var draggingDivider = false
     private var pending = false
     private var revision = 0
     private var lastExpandedSidebar: CGFloat = 340
@@ -149,9 +174,14 @@ final class WindowPaneLayout {
                 let handle = dividerHandles.first { $0.split === split && $0.dividerIndex == index } ?? PaneDividerHandle(split: split, index: index)
                 let edge = split.arrangedSubviews[index].frame.maxX + split.dividerThickness / 2
                 let rect = NSRect(x: edge - PaneDividerHandle.hitWidth / 2, y: split.bounds.minY, width: PaneDividerHandle.hitWidth, height: split.bounds.height)
-                handle.frame = root.convert(rect, from: split).intersection(root.bounds)
+                handle.dragBegan = { [weak self] in self?.draggingDivider = true }
+                handle.dragEnded = { [weak self] in self?.finishDividerDrag() }
+                let frame = root.convert(rect, from: split).intersection(root.bounds)
+                if handle.frame != frame {
+                    handle.frame = frame
+                    window?.invalidateCursorRects(for: handle)
+                }
                 if handle.superview !== root { root.addSubview(handle, positioned: .above, relativeTo: nil) }
-                window?.invalidateCursorRects(for: handle)
                 active.append(handle)
             }
         }
@@ -202,8 +232,21 @@ final class WindowPaneLayout {
         if let scroll = view as? ConversationScrollView { scroll.revealInitialTail() }
         for child in view.subviews { followTail(in: child) }
     }
+    private func finishDividerDrag() {
+        draggingDivider = false
+        guard let window, let outer = PaneSizing.split(in: window.contentView), outer.arrangedSubviews.count == 2 else { return }
+        let width = window.contentRect(forFrameRect: window.frame).width
+        if !sidebarCollapsed {
+            preferredSidebar = outer.arrangedSubviews[0].frame.width
+            referenceWidth = width; sidebarLimit = 480
+        }
+        if let inner = PaneSizing.split(in: outer.arrangedSubviews[1]), inner.arrangedSubviews.count == paneCount {
+            weights = inner.arrangedSubviews.map { max(1, $0.frame.width) }
+        }
+        schedule()
+    }
     private func dividerChanged() {
-        guard !applying, let window, let outer = PaneSizing.split(in: window.contentView) else { return }
+        guard !applying, !draggingDivider, let window, let outer = PaneSizing.split(in: window.contentView) else { return }
         if pending { schedule(); return }
         let width = window.contentRect(forFrameRect: window.frame).width
         guard abs(width - lastWidth) < 0.5 else { schedule(); return }
@@ -222,7 +265,7 @@ final class WindowPaneLayout {
         DispatchQueue.main.async { [weak self] in self?.arrange(token, attempts: 8) }
     }
     private func arrange(_ token: Int, attempts: Int) {
-        guard token == revision, let window else { return }
+        guard token == revision, !draggingDivider, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
         let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : countChangeSidebar ?? PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
         applying = true
@@ -280,6 +323,27 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         check(NSCursor.current == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
         NSCursor.arrow.set()
     } else { check(false, "Session gutter handle is installed") }
+    for target in [outer, inner] {
+        guard let handle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === target && $0.dividerIndex == 0 }) else { check(false, "Burst-drag fixture handle exists"); continue }
+        let before = target.arrangedSubviews[0].frame.maxX
+        let point = NSPoint(x: handle.frame.midX, y: handle.frame.midY)
+        func event(_ type: NSEvent.EventType, _ delta: CGFloat) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: content.convert(NSPoint(x: point.x + delta, y: point.y), to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        var notifications = 0
+        let observer = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: target, queue: .main) { _ in notifications += 1 }
+        handle.mouseDown(with: event(.leftMouseDown, 0))
+        for step in 1...100 { handle.mouseDragged(with: event(.leftMouseDragged, CGFloat(step) * 0.3)) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.04))
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && notifications < 10,
+              "\(target === outer ? "Sidebar" : "Session") gutter coalesces a 100-event burst while following the latest pointer (resize notifications: \(notifications))")
+        handle.mouseDragged(with: event(.leftMouseDragged, 37))
+        handle.mouseUp(with: event(.leftMouseUp, 37))
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Gutter release applies the final pointer position without waiting for a timer")
+        NotificationCenter.default.removeObserver(observer)
+        settle()
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Final gutter layout preserves the user's released position")
+    }
     inner.setPosition(500, ofDividerAt: 0); settle()
     _ = sizes()
     window.setContentSize(NSSize(width: 1800, height: 700)); settle()
