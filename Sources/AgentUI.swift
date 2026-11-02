@@ -650,13 +650,13 @@ struct AgentScoreboardCards: View {
                         Text(metric.label).font(.caption)
                         Text(metric.value).font(.title2.bold()).textSelection(.enabled)
                         if let at = metric.asOf { Text("Source time: " + at).font(.caption) }
-                        if let link = metric.sourceURL.flatMap(AgentWebSource.safeURL) { Link("Source", destination: link).font(.caption) }
+                        if let link = metric.sourceURL.flatMap(AgentWebSource.safeURL) { Link(AgentWebSource.domainLabel(link.absoluteString) ?? "Source", destination: link).font(.caption) }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(14).background(Color(red: 0.12, green: 0.16, blue: 0.22), in: RoundedRectangle(cornerRadius: 12))
                 }
             }
             if let at = board.observedAt { Text("Retrieved " + at.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary) }
             ForEach(board.sources ?? [], id: \.url) { source in
-                if let url = AgentWebSource.safeURL(source.url) { Link(source.title, destination: url).font(.caption) }
+                if let url = AgentWebSource.safeURL(source.url) { Link(AgentWebSource.shortLabel(title: source.title, url: source.url), destination: url).font(.caption) }
             }
         }
     }
@@ -665,11 +665,11 @@ struct AgentScoreboardCards: View {
         func e(_ s: String) -> String { AgentWidgetExport.escape(s) }
         let cells = board.metrics.map { metric in
             "<div class=metric><span>" + e(metric.label) + "</span><strong>" + e(metric.value) + "</strong><span>" + e(metric.asOf.map { "Source time: " + $0 } ?? "") + "</span>" +
-            (metric.sourceURL.flatMap(AgentWebSource.safeURL).map { "<br><a href=\"" + e($0.absoluteString) + "\" rel=\"noreferrer\">Source</a>" } ?? "") + "</div>"
+            (metric.sourceURL.flatMap(AgentWebSource.safeURL).map { "<br><a href=\"" + e($0.absoluteString) + "\" rel=\"noreferrer\">" + e(AgentWebSource.domainLabel($0.absoluteString) ?? "Source") + "</a>" } ?? "") + "</div>"
         }.joined()
         let sources = (board.sources ?? []).compactMap { source -> String? in
             guard let url = AgentWebSource.safeURL(source.url) else { return nil }
-            return "<a href=\"" + e(url.absoluteString) + "\" rel=\"noreferrer\">" + e(source.title) + "</a>"
+            return "<a href=\"" + e(url.absoluteString) + "\" rel=\"noreferrer\">" + e(AgentWebSource.shortLabel(title: source.title, url: source.url)) + "</a>"
         }.joined(separator: " · ")
         return "<section><h2>" + e(board.title ?? "Scoreboard") + "</h2><p>" + e(board.summary) + "</p><div class=grid>" + cells + "</div><p>Retrieved " + e(board.observedAt?.formatted() ?? "Unknown") + "</p><p>" + sources + "</p></section>"
     }

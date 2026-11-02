@@ -19,7 +19,7 @@ struct MarkdownText {
             var attributes: [NSAttributedString.Key: Any] = [.font: selectedFont, .foregroundColor: NSColor.textColor]
             if intent.contains(.code) { attributes[.backgroundColor] = NSColor.quaternaryLabelColor.withAlphaComponent(0.10) }
             if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-            if let link = run.link, ["https", "http", "converse-help"].contains(link.scheme ?? "") { attributes[.link] = link }
+            if let link = run.link, ["https", "http", "converse-help"].contains(link.scheme ?? "") { attributes[.link] = link; attributes[.toolTip] = link.absoluteString }
             output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
         }
         return output

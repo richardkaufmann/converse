@@ -147,11 +147,15 @@ import Foundation
         ["type": "message", "content": [["type": "output_text", "annotations": [["type": "url_citation", "url": "https://example.com/news", "title": "News"]]]]]]]
     let research = AgentResearch.parse(researchResponse)
     check(research.searched && research.sources.count == 2 && !research.markdown.contains("file:"), "Web research preserves actual result/citation URLs and rejects non-web links")
+    check(!research.markdown.contains("Source 1") && research.markdown.contains("[Quote](<https://example.com/quote>)"), "Research citations read as short labels instead of numbered sources")
+    check(AgentWebSource.shortLabel(title: "Apple Reports Record Quarter Results Today", url: "https://example.com/x") == "Apple Reports" && AgentWebSource.shortLabel(title: "", url: "https://www.example.com/x") == "example.com" && AgentWebSource.shortLabel(title: "[Bracketed] (mess)", url: "https://example.com/x") == "Bracketed mess" && AgentWebSource.shortLabel(title: String(repeating: "Supercalifragilistic", count: 4), url: "https://example.com/x") == "example.com" && AgentWebSource.domainLabel("https://www.example.com/x") == "example.com", "Short source labels trim to two words with a domain fallback")
+    check((MarkdownText.inline("[x](https://example.com/y)").attribute(.toolTip, at: 0, effectiveRange: nil) as? String) == "https://example.com/y", "Rendered links carry their URL as the hover tooltip")
     let board = AgentScoreboard(title: "Stock", summary: "Today’s verified snapshot", metrics: [
         .init(label: "Price", value: "$123", sourceURL: "https://example.com/quote", asOf: "2026-10-29 16:00 ET · close"),
         .init(label: "Invented", value: "999", sourceURL: "https://unseen.example/quote", asOf: "now")], sentiment: "up").validated(research: research, at: now)
     check(board.metrics[0].value == "$123" && board.metrics[1].value == "Unavailable" && board.metrics[1].sourceURL == nil && board.observedAt == now, "Scoreboard keeps source time distinct from retrieval and refuses metrics whose source was not retrieved")
     check(AgentScoreboardCards.html(board).contains("https://example.com/quote") && !AgentScoreboardCards.html(board).contains("999"), "Exported flexible scoreboard has clickable sources and omits unsupported values")
+    check(AgentScoreboardCards.html(board).contains(">example.com</a>"), "Exported scoreboard links read as domains")
     check(!AgentResearch.parse(["output": []]).searched && board.validated(research: AgentResearch()).metrics.allSatisfy { $0.value == "Unavailable" }, "Enabling search is not treated as evidence that a search ran")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-agents-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
