@@ -12,10 +12,18 @@ final class PaneDividerHandle: NSView {
     private var lastDragEvent = Date.distantPast
     private var pendingPosition: CGFloat?
     private var dragFrame: DispatchWorkItem?
+    private var idleCheck: DispatchWorkItem?
+    private var releaseMonitor: Any?
     private var frozenText: [(NSTextContainer, Bool)] = []
+    /// Pointer motion stops count as the end of dragging for wrapping: reflow
+    /// follows quickly even with the button still held.
+    private static let idleThawInterval: TimeInterval = 0.4
+    /// A missed release (button let go off the gutter or outside the app) can
+    /// never freeze wrapping longer than this.
+    static let staleDragInterval: TimeInterval = 2
     var dragBegan: (() -> Void)?
     var dragEnded: (() -> Void)?
-    deinit { dragFrame?.cancel(); thawText() }
+    deinit { dragFrame?.cancel(); idleCheck?.cancel(); stopReleaseMonitor(); thawText() }
     init(split: NSSplitView, index: Int) {
         self.split = split; dividerIndex = index
         super.init(frame: .zero)
@@ -40,11 +48,16 @@ final class PaneDividerHandle: NSView {
         lastDragEvent = Date()
         freezeText(in: window?.contentView)
         dragBegan?()
+        startReleaseMonitor()
+        scheduleIdleCheck()
         NSCursor.resizeLeftRight.set()
     }
     override func mouseDragged(with event: NSEvent) {
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         lastDragEvent = Date()
+        // A pause thawed wrapping while the button stayed down; suspend it
+        // again as soon as the pointer moves.
+        if frozenText.isEmpty { freezeText(in: window?.contentView) }
         pendingPosition = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
         // Consume only the newest pointer position each display interval.
         // Reflowing every queued mouse event makes long transcripts lag behind.
@@ -80,19 +93,54 @@ final class PaneDividerHandle: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard dragStart != nil else { return }
+        endDrag(at: event.locationInWindow)
+    }
+    // AppKit delivers mouseUp to the view under the cursor, not necessarily
+    // this handle, so releasing outside the gutter never calls mouseUp here.
+    // A local event monitor catches those in-app releases; the idle sweep
+    // below is the backstop for releases outside the app. Shared with the
+    // monitor so both paths apply the identical release exactly once.
+    func endDrag(at locationInWindow: NSPoint) {
         guard let split, let start = dragStart else { return }
+        stopReleaseMonitor(); idleCheck?.cancel(); idleCheck = nil
         dragFrame?.cancel(); dragFrame = nil
-        pendingPosition = start.divider + split.convert(event.locationInWindow, from: nil).x - start.pointer
+        pendingPosition = start.divider + split.convert(locationInWindow, from: nil).x - start.pointer
         applyDragFrame()
         dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
     }
-    // AppKit delivers mouseUp to the view under the cursor, not necessarily
-    // this handle, so releasing outside the gutter never calls mouseUp here.
+    private func startReleaseMonitor() {
+        stopReleaseMonitor()
+        releaseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            // A release in another window has foreign coordinates; leave it
+            // to the stale sweep instead of jumping the divider to garbage.
+            if self?.dragStart != nil, event.window === self?.window { self?.endDrag(at: event.locationInWindow) }
+            return event
+        }
+    }
+    private func stopReleaseMonitor() {
+        if let monitor = releaseMonitor { NSEvent.removeMonitor(monitor); releaseMonitor = nil }
+    }
+    private func scheduleIdleCheck() {
+        idleCheck?.cancel()
+        let check = DispatchWorkItem { [weak self] in self?.idleCheckFired() }
+        idleCheck = check
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleThawInterval, execute: check)
+    }
+    private func idleCheckFired() {
+        idleCheck = nil
+        guard dragStart != nil else { return }
+        // Pointer motion stopped with the button still down: reflow now
+        // instead of waiting for a release that may never reach this handle.
+        if Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval { thawText() }
+        scheduleIdleCheck()
+    }
     // Without this sweep a missed release freezes transcript wrapping and the
     // layout loop forever. Returns true when it ended a stale drag.
     func cancelStaleDrag(now: Date = Date()) -> Bool {
-        guard dragStart != nil, now.timeIntervalSince(lastDragEvent) > 2 else { return false }
+        guard dragStart != nil, now.timeIntervalSince(lastDragEvent) > Self.staleDragInterval else { return false }
+        stopReleaseMonitor(); idleCheck?.cancel(); idleCheck = nil
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
@@ -405,6 +453,20 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         NotificationCenter.default.removeObserver(observer)
         settle()
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Final gutter layout preserves the user's released position")
+        // Pause with the button held: wrapping reflows without a release.
+        handle.mouseDown(with: event(.leftMouseDown, 0))
+        handle.mouseDragged(with: event(.leftMouseDragged, -12))
+        check(!longText.textContainer!.widthTracksTextView, "Resumed gutter motion suspends wrapping again")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.65))
+        check(longText.textContainer!.widthTracksTextView, "A paused gutter drag reflows without waiting for release")
+        // The monitor path shares one release with the handle path.
+        var ended = 0
+        let previousEnded = handle.dragEnded
+        handle.dragEnded = { previousEnded?(); ended += 1 }
+        handle.endDrag(at: content.convert(NSPoint(x: point.x - 12, y: point.y), to: nil))
+        check(ended == 1 && longText.textContainer!.widthTracksTextView, "An off-gutter release applies once and restores wrapping")
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2, "An off-gutter release lands on the pointer position")
+        handle.dragEnded = previousEnded
     }
     if let staleHandle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
         let probe = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
