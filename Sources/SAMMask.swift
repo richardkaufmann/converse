@@ -6,10 +6,12 @@
 import Foundation
 
 enum SAMMask {
-    static let alphabet = Array((33...126).compactMap { n -> UInt8? in
+    static let alphabet = Array((33...123).compactMap { n -> UInt8? in
         [34, 92, 44, 59, 60, 62, 124].contains(n) ? nil : UInt8(n)
     })
-    static func invalid() -> ImageAssistError { .invalid("SAM returned an invalid or unsupported mask. No rectangular substitute was used.") }
+    static func invalid(_ reason: String = "invalid mask data") -> ImageAssistError {
+        .invalid("SAM selection could not be read: " + reason + ". No rectangular substitute was used.")
+    }
     static func pack(_ bytes: [UInt8]) -> String {
         var n = bytes.count, prefix = [UInt8](repeating: 33, count: 5)
         for i in (0..<5).reversed() { prefix[i] = alphabet[n % 85]; n /= 85 }
@@ -26,29 +28,29 @@ enum SAMMask {
     }
     static func unpack(_ payload: String) throws -> [UInt8] {
         let chars = Array(payload.utf8)
-        guard chars.count >= 5, chars.count <= 2_000_000 else { throw invalid() }
+        guard chars.count >= 5, chars.count <= 2_000_000 else { throw invalid("invalid encoded mask length") }
         func digit(_ c: UInt8) throws -> UInt64 {
-            guard let index = alphabet.firstIndex(of: c), index < 85 else { throw invalid() }; return UInt64(index)
+            guard let index = alphabet.firstIndex(of: c), index < 85 else { throw invalid("mask contains an invalid base85 character") }; return UInt64(index)
         }
         var length = 0
         for c in chars.prefix(5) { length = length * 85 + Int(try digit(c)) }
         let remainder = length % 4
-        guard length <= 1_600_000, chars.count == 5 + length / 4 * 5 + (remainder == 0 ? 0 : remainder + 1) else { throw invalid() }
+        guard length <= 1_600_000, chars.count == 5 + length / 4 * 5 + (remainder == 0 ? 0 : remainder + 1) else { throw invalid("mask byte count does not match its length prefix") }
         var output: [UInt8] = [], source = 5
         for start in stride(from: 0, to: length, by: 4) {
             let count = min(4, length - start), used = count == 4 ? 5 : count + 1
             var value: UInt64 = 0
             for i in 0..<5 { value = value * 85 + (i < used ? try digit(chars[source + i]) : 84) }
-            guard value <= UInt32.max else { throw invalid() }
+            guard value <= UInt32.max else { throw invalid("mask contains an overflowing base85 group") }
             for i in 0..<count { output.append(UInt8((value >> (24 - i * 8)) & 255)) }; source += used
         }
-        guard pack(output) == payload else { throw invalid() }; return output
+        guard pack(output) == payload else { throw invalid("mask has noncanonical base85 padding") }; return output
     }
     struct RangeCoder {
         var low: UInt32 = 0, range: UInt32 = .max, code: UInt32 = 0
         var input: [UInt8] = [], position = 0, output: [UInt8] = []
         mutating func read() throws -> UInt32 {
-            guard position < input.count else { throw SAMMask.invalid() }
+            guard position < input.count else { throw SAMMask.invalid("mask arithmetic stream is truncated") }
             defer { position += 1 }; return UInt32(input[position])
         }
         mutating func start(_ bytes: [UInt8]) throws {
@@ -81,7 +83,9 @@ enum SAMMask {
         guard width > 0, height > 0, width <= 2048, height <= 2048 else { throw invalid() }
         var decoder = RangeCoder(), encoder = RangeCoder()
         if let payload {
-            guard payload.first == "!" else { throw invalid() }
+            guard payload.first == "!" else {
+                throw invalid(payload.first == "~" ? "service returned lossless encoding despite the requested one_bit encoding" : "unrecognized mask encoding marker")
+            }
             try decoder.start(unpack(String(payload.dropFirst())))
         }
         if let input, input.count != width * height { throw invalid() }
@@ -103,7 +107,7 @@ enum SAMMask {
             if counts[c] + counts[c + 1] >= 4096 { counts[c] = max(1, counts[c] >> 1); counts[c + 1] = max(1, counts[c + 1] >> 1) }
         } }
         let encoded = "!" + pack(encoder.finish())
-        if let payload, payload != encoded { throw invalid() }
+        if let payload, payload != encoded { throw invalid("mask failed the canonical arithmetic-code check") }
         return (result, encoded)
     }
     static func decode(_ payload: String, width: Int, height: Int) throws -> [UInt8] { try raster(payload, input: nil, width: width, height: height).0 }

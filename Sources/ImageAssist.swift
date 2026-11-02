@@ -57,43 +57,99 @@ extension ImageAssist {
             return seen.insert(name.lowercased()).inserted ? name : nil
         }
     }
-    static func segments(_ text: String, label: String, width: Int, height: Int) throws -> [DeviceImageSegment] {
-        guard text.utf8.count <= 2_000_000 else { throw SAMMask.invalid() }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return [] }
-        let pattern = #"(?:<0f>|,)\s*([0-9]+)<\|box;([^|]+)\|><\|mask;([^|]+)\|>"#
-        let regex = try NSRegularExpression(pattern: pattern), ns = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        guard matches.count <= 32, !matches.isEmpty else { throw SAMMask.invalid() }
-        var remainder = text
-        for match in matches.reversed() { let r = Range(match.range, in: remainder)!; remainder.removeSubrange(r) }
-        guard remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SAMMask.invalid() }
-        func fields(_ source: String, required: Set<String>) throws -> [String: String] {
-            var result: [String: String] = [:]
+    // Parse the documented SAM token grammar rather than assuming one token order.
+    // Diagnostics contain validation reasons only, never image data or opaque payloads.
+    static func segments(_ text: String, label: String, width: Int, height: Int,
+                         warning: ((String) -> Void)? = nil) throws -> [DeviceImageSegment] {
+        guard text.utf8.count <= 2_000_000 else { throw SAMMask.invalid("response exceeds the 2 MB limit") }
+        guard width > 0, height > 0, width <= 2048, height <= 2048 else { throw SAMMask.invalid("unsupported source image dimensions") }
+        let frame = try NSRegularExpression(pattern: #"<([0-9]+)f(?:;[^>\r\n]*)?>"#)
+        let identifier = try NSRegularExpression(pattern: #"[0-9]+"#)
+        let token = try NSRegularExpression(pattern: #"<\|([A-Za-z][A-Za-z0-9_.-]*)(?:;([^|]*))?\|>"#)
+        var ids = Set<String>(), budget = 0, result: [DeviceImageSegment] = [], warnings = Set<String>()
+        func warn(_ reason: String) { warnings.insert(reason) }
+        func fields(_ source: String, required: Set<String>, kind: String) throws -> [String: String] {
+            var values: [String: String] = [:], seen = Set<String>()
             for field in source.split(separator: ";") {
-                let pair = field.split(separator: "=", maxSplits: 1).map(String.init)
-                guard let key = pair.first else { continue }
+                let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                let key = pair[0]
+                if key.isEmpty && pair.count == 1 { continue }
+                if key == "c" { continue } // Confidence does not affect the binary selection.
+                guard seen.insert(key).inserted else { throw SAMMask.invalid("duplicate \(kind) field") }
                 if required.contains(key) {
-                    guard pair.count == 2, result[key] == nil else { throw SAMMask.invalid() }; result[key] = pair[1]
-                }
+                    guard pair.count == 2 else { throw SAMMask.invalid("missing \(kind) field value") }
+                    values[key] = pair[1]
+                } else { warn("additional fields") }
             }
-            guard required.isSubset(of: Set(result.keys)) else { throw SAMMask.invalid() }; return result
+            guard required.isSubset(of: Set(values.keys)) else { throw SAMMask.invalid("missing required \(kind) fields") }
+            return values
         }
-        var ids = Set<String>(), budget = 0
-        return try matches.map { match in
-            guard ids.insert(ns.substring(with: match.range(at: 1))).inserted else { throw SAMMask.invalid() }
-            let box = try fields(ns.substring(with: match.range(at: 2)), required: ["x1", "y1", "x2", "y2", "w", "h"])
-            let mask = try fields(ns.substring(with: match.range(at: 3)), required: ["x", "y", "data"])
-            guard let x = Int(box["x1"]!), let y = Int(box["y1"]!), let x2 = Int(box["x2"]!), let y2 = Int(box["y2"]!),
-                  Int(box["w"]!) == width, Int(box["h"]!) == height, x >= 0, y >= 0, x2 >= x, y2 >= y, x2 < width, y2 < height,
-                  Int(mask["x"]!) == 0, Int(mask["y"]!) == 0 else { throw SAMMask.invalid() }
-            let values = mask["data"]!.split(separator: ",", maxSplits: 2).map(String.init)
-            guard values.count == 3, Int(values[0]) == y2 - y + 1, Int(values[1]) == x2 - x + 1 else { throw SAMMask.invalid() }
-            budget += (x2 - x + 1) * (y2 - y + 1)
-            guard budget <= 24_000_000 else { throw SAMMask.invalid() }
-            let pixels = try SAMMask.decode(values[2], width: x2 - x + 1, height: y2 - y + 1)
-            guard pixels.contains(1) else { throw SAMMask.invalid() }
-            return DeviceImageSegment(region: DeviceImageRegion(x: x, y: y, width: x2 - x + 1, height: y2 - y + 1, imageWidth: width, imageHeight: height), label: label, mask: values[2])
+        func integer(_ value: String?, signed: Bool = false) -> Int? {
+            guard let value else { return nil }
+            let digits = signed && value.hasPrefix("-") ? value.dropFirst() : value[...]
+            guard !digits.isEmpty, digits.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+            return Int(value)
         }
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            let ns = line as NSString
+            var cursor = 0
+            func match(_ regex: NSRegularExpression) -> NSTextCheckingResult? {
+                regex.firstMatch(in: line, options: .anchored, range: NSRange(location: cursor, length: ns.length - cursor))
+            }
+            func skipSpace() {
+                while cursor < ns.length && (ns.character(at: cursor) == 32 || ns.character(at: cursor) == 9) { cursor += 1 }
+            }
+            guard let header = match(frame), integer(ns.substring(with: header.range(at: 1))) == 0 else {
+                throw SAMMask.invalid("expected image frame 0")
+            }
+            if ns.substring(with: header.range).contains(";") { warn("frame metadata") }
+            cursor = NSMaxRange(header.range); skipSpace()
+            guard cursor < ns.length else { throw SAMMask.invalid("frame contains no object record") }
+            while cursor < ns.length {
+                if ns.character(at: cursor) == 44 { cursor += 1; skipSpace() }
+                guard let id = match(identifier) else { throw SAMMask.invalid("expected an object ID") }
+                guard ids.insert(ns.substring(with: id.range)).inserted else { throw SAMMask.invalid("duplicate object ID") }
+                guard result.count < 32 else { throw SAMMask.invalid("more than 32 objects; try a more specific description") }
+                cursor = NSMaxRange(id.range); skipSpace()
+                var box: [String: String]?, mask: [String: String]?
+                while let part = match(token) {
+                    let name = ns.substring(with: part.range(at: 1))
+                    let body = part.range(at: 2).location == NSNotFound ? "" : ns.substring(with: part.range(at: 2))
+                    switch name {
+                    case "box":
+                        guard box == nil else { throw SAMMask.invalid("duplicate box token") }
+                        box = try fields(body, required: ["x1", "y1", "x2", "y2", "w", "h"], kind: "box")
+                    case "mask":
+                        guard mask == nil else { throw SAMMask.invalid("duplicate mask token") }
+                        mask = try fields(body, required: ["x", "y", "data"], kind: "mask")
+                    default: warn("additional tokens")
+                    }
+                    cursor = NSMaxRange(part.range); skipSpace()
+                }
+                guard let box, let mask else { throw SAMMask.invalid("object is missing a box or mask token, or has malformed token syntax") }
+                guard let x = integer(box["x1"], signed: true), let y = integer(box["y1"], signed: true),
+                      let x2 = integer(box["x2"], signed: true), let y2 = integer(box["y2"], signed: true),
+                      integer(box["w"]) == width, integer(box["h"]) == height,
+                      x >= 0, y >= 0, x2 >= x, y2 >= y, x2 < width, y2 < height else {
+                    throw SAMMask.invalid("box coordinates or dimensions do not match the source image")
+                }
+                guard integer(mask["x"]) == 0, integer(mask["y"]) == 0 else { throw SAMMask.invalid("mask offsets must be zero") }
+                let values = mask["data"]!.split(separator: ",", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+                guard values.count == 3, integer(values[0]) == y2 - y + 1, integer(values[1]) == x2 - x + 1 else {
+                    throw SAMMask.invalid("mask dimensions do not match its box")
+                }
+                budget += (x2 - x + 1) * (y2 - y + 1)
+                guard budget <= 24_000_000 else { throw SAMMask.invalid("decoded masks exceed the 24 megapixel limit") }
+                let pixels = try SAMMask.decode(values[2], width: x2 - x + 1, height: y2 - y + 1)
+                guard pixels.contains(1) else { throw SAMMask.invalid("object mask contains no selected pixels") }
+                result.append(DeviceImageSegment(region: DeviceImageRegion(x: x, y: y, width: x2 - x + 1, height: y2 - y + 1, imageWidth: width, imageHeight: height), label: label, mask: values[2]))
+            }
+        }
+        for reason in warnings.sorted() { warning?("SAM returned \(reason), which were ignored.") }
+        return result
     }
     static func deduplicated(_ candidates: [DeviceImageSegment]) throws -> [DeviceImageSegment] {
         var kept: [ImageSegment] = [], budget = 0, encoded = 0
@@ -155,11 +211,17 @@ extension AgentAPI {
             concepts = try ImageAssist.discoveryConcepts(text)
         } else { concepts = [concept] }
         var candidates: [DeviceImageSegment] = [], failures = 0
+        var formatWarnings = Set<String>()
         for name in concepts {
             do {
                 let text = try await call("sam-3.1", name)
-                let found = try await Task.detached { try ImageAssist.segments(text, label: name, width: width, height: height) }.value
-                candidates += found
+                let parsed = try await Task.detached {
+                    var warnings: [String] = []
+                    let found = try ImageAssist.segments(text, label: name, width: width, height: height) { warnings.append($0) }
+                    return (found, warnings)
+                }.value
+                candidates += parsed.0
+                formatWarnings.formUnion(parsed.1)
             } catch {
                 failures += 1
                 if concepts.count == 1 { throw error }
@@ -171,6 +233,7 @@ extension AgentAPI {
         var summary = merged.isEmpty ? "No matching segments found. Try a specific object description." : "\(merged.count) segments. Select the objects you want; nothing is added automatically."
         if concept.isEmpty { summary += " Discovery checked \(concepts.count) object types and may miss objects." }
         if failures > 0 { summary += " \(failures) object searches failed; results are partial. No automatic retry was made." }
+        if !formatWarnings.isEmpty { summary += " " + formatWarnings.sorted().joined(separator: " ") }
         return DeviceImageAssistResult(segments: merged, summary: summary)
     }
 }
