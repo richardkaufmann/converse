@@ -129,6 +129,10 @@ final class Session: ObservableObject, Identifiable {
     @Published var unseenResponse = false
     // An agent loop Richard did not leave running: red in the sidebar.
     var agentLoopPaused: Bool { agent != nil && agent?.enabled == false }
+    // A Parking Lot Talk helper with nothing going on stays out of the
+    // sidebar; the lot's Talk button reopens it. Busy or queued helpers stay
+    // listed so their work can always be reached.
+    var isIdleTalkSession: Bool { agent?.parkingLotTalkID != nil && !busy && pending.isEmpty }
     @Published var injectionNotice = ""
     // Momentary share confirmation shown as a row, never a modal alert.
     @Published var shareNotice = ""

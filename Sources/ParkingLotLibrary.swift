@@ -172,7 +172,7 @@ struct OrderedDeviceSidebar: View {
     @ObservedObject var state: WindowState
     var deviceIDs: [String] { ["local"] + (devices.currentGroup == nil ? [] : devices.homes.keys.sorted()) }
     var localIDs: [String] {
-        let rows = store.sessions.map { ($0.id.uuidString, $0.title) } + library.records.map { ($0.id.uuidString, $0.name) }
+        let rows = store.sessions.filter { !$0.isIdleTalkSession }.map { ($0.id.uuidString, $0.title) } + library.records.map { ($0.id.uuidString, $0.name) }
         return rows.sorted { $0.1.localizedStandardCompare($1.1) == .orderedAscending }.map(\.0)
     }
     var body: some View {
@@ -271,6 +271,19 @@ extension Store {
 }
 
 func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
+    do {
+        let talk = Session(entry: Entry(name: "Lot · Talk", command: "", directory: "~", engine: "agent", accountName: "Work"))
+        check(!talk.isIdleTalkSession, "An ordinary session is never an idle Talk helper")
+        talk.agent = AgentConfig()
+        check(!talk.isIdleTalkSession, "An agent without a lot assignment stays listed")
+        talk.agent?.parkingLotTalkID = UUID()
+        check(talk.isIdleTalkSession, "An idle Talk helper hides from the sidebar")
+        talk.busy = true
+        check(!talk.isIdleTalkSession, "A Talk helper with live work stays listed")
+        talk.busy = false
+        talk.pending = [PendingPrompt(text: "held", images: [])]
+        check(!talk.isIdleTalkSession, "A Talk helper with queued work stays listed")
+    }
     // Undo belongs to the document, so it survives replacing the editor with Reorder.
     do {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-undo-tests-" + UUID().uuidString)
