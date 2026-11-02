@@ -37,6 +37,9 @@ struct ParkingLotEdits: Decodable {
 // watched-session scope and workspace placement, without starting a CLI.
 final class ParkingLotStore: ObservableObject, Identifiable {
     static let id = UUID(uuidString: "B4AA70E2-147E-40A1-9342-0751C0A40101")!
+    static let placementGuidance = """
+    Choose a section by meaning when adding an item, unless the human specified a destination. Read the existing headings and their items first; use the most relevant existing section without asking when the fit is clear. A report of broken behavior belongs under Bugs, praise under Compliments, and a deferred idea under Future work. Respect project boundaries and planning-only headings. Do not append to the last section just because it is convenient. Rows belong to the nearest preceding heading: to append inside a section, set before to the NEXT heading's UUID; omit before only if the chosen section is the last one. To place an item first in a section, use its first item's UUID (or the next heading for an empty section). If no section fits, propose a clearly named heading with the item; ask only when the intended classification is genuinely ambiguous. Preserve existing wording, IDs, comments, images and Done state when moving an item. Do not reorganize unrelated items. Briefly name the chosen section in your reply.
+    """
     // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
     let id: UUID
     let substitutionFeedback = SubstitutionFeedback()
