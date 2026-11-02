@@ -48,6 +48,63 @@ while ps -axo comm= | /usr/bin/grep -Fxq "$destination/Contents/MacOS/Converse";
 codesign --verify --deep --strict "$job/Converse.app"
 actual=$(shasum -a 256 "$job/Converse.app/Contents/MacOS/Converse" | cut -d ' ' -f 1)
 [[ "$actual" == "$expected" ]] || fail 'Staged build changed before installation'
+# Single-winner election: concurrent queued updates must not interleave.
+# The lock holder re-checks the installed and rival staged builds, so an
+# older build always stands down even if it reaches this point first.
+root="${job:h}"
+lockdir="$root/install.lock"
+supersede() { print -r -- "SUPERSEDED: $1" > "$status_file"; exit 3; }
+release_lock() {
+    if [[ -f "$lockdir/pid" ]] && [[ $(<"$lockdir/pid") == "$$" ]]; then
+        rm -rf "$lockdir"
+    fi
+}
+trap 'release_lock; rm -f "$job/agent.plist"' EXIT
+acquired=0
+deadline=$(( $(date +%s) + 300 ))
+while (( $(date +%s) < deadline )); do
+    if mkdir "$lockdir" 2>/dev/null; then
+        print $$ > "$lockdir/pid"
+        print $(date +%s) > "$lockdir/started"
+        acquired=1
+        break
+    fi
+    # A lock with no pid file yet is being created right now: wait for the
+    # holder to finish writing it instead of deleting a live lock.
+    holder=""
+    if [[ -f "$lockdir/pid" ]]; then holder=$(<"$lockdir/pid"); fi
+    if [[ -z "$holder" ]]; then sleep 1; continue; fi
+    if kill -0 "$holder" 2>/dev/null; then
+        started=""
+        if [[ -f "$lockdir/started" ]]; then started=$(<"$lockdir/started"); fi
+        case "$started" in ''|*[^0-9]*) sleep 1; continue;; esac
+        if (( $(date +%s) - started <= 300 )); then sleep 1; continue; fi
+    fi
+    rm -rf "$lockdir"
+done
+if (( ! acquired )); then
+    supersede 'Another update is installing; this build stood down'
+fi
+my_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$job/Converse.app/Contents/Info.plist")
+dest_build=0
+if [[ -f "$destination/Contents/Info.plist" ]]; then
+    dest_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$destination/Contents/Info.plist")
+fi
+if (( my_build <= dest_build )); then
+    supersede "build $my_build is not newer than installed build $dest_build"
+fi
+rival_build=0
+for sib in "$root"/install.*; do
+    if [[ ! -d "$sib" || "$sib" == "$job" ]]; then continue; fi
+    if [[ ! -f "$sib/status.txt" ]]; then continue; fi
+    case $(head -1 "$sib/status.txt") in WAITING:*) ;; *) continue;; esac
+    if [[ ! -f "$sib/Converse.app/Contents/Info.plist" ]]; then continue; fi
+    b=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$sib/Converse.app/Contents/Info.plist" 2>/dev/null) || continue
+    if (( b > rival_build )); then rival_build=$b; fi
+done
+if (( rival_build > my_build )); then
+    supersede "newer build $rival_build is staged; build $my_build stood down"
+fi
 mkdir -p "${destination:h}"
 if [[ -e "$destination" ]]; then
     mv "$destination" "$job/Previous Converse.app"
