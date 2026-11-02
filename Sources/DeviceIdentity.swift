@@ -95,10 +95,40 @@ final class DeviceTrustStore {
         guard let device = devices.first(where: { $0.deviceID == deviceID }) else { return .unknown }
         return device.publicKey == publicKey ? .trusted : .keyChanged
     }
+    // Membership generations advance by one per local mutation, so an honest
+    // peer is never far ahead. Records beyond this allowance are ignored
+    // rather than ranked: a compromised member cannot ratchet counters toward
+    // exhaustion, and a tombstone cannot be outranked from afar. Honest
+    // long-offline skew (hundreds of mutations) fits comfortably inside.
+    static let generationSkewAllowance: UInt64 = 1_000_000
     private func nextGeneration() throws -> UInt64 {
         let highest = records.map { $0.generation ?? 0 }.max() ?? 0
-        guard highest < UInt64.max - 2 else { throw CocoaError(.coderInvalidValue) }
+        guard highest < UInt64.max - 2 else {
+            // Exhausted counters compact instead of bricking Forget, Pin and
+            // admissions. Order is preserved, so every rank relationship that
+            // held before still holds after.
+            try renormalizeGenerations()
+            let compacted = records.map { $0.generation ?? 0 }.max() ?? 0
+            guard compacted < UInt64.max - 2 else { throw CocoaError(.coderInvalidValue) }
+            return compacted + 1
+        }
         return highest + 1
+    }
+    private func renormalizeGenerations() throws {
+        let order = records.indices.sorted {
+            let left = records[$0], right = records[$1]
+            if (left.generation ?? 0) != (right.generation ?? 0) { return (left.generation ?? 0) < (right.generation ?? 0) }
+            return left.deviceID < right.deviceID
+        }
+        var next = records
+        for (rank, index) in order.enumerated() { next[index].generation = UInt64(rank + 1) }
+        try save(next); records = next
+    }
+    private static func withinAllowance(_ remote: UInt64?, of local: UInt64?) -> Bool {
+        let local = local ?? 0, remote = remote ?? 0
+        guard remote > local else { return true }
+        guard local < UInt64.max - generationSkewAllowance else { return true }
+        return remote - local <= generationSkewAllowance
     }
     static func boundedName(_ name: String) -> String {
         var bytes = Array(name.utf8.prefix(200))
@@ -149,27 +179,39 @@ final class DeviceTrustStore {
         guard incoming.allSatisfy({ ($0.displayName == nil || Self.validDisplayName($0.displayName!)) &&
             ($0.displayNameGeneration ?? 0) < UInt64.max - 1 && ($0.displayNameBy?.count ?? 0) <= 64 }) else { throw CocoaError(.coderInvalidValue) }
         guard incoming.count <= 512, incoming.allSatisfy({ ($0.groupID == nil || UUID(uuidString: $0.groupID!) != nil) && $0.publicKey.count == 32 && DeviceBlob.sha256Hex($0.publicKey) == $0.deviceID && $0.name.utf8.count <= 200 && ($0.metadataBy?.count ?? 0) <= 64 && ($0.metadataGeneration ?? 0) < UInt64.max - 1 && ($0.changedBy?.count ?? 0) <= 64 && ($0.lastHost?.count ?? 0) <= 253 && ($0.lastPort == nil || (1...65535).contains($0.lastPort!)) && ($0.generation ?? 0) < UInt64.max - 1 }) else { throw CocoaError(.coderInvalidValue) }
+        // A record far past local state is ignored, never ranked: a tombstone
+        // keeps authority over any non-removal far past it (so removal wins
+        // while a genuine readmission, one generation past the tombstone,
+        // still applies), and a far-future membership cannot outrank local
+        // state. Stale or tied records fall through to the rank compare below.
         var next = records
+        let preMergeMax = next.map { $0.generation ?? 0 }.max() ?? 0
         for record in incoming {
             if let index = next.firstIndex(where: { $0.deviceID == record.deviceID }) {
                 let old = next[index]
+                guard Self.withinAllowance(record.generation, of: old.generation) else { continue }
                 let newRank = (record.generation ?? 0, record.removed == true ? 1 : 0, record.changedBy ?? "")
                 let oldRank = (old.generation ?? 0, old.removed == true ? 1 : 0, old.changedBy ?? "")
                 if newRank > oldRank { next[index] = record }
                 else if newRank == oldRank, record.publicKey == old.publicKey, record.groupID == old.groupID {
-                    if (record.metadataGeneration ?? 0, record.metadataBy ?? "") > (old.metadataGeneration ?? 0, old.metadataBy ?? "") {
+                    if Self.withinAllowance(record.metadataGeneration, of: old.metadataGeneration),
+                       (record.metadataGeneration ?? 0, record.metadataBy ?? "") > (old.metadataGeneration ?? 0, old.metadataBy ?? "") {
                     // Hint freshness is independent of admission authority.
                     // No amount of metadata churn can beat a tombstone.
                     next[index].name = record.name; next[index].lastHost = record.lastHost; next[index].lastPort = record.lastPort
                     next[index].metadataGeneration = record.metadataGeneration; next[index].metadataBy = record.metadataBy
                     }
-                    if (record.displayNameGeneration ?? 0, record.displayNameBy ?? "") > (old.displayNameGeneration ?? 0, old.displayNameBy ?? "") {
+                    if Self.withinAllowance(record.displayNameGeneration, of: old.displayNameGeneration),
+                       (record.displayNameGeneration ?? 0, record.displayNameBy ?? "") > (old.displayNameGeneration ?? 0, old.displayNameBy ?? "") {
                         next[index].displayName = record.displayName
                         next[index].displayNameGeneration = record.displayNameGeneration
                         next[index].displayNameBy = record.displayNameBy
                     }
                 }
-            } else { next.append(record) }
+            } else {
+                guard Self.withinAllowance(record.generation, of: preMergeMax) else { continue }
+                next.append(record)
+            }
         }
         guard next.count <= 512 else { throw CocoaError(.coderInvalidValue) }
         guard next != records else { return false }

@@ -1336,6 +1336,38 @@ MdnsChecks.Run(Check);
     } finally { Cleanup(root); }
 }
 
+// A compromised member cannot ratchet membership counters toward exhaustion:
+// far-future records are ignored, and Forget/Pin stay operable by compacting.
+{
+    var root = Directory.CreateTempSubdirectory("converse-revoke-bound-").FullName;
+    try
+    {
+        var a = new DeviceTrustStore(Path.Combine(root, "a"));
+        var b = new DeviceTrustStore(Path.Combine(root, "b"));
+        var key = new byte[32]; var id = DeviceBlob.DeviceIdForPublicKey(key);
+        a.Pin(new TrustedDevice(id, "Member", key, null, null), "a");
+        b.Merge(a.Records);
+        var before = b.Records.Single();
+        var attack = before with { Generation = ulong.MaxValue - 2, ChangedBy = "attacker", Removed = false };
+        b.Merge(new[] { attack });
+        Check(b.Records.Single().Equals(before), "A far-future membership is ignored instead of outranking local state");
+        var poisonDir = Path.Combine(root, "poisoned"); Directory.CreateDirectory(poisonDir);
+        var seed = new TrustedDevice(id, "Victim", key, null, null) with { Generation = ulong.MaxValue - 2, ChangedBy = "attacker" };
+        File.WriteAllText(Path.Combine(poisonDir, "devices.json"), System.Text.Json.JsonSerializer.Serialize(new[] { seed }));
+        var poisoned = new DeviceTrustStore(poisonDir);
+        poisoned.Forget(id, "owner");
+        Check(poisoned.Devices.Count == 0, "Forget succeeds when membership counters are exhausted");
+        poisoned.Pin(new TrustedDevice(id, "Rejoined", key, null, null), "owner");
+        Check(poisoned.Check(id, key) == "trusted" && (poisoned.Records.Single().Generation ?? ulong.MaxValue) < 1000, "Admission compacts exhausted counters and succeeds");
+        poisoned.Merge(new[] { attack });
+        Check(poisoned.Check(id, key) == "trusted" && (poisoned.Records.Single().Generation ?? ulong.MaxValue) < 1000, "A far-future resuscitation cannot outrank the local member");
+        poisoned.Forget(id, "owner");
+        poisoned.Merge(new[] { attack });
+        Check(poisoned.Devices.Count == 0, "A far-future resuscitation cannot resurrect a locally removed member");
+    }
+    finally { Cleanup(root); }
+}
+
 // Join codes match: the joiner's prompt equals the sponsor's live review code.
 {
     var homeRoot = Directory.CreateTempSubdirectory("converse-codeeq-").FullName;
