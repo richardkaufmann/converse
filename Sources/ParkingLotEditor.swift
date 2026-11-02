@@ -136,12 +136,17 @@ struct ParkingLotEditor: NSViewRepresentable {
         var displayedCollapsed: Set<UUID> = []
         var rendering = false
         init(_ parent: ParkingLotEditor) { self.parent = parent }
+        var displayedWidth: CGFloat = 0
         func render(caret: (UUID, Int)? = nil) {
-            guard let text, caret != nil || displayed != parent.lot.document || displayedCollapsed != parent.collapsed else { return }
+            guard let text else { return }
+            // Image rows reserve space for their drawn height at the current
+            // width, so a resize that changes the width must re-render too.
+            let width = min(ParkingOutlineText.lotImageWidth, (text.textContainer?.containerSize.width ?? 400) - 10)
+            guard caret != nil || displayed != parent.lot.document || displayedCollapsed != parent.collapsed || displayedWidth != width else { return }
             let oldSelection = text.selectedRange()
             let oldAnchor = projection.index(at: oldSelection.location).map { (projection.entries[$0].row.id, oldSelection.location - projection.entries[$0].range.location) }
             rendering = true; defer { rendering = false }
-            displayed = parent.lot.document; displayedCollapsed = parent.collapsed
+            displayed = parent.lot.document; displayedCollapsed = parent.collapsed; displayedWidth = width
             projection = ParkingOutline(rows: parent.lot.document.rows, collapsed: parent.collapsed, placeholders: &placeholders)
             let body = NSMutableAttributedString(string: projection.string)
             let standard = NSMutableParagraphStyle(); standard.paragraphSpacing = 5
@@ -152,7 +157,6 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
             for entry in projection.entries where !(entry.row.images ?? []).isEmpty {
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle
-                let width = min(ParkingOutlineText.lotImageWidth, (text.textContainer?.containerSize.width ?? 400) - 10)
                 let sizes = text.lotImageSizes(entry.row.images!, width: width).compactMap { $0 }
                 style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
@@ -616,6 +620,15 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     check(imageText.lotImageSizes(["/nonexistent/missing.png"], width: 320).compactMap { $0 }.isEmpty, "Unloadable images reserve no space")
     imageText.undo(nil)
     check(imageLot.document.rows.first { $0.id == imageRow.id }!.images == savedImages, "Undo removes the second pasted image and restores single-image state")
+    // Narrowing the pane must re-reserve the smaller drawn height.
+    imageText.textContainer?.containerSize.width = 210
+    imageCoordinator.render()
+    let narrowedWidth: CGFloat = min(320, 210 - 10)
+    let narrowedScale: CGFloat = min(narrowedWidth / 100, 106 / 50)
+    let narrowedHeight: CGFloat = 50 * narrowedScale
+    let narrowedEntry = imageCoordinator.projection.entries.first { $0.row.id == imageRow.id }!
+    let narrowedStyle = imageText.textStorage?.attribute(.paragraphStyle, at: narrowedEntry.range.location, effectiveRange: nil) as? NSParagraphStyle
+    check(narrowedStyle != nil && abs(narrowedStyle!.paragraphSpacing - (5 + 6 + narrowedHeight + 6)) < 0.5, "Resizing the pane re-reserves image height without an edit")
     imageCoordinator.copyEntry(imageRow.id, cut: true, board: board)
     check(!imageLot.document.rows.contains { $0.id == imageRow.id }, "Cut Item removes the item and its attached image together")
     imageText.setSelectedRange(imageCoordinator.projection.entries.last!.range)
