@@ -202,6 +202,7 @@ public sealed class DeviceSidebarRow
     [JsonPropertyName("messagingEnabled")] public bool? MessagingEnabled { get; set; }
     [JsonPropertyName("participantKind")] public string? ParticipantKind { get; set; }
     [JsonPropertyName("attention")] public string? Attention { get; set; }
+    [JsonPropertyName("linkedSessionIDs")] public string[]? LinkedSessionIDs { get; set; }
 
 }
 

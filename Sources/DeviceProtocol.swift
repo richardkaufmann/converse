@@ -127,6 +127,19 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var messagingEnabled: Bool? = nil
     var participantKind: String? = nil
     var attention: String? = nil
+    var linkedSessionIDs: [String]? = nil
+}
+
+// Discovery metadata only; links never confer permission to read or edit.
+struct ParkingLotRoute: Codable, Equatable {
+    var id: UUID
+    var globalID: String
+    var name: String
+    var homeDeviceID: String
+    var homeDeviceName: String
+    var online: Bool
+    var linkedToMe: Bool
+    var access: String
 }
 
 struct DeviceSidebarPayload: Codable, Equatable {

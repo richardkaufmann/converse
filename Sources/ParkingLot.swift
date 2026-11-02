@@ -215,6 +215,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
 }
 
 struct ParkingLotSidebar: View {
+    @State private var showingLinks = false
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
@@ -241,9 +242,11 @@ struct ParkingLotSidebar: View {
             }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .contextMenu {
+                Button("Linked Sessions…") { showingLinks = true }
                 Button("Rename Parking Lot…") { ParkingLotLibrary.shared.promptRename(lot) }
                 Button("Delete Parking Lot…") { ParkingLotLibrary.shared.promptDelete(lot) }
             }
+            .sheet(isPresented: $showingLinks) { ParkingLotLinksView(lot: lot) }
     }
 }
 struct ParkingLotView: View {

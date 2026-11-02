@@ -109,6 +109,30 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         a.reviewGroupRequest(a.groupRequests[0]); a.approveGroupReview(); b.confirmPairing()
         let aid = a.identity!.deviceID, bid = b.identity!.deviceID
         guard pump({ a.homes[bid]?.rows.contains(where: { $0.sessionID == target.id }) == true && b.homes[aid]?.online == true }) else { check(false, "Group tell homes exchange directory metadata"); return }
+        let linkedLot = try b.parkingLibrary.create(name: "Linked Group ideas")
+        let sourceID = DeviceGlobalID(home: aid, session: source.id).string
+        let targetID = DeviceGlobalID(home: bid, session: target.id).string
+        let staleID = DeviceGlobalID(home: "former-group", session: UUID()).string
+        try b.parkingLibrary.setLinks(linkedLot.id, to: [sourceID, targetID, staleID], expected: [])
+        check(pump { a.parkingLotDirectory(for: source.id, linkedOnly: true).contains { $0.id == linkedLot.id } }, "Linked lot metadata reaches another Group home over authenticated transport")
+        check(b.publishedParkingLotLinks(linkedLot.id).contains(sourceID) && !b.publishedParkingLotLinks(linkedLot.id).contains(staleID), "Published lot links exclude unavailable and previous-Group targets")
+        check(a.parkingLotDirectory(for: UUID(), linkedOnly: true).isEmpty, "Linked-only lookup matches the requesting identity rather than a title")
+        let noAccess = a.parkingLotDirectory(for: source.id, agent: AgentConfig(), linkedOnly: true)
+        check(noAccess.first?.access == "requires Agent Setup access", "Linking an agent never grants content access")
+        source.switchboardTurnStart = source.messages.count
+        let linkedLookup = "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```"
+        source.messages.append(Message(role: "assistant", text: linkedLookup, finalReply: linkedLookup))
+        sa.processSwitchboard(source)
+        check(source.pending.last?.text.contains("Linked Group ideas") == true && source.pending.last?.text.contains("linkedToMe") == true, "Session linked-lot command returns live discovery metadata")
+        source.pending.removeAll()
+        try b.parkingLibrary.rename(linkedLot.id, to: "Renamed linked ideas")
+        check(pump { a.parkingLotDirectory(for: source.id, linkedOnly: true).first?.name == "Renamed linked ideas" }, "Renaming a Group lot preserves its links and updates discovery")
+        let joinedGroup = a.currentGroup; a.currentGroup = nil
+        check(a.parkingLotDirectory(for: source.id, linkedOnly: true).isEmpty, "Cached lots from a former Group are not discoverable")
+        a.currentGroup = joinedGroup
+        try b.parkingLibrary.setLinks(linkedLot.id, to: [], expected: [sourceID, targetID, staleID])
+        check(pump { a.parkingLotDirectory(for: source.id, linkedOnly: true).isEmpty }, "Unlinking propagates without deleting the lot")
+        try b.parkingLibrary.delete(linkedLot.id)
         let gid = DeviceGlobalID(home: bid, session: target.id).string
         let directory = sa.switchboardDirectory(for: source)
         check(directory.contains(gid) && directory.contains("Group receiver") && directory.contains("homeDeviceName"), "list-sessions includes same-group remote participants and their homes")

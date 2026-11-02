@@ -766,7 +766,7 @@ extension DeviceSyncService {
         let parkingRows = parkingLibrary.lots.filter(\.active).map { lot in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot.id).string, sessionID: lot.id,
                              title: lot.name, assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only",
-                             status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false, messagingEnabled: false, participantKind: "parkingLot")
+                             status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false, messagingEnabled: false, participantKind: "parkingLot", linkedSessionIDs: publishedParkingLotLinks(lot.id))
         }
         #else
         let parkingRows: [DeviceSidebarRow] = []

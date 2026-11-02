@@ -75,6 +75,27 @@ static class SwitchboardSupervisionChecks
             home.PairingConfirmation = _ => Task.FromResult(true); peerHome.PairingConfirmation = _ => Task.FromResult(true);
             await home.StartAsync(0, false); await peerHome.StartAsync(0, false);
             check(await join(home, peerHome, () => home.IsParticipantAllowed(peerHome.DeviceId, home.CurrentGroup?.Id) && peerHome.IsParticipantAllowed(home.DeviceId, peerHome.CurrentGroup?.Id)), "Supervision test homes join over authenticated loopback");
+            var lotID = Guid.NewGuid();
+            var lotGlobal = new DeviceGlobalID(peerHome.DeviceId, lotID).ToString();
+            var linkedRow = DeviceJson.Decode<DeviceSidebarRow>(DeviceJson.Encode(new DeviceSidebarRow { GlobalID = lotGlobal, SessionID = lotID, Title = "Linked Mac lot", Engine = "parking", ParticipantKind = "parkingLot", LinkedSessionIDs = new[] { ID(asker) } }));
+            var remoteRows = home.Homes[peerHome.DeviceId].Rows;
+            remoteRows.Add(linkedRow);
+            var linked = System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true));
+            check(linked.Contains("Linked Mac lot") && linked.Contains("linkedToMe\":true") && home.ParkingLotDirectory(answerer, true).Length == 0, "Windows discovers Group lots linked to the exact session identity");
+            var beforeDirectory = asker.Pending.Count;
+            store.FinalParticipantReply!(asker, "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```");
+            check(asker.Pending.Count == beforeDirectory + 1 && asker.Pending.Last().Text.Contains("Linked Mac lot"), "Windows session command returns linked lot discovery");
+            asker.Agent = new AgentConfig();
+            check(System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("requires Agent Setup access"), "Windows linked agent gets no content permission implicitly");
+            asker.Agent.Settings.Watched.Add(lotGlobal);
+            check(System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("scoped Group read-only evidence"), "Windows scoped agent sees the actual read-only capability");
+            asker.Agent = null;
+            var outsiderID = new string('c', 64);
+            home.Homes[outsiderID] = new RemoteHomeState { DeviceID = outsiderID, DeviceName = "Old Group", Online = true, Rows = new() { linkedRow } };
+            check(home.ParkingLotDirectory(asker, true).Length == 1, "Windows excludes cached lots outside the current Group");
+            home.Homes.Remove(outsiderID); remoteRows.Remove(linkedRow);
+            check(DeviceJson.Decode<DeviceSidebarRow>(System.Text.Encoding.UTF8.GetBytes("{}" )).LinkedSessionIDs is null, "Older sidebar rows remain compatible without links");
+
             async Task<bool> Until(Func<bool> done) { for (var i = 0; i < 200 && !done(); i++) await Task.Delay(25); return done(); }
             var remoteID = new DeviceGlobalID(peerHome.DeviceId, remote.Id).ToString();
             await Until(() => home.Homes.GetValueOrDefault(peerHome.DeviceId)?.Rows.Any(r => r.GlobalID == remoteID) == true && peerHome.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == ID(a)) == true);

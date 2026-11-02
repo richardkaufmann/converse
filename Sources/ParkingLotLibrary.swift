@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class ParkingLotLibrary: ObservableObject {
-    struct Record: Codable, Equatable, Identifiable { var id: UUID; var name: String }
+    struct Record: Codable, Equatable, Identifiable { var id: UUID; var name: String; var linkedSessionIDs: [String]? = nil }
     static let shared = ParkingLotLibrary(folder: Store.shared.folder)
     @Published private(set) var records: [Record] = []
     @Published var error = ""
@@ -44,6 +44,16 @@ final class ParkingLotLibrary: ObservableObject {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, title.count <= 100, let index = records.firstIndex(where: { $0.id == id }) else { throw AgentFailure.message("Choose a name of 1–100 characters.") }
         var next = records; next[index].name = title; try save(next); cache[id]?.name = title
+    }
+    func links(_ id: UUID) -> [String] { records.first { $0.id == id }?.linkedSessionIDs ?? [] }
+    func setLinks(_ id: UUID, to links: [String], expected: [String]) throws {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { throw AgentFailure.message("This Parking Lot was deleted.") }
+        guard Set(self.links(id)) == Set(expected) else { throw AgentFailure.message("Links changed while this window was open. Reopen Linked Sessions and try again.") }
+        let parsed = links.compactMap { DeviceGlobalID($0)?.string }
+        guard parsed.count == links.count, links.count <= 256 else { throw AgentFailure.message("Choose up to 256 valid sessions.") }
+        var next = records
+        next[index].linkedSessionIDs = Array(Set(parsed)).sorted()
+        try save(next)
     }
     func delete(_ id: UUID) throws {
         guard let lot = lot(id), let record = records.first(where: { $0.id == id }) else { return }
@@ -316,8 +326,17 @@ func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
         check(library.records.count == 1 && library.lot(ParkingLotStore.id)?.document == legacy.document, "Named lots preserve legacy identity, content and agent scope")
         let other = try library.create(name: "KAOS")
         check(other.id != ParkingLotStore.id && other.document.rows.count == 4, "New lots have independent identities and content")
+        let linkedID = DeviceGlobalID(home: "local-home", session: UUID()).string
+        check(library.links(other.id).isEmpty, "Legacy catalogs default to no linked sessions")
+        try library.setLinks(other.id, to: [linkedID, linkedID], expected: [])
+        check(library.links(other.id) == [linkedID], "Parking Lot links use stable global identities and deduplicate")
+        do { try library.setLinks(other.id, to: [], expected: []); check(false, "Stale link update rejected") }
+        catch { check(library.links(other.id) == [linkedID], "Stale link settings cannot overwrite a newer selection") }
+        do { try library.setLinks(other.id, to: ["bad"], expected: [linkedID]); check(false, "Invalid link rejected") }
+        catch { check(library.links(other.id) == [linkedID], "Malformed link cannot damage the catalog") }
         try library.rename(ParkingLotStore.id, to: "Converse")
         let reloaded = ParkingLotLibrary(folder: folder)
+        check(reloaded.links(other.id) == [linkedID], "Linked sessions survive rename and restart without changing outline revisions")
         check(reloaded.records.map(\.name) == ["Converse", "KAOS"] && reloaded.lot(other.id)?.document == other.document, "Named lot catalog and documents survive restart")
         check(try Data(contentsOf: folder.appendingPathComponent("parking-lot.json")) == bytes, "Catalog migration never rewrites existing notes")
         var config = AgentConfig(); config.watchedSessions = [other.id]
@@ -386,5 +405,111 @@ final class ParkingLotUndoResponder: NSView, NSUserInterfaceValidations {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
         return false
+    }
+}
+
+import AppKit
+import SwiftUI
+
+struct ParkingLotLinkTarget: Identifiable {
+    var id: String
+    var title: String
+    var home: String
+    var agent: Bool
+    var online: Bool
+}
+
+extension DeviceSyncService {
+    var parkingLotLinkTargets: [ParkingLotLinkTarget] {
+        guard let home = localDeviceID else { return [] }
+        let local = participantStore.sessions.map {
+            ParkingLotLinkTarget(id: DeviceGlobalID(home: home, session: $0.id).string,
+                                 title: $0.title, home: (deviceNameOverride ?? identity?.deviceName ?? "Converse"), agent: $0.agent != nil, online: true)
+        }
+        let remote = participantHomes.flatMap { host in
+            host.rows.filter { $0.engine != "parking" && $0.participantKind != "parkingLot" }.map {
+                ParkingLotLinkTarget(id: $0.globalID, title: $0.title, home: host.deviceName,
+                                     agent: $0.participantKind == "agent", online: host.online)
+            }
+        }
+        return (local + remote).sorted { ($0.home + $0.title + $0.id).localizedStandardCompare($1.home + $1.title + $1.id) == .orderedAscending }
+    }
+    func publishedParkingLotLinks(_ id: UUID) -> [String] {
+        // Stale/deleted and previous-Group references remain editable locally,
+        // but do not travel to the new Group or get rebound by display name.
+        let available = Set(parkingLotLinkTargets.map(\.id))
+        return parkingLibrary.links(id).filter { available.contains($0) }
+    }
+    func parkingLotDirectory(for sessionID: UUID, agent: AgentConfig? = nil, linkedOnly: Bool = false) -> [ParkingLotRoute] {
+        guard let home = localDeviceID else { return [] }
+        let selfID = DeviceGlobalID(home: home, session: sessionID).string
+        let local = parkingLibrary.records.map { record in
+            ParkingLotRoute(id: record.id, globalID: DeviceGlobalID(home: home, session: record.id).string,
+                            name: record.name, homeDeviceID: home, homeDeviceName: (deviceNameOverride ?? identity?.deviceName ?? "Converse"), online: true,
+                            linkedToMe: parkingLibrary.links(record.id).contains(selfID),
+                            access: agent.map { $0.allows(local: record.id, home: home) ? "scoped local read/edit" : "requires Agent Setup access" } ?? "local read; edits require review")
+        }
+        let remote = participantHomes.flatMap { host in
+            host.rows.filter { $0.engine == "parking" || $0.participantKind == "parkingLot" }.map { row in
+                ParkingLotRoute(id: row.sessionID, globalID: row.globalID, name: row.title,
+                                homeDeviceID: host.deviceID, homeDeviceName: host.deviceName, online: host.online,
+                                linkedToMe: row.linkedSessionIDs?.contains(selfID) == true,
+                                access: agent.map { $0.allows(global: row.globalID, home: home) ? "scoped Group read-only evidence" : "requires Agent Setup access" } ?? "Group viewer read only; read/edit commands run on the home device")
+            }
+        }
+        return (local + remote).filter { !linkedOnly || $0.linkedToMe }
+            .sorted { ($0.homeDeviceName + $0.name + $0.globalID).localizedStandardCompare($1.homeDeviceName + $1.name + $1.globalID) == .orderedAscending }
+    }
+}
+
+struct ParkingLotLinksView: View {
+    let lot: ParkingLotStore
+    @ObservedObject var library = ParkingLotLibrary.shared
+    @ObservedObject var service = DeviceSyncService.shared
+    @ObservedObject var store = Store.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected: Set<String> = []
+    @State private var original: [String] = []
+    @State private var error = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Linked Sessions · " + lot.name).font(.headline)
+            Text("Choose the sessions and agents this Parking Lot is for. They can ask which lots are linked to them. Links do not send messages or grant agent access.").font(.callout)
+            List {
+                ForEach(service.parkingLotLinkTargets) { target in
+                    Toggle(isOn: binding(target.id)) {
+                        HStack {
+                            Text(target.title + (target.agent ? " 😎" : ""))
+                            Spacer()
+                            Text(target.home + (target.online ? "" : " · offline")).foregroundStyle(.secondary)
+                        }
+                    }.toggleStyle(.checkbox)
+                }
+                ForEach(Array(selected.subtracting(service.parkingLotLinkTargets.map(\.id))).sorted(), id: \.self) { id in
+                    Toggle("Unavailable session · " + id, isOn: binding(id)).toggleStyle(.checkbox)
+                        .help("Deleted, offline without a cached directory, or outside this Group. Uncheck to remove the link.")
+                }
+            }.frame(minHeight: 200)
+            if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            HStack {
+                Text("Agents still need the lot selected in Agent Setup.").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    do {
+                        let available = Set(service.parkingLotLinkTargets.map(\.id))
+                        guard selected.subtracting(original).isSubset(of: available) else {
+                            throw AgentFailure.message("A selected session is no longer available. Reopen this window to refresh the choices.")
+                        }
+                        try library.setLinks(lot.id, to: Array(selected), expected: original)
+                        dismiss()
+                    } catch { self.error = error.localizedDescription }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(20).frame(width: 590, height: 420)
+            .onAppear { original = library.links(lot.id); selected = Set(original) }
+    }
+    private func binding(_ id: String) -> Binding<Bool> {
+        Binding(get: { selected.contains(id) }, set: { if $0 { selected.insert(id) } else { selected.remove(id) } })
     }
 }
