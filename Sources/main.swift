@@ -277,7 +277,7 @@ final class Store: ObservableObject {
             setupCompleted = FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path)
             entries = SetupCatalog.entries
         }
-        for session in sessions { attachIdentity(session); importResponseImages(session) }
+        for session in sessions { attachIdentity(session); importResponseImages(session, allowRemote: false) }
         if !sessions.isEmpty { save() }
     }
     deinit { configurationAudit.record("store_closed") }

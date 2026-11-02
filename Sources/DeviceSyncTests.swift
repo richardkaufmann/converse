@@ -824,6 +824,25 @@ func fabricTrustSelfTests(_ check: (Bool, String) -> Void) {
         invalid = a.records[0]; invalid.generation = UInt64.max
         do { _ = try b.merge([invalid]); check(false, "Fabric rejects exhausted generation") }
         catch { check(b.records == before, "Fabric rejects exhausted generation without poisoning future admissions") }
+        var attack = a.records[0]; attack.generation = UInt64.max - 2; attack.changedBy = "attacker"; attack.removed = false
+        let beforeAttack = b.records
+        _ = try b.merge([attack])
+        check(b.records == beforeAttack, "A far-future membership is ignored instead of outranking local state")
+        let poisonDir = root.appendingPathComponent("poisoned")
+        try FileManager.default.createDirectory(at: poisonDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var seed = TrustedDevice(deviceID: id, name: "Victim", publicKey: key, pairedAt: Date())
+        seed.generation = UInt64.max - 2; seed.changedBy = "attacker"
+        try JSONEncoder().encode([seed]).write(to: poisonDir.appendingPathComponent("devices.json"))
+        let poisonedStore = try DeviceTrustStore(folder: poisonDir)
+        try poisonedStore.forget(deviceID: id, issuer: "owner")
+        check(poisonedStore.devices.isEmpty, "Forget succeeds when membership counters are exhausted")
+        try poisonedStore.pin(deviceID: id, name: "Rejoined", publicKey: key, issuer: "owner")
+        check(poisonedStore.check(deviceID: id, publicKey: key) == .trusted && (poisonedStore.records.first?.generation ?? UInt64.max) < 1000, "Admission compacts exhausted counters and succeeds")
+        _ = try poisonedStore.merge([attack])
+        check(poisonedStore.check(deviceID: id, publicKey: key) == .trusted && (poisonedStore.records.first?.generation ?? UInt64.max) < 1000, "A far-future resuscitation cannot outrank the local member")
+        try poisonedStore.forget(deviceID: id, issuer: "owner")
+        _ = try poisonedStore.merge([attack])
+        check(poisonedStore.devices.isEmpty, "A far-future resuscitation cannot resurrect a locally removed member")
         let untrusted = DeviceSyncService(); try untrusted.configureForTesting(folder: root.appendingPathComponent("untrusted"))
         let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp), isInitiator: false, displayName: "Untrusted")
         peer.hello = DeviceHello(deviceID: "unknown", deviceName: "Unknown", converseVersion: "test")

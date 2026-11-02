@@ -57,12 +57,40 @@ public sealed class DeviceTrustStore
         if (device is null) return "unknown";
         return device.PublicKey.AsSpan().SequenceEqual(publicKey) ? "trusted" : "keyChanged";
     }
+    // Membership generations advance by one per local mutation, so an honest
+    // peer is never far ahead. Records beyond this allowance are ignored
+    // rather than ranked: a compromised member cannot ratchet counters toward
+    // exhaustion, and a tombstone cannot be outranked from afar (Mac parity).
+    private static readonly ulong GenerationSkewAllowance = 1_000_000;
+    private static bool WithinAllowance(ulong? remote, ulong? local)
+    {
+        var l = local ?? 0; var r = remote ?? 0;
+        if (r <= l) return true;
+        if (l >= ulong.MaxValue - GenerationSkewAllowance) return true;
+        return r - l <= GenerationSkewAllowance;
+    }
     private ulong NextGeneration()
     {
         var highest = Math.Max(_generationFloor,
             _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max());
-        if (highest >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
-        return highest + 1;
+        if (highest < ulong.MaxValue - 2) return highest + 1;
+        // Exhausted counters compact instead of bricking Forget, Pin and
+        // admissions. Order is preserved, so every rank relationship holds.
+        RenormalizeGenerations();
+        var compacted = Math.Max(_generationFloor,
+            _records.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max());
+        if (compacted >= ulong.MaxValue - 2) throw new InvalidDataException("Membership counter exhausted");
+        return compacted + 1;
+    }
+    private void RenormalizeGenerations()
+    {
+        var order = _records.Select((d, i) => i)
+            .OrderBy(i => _records[i].Generation ?? 0).ThenBy(i => _records[i].DeviceID, StringComparer.Ordinal).ToList();
+        var next = _records.ToList();
+        for (var rank = 0; rank < order.Count; rank++)
+            next[order[rank]] = next[order[rank]] with { Generation = (ulong)(rank + 1) };
+        Save(next);
+        _records = next;
     }
 
     public ulong NextGenerationFloor =>
@@ -173,12 +201,21 @@ public sealed class DeviceTrustStore
                 || (d.ChangedBy?.Length ?? 0) > 64 || (d.LastHost?.Length ?? 0) > 253 || d.LastPort is < 1 or > 65535
                 || (d.Generation ?? 0) >= ulong.MaxValue - 1)) throw new InvalidDataException("Invalid membership");
             var next = _records.ToList();
+            var preMergeMax = next.Select(d => d.Generation ?? 0).DefaultIfEmpty().Max();
             var changed = false;
             foreach (var member in incoming)
             {
                 var index = next.FindIndex(d => d.DeviceID == member.DeviceID);
-                if (index < 0) { next.Add(member); changed = true; continue; }
+                if (index < 0)
+                {
+                    // A far-future introduction is ignored, never appended.
+                    if (!WithinAllowance(member.Generation, preMergeMax)) continue;
+                    next.Add(member); changed = true; continue;
+                }
                 var old = next[index];
+                // A record far past local state is ignored, never ranked: a
+                // tombstone keeps authority over any non-removal far past it.
+                if (!WithinAllowance(member.Generation, old.Generation)) continue;
                 var newer = (member.Generation ?? 0) > (old.Generation ?? 0)
                     || ((member.Generation ?? 0) == (old.Generation ?? 0) && ((member.Removed == true && old.Removed != true)
                     || ((member.Removed == true) == (old.Removed == true) && string.CompareOrdinal(member.ChangedBy ?? "", old.ChangedBy ?? "") > 0)));
@@ -186,9 +223,10 @@ public sealed class DeviceTrustStore
                 else if ((member.Generation ?? 0) == (old.Generation ?? 0) && (member.Removed == true) == (old.Removed == true)
                     && (member.ChangedBy ?? "") == (old.ChangedBy ?? "") && old.GroupID == member.GroupID && old.PublicKey.AsSpan().SequenceEqual(member.PublicKey))
                 {
-                    if ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0)
+                    if (WithinAllowance(member.MetadataGeneration, old.MetadataGeneration)
+                        && ((member.MetadataGeneration ?? 0) > (old.MetadataGeneration ?? 0)
                     || ((member.MetadataGeneration ?? 0) == (old.MetadataGeneration ?? 0)
-                    && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0)) {
+                    && string.CompareOrdinal(member.MetadataBy ?? "", old.MetadataBy ?? "") > 0))) {
                     next[index] = old with
                     {
                         Name = member.Name, LastHost = member.LastHost, LastPort = member.LastPort,
@@ -196,9 +234,10 @@ public sealed class DeviceTrustStore
                     };
                     changed = true;
                     }
-                    if ((member.DisplayNameGeneration ?? 0) > (old.DisplayNameGeneration ?? 0)
+                    if (WithinAllowance(member.DisplayNameGeneration, old.DisplayNameGeneration)
+                        && ((member.DisplayNameGeneration ?? 0) > (old.DisplayNameGeneration ?? 0)
                         || ((member.DisplayNameGeneration ?? 0) == (old.DisplayNameGeneration ?? 0)
-                        && string.CompareOrdinal(member.DisplayNameBy ?? "", old.DisplayNameBy ?? "") > 0))
+                        && string.CompareOrdinal(member.DisplayNameBy ?? "", old.DisplayNameBy ?? "") > 0)))
                     {
                         next[index] = next[index] with { DisplayName = member.DisplayName,
                             DisplayNameGeneration = member.DisplayNameGeneration, DisplayNameBy = member.DisplayNameBy };

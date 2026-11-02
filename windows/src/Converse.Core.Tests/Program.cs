@@ -1336,6 +1336,38 @@ MdnsChecks.Run(Check);
     } finally { Cleanup(root); }
 }
 
+// A compromised member cannot ratchet membership counters toward exhaustion:
+// far-future records are ignored, and Forget/Pin stay operable by compacting.
+{
+    var root = Directory.CreateTempSubdirectory("converse-revoke-bound-").FullName;
+    try
+    {
+        var a = new DeviceTrustStore(Path.Combine(root, "a"));
+        var b = new DeviceTrustStore(Path.Combine(root, "b"));
+        var key = new byte[32]; var id = DeviceBlob.DeviceIdForPublicKey(key);
+        a.Pin(new TrustedDevice(id, "Member", key, null, null), "a");
+        b.Merge(a.Records);
+        var before = b.Records.Single();
+        var attack = before with { Generation = ulong.MaxValue - 2, ChangedBy = "attacker", Removed = false };
+        b.Merge(new[] { attack });
+        Check(b.Records.Single().Equals(before), "A far-future membership is ignored instead of outranking local state");
+        var poisonDir = Path.Combine(root, "poisoned"); Directory.CreateDirectory(poisonDir);
+        var seed = new TrustedDevice(id, "Victim", key, null, null) with { Generation = ulong.MaxValue - 2, ChangedBy = "attacker" };
+        File.WriteAllText(Path.Combine(poisonDir, "devices.json"), System.Text.Json.JsonSerializer.Serialize(new[] { seed }));
+        var poisoned = new DeviceTrustStore(poisonDir);
+        poisoned.Forget(id, "owner");
+        Check(poisoned.Devices.Count == 0, "Forget succeeds when membership counters are exhausted");
+        poisoned.Pin(new TrustedDevice(id, "Rejoined", key, null, null), "owner");
+        Check(poisoned.Check(id, key) == "trusted" && (poisoned.Records.Single().Generation ?? ulong.MaxValue) < 1000, "Admission compacts exhausted counters and succeeds");
+        poisoned.Merge(new[] { attack });
+        Check(poisoned.Check(id, key) == "trusted" && (poisoned.Records.Single().Generation ?? ulong.MaxValue) < 1000, "A far-future resuscitation cannot outrank the local member");
+        poisoned.Forget(id, "owner");
+        poisoned.Merge(new[] { attack });
+        Check(poisoned.Devices.Count == 0, "A far-future resuscitation cannot resurrect a locally removed member");
+    }
+    finally { Cleanup(root); }
+}
+
 // Join codes match: the joiner's prompt equals the sponsor's live review code.
 {
     var homeRoot = Directory.CreateTempSubdirectory("converse-codeeq-").FullName;
@@ -2072,6 +2104,27 @@ MdnsChecks.Run(Check);
         var outside = new ChatMessage { Role = "assistant", Text = "![x](/etc/hosts)" };
         Check(!await ResponseImages.ImportAsync(dataDir, session, outside) && outside.Images.Count == 0
             && outside.Text.Contains("!["), "Refs outside the roots stay untouched");
+        Check(ResponseImages.CanonicalWebImageUrl("https://h.example/p?x=1#f")?.AbsoluteUri == "https://h.example/p",
+            "Image fetch drops query and fragment");
+        Check(ResponseImages.CanonicalWebImageUrl("https://h.example:443/p")?.AbsoluteUri == "https://h.example/p",
+            "Explicit default image port stays fetchable");
+        Check(ResponseImages.CanonicalWebImageUrl("http://h.example/p") is null
+            && ResponseImages.CanonicalWebImageUrl("https://u:p@h.example/p") is null
+            && ResponseImages.CanonicalWebImageUrl("https://h.example:8443/p") is null
+            && ResponseImages.CanonicalWebImageUrl("not a url") is null,
+            "Image fetch rejects insecure, credentialed, off-port and malformed refs");
+        Check(!ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("10.0.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("192.168.1.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("127.0.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("169.254.1.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("100.64.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("192.0.2.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("::1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("2001:db8::1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("::ffff:10.0.0.1"))
+            && ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("8.8.8.8"))
+            && ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("2606:4700:4700::1111")),
+            "Image destination checks reject private, reserved and mapped addresses");
     }
     finally { Cleanup(dataDir); Cleanup(workDir); }
 }
