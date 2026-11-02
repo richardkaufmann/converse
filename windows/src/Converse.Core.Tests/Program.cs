@@ -2104,6 +2104,27 @@ MdnsChecks.Run(Check);
         var outside = new ChatMessage { Role = "assistant", Text = "![x](/etc/hosts)" };
         Check(!await ResponseImages.ImportAsync(dataDir, session, outside) && outside.Images.Count == 0
             && outside.Text.Contains("!["), "Refs outside the roots stay untouched");
+        Check(ResponseImages.CanonicalWebImageUrl("https://h.example/p?x=1#f")?.AbsoluteUri == "https://h.example/p",
+            "Image fetch drops query and fragment");
+        Check(ResponseImages.CanonicalWebImageUrl("https://h.example:443/p")?.AbsoluteUri == "https://h.example/p",
+            "Explicit default image port stays fetchable");
+        Check(ResponseImages.CanonicalWebImageUrl("http://h.example/p") is null
+            && ResponseImages.CanonicalWebImageUrl("https://u:p@h.example/p") is null
+            && ResponseImages.CanonicalWebImageUrl("https://h.example:8443/p") is null
+            && ResponseImages.CanonicalWebImageUrl("not a url") is null,
+            "Image fetch rejects insecure, credentialed, off-port and malformed refs");
+        Check(!ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("10.0.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("192.168.1.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("127.0.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("169.254.1.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("100.64.0.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("192.0.2.1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("::1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("2001:db8::1"))
+            && !ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("::ffff:10.0.0.1"))
+            && ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("8.8.8.8"))
+            && ResponseImages.IsPublicAddress(System.Net.IPAddress.Parse("2606:4700:4700::1111")),
+            "Image destination checks reject private, reserved and mapped addresses");
     }
     finally { Cleanup(dataDir); Cleanup(workDir); }
 }

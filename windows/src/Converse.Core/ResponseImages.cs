@@ -158,7 +158,58 @@ public static class ResponseImages
             && (long)width * height <= 64_000_000;
     }
 
-    private static readonly HttpClient WebClient = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private static readonly HttpClient NoRedirectClient = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(30) };
+
+    // Canonical fetch form: https, no credentials, default port, and no
+    // query or fragment — model output can smuggle private context into
+    // either, and the host plus path identify the fetch. Null means never
+    // fetch this ref.
+    public static Uri? CanonicalWebImageUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed)) return null;
+        if (!parsed.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!string.IsNullOrEmpty(parsed.UserInfo)) return null;
+        if (!parsed.IsDefaultPort && parsed.Port != 443) return null;
+        var builder = new UriBuilder(parsed) { Query = "", Fragment = "" };
+        builder.Port = -1;
+        return builder.Uri;
+    }
+
+    // Mac allowedIPv4/publicHTTPS parity: link-local, private, reserved and
+    // documentation ranges never fetch, so a prompt-injected URL cannot probe
+    // the LAN. Hostnames resolve first; every returned address must pass.
+    public static bool IsPublicAddress(System.Net.IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        var bytes = address.GetAddressBytes();
+        if (bytes.Length == 4)
+        {
+            var (a, b, c) = (bytes[0], bytes[1], bytes[2]);
+            if (a == 0 || a == 10 || a == 127 || a >= 224) return false;
+            if (a == 100 && b >= 64 && b <= 127) return false;
+            if (a == 169 && b == 254) return false;
+            if (a == 172 && b >= 16 && b <= 31) return false;
+            if (a == 192 && (b == 168 || b == 0 || (b == 88 && c == 99))) return false;
+            if (a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) return false;
+            if (a == 203 && b == 0 && c == 113) return false;
+            return true;
+        }
+        if (bytes.Length == 16)
+        {
+            if ((bytes[0] & 0xe0) != 0x20) return false;
+            if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
+            return true;
+        }
+        return false;
+    }
+
+    public static async Task<bool> IsPublicHostAsync(string host)
+    {
+        System.Net.IPAddress[] addresses;
+        try { addresses = await System.Net.Dns.GetHostAddressesAsync(host); }
+        catch { return false; }
+        return addresses.Length > 0 && addresses.All(IsPublicAddress);
+    }
 
     // Converts an assistant reply's image refs into managed attachments:
     // file refs inside the roots, plus bounded public-HTTPS downloads.
@@ -214,28 +265,46 @@ public static class ResponseImages
         return true;
     }
 
-    // Bounded public-HTTPS download: no credentials, 8 MB cap enforced
-    // while reading, magic-validated before return.
+    // Bounded public-HTTPS download: canonical form, public destination,
+    // no credentials or cookies, 8 MB cap enforced while reading,
+    // magic-validated before return. Redirects are followed manually so
+    // every hop re-validates canonical form and destination.
     public static async Task<byte[]?> DownloadWebImageAsync(string url)
     {
-        if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return null;
+        var next = CanonicalWebImageUrl(url);
         try
         {
-            using var response = await WebClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-            if (!response.IsSuccessStatusCode) return null;
-            var declared = response.Content.Headers.ContentLength;
-            if (declared is not null && (declared <= 0 || declared > MaxBytes)) return null;
-            using var stream = await response.Content.ReadAsStreamAsync();
-            using var buffer = new MemoryStream();
-            var chunk = new byte[32_768];
-            int read;
-            while ((read = await stream.ReadAsync(chunk)) > 0)
+            for (var hop = 0; hop <= 3 && next is not null; hop++)
             {
-                buffer.Write(chunk, 0, read);
-                if (buffer.Length > MaxBytes) return null;
+                if (!await IsPublicHostAsync(next.Host)) return null;
+                using var response = await NoRedirectClient.GetAsync(next, HttpCompletionOption.ResponseHeadersRead);
+                if (response.StatusCode is System.Net.HttpStatusCode.MovedPermanently
+                    or System.Net.HttpStatusCode.Found or System.Net.HttpStatusCode.SeeOther
+                    or System.Net.HttpStatusCode.TemporaryRedirect or System.Net.HttpStatusCode.PermanentRedirect)
+                {
+                    next = response.Headers.Location is { } target && target.IsAbsoluteUri
+                        ? CanonicalWebImageUrl(target.AbsoluteUri)
+                        : next is not null && response.Headers.Location is { } relative
+                            ? CanonicalWebImageUrl(new Uri(next, relative).AbsoluteUri)
+                            : null;
+                    continue;
+                }
+                if (!response.IsSuccessStatusCode) return null;
+                var declared = response.Content.Headers.ContentLength;
+                if (declared is not null && (declared <= 0 || declared > MaxBytes)) return null;
+                using var stream = await response.Content.ReadAsStreamAsync();
+                using var buffer = new MemoryStream();
+                var chunk = new byte[32_768];
+                int read;
+                while ((read = await stream.ReadAsync(chunk)) > 0)
+                {
+                    buffer.Write(chunk, 0, read);
+                    if (buffer.Length > MaxBytes) return null;
+                }
+                var bytes = buffer.ToArray();
+                return IsSupportedImage(bytes) ? bytes : null;
             }
-            var bytes = buffer.ToArray();
-            return IsSupportedImage(bytes) ? bytes : null;
+            return null;
         }
         catch { return null; }
     }

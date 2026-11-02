@@ -44,6 +44,11 @@ enum ResponseImages {
         }
         return captured
     }
+    // The host leads the failure notice so a prompt-injected link is
+    // identifiable before its full attacker-chosen text.
+    static func unreachableNotice(url: URL) -> String {
+        "Image could not be loaded from " + (url.host ?? "an unknown host") + ": " + url.absoluteString + "\nOpen the image link to view it in a browser."
+    }
     static func normalizedPNG(_ bytes: Data) -> Data? {
         guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -61,7 +66,9 @@ enum ResponseImages {
 
 extension Store {
     func responseImageFolder(_ session: Session) -> URL { folder.appendingPathComponent("Attachments").appendingPathComponent(session.id.uuidString).appendingPathComponent("Outputs") }
-    @discardableResult func importResponseImages(_ session: Session) -> Bool {
+    // Launch passes allowRemote false: saved history imports its local
+    // captures without re-requesting every remote image on every launch.
+    @discardableResult func importResponseImages(_ session: Session, allowRemote: Bool = true) -> Bool {
         let output = responseImageFolder(session)
         let attachmentRoot = folder.appendingPathComponent("Attachments").resolvingSymlinksInPath().standardizedFileURL.path + "/"
         guard output.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(attachmentRoot) else { return false }
@@ -71,7 +78,8 @@ extension Store {
         var changed = false
         for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].text.contains("![") {
             let message = session.messages[index]
-            for ref in TranscriptStyle.imageReferences(message.text).prefix(max(0, 8 - message.images.count)) where ref.url.scheme?.lowercased() == "https" {
+            if allowRemote {
+                for ref in TranscriptStyle.imageReferences(message.text).prefix(max(0, 8 - message.images.count)) where ref.url.scheme?.lowercased() == "https" {
                 let key = session.id.uuidString + "/" + message.id.uuidString + "/" + ref.url.absoluteString
                 responseImageLoader.enqueue(key: key, url: ref.url) { [weak self, weak session] result in
                     guard let self, let session, self.sessions.contains(where: { $0 === session }),
@@ -91,10 +99,11 @@ extension Store {
                             if !session.messages[index].images.contains(file.path) { session.messages[index].images.append(file.path) }
                         } catch { session.messages.append(Message(role: "notice", text: "Image could not be saved. Its link remains available.")) }
                     case .failure:
-                        session.messages.append(Message(role: "notice", text: "Image could not be loaded: " + ref.url.absoluteString + "\nOpen the image link to view it in a browser."))
+                        session.messages.append(Message(role: "notice", text: ResponseImages.unreachableNotice(url: ref.url)))
                     }
                     self.saveSoon()
                 }
+            }
             }
             let items = ResponseImages.capture(session.messages[index].text, roots: roots, destination: output)
             guard !items.isEmpty else { continue }
@@ -141,6 +150,12 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         }
         if case .success(let png)? = fetch("valid.jpg") { check(png.prefix(8) == Data([137,80,78,71,13,10,26,10]), "HTTPS image download normalizes into managed PNG bytes") }
         else { check(false, "HTTPS image download fixture completes") }
+        ResponseImageFixture.lastRequestURL = nil
+        if case .success? = fetch("valid.jpg?smuggled=secret#fragment") {
+            let requested = ResponseImageFixture.lastRequestURL
+            check(requested?.query == nil && requested?.fragment == nil && requested?.path == "/valid.jpg", "Image requests carry no query or fragment")
+        } else { check(false, "Image request stripping fixture completes") }
+        check(ResponseImages.unreachableNotice(url: URL(string: "https://evil.example.invalid/x?k=v")!).hasPrefix("Image could not be loaded from evil.example.invalid"), "Unreachable image notices lead with the host")
         for path in ["large-header", "large-body", "not-an-image", "missing"] {
             if case .failure? = fetch(path) { check(true, "HTTPS image rejects " + path) } else { check(false, "HTTPS image rejects " + path) }
         }
@@ -172,6 +187,10 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         check(remote.messages[0].images.count == 1 && remote.messages[0].text == "Grasshopper", "Home promotes HTTPS replies into transcript attachments for remote clients")
         store.save()
         check(Store(folder: store.folder).sessions.first(where: { $0.id == remote.id })?.messages[0].images == remote.messages[0].images, "Downloaded reply images survive archive restore")
+        let localOnly = store.create(Entry(name: "Local only", command: "unused", directory: allowed.path, engine: "codex"))
+        ResponseImageFixture.lastRequestURL = nil
+        localOnly.messages = [Message(role: "assistant", text: "Photo\n![Grasshopper](" + input.absoluteString + ")")]
+        check(store.importResponseImages(localOnly, allowRemote: false) && localOnly.messages[0].images.count == 1 && !localOnly.messages[0].text.contains("![") && ResponseImageFixture.lastRequestURL == nil, "Launch imports local captures without remote requests")
 
     } catch { check(false, "Response image fixture: " + error.localizedDescription) }
 }
@@ -219,6 +238,13 @@ final class ResponseImageDownload: NSObject, URLSessionDataDelegate {
                  (a == 192 && (b == 168 || b == 0 || (b == 88 && c == 99))) ||
                  (a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) || (a == 203 && b == 0 && c == 113))
     }
+    // The request carries no query or fragment: model output can smuggle
+    // private context into either, and the host alone identifies the fetch.
+    static func stripped(_ url: URL) -> URL? {
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        parts?.query = nil; parts?.fragment = nil
+        return parts?.url
+    }
     static func publicHTTPS(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
               url.port == nil || url.port == 443, let host = url.host, !host.isEmpty else { return false }
@@ -243,19 +269,20 @@ final class ResponseImageDownload: NSObject, URLSessionDataDelegate {
     }
     func start(_ url: URL) {
         DispatchQueue.global(qos: .utility).async {
-            guard self.validate(url) else { self.finish(.failure(URLError(.unsupportedURL))); return }
+            guard let fetch = Self.stripped(url), self.validate(fetch) else { self.finish(.failure(URLError(.unsupportedURL))); return }
             let config = self.configuration
             config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.urlCredentialStorage = nil; config.urlCache = nil
             config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 25
             let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
             let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
-            self.session = session; session.dataTask(with: url).resume()
+            self.session = session; session.dataTask(with: fetch).resume()
         }
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         redirects += 1
-        guard redirects <= 3, let url = request.url, validate(url) else { rejected = true; completionHandler(nil); return }
-        completionHandler(request)
+        guard redirects <= 3, let raw = request.url, let url = Self.stripped(raw), validate(url) else { rejected = true; completionHandler(nil); return }
+        var stripped = request; stripped.url = url
+        completionHandler(stripped)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
@@ -280,9 +307,11 @@ final class ResponseImageDownload: NSObject, URLSessionDataDelegate {
 // Offline URL loading peer: real URLSession delegates and image decoding, no LAN requests.
 final class ResponseImageFixture: URLProtocol {
     static var photo = Data()
+    static var lastRequestURL: URL?
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "images.example.invalid" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        Self.lastRequestURL = request.url
         let path = request.url!.lastPathComponent
         let body = path == "large-body" ? Data(count: ResponseImageDownload.limit + 1) : (path == "not-an-image" ? Data("plain text".utf8) : Self.photo)
         let headers = path == "large-header" ? ["Content-Length": "9000000"] : ["Content-Type": "image/jpeg"]
