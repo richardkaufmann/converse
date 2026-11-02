@@ -75,6 +75,15 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         check(!store.flagsUnseenResponse(agentSession, success: true, interrupted: false), "Agent answers report through attention, never the unread marker")
         agentSession.agent?.enabled = true
         check(!agentSession.agentLoopPaused, "An enabled agent loop reads as running")
+        check(agentSession.pausedLoopReason == nil && chat.pausedLoopReason == nil, "Running loops and ordinary sessions carry no paused reason")
+        agentSession.agent?.enabled = false
+        agentSession.agent?.attention = "Over budget."
+        check(agentSession.pausedLoopReason == "Over budget.", "A paused row leads with live attention")
+        agentSession.agent?.attention = ""
+        agentSession.agent?.lastOutcome = "Paused by Stop."
+        check(agentSession.pausedLoopReason == "Paused by Stop.", "A paused row falls back to the last recorded outcome")
+        agentSession.agent?.lastOutcome = "Not run yet"
+        check(agentSession.pausedLoopReason == "Never run — enable the loop in Agent Setup.", "A never-run loop points at Agent Setup")
     }
     session.requests = []
     let detail = session.sidebarSummary(workspace: workspace, windowID: first.id)

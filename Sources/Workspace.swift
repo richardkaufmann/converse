@@ -122,7 +122,7 @@ struct SessionActivity: View {
                     Image(systemName: "pause.circle.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(Color.red)
                         .frame(width: 12, height: 12)
                         .accessibilityLabel("Agent loop paused")
-                        .help(agent.attention.isEmpty ? (agent.lastOutcome.isEmpty ? "Loop paused. Re-enable it in Agent Setup / Loop." : agent.lastOutcome) : agent.attention)
+                        .help(session.pausedLoopReason ?? "Loop paused. Re-enable it in Agent Setup / Loop.")
                 } else {
                     Image(systemName: agent.canSchedule && !session.queuePaused ? "arrow.triangle.2.circlepath" : "pause.circle")
                         .font(.system(size: 11)).foregroundStyle(agent.canSchedule && !session.queuePaused ? Color.green : Color.secondary)
@@ -214,7 +214,14 @@ struct SidebarSession: View {
     var body: some View {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
-            SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused, unread: !session.isAgentSession && session.unseenResponse).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
+            VStack(alignment: .leading, spacing: 0) {
+                SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused, unread: !session.isAgentSession && session.unseenResponse).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
+                if let reason = session.pausedLoopReason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .help(reason).accessibilityLabel("Paused: " + reason)
+                }
+            }
                 .help("Use 1, 2 or 3 to show this session in a pane. Clicking its name never moves panes.")
             if showsModel {
                 ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)

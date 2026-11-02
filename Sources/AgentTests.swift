@@ -126,6 +126,13 @@ import Foundation
     AgentRuntime().cancel(ownStop)
     AgentRuntime().finishCancelledTurn(ownStop, store: strayStore)
     check(ownStop.agent?.enabled == false && ownStop.agent?.attention.contains("Agent Setup") == true && ownStop.agent?.lastOutcome == "Paused by Stop.", "A Stop on the agent's own session keeps its paused explanation after the turn settles")
+    let setupSwitch = strayStore.createAgent(title: "Setup switch fixture agent")
+    setupSwitch.agent?.enabled = true
+    setupSwitch.agent?.attention = "Stale alarm."
+    do {
+        try strayStore.configureAgentLoop(setupSwitch, enabled: false, interval: 900, turns: 20, scoreboardEvery: 1)
+    } catch { check(false, "Setup switch fixture: " + error.localizedDescription) }
+    check(setupSwitch.agent?.enabled == false && setupSwitch.agent?.attention == "" && setupSwitch.agent?.lastOutcome == "Loop turned off in Agent Setup.", "Switching a loop off in Setup clears the alarm and records the choice")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
     let old = AgentRepoSnapshot(repository: "owner/repo", openBugs: 2)
     check(AgentRepoSnapshot(repository: "owner/repo", openBugs: 3).mood(previous: old) == "urgent" && AgentRepoSnapshot(repository: "owner/repo", openBugs: 0).mood(previous: old) == "peaceful", "Widget mood follows measured bug changes")

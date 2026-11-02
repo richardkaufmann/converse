@@ -436,6 +436,12 @@ extension Store {
         if !enabled { config.nextRunAt = nil }
         else if !previous.enabled || previous.intervalSeconds != interval || previous.scheduleText != scheduleText || previous.scheduleTimeZone != rule.zoneID || previous.nextRunAt == nil { config.nextRunAt = rule.next(after: now) }
         session.agent = config
+        if !enabled {
+            // A human-switched loop is off by choice, not by failure: no
+            // alarm, but the reason stays visible wherever paused shows.
+            session.agent?.attention = ""
+            session.agent?.lastOutcome = "Loop turned off in Agent Setup."
+        }
         if enabled && session.pending.isEmpty { session.queuePaused = false }
         do { try saveChecked() }
         catch { session.agent = previous; session.queuePaused = paused; throw AgentFailure.message("Could not save loop settings. Try again.") }

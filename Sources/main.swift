@@ -129,6 +129,14 @@ final class Session: ObservableObject, Identifiable {
     @Published var unseenResponse = false
     // An agent loop Richard did not leave running: red in the sidebar.
     var agentLoopPaused: Bool { agent != nil && agent?.enabled == false }
+    // The row answers why it is paused: live attention first, then the last
+    // recorded outcome, with a plain pointer for loops that never ran.
+    var pausedLoopReason: String? {
+        guard agentLoopPaused, let agent else { return nil }
+        if !agent.attention.isEmpty { return agent.attention }
+        if agent.lastOutcome.isEmpty || agent.lastOutcome == "Not run yet" { return "Never run — enable the loop in Agent Setup." }
+        return agent.lastOutcome
+    }
     // A Parking Lot Talk helper with nothing going on stays out of the
     // sidebar; the lot's Talk button reopens it. Busy or queued helpers stay
     // listed so their work can always be reached.
