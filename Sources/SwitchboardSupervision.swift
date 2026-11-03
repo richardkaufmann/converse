@@ -96,7 +96,7 @@ extension Store {
         item.intervenedAt = now; target.switchboardLastRecoveryAt = now
         if item.state == "submitted" {
             let prompt = PendingPrompt(switchboardHop: 0, originGroupID: item.groupID, originHomeID: item.originHomeID,
-                autonomous: true, text: "[Converse switchboard recovery · request \(item.id.uuidString)]\nYour turn finished without the requested reply to \(item.sourceName) (\(item.source)). Send the answer, a blocker, or an explicit decline using tell with inReplyTo: \"\(item.id.uuidString)\". This is the only automatic reminder; do not request a reply to this recovery notice.", images: [])
+                autonomous: true, text: "[Converse switchboard recovery · request \(item.id.uuidString)]\nYour turn finished without the requested reply to \(item.sourceName) (\(item.source)). Send the answer, a blocker, or an explicit decline using tell with inReplyTo set to this full request UUID, copied exactly:\n\(item.id.uuidString)\nThis is the only automatic reminder; do not request a reply to this recovery notice.", images: [])
             item.promptID = prompt.id; item.state = "queued"; item.finishedAt = nil
             target.pending.insert(prompt, at: 0)
         }
@@ -128,12 +128,24 @@ extension Store {
         }
         return DeviceGlobalID(raw)?.string ?? raw
     }
-    func switchboardReplyError(_ source: Session, to: String, reply: UUID?) -> String? {
-        guard let reply else { return nil }
-        guard source.switchboardObligations.contains(where: {
-            $0.id == reply && $0.kind == "request" && $0.source == switchboardAddress(to)
-        }) else { return "Reply does not match a request from that session. Nothing was sent." }
-        return nil
+    // Models sometimes garble a request UUID. Never drop the message: correct it
+    // to the sender's own open request from that exact target, else send plainly.
+    func switchboardResolveReply(_ source: Session, to: String, supplied: String?) -> (reply: UUID?, corrected: Bool) {
+        guard let raw = supplied?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return (nil, false) }
+        let address = switchboardAddress(to)
+        let requests = source.switchboardObligations.filter { $0.kind == "request" && $0.source == address }
+        if let exact = UUID(uuidString: raw), requests.contains(where: { $0.id == exact }) { return (exact, false) }
+        let open = requests.filter { !["resolved", "cancelled"].contains($0.state) && ($0.replyDeliveryID == nil || $0.state == "deliveryFailed") }
+        let head = String(raw.uppercased().prefix(8))
+        let byPrefix = head.count == 8 && head.allSatisfy(\.isHexDigit) ? open.filter { $0.id.uuidString.hasPrefix(head) } : []
+        if byPrefix.count == 1 { return (byPrefix[0].id, true) }
+        if byPrefix.isEmpty, open.count == 1 { return (open[0].id, true) }
+        return (nil, false)
+    }
+    func switchboardReplyNotice(supplied: String?, resolved: UUID?, corrected: Bool, targetName: String) -> String? {
+        guard let raw = supplied?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        if let resolved { return corrected ? "Switchboard: reply ID corrected to " + resolved.uuidString + " (supplied " + raw + ")" : nil }
+        return "Switchboard: reply ID " + raw + " matched no open request from " + targetName + "; delivered as a plain tell."
     }
     func switchboardSent(_ source: Session, to: String, id: UUID, replyExpected: Bool, inReplyTo: UUID?, remote: Bool) {
         if replyExpected {
@@ -189,7 +201,7 @@ extension Store {
     }
     static func replyInstruction(id: UUID, expected: Bool, inReplyTo: UUID?) -> String {
         var result = inReplyTo.map { "\n[Reply to request \($0.uuidString)]" } ?? ""
-        if expected { result += "\n[Reply expected · request \(id.uuidString). Reply with tell to the sender and inReplyTo: \"\(id.uuidString)\". Answer, report a blocker, or decline explicitly; an unrelated tell does not close this request.]" }
+        if expected { result += "\n[Reply expected · request ID:\n\(id.uuidString)\nReply with tell to the sender and set inReplyTo to that full request UUID, copied exactly (all 36 characters). Answer, report a blocker, or decline explicitly; an unrelated tell does not close this request.]" }
         return result
     }
     // Only authenticated delivery records participate. Never interpret a user's

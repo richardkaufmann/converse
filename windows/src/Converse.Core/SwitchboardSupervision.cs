@@ -31,7 +31,29 @@ public sealed partial class DeviceSyncService
     private readonly Dictionary<Guid, (long Revision, DateTime At)> _supervisionProgress = new();
     internal static string ReplyInstruction(Guid id, bool expected, Guid? inReplyTo) =>
         (inReplyTo is { } reply ? $"\n[Reply to request {reply}]" : "") +
-        (expected ? $"\n[Reply expected · request {id}. Reply using tell to the sender with inReplyTo: \"{id}\". Answer, report a blocker, or explicitly decline.]" : "");
+        (expected ? $"\n[Reply expected · request ID:\n{id}\nReply using tell to the sender and set inReplyTo to that full request UUID, copied exactly (all 36 characters). Answer, report a blocker, or explicitly decline.]" : "");
+    // Models sometimes garble a request UUID. Never drop the message: correct it
+    // to the sender's own open request from that exact target, else send plainly.
+    internal static (Guid? Reply, bool Corrected) ResolveReply(ChatSession source, string target, string? supplied)
+    {
+        var raw = supplied?.Trim();
+        if (string.IsNullOrEmpty(raw)) return (null, false);
+        var requests = source.SwitchboardObligations.Where(o => o.Kind == "request" && o.Source == target).ToList();
+        if (Guid.TryParse(raw, out var exact) && requests.Any(o => o.Id == exact)) return (exact, false);
+        var open = requests.Where(o => o.State is not ("resolved" or "cancelled") && (o.ReplyDeliveryID is null || o.State == "deliveryFailed")).ToList();
+        var head = raw.Length >= 8 ? raw[..8].ToLowerInvariant() : "";
+        var byPrefix = head.Length == 8 && head.All(Uri.IsHexDigit) ? open.Where(o => o.Id.ToString().StartsWith(head, StringComparison.Ordinal)).ToList() : new();
+        if (byPrefix.Count == 1) return (byPrefix[0].Id, true);
+        if (byPrefix.Count == 0 && open.Count == 1) return (open[0].Id, true);
+        return (null, false);
+    }
+    internal static string? ReplyNotice(string? supplied, Guid? resolved, bool corrected, string targetName)
+    {
+        var raw = supplied?.Trim();
+        if (string.IsNullOrEmpty(raw)) return null;
+        if (resolved is { } id) return corrected ? $"Switchboard: reply ID corrected to {id} (supplied {raw})" : null;
+        return $"Switchboard: reply ID {raw} matched no open request from {targetName}; delivered as a plain tell.";
+    }
 
     internal void RecordSwitchboardIncoming(ChatSession target, string source, string name, Guid id, PendingPrompt prompt,
         bool expected, Guid? inReplyTo, string? group = null, string? home = null)
@@ -143,7 +165,7 @@ public sealed partial class DeviceSyncService
                     if (!queued)
                     {
                         var prompt = new PendingPrompt { Autonomous = true, OriginGroupID = item.GroupID, OriginHomeID = item.OriginHomeID,
-                            Text = $"[Converse switchboard recovery · request {item.Id}]\nYour turn finished without replying to {item.SourceName} ({item.Source}). Send an answer, blocker, or explicit decline using tell with inReplyTo: \"{item.Id}\". This is the only automatic reminder. Do not request a reply to this notice." };
+                            Text = $"[Converse switchboard recovery · request {item.Id}]\nYour turn finished without replying to {item.SourceName} ({item.Source}). Send an answer, blocker, or explicit decline using tell with inReplyTo set to this full request UUID, copied exactly:\n{item.Id}\nThis is the only automatic reminder. Do not request a reply to this notice." };
                         item.PromptID = prompt.Id; item.State = "queued"; item.FinishedAt = null; session.Pending.Insert(0, prompt);
                     }
                     _store.Save(); _store.InjectPending(session, session.Pending.First(p => p.Id == item.PromptID || p.ComponentIDs?.Contains(item.PromptID) == true).Id);

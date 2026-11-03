@@ -230,7 +230,7 @@ public sealed class AgentRuntime
             foreach (var tell in (reply["tell"] as JsonArray ?? new()).OfType<JsonObject>().Take(2))
             {
                 var target = Clip(tell["to"], 200); var content = Clip(tell["text"], 8000);
-                if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, Guid.TryParse(tell["inReplyTo"]?.GetValue<string>(), out var correlation) ? correlation : null);
+                if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, suppliedReply: tell["inReplyTo"] is JsonValue correlation && correlation.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
             }
             if (reply["appControl"] is JsonObject operation && _store.AppSupportRequest is { } handler)
                 await handler(session, operation);

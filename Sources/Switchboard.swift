@@ -13,7 +13,7 @@ struct SwitchboardCommand: Decodable {
     var to: String?
     var text: String?
     var replyExpected: Bool?
-    var inReplyTo: UUID?
+    var inReplyTo: String?
     var parkingLotEdits: ParkingLotEdits?
     var lotID: UUID?
     var linkedOnly: Bool?
@@ -90,10 +90,16 @@ extension Store {
         let data = try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes])
         return "[Converse switchboard directory · live lookup]\n" + String(decoding: data, as: UTF8.self)
     }
-    @discardableResult func deliverSwitchboard(from source: Session, to rawID: String, text: String, id: UUID, hop: Int, urgent: Bool = false, replyExpected: Bool = false, inReplyTo: UUID? = nil) -> String? {
+    /// `suppliedReply` is the model's raw inReplyTo text; it may be garbled.
+    @discardableResult func deliverSwitchboard(from source: Session, to rawID: String, text: String, id: UUID, hop: Int, urgent: Bool = false, replyExpected: Bool = false, inReplyTo: UUID? = nil, suppliedReply: String? = nil) -> String? {
         guard source.switchboardEnabled, hop > 0, hop <= SwitchboardPolicy.maxHops else { return "Messaging disabled or chain exhausted. Nothing was sent." }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 32768 else { return "Message must contain 1–32768 bytes of text. Nothing was sent." }
-        if let error = switchboardReplyError(source, to: rawID, reply: inReplyTo) { return error }
+        let supplied = suppliedReply ?? inReplyTo?.uuidString
+        let (inReplyTo, corrected) = switchboardResolveReply(source, to: rawID, supplied: supplied)
+        func noteReply(_ targetName: String) {
+            guard let notice = switchboardReplyNotice(supplied: supplied, resolved: inReplyTo, corrected: corrected, targetName: targetName) else { return }
+            source.messages.append(Message(role: "notice", text: notice)); save()
+        }
         guard !replyExpected || source.switchboardExpectations.filter({ !$0.answered }).count < 128 else { return "Too many unanswered switchboard requests. Resolve existing requests first." }
         let service = participantService
         let global = DeviceGlobalID(rawID)
@@ -122,10 +128,13 @@ extension Store {
             service.publishSwitchboardQueue(target.id); service.publishSwitchboardQueue(source.id)
             if urgent { target.queuePaused = false; if target.busy { target.resumeAfterInterrupt = true; interruptProcess(target) } }
             if !target.busy { DispatchQueue.main.async { self.runNext(target) } }
+            noteReply(target.title)
             return nil
         }
         guard global != nil else { return "Invalid target. Request list-sessions for a current directory ID." }
-        return service.sendParticipantTell(source: source, target: rawID, text: text, id: id, hop: hop, urgent: urgent, replyExpected: replyExpected, inReplyTo: inReplyTo)
+        let failure = service.sendParticipantTell(source: source, target: rawID, text: text, id: id, hop: hop, urgent: urgent, replyExpected: replyExpected, inReplyTo: inReplyTo)
+        if failure == nil { noteReply(global.flatMap { g in service.homes[g.home]?.rows.first { $0.globalID == g.string }?.title } ?? rawID) }
+        return failure
     }
     func processSwitchboard(_ s: Session) {
         // Agent actions already passed through the same host routing primitive
@@ -184,7 +193,7 @@ extension Store {
                 note("Parking Lot result queued here.")
                 enqueueSwitchboard(s, text: response, hop: s.switchboardHop + 1, autonomous: s.supportAutonomous)
             case "tell", "ask", "tell-urgently":
-                if let failure = deliverSwitchboard(from: s, to: request.to ?? "", text: request.text ?? "", id: reply.id, hop: s.switchboardHop + 1, urgent: request.command == "tell-urgently", replyExpected: request.command == "ask" || request.replyExpected == true, inReplyTo: request.inReplyTo) {
+                if let failure = deliverSwitchboard(from: s, to: request.to ?? "", text: request.text ?? "", id: reply.id, hop: s.switchboardHop + 1, urgent: request.command == "tell-urgently", replyExpected: request.command == "ask" || request.replyExpected == true, suppliedReply: request.inReplyTo) {
                     note("delivery failed: " + failure); save()
                 }
             default:

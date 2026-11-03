@@ -381,7 +381,7 @@ enum AgentPolicy {
             session.messages.append(Message(role: "notice", text: "Switchboard supervision: " + result))
         }
         for tell in (reply.tell ?? []).prefix(2) {
-            if let error = store.deliverSwitchboard(from: session, to: tell.to, text: tell.text, id: UUID(), hop: session.switchboardHop + 1, replyExpected: tell.replyExpected == true, inReplyTo: tell.inReplyTo) {
+            if let error = store.deliverSwitchboard(from: session, to: tell.to, text: tell.text, id: UUID(), hop: session.switchboardHop + 1, replyExpected: tell.replyExpected == true, suppliedReply: tell.inReplyTo) {
                 session.messages.append(Message(role: "notice", text: "Switchboard: " + error))
             }
         }

@@ -332,8 +332,10 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
           "Restart preserves the consumed recovery allowance")
     check(store.deliverSwitchboard(from: receiver, to: sender.id.uuidString, text: "Reviewed; here is the blocker", id: UUID(), hop: 2, inReplyTo: id) == nil && sender.switchboardExpectations[0].answered,
           "A correctly attributed correlated reply closes the request even after escalation")
-    check(store.deliverSwitchboard(from: receiver, to: sender.id.uuidString, text: "Wrong request", id: UUID(), hop: 2, inReplyTo: UUID()) != nil,
-          "Unrelated reply IDs cannot satisfy an obligation")
+    let stray = UUID(), expectations = sender.switchboardExpectations
+    check(store.deliverSwitchboard(from: receiver, to: sender.id.uuidString, text: "Wrong request", id: stray, hop: 2, inReplyTo: UUID()) == nil &&
+          sender.switchboardExpectations.map(\.answered) == expectations.map(\.answered) && !receiver.switchboardObligations.contains { $0.replyDeliveryID == stray },
+          "Unrelated reply IDs cannot satisfy an obligation; the message is still delivered as a plain tell")
     let a = store.create(entry), b = store.create(entry)
     a.switchboardEnabled = true; b.switchboardEnabled = true
     a.queuePaused = true; b.queuePaused = true
@@ -486,4 +488,83 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     let future = try? JSONDecoder().decode(SwitchboardObligation.self, from: Data(futureJSON.utf8))
     check(legacy?.state == "failed" && legacy?.displayState == "Failed" && legacy?.terminal == true, "Persisted legacy failed state still decodes and displays as failed")
     check(future?.state == "futureState" && future?.terminal == false, "Unknown persisted states decode safely for cross-version archives")
+}
+
+// Models garble request UUIDs (observed: first 8 hex digits intact, the rest
+// invented). A reply must never be dropped for a bad inReplyTo.
+func switchboardReplyToleranceSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("reply-tolerance-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let store = Store(folder: folder)
+    let entry = Entry(name: "Fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
+    let asker = store.create(entry), answerer = store.create(entry), other = store.create(entry)
+    for s in [asker, answerer, other] { s.switchboardEnabled = true; s.queuePaused = true }
+    func ask(_ from: Session, _ id: String) -> UUID {
+        let uuid = UUID(uuidString: id)!
+        _ = store.deliverSwitchboard(from: from, to: answerer.id.uuidString, text: "Question " + id, id: uuid, hop: 1, replyExpected: true)
+        return uuid
+    }
+    func reply(_ text: String, supplied: String, to target: Session = asker) -> (failure: String?, id: UUID) {
+        let id = UUID()
+        return (store.deliverSwitchboard(from: answerer, to: target.id.uuidString, text: text, id: id, hop: 2, suppliedReply: supplied), id)
+    }
+    func request(_ id: UUID) -> SwitchboardObligation? { answerer.switchboardObligations.first { $0.id == id && $0.kind == "request" } }
+    func delivered(_ text: String, replyTo: UUID?) -> Bool {
+        guard let prompt = asker.pending.last, prompt.text.contains(text) else { return false }
+        return replyTo.map { prompt.text.contains("[Reply to request " + $0.uuidString + "]") } ?? !prompt.text.contains("[Reply to request")
+    }
+    func answered(_ id: UUID) -> Bool { asker.switchboardExpectations.first { $0.id == id }?.answered == true }
+    func lastNotice() -> String { answerer.messages.last { $0.role == "notice" }?.text ?? "" }
+
+    let exact = ask(asker, "0E0E0E0E-0000-4000-8000-000000000001")
+    var sent = reply("Exact answer", supplied: exact.uuidString)
+    check(sent.failure == nil && request(exact)?.replyDeliveryID == sent.id && answered(exact) && delivered("Exact answer", replyTo: exact) && !lastNotice().contains("reply ID"),
+          "Exact inReplyTo resolves the request without a correction notice")
+
+    let decoy = ask(asker, "AAAAAAAA-0000-4000-8000-000000000002")
+    let real = ask(asker, "CDE10DC4-8BFE-47B6-92A2-4EFF5009E548")
+    sent = reply("APPROVE", supplied: "CDE10DC4-2353-4A2F-81AC-35BE0DF9701F")
+    check(sent.failure == nil && request(real)?.replyDeliveryID == sent.id && request(real)?.state == "resolved" && answered(real) &&
+          request(decoy)?.replyDeliveryID == nil && !answered(decoy) && delivered("APPROVE", replyTo: real) &&
+          lastNotice() == "Switchboard: reply ID corrected to CDE10DC4-8BFE-47B6-92A2-4EFF5009E548 (supplied CDE10DC4-2353-4A2F-81AC-35BE0DF9701F)",
+          "Garbled inReplyTo with a matching 8-digit prefix is corrected to the right open request")
+
+    sent = reply("Decoy answer", supplied: "DEADBEEF-1111-4111-8111-111111111111")
+    check(sent.failure == nil && request(decoy)?.replyDeliveryID == sent.id && answered(decoy) && delivered("Decoy answer", replyTo: decoy) &&
+          lastNotice().contains("corrected to " + decoy.uuidString),
+          "Garbled inReplyTo is corrected to the single open request from that session")
+
+    let first = ask(asker, "11111111-0000-4000-8000-000000000003"), second = ask(asker, "22222222-0000-4000-8000-000000000004")
+    sent = reply("Ambiguous answer", supplied: "99999999-0000-4000-8000-000000000000")
+    check(sent.failure == nil && request(first)?.replyDeliveryID == nil && request(second)?.replyDeliveryID == nil && !answered(first) && !answered(second) &&
+          delivered("Ambiguous answer", replyTo: nil) && lastNotice().contains("matched no open request from") && lastNotice().hasSuffix("delivered as a plain tell."),
+          "Ambiguous garbled inReplyTo delivers a plain tell without resolving anything")
+    _ = reply("Close first", supplied: first.uuidString); _ = reply("Close second", supplied: second.uuidString)
+
+    sent = reply("Nothing open", supplied: "CDE10DC4-0000-4000-8000-000000000000")
+    check(sent.failure == nil && delivered("Nothing open", replyTo: nil) && lastNotice().contains("matched no open request"),
+          "With no open requests a garbled inReplyTo still delivers as a plain tell")
+
+    // Another session's open request is never a correction candidate.
+    let foreign = ask(other, "77777777-0000-4000-8000-000000000005")
+    let own = ask(asker, "33333333-0000-4000-8000-000000000006")
+    sent = reply("Scoped answer", supplied: "77777777-AAAA-4AAA-8AAA-AAAAAAAAAAAA")
+    check(sent.failure == nil && request(own)?.replyDeliveryID == sent.id && request(foreign)?.replyDeliveryID == nil &&
+          other.switchboardExpectations.first { $0.id == foreign }?.answered == false && delivered("Scoped answer", replyTo: own),
+          "Correction considers only requests from the addressed session")
+    sent = reply("Other only", supplied: "77777777-AAAA-4AAA-8AAA-AAAAAAAAAAAA", to: asker)
+    check(sent.failure == nil && request(foreign)?.replyDeliveryID == nil && delivered("Other only", replyTo: nil),
+          "A prefix match from a different session is never borrowed")
+
+    // A non-UUID inReplyTo from the command fence must not make the whole command vanish.
+    let pending = ask(asker, "44444444-0000-4000-8000-000000000007")
+    let body: [String: Any] = ["command": "tell", "to": asker.id.uuidString, "text": "Fenced answer", "inReplyTo": "44444444"]
+    let text = "```converse\n" + String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "\n```"
+    answerer.switchboardTurnStart = answerer.messages.count
+    answerer.messages.append(Message(role: "assistant", text: text, finalReply: text)); store.processSwitchboard(answerer)
+    check(delivered("Fenced answer", replyTo: pending) && answered(pending) && lastNotice().contains("supplied 44444444)"),
+          "A truncated non-UUID inReplyTo in a fenced command is corrected and delivered")
+    check(Store.replyInstruction(id: real, expected: true, inReplyTo: nil).contains("\n" + real.uuidString + "\n") &&
+          Store.replyInstruction(id: real, expected: true, inReplyTo: nil).contains("copied exactly"),
+          "Reply instructions place the full request UUID on its own line and ask for an exact copy")
 }

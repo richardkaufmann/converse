@@ -297,10 +297,12 @@ public sealed partial class DeviceSyncService
             return Task.FromResult(Result("rejected", e is ArgumentException ? e.Message : "Home could not save the operation. Nothing applied."));
         }
     }
-    public async Task SendAgentTellAsync(ChatSession source, string target, string text, bool replyExpected = false, Guid? inReplyTo = null)
+    // suppliedReply is the model's raw inReplyTo text; it may be garbled.
+    public async Task SendAgentTellAsync(ChatSession source, string target, string text, bool replyExpected = false, Guid? inReplyTo = null, string? suppliedReply = null)
     {
         if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
-        if (inReplyTo is not null && !source.SwitchboardObligations.Any(o => o.Id == inReplyTo && o.Kind == "request" && o.Source == target)) throw new ArgumentException("Reply does not match a request from that session.");
+        var supplied = suppliedReply ?? inReplyTo?.ToString();
+        (inReplyTo, var corrected) = ResolveReply(source, target, supplied);
         if (replyExpected && source.SwitchboardExpectations.Count(e => !e.Answered) >= 128) throw new ArgumentException("Too many unanswered requests.");
         var id = Guid.NewGuid(); var hop = source.ActiveHop + 1;
         if (to.Home == DeviceId)
@@ -313,6 +315,7 @@ public sealed partial class DeviceSyncService
             var beforeTarget = JsonSerializer.SerializeToUtf8Bytes(session);
             session.Pending.Add(prompt);
             source.Messages.Add(new() { Role = "notice", Text = $"Switchboard: queued → {session.Title} [{target}] · {id} [{(replyExpected ? "ask" : "tell")}]\n{text}" });
+            if (ReplyNotice(supplied, inReplyTo, corrected, session.Title) is { } localNotice) source.Messages.Add(new() { Role = "notice", Text = localNotice });
             RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, false);
             RecordSwitchboardIncoming(session, new DeviceGlobalID(DeviceId, source.Id).ToString(), source.Title, id, prompt, replyExpected, inReplyTo);
             try { _store.Save(); } catch {
@@ -330,6 +333,7 @@ public sealed partial class DeviceSyncService
         RecordSwitchboardSent(source, target, id, replyExpected, inReplyTo, true);
         var request = new DeviceTellPayload { ReplyExpected = replyExpected, InReplyTo = inReplyTo, GroupID = CurrentGroup!.Id, Source = new DeviceGlobalID(DeviceId, source.Id).ToString(), SourceTitle = source.Title, Target = target, Text = text, Hop = hop };
         source.Messages.Add(new ChatMessage { Role = "notice", Text = $"Switchboard: awaiting home acceptance → {targetTitle} [{target}] · {id} [{(replyExpected ? "ask" : "tell")}]\n{text}" });
+        if (ReplyNotice(supplied, inReplyTo, corrected, targetTitle) is { } remoteNotice) source.Messages.Add(new ChatMessage { Role = "notice", Text = remoteNotice });
         try { _store.Save(); } catch {
             var previous = JsonSerializer.Deserialize<ChatSession>(sourceBefore)!;
             source.SwitchboardObligations = previous.SwitchboardObligations; source.SwitchboardExpectations = previous.SwitchboardExpectations; source.Messages = previous.Messages; throw;
@@ -394,7 +398,7 @@ public sealed partial class DeviceSyncService
             else if ((action is "tell" or "ask") && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
-                await SendAgentTellAsync(source, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, command["inReplyTo"] is { } replyID ? Guid.Parse(replyID.GetValue<string>()) : null);
+                await SendAgentTellAsync(source, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
             }
             else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell or ask." }); _store.Save(); }
         }
