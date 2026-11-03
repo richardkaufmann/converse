@@ -41,6 +41,8 @@ Please file bugs and suggestions through the support agent. Your agent will talk
 
 **On Mac:** [download the latest Mac preview](https://github.com/richardkaufmann/converse/releases/latest), unzip it, drag **Converse.app** into **Applications**, and open it. Current release downloads are Developer ID signed and notarized by Apple. The universal app targets macOS 14 or later on Apple Silicon and Intel; direct hardware testing has been on Apple Silicon.
 
+**One thing keeps running after you quit, if you set up Jolly.** Connecting [Jolly](#jolly-mac) installs a small background bridge (the launchd agent `local.converse.jolly.bridge`), and it stays up after **⌘Q** so the Muse phone app can still reach your Mac and hear whether Converse is available. Without Jolly, Converse installs no background service.
+
 **On Windows:** use a Windows preview supplied by the project, or build the Windows app from source. There is not yet a general-purpose Windows installer. The [Windows build instructions](windows/README.md#build-and-test-on-the-windows-box) are for developers, not a required step for someone who already has a preview.
 
 **On iPhone or iPad:** install an invited Converse build through Apple's TestFlight app. There is no public testing link at present. These apps display and control work running on a computer; get your first desktop session working, then follow the Group setup section below to connect the phone or tablet. Developers can also [build the iOS app](iPad/README.md#install-wirelessly).
@@ -330,6 +332,8 @@ Once that bridge is configured:
 2. Load or refresh the connector schema in Muse so it exposes **Ask Converse**.
 3. Ask it to list the available agents, then address one by exact name. If a choice is ambiguous, it should ask which one rather than broadcast.
 4. Confirm the request appears in the intended agent's conversation and the reply returns to the phone. Pending is not a completed answer.
+
+The bridge runs in the background as the launchd agent `local.converse.jolly.bridge`, and launchd restarts it if it stops, so it keeps running after you quit Converse. That way Jolly can still reach your Mac and learn whether Converse is available. To stop it, run `launchctl bootout gui/$UID/local.converse.jolly.bridge`.
 
 Converse must remain open to do new work. The bridge can report that it is offline and serve previously saved replies. A message you explicitly leave for the phone is retrieved when Jolly checks; it is not pushed into a Muse conversation automatically. [Bridge protocol and recovery](docs/agents.md#jolly-routing-mac).
 
