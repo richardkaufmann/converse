@@ -179,6 +179,7 @@ final class Session: ObservableObject, Identifiable {
     var streamedText = false
     var claudeTextBlockPending = false
     var claudeStreamSeparators: [NSRange] = []
+    var claudeBackgroundTasks: [String: String] = [:]
     var process: Process?
     var muse: MuseConnection?
     var museClosing = false
@@ -548,7 +549,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if clearDisplayBeforeReply { clearSessionDisplay(s) }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeBackgroundTasks = [:]; s.status = "Working…"
         s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
@@ -627,6 +628,10 @@ final class Store: ObservableObject {
                 let retryFailure = s.retryDetail
                 s.retryDetail = nil
                 s.busy = false; s.process = nil
+                if !s.claudeBackgroundTasks.isEmpty {
+                    if !s.interrupted { s.messages.append(Message(role: "notice", text: "Claude ended this turn while still reporting work in progress: " + s.claudeBackgroundTasks.values.sorted().joined(separator: "; ") + ". No completion was reported; ask the session for its status before assuming that work finished.")) }
+                    s.claudeBackgroundTasks = [:]
+                }
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
                 if s.entry.engine == "codex", p.terminationStatus == 0, !s.turnFailed, !s.interrupted,
@@ -850,7 +855,7 @@ final class Store: ObservableObject {
         let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
-            let quotaResult: Result<String, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
+            let quotaResult: Result<MuseQuotaReading, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
             DispatchQueue.main.async {
                 s.probingStatus = false
                 // A pre-change metadata read must not revert the picker after
@@ -868,6 +873,11 @@ final class Store: ObservableObject {
                         if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
                         s.toolStatus.accountUsage?.context = context
                     }
+                    // Keep the last measured limits (and their age) between quota reads.
+                    if let previousUsage, !previousUsage.limits.isEmpty, s.toolStatus.accountUsage?.limits.isEmpty != false {
+                        if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+                        s.toolStatus.accountUsage?.limits = previousUsage.limits; s.toolStatus.accountUsage?.observedAt = previousUsage.observedAt
+                    }
                     s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
@@ -880,9 +890,10 @@ final class Store: ObservableObject {
                 if let quotaResult {
                     s.quotaRefreshedAt = Date()
                     switch quotaResult {
-                    case .success(let value):
-                        let context = s.toolStatus.accountUsage?.context
-                        s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage(context: context)
+                    case .success(let reading):
+                        var usage = reading.usage ?? AccountUsage()
+                        usage.context = s.toolStatus.accountUsage?.context
+                        s.toolStatus.quota = reading.text; s.toolStatus.accountUsage = usage
                     case .failure(let error): s.toolStatus.quota = error.localizedDescription
                     }
                 }
@@ -1119,6 +1130,11 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "activity", text: text))
         // Tool activity is retained for diagnostics, but does not reset visible-answer timing.
     }
+    static func claudeWorkingStatus(_ s: Session) -> String {
+        let tasks = s.claudeBackgroundTasks.values.sorted()
+        guard let first = tasks.first else { return "Working…" }
+        return "Working… · " + (tasks.count == 1 ? "task: " : "\(tasks.count) tasks: ") + String(first.prefix(60)) + (tasks.count > 1 ? " +\(tasks.count - 1)" : "")
+    }
     static func claudeUnseparated(_ text: String, session: Session) -> String {
         let unseparated = NSMutableString(string: text)
         for range in session.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length {
@@ -1133,7 +1149,7 @@ final class Store: ObservableObject {
             s.status = ProviderRetry.status(s.entry.engine)
             saveSoon(); objectWillChange.send(); return
         }
-        if s.retryDetail != nil { s.retryDetail = nil; s.status = "Working…" }
+        if s.retryDetail != nil { s.retryDetail = nil; s.status = s.entry.engine == "claude" ? Store.claudeWorkingStatus(s) : "Working…" }
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
@@ -1157,6 +1173,13 @@ final class Store: ObservableObject {
             }
         } else if s.entry.engine == "claude" {
             if let sid = obj["session_id"] as? String { s.remoteID = sid }
+            // Subagents and background shells can keep the CLI working after
+            // its first result. Name them so the turn does not look finished.
+            if type == "system", let task = obj["task_id"] as? String, let subtype = obj["subtype"] as? String, ["task_started", "task_notification"].contains(subtype) {
+                if subtype == "task_started" { s.claudeBackgroundTasks[task] = (obj["description"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unnamed task" }
+                else { s.claudeBackgroundTasks[task] = nil }
+                if s.busy && s.status.hasPrefix("Working") { s.status = Store.claudeWorkingStatus(s) }
+            }
             if type == "stream_event", let event = obj["event"] as? [String: Any] {
                 if event["type"] as? String == "content_block_start", let block = event["content_block"] as? [String: Any], block["type"] as? String == "text" {
                     s.claudeTextBlockPending = true
@@ -3326,6 +3349,16 @@ func selfTest() {
     check(pong.messages[0].text == "A genuine correction", "A genuinely different Claude result still replaces accumulated output")
     pongLine(#"{"type":"result","is_error":true,"result":"correction"}"#)
     check(pong.turnFailed && pong.messages[0].text == "correction", "Claude error results replace output even when they are a subset")
+    let background = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
+    let backgroundID = UUID(); background.messages = [Message(id: backgroundID, role: "assistant", text: "")]; background.busy = true; background.status = "Working…"
+    store.consume(#"{"type":"system","subtype":"task_started","task_id":"t1","description":"Audit the gutter","is_backgrounded":true}"#, session: background, responseID: backgroundID)
+    store.consume(#"{"type":"result","result":"Started a background audit."}"#, session: background, responseID: backgroundID)
+    check(background.busy && background.status == "Working… · task: Audit the gutter" && background.messages[0].text == "Started a background audit.", "Claude background work stays visible as busy after the first result")
+    store.consume(#"{"type":"system","subtype":"task_started","task_id":"t2","description":"Run tests"}"#, session: background, responseID: backgroundID)
+    check(background.status == "Working… · 2 tasks: Audit the gutter +1", "Several outstanding Claude tasks are counted")
+    store.consume(#"{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed"}"#, session: background, responseID: backgroundID)
+    store.consume(#"{"type":"system","subtype":"task_notification","task_id":"t2","status":"failed"}"#, session: background, responseID: backgroundID)
+    check(background.status == "Working…" && background.claudeBackgroundTasks.isEmpty, "Finished Claude tasks clear the background status")
     let blocks = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
     let blocksID = UUID(); blocks.messages = [Message(id: blocksID, role: "assistant", text: "")]
     store.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"Unique block"},{"type":"text","text":"Unique block"}]}}"#, session: blocks, responseID: blocksID)
@@ -3362,6 +3395,18 @@ func selfTest() {
     let ttyQuota = MuseQuota.parse("\u{001B}[17;1H│ Weekly 2% used · Resets Nov 1 at 4:00 PM │\n│ Current 7% used · Resets at 10:42 PM │")
     check(ttyQuota?.contains("Weekly 2% used · resets Nov 1 at 4:00 PM") == true && ttyQuota?.contains("Current 7%") == true && ttyQuota?.contains("\u{001B}") == false, "CLI quota parsing preserves weekly percent and reset time without terminal escapes")
     check(MuseQuota.parse("Weekly: unavailable") == nil, "Unavailable quota is never presented as zero")
+    // Captured from `muse usage --json` (Muse Code 1.4.14).
+    let usageSample = Data(#"{"schemaVersion":1,"allowance":{"tier":"Muse Code Max Usage","window":{"usedPercent":2,"resetsAtMs":1793685586000},"weekly":{"usedPercent":8,"resetsAtMs":1794182400000},"asOfMs":1793670990782,"source":"mint"},"reason":null,"hint":null}"#.utf8)
+    let usageReading = try? MuseQuota.allowance(usageSample)
+    let weeklyLimit = usageReading?.usage?.limits.first { $0.name == "Weekly" }
+    check(weeklyLimit?.usedPercent == 8 && weeklyLimit?.resetsAt == Date(timeIntervalSince1970: 1794182400) && usageReading?.usage?.limits.first?.name == "Window" && abs((usageReading?.usage?.observedAt?.timeIntervalSince1970 ?? 0) - 1793670990.782) < 0.01, "Muse usage report supplies weekly and window limits with reset and observation times")
+    check(usageReading?.text.contains("weekly 8% used") == true && AccountUsage.museLimits(usageReading?.text ?? "").map(\.usedPercent) == [2, 8], "Muse usage report keeps a readable quota summary")
+    var unavailableThrows = false
+    do { _ = try MuseQuota.allowance(Data(#"{"schemaVersion":1,"allowance":null,"reason":"not signed in","hint":"Run muse login"}"#.utf8)) } catch { unavailableThrows = error.localizedDescription.contains("not signed in") }
+    var fellBack = false
+    do { fellBack = try MuseQuota.allowance(Data("Weekly: 8% used".utf8)) == nil } catch {}
+    check(unavailableThrows && fellBack, "Missing Muse allowance reports Muse's reason; non-report output falls back to the terminal reader")
+    check(MuseQuota.listsUsage("Commands:\n  serve  Serve\n  usage            Show your subscription allowance\n") && !MuseQuota.listsUsage("Commands:\n  serve  Serve\n  exec  Run one prompt\n"), "Converse runs muse usage only when the installed CLI lists it")
     let fresh = Session(entry: entry)
     store.changeSetting(fresh, .effort("max"))
     check(fresh.choices.effort == "max" && fresh.toolStatus.effort == "max" && fresh.process == nil, "New-session setting is scoped and saved without starting a turn")
@@ -3610,7 +3655,7 @@ func selfTest() {
 signal(SIGPIPE, SIG_IGN)
 if CommandLine.arguments.contains("--agent-image-live-test") { exit(MainActor.assumeIsolated { agentImageLiveTest() } ? 0 : 1) }
 if CommandLine.arguments.contains("--probe-muse-quota") {
-    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"))); exit(0) }
+    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse")).text); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {

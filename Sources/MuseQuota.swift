@@ -4,7 +4,66 @@ import Darwin
 // Muse's MSP usage/read only returns an observation held by that host. The TUI
 // can fetch subscription data without a model turn. Until MSP exposes refresh,
 // ask the installed CLI's /usage in an ephemeral, invisible PTY.
+struct MuseQuotaReading {
+    var text: String
+    var usage: AccountUsage?
+}
 struct MuseQuota {
+    // `muse usage --json` reads the subscription allowance without a model turn.
+    // nil means the output is not that report; a report without an allowance
+    // throws Muse's own reason instead of showing zero.
+    static func allowance(_ data: Data, now: Date = Date()) throws -> MuseQuotaReading? {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], root["schemaVersion"] != nil else { return nil }
+        guard var allowance = root["allowance"] as? [String: Any] else {
+            let detail = [root["reason"] as? String, root["hint"] as? String].compactMap { $0 }.joined(separator: " ")
+            throw NSError(domain: "MuseQuota", code: 3, userInfo: [NSLocalizedDescriptionKey: "Muse reported no subscription allowance." + (detail.isEmpty ? "" : " " + detail)])
+        }
+        var usage = AccountUsage()
+        for (key, name) in [("window", "Window"), ("weekly", "Weekly")] {
+            guard let row = allowance[key] as? [String: Any], let used = (row["usedPercent"] as? NSNumber)?.doubleValue,
+                  used.isFinite, used >= 0, used <= 100 else { continue }
+            let reset = ((row["resetsAtMs"] as? NSNumber)?.doubleValue).flatMap { $0.isFinite && $0 > 0 ? Date(timeIntervalSince1970: $0 / 1000) : nil }
+            usage.limits.append(AccountLimit(name: name, usedPercent: used, resetsAt: reset))
+        }
+        guard !usage.limits.isEmpty else { return nil }
+        let asOf = ((allowance["asOfMs"] as? NSNumber)?.doubleValue).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        usage.observedAt = asOf.map { Date(timeIntervalSince1970: $0 / 1000) } ?? now
+        if allowance["observedAtMs"] == nil, let asOf { allowance["observedAtMs"] = asOf }
+        return MuseQuotaReading(text: MuseStatusProbe.quotaSummary(allowance), usage: usage)
+    }
+    static func query(entry: Entry) throws -> MuseQuotaReading {
+        if let reading = try usageReport(entry: entry) { return reading }
+        return MuseQuotaReading(text: try terminalQuery(entry: entry), usage: nil)
+    }
+    // Older CLIs lack the subcommand and would read "usage" as a prompt, so
+    // confirm it is listed before running it.
+    static func usageReport(entry: Entry) throws -> MuseQuotaReading? {
+        func run(_ arguments: [String]) -> Data? {
+            let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            process.arguments = ["-lc", ProviderCommand.script(entry: entry, arguments: arguments)]
+            let cwd = NSString(string: entry.directory).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: cwd) { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+            process.environment = env
+            let output = Pipe()
+            process.standardInput = FileHandle.nullDevice; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return nil }
+            let timeout = DispatchWorkItem {
+                if process.isRunning { process.terminate() }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: timeout)
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit(); timeout.cancel()
+            return process.terminationStatus == 0 ? data : nil
+        }
+        guard let help = run(["--help"]), listsUsage(String(decoding: help, as: UTF8.self)), let report = run(["usage", "--json"]) else { return nil }
+        return try allowance(report)
+    }
+    static func listsUsage(_ help: String) -> Bool {
+        help.range(of: "(?m)^\\s+usage\\s", options: .regularExpression) != nil
+    }
     static func parse(_ raw: String, requireObservation: Bool = false) -> String? {
         let osc = "\u{001B}\\][^\u{0007}]*?(?:\u{0007}|\u{001B}\\\\)"
         var plain = raw.replacingOccurrences(of: osc, with: " ", options: .regularExpression)
@@ -29,7 +88,7 @@ struct MuseQuota {
         if requireObservation && !hasObservation { return nil }
         return [row("Current"), weekly, (hasObservation ? "as of " : "queried ") + observed].compactMap { $0 }.joined(separator: "\n")
     }
-    static func query(entry: Entry) throws -> String {
+    static func terminalQuery(entry: Entry) throws -> String {
         var master: Int32 = -1; var slave: Int32 = -1
         var size = winsize(ws_row: 42, ws_col: 130, ws_xpixel: 0, ws_ypixel: 0)
         guard openpty(&master, &slave, nil, nil, &size) == 0 else { throw NSError(domain: "MuseQuota", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open Muse usage terminal"]) }

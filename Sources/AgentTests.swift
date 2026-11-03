@@ -576,11 +576,13 @@ import Foundation
     let evidenceInput = evidenceText(requestBody).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
+    check((requestBody?["instructions"] as? String)?.contains(AgentPolicy.scoreboardScope) == true, "Agent scoreboard instructions limit metrics to that agent's own objective and scope")
     check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
 
     // Clearing GitHub must not make an unrelated saved credential a runtime dependency.
     var noRepoSettings = agent.agent!.wire(home: localHome); noRepoSettings.repository = ""
+    noRepoSettings.objective = "Report weather news only. Never mention GitHub or Discord."
     do { try agent.agent?.apply(noRepoSettings) } catch { check(false, "Clear runtime repository") }
     agent.agent?.generateArt = false; requests = []
     runtime.keyReader = { name in
@@ -596,6 +598,8 @@ import Foundation
     let noRepoBody = requests.first?.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let noRepoEvidence = evidenceText(noRepoBody)?.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     check(noRepoEvidence?["repository"] is NSNull, "General agent evidence explicitly omits repository data")
+    let noRepoInstructions = noRepoBody?["instructions"] as? String ?? ""
+    check(noRepoInstructions.contains("Objective: Report weather news only. Never mention GitHub or Discord.") && !noRepoInstructions.contains("Objective: " + AgentConfig().objective) && noRepoInstructions.contains(AgentPolicy.objectiveGoverns), "An objective edited in Agent Setup reaches the next run and governs supplied evidence and older notes")
     let noRepoHTML = AgentWidgetExport.html(agent)
     check(noRepoHTML.contains("AGENT SCOREBOARD") && !noRepoHTML.contains("Repository data unavailable") && !noRepoHTML.contains("<div class=grid>"), "General scoreboard retains its report without GitHub warnings or metric tiles")
     check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/metrics.json").path), "Clearing GitHub removes stale exported repository measurements")
