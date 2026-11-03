@@ -81,8 +81,53 @@ static class SwitchboardSupervisionChecks
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }
+    // Inject all must not launder peer or agent prompts into a foreground
+    // hop-0 human turn, and must still apply Group admission per part.
+    static void InjectAllFlags(Action<bool, string> check)
+    {
+        var root = Directory.CreateTempSubdirectory("converse-inject-flags-").FullName;
+        try
+        {
+            var group = Guid.NewGuid().ToString(); var peer = new string('a', 64); var removed = new string('b', 64); var other = new string('c', 64);
+            var store = new SessionStore(root, new FakeRunner()) { AcceptGroupPrompt = p => p.OriginHomeID != removed };
+            ChatSession Busy(params PendingPrompt[] prompts) { var s = new ChatSession { MessagingEnabled = true, Busy = true }; s.Pending.AddRange(prompts); return s; }
+
+            var human = new PendingPrompt { Text = "human" };
+            var tell = new PendingPrompt { Text = "peer", Autonomous = true, Hop = 3, AppControlDepth = 2, OriginGroupID = group, OriginHomeID = peer };
+            var local = new PendingPrompt { Text = "agent", Autonomous = true, Hop = 1, AppControlDepth = 1 };
+            var mixed = Busy(human, tell, local);
+            var result = store.InjectPending(mixed);
+            var m = mixed.Pending.SingleOrDefault();
+            check(result is null && m is { Autonomous: true, Hop: 3, AppControlDepth: 2, AgentRunReserved: false } && m.OriginGroupID == group && m.OriginHomeID == peer
+                && m.Text == "human\n\npeer\n\nagent" && new[] { human.Id, tell.Id, local.Id }.All(m.ComponentIDs!.Contains),
+                "Inject all keeps the strictest flags: autonomous, max hop/app-control depth, and the Group origin");
+
+            var reserved = Busy(new PendingPrompt { Text = "typed" }, new PendingPrompt { Text = "run", Autonomous = true, AgentRunReserved = true });
+            store.InjectPending(reserved);
+            check(reserved.Pending.SingleOrDefault() is { Autonomous: true, AgentRunReserved: true }, "Inject all keeps an agent run reservation");
+
+            var revoked = new PendingPrompt { Text = "from removed member", Autonomous = true, Hop = 4, OriginGroupID = group, OriginHomeID = removed };
+            var stale = Busy(new PendingPrompt { Text = "mine" }, revoked, new PendingPrompt { Text = "also mine" });
+            store.InjectPending(stale);
+            check(stale.Pending.SingleOrDefault() is { Autonomous: false, Hop: 0, OriginGroupID: null, Text: "mine\n\nalso mine" } p && !p.ComponentIDs!.Contains(revoked.Id),
+                "Inject all drops a part whose Group origin is no longer allowed and keeps unrelated human input");
+            var onlyRevoked = Busy(revoked, new PendingPrompt { Text = "x", OriginGroupID = group, OriginHomeID = removed });
+            check(store.InjectPending(onlyRevoked) is string refused && refused.Length > 0 && onlyRevoked.Pending.Count == 0,
+                "Inject all reports honestly when every part came from a removed Group member");
+
+            var fromOther = new PendingPrompt { Text = "other peer", Autonomous = true, Hop = 2, OriginGroupID = group, OriginHomeID = other };
+            var two = Busy(new PendingPrompt { Text = "mine" }, tell, fromOther, new PendingPrompt { Text = "later" });
+            store.InjectPending(two);
+            check(two.Pending.Count == 2 && two.Pending[0] is { OriginHomeID: var first, Text: "mine\n\npeer\n\nlater" } && first == peer
+                && two.Pending[1] == fromOther,
+                "Inject all never merges prompts from different Group senders under one origin");
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
     public static async Task Run(Action<bool, string> check, Func<DeviceSyncService, DeviceSyncService, Func<bool>, Task<bool>> join)
     {
+        InjectAllFlags(check);
         await ReplyTolerance(check);
         var root = Directory.CreateTempSubdirectory("converse-supervision-").FullName;
         try
