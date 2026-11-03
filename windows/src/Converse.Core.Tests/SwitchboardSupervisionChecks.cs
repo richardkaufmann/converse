@@ -217,6 +217,16 @@ static class SwitchboardSupervisionChecks
             check(SwitchboardPresentation.Summary("Switchboard: rejected → Muse [id] · delivery [tell]\nReview") == "Rejected tell to Muse · Review", "Rejected messages never render as sent");
             check(SwitchboardPresentation.Summary("[Converse message from Muse · session id]\nReview\n[Reply expected]", queued: true)!.StartsWith("Queued ask from Muse"), "Receiver queue identifies source and ask kind");
             check(SwitchboardPresentation.Summary("Some prose\n```converse\n{}\n```") is null, "Quoted JSON examples remain expanded");
+            // Incoming traffic built as delivery builds it: an inReplyTo answer reads as a reply (bug 9DF32E78).
+            var envelopeRequest = Guid.NewGuid(); var envelopeDelivery = Guid.NewGuid();
+            foreach (var (body, expected, replyTo, kind) in new (string, bool, Guid?, string)[] { ("Status update", false, null, "tell"), ("Can you check?", true, null, "ask"), ("Done; fixed it", false, envelopeRequest, "reply"), ("Done; which branch?", true, envelopeRequest, "reply + ask") })
+            {
+                var envelope = $"[Converse message from ClaudeConverse · session abc · delivery {envelopeDelivery} · hop 1/100]\n{body}" + DeviceSyncService.ReplyInstruction(envelopeDelivery, expected, replyTo);
+                check(SwitchboardPresentation.Summary(envelope) == $"Received {kind} from ClaudeConverse · {body}" && SwitchboardPresentation.Summary(envelope, queued: true) == $"Queued {kind} from ClaudeConverse · {body}",
+                    $"Incoming {kind} reads as {kind} when received and queued, without delivery instructions");
+            }
+            check(SwitchboardPresentation.Summary($"Switchboard: message queued from ClaudeConverse · session abc\nDone\n[Reply to request {envelopeRequest}]") == "Queued reply from ClaudeConverse · Done", "Legacy queue receipts also read replies as replies");
+            check(SwitchboardPresentation.Summary("[Converse message from Muse · session abc]\nI read [Reply to request X] in the docs") == "Received tell from Muse · I read [Reply to request X] in the docs", "Only the delivery reply marker, not quoted body text, makes a reply");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { /* Disposed transport callbacks may finish their last isolated write. */ } }
     }

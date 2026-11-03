@@ -422,6 +422,25 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     check(TranscriptStyle.trafficSummary("{\"ordinary\":\"JSON\"}") == nil && TranscriptStyle.trafficSummary("Example:\n```converse\n{\"command\":\"tell\"}\n```") == nil,
           "Ordinary JSON and quoted switchboard examples remain expanded")
     check(TranscriptStyle.trafficSummary("```converse\n{\"command\":\"tell\",\"to\":\"Muse\",\"text\":\"Review\"}\n```") == "Tell to Muse · Review", "Unexecuted command summaries never claim delivery")
+    // Incoming traffic built exactly as delivery builds it: an inReplyTo answer
+    // reads as a reply (bug 9DF32E78), and delivery instructions stay out of the detail.
+    let envelopeRequest = UUID(), envelopeDelivery = UUID()
+    func envelope(_ body: String, expected: Bool, inReplyTo: UUID?) -> String {
+        "[Converse message from ClaudeConverse · session abc · delivery " + envelopeDelivery.uuidString + " · hop 1/100]\n" + body + Store.replyInstruction(id: envelopeDelivery, expected: expected, inReplyTo: inReplyTo)
+    }
+    let envelopeCases: [(String, Bool, UUID?, String)] = [
+        ("Status update", false, nil, "tell"), ("Can you check?", true, nil, "ask"),
+        ("Done; fixed it", false, envelopeRequest, "reply"), ("Done; which branch?", true, envelopeRequest, "reply + ask")]
+    for (body, expected, replyTo, kind) in envelopeCases {
+        let text = envelope(body, expected: expected, inReplyTo: replyTo)
+        check(TranscriptStyle.trafficSummary(text) == "Received " + kind + " from ClaudeConverse · " + body &&
+              TranscriptStyle.trafficSummary(text, queued: true) == "Queued " + kind + " from ClaudeConverse · " + body,
+              "Incoming " + kind + " reads as " + kind + " when received and queued, without delivery instructions")
+    }
+    check(TranscriptStyle.trafficSummary("Switchboard: message queued from ClaudeConverse · session abc\nDone\n[Reply to request " + envelopeRequest.uuidString + "]") == "Queued reply from ClaudeConverse · Done",
+          "Legacy queue receipts also read replies as replies")
+    check(TranscriptStyle.trafficSummary("[Converse message from Muse · session abc]\nI read [Reply to request X] in the docs") == "Received tell from Muse · I read [Reply to request X] in the docs",
+          "Only the delivery reply marker, not quoted body text, makes a reply")
     // A delivered reply carries no obligation: an interrupted receiving turn is not a delivery failure.
     let replyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("reply-interrupted-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: replyFolder) }

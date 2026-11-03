@@ -49,9 +49,15 @@ enum TranscriptStyle {
             if let resolved = resolveName(value) { return clipped(resolved, limit: 35) }
             return UUID(uuidString: value) != nil || value.contains("/") ? "Unavailable session" : clipped(value, limit: 35)
         }
-        let kind = text.contains("[Reply expected") || text.components(separatedBy: "\n")[0].contains("[ask]") ? "ask" : "tell"
+        let asks = text.contains("[Reply expected") || text.components(separatedBy: "\n")[0].contains("[ask]")
+        // An incoming message carrying inReplyTo answers the recipient's own
+        // request; it must read as a reply, not as a fresh tell or ask.
+        let replies = text.contains("\n[Reply to request ")
+        let kind = replies ? (asks ? "reply + ask" : "reply") : asks ? "ask" : "tell"
+        // The delivery instructions trail the body; keep them out of the detail.
+        let body = ["\n[Reply to request ", "\n[Reply expected"].compactMap { text.range(of: $0)?.lowerBound }.min().map { String(text[..<$0]) } ?? text
         let lines = text.components(separatedBy: "\n")
-        let detail = clipped(lines.dropFirst().joined(separator: " "))
+        let detail = clipped(body.components(separatedBy: "\n").dropFirst().joined(separator: " "))
         if text.hasPrefix("[Converse message from ") {
             let who = String((lines.first ?? "").dropFirst("[Converse message from ".count))
             return (queued ? "Queued " : "Received ") + kind + " from " + name(who) + (detail.isEmpty ? "" : " · " + detail)

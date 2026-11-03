@@ -17,9 +17,15 @@ public static class SwitchboardPresentation
         var text = source.Trim();
         string Destination(string value) => resolveName?.Invoke(value) is { } name ? Clip(name, 35)
             : Guid.TryParse(value, out _) || value.Contains('/') ? "Unavailable session" : Clip(value, 35);
-        var kind = text.Contains("[Reply expected") || text.Split('\n')[0].Contains("[ask]") ? "ask" : "tell";
+        var asks = text.Contains("[Reply expected") || text.Split('\n')[0].Contains("[ask]");
+        // An incoming message carrying inReplyTo answers the recipient's own
+        // request; it must read as a reply, not as a fresh tell or ask.
+        var replies = text.Contains("\n[Reply to request ");
+        var kind = replies ? (asks ? "reply + ask" : "reply") : asks ? "ask" : "tell";
+        // The delivery instructions trail the body; keep them out of the detail.
+        var cut = new[] { text.IndexOf("\n[Reply to request ", StringComparison.Ordinal), text.IndexOf("\n[Reply expected", StringComparison.Ordinal) }.Where(i => i >= 0).DefaultIfEmpty(text.Length).Min();
         var lines = text.Split('\n');
-        var detail = Clip(string.Join(" ", lines.Skip(1)));
+        var detail = Clip(string.Join(" ", text[..cut].Split('\n').Skip(1)));
         var suffix = detail.Length == 0 ? "" : " · " + detail;
         if (text.StartsWith("[Converse message from "))
             return (queued ? "Queued " : "Received ") + kind + " from " + Name(lines[0][23..]) + suffix;
