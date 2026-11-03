@@ -632,7 +632,7 @@ public sealed class SessionStore
                             {
                                 var newId = Guid.NewGuid();
                                 session.MuseItems[itemId] = newId;
-                                session.Messages.Add(new ChatMessage { Id = newId, Role = "assistant", Text = "" });
+                                session.Messages.Add(new ChatMessage { Id = newId, Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow });
                             }
                         }
                         if (item["text"]?.GetValue<string>() is { } value) UpdateMuseText(value, append: false, itemId, session);

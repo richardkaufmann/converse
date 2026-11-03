@@ -203,7 +203,41 @@ public sealed class DeviceSidebarRow
     [JsonPropertyName("participantKind")] public string? ParticipantKind { get; set; }
     [JsonPropertyName("attention")] public string? Attention { get; set; }
     [JsonPropertyName("linkedSessionIDs")] public string[]? LinkedSessionIDs { get; set; }
+    // Viewer sidebar markers (Sources/DeviceProtocol.swift parity). Optional
+    // so older peers ignore them. lastResponseAt is an Apple-epoch double on
+    // the home's clock, compared only with earlier values from that home.
+    [JsonPropertyName("loopPaused")] public bool? LoopPaused { get; set; }
+    [JsonPropertyName("pausedReason")] public string? PausedReason { get; set; }
+    [JsonPropertyName("lastResponseAt")] public double? LastResponseAt { get; set; }
+}
 
+// Home-side marker values, Mac Session.agentLoopPaused / pausedLoopReason /
+// lastResponseAt parity.
+public static class SidebarMarkers
+{
+    private static readonly DateTime AppleEpoch = new(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    public static bool? LoopPaused(ChatSession session) => session.Agent is null ? null : !session.Agent.Settings.Enabled;
+    public static string? PausedReason(ChatSession session)
+    {
+        if (session.Agent is not { } agent || agent.Settings.Enabled) return null;
+        if (!string.IsNullOrEmpty(agent.Attention)) return agent.Attention;
+        return agent.LastLoopUtc is null ? "Never run — enable the loop in Agent Setup." : "Loop paused. Re-enable it in Agent Setup / Loop.";
+    }
+    // Newest assistant response; a running turn's partial reply never counts.
+    public static double? LastResponseAt(IReadOnlyList<ChatMessage> messages, bool busy)
+    {
+        var end = messages.Count;
+        if (busy) { var turn = -1; for (var i = messages.Count - 1; i >= 0; i--) if (messages[i].Role == "user") { turn = i; break; } if (turn >= 0) end = turn; }
+        for (var i = end - 1; i >= 0; i--)
+        {
+            var m = messages[i];
+            if (m.Role != "assistant" || (string.IsNullOrEmpty(m.Text) && m.Images.Count == 0)) continue;
+            if (m.CreatedAt is not { } at) continue; // Older archives carry no times.
+            var utc = at.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : at.ToUniversalTime();
+            return (utc - AppleEpoch).TotalSeconds;
+        }
+        return null;
+    }
 }
 
 public sealed class DeviceSidebarPayload

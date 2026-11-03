@@ -280,12 +280,14 @@ struct PadRoot: View {
                         ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
                             let pane = model.state.placements.firstIndex(of: row.globalID)
                             let attention = !(row.attention ?? "").isEmpty || (row.status.hasPrefix("Waiting") && pane == nil)
+                            let markers = service.remoteMarkers(row)
                             HStack(spacing: 3) {
                                 if row.busy && home.online { ProgressView().controlSize(.mini).frame(width: 14) }
+                                else if markers.paused || (markers.unseen && !attention) { PadRowMarker(markers: markers).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
                                 Button { sessionActions = row } label: {
-                                    PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent").frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityLabel("Actions for " + row.title)
+                                    PadSessionName(title: row.title, isAgent: row.isAgentRow, isPaused: markers.paused, unread: markers.unseen).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                }.buttonStyle(.plain).accessibilityLabel("Actions for " + row.title + PadRowMarker.spoken(markers))
                                     .simultaneousGesture(LongPressGesture().onEnded { _ in sessionActions = row })
                                 Group { if row.engine == "parking" { Image(systemName: "note.text") } else { PadProviderLogo(engine: row.engine) } }.frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
@@ -331,11 +333,13 @@ struct PhoneSessionPicker: View {
                     Section {
                         ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
                             let selected = model.state.placements.contains(row.globalID)
+                            let markers = service.remoteMarkers(row)
                             Button { model.togglePhoneSession(row.globalID) } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Color.accentColor : .secondary)
+                                    PadRowMarker(markers: markers).frame(width: 14)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        PadSessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent")
+                                        PadSessionName(title: row.title, isAgent: row.isAgentRow, isPaused: markers.paused, unread: markers.unseen)
                                         Text(row.status).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -343,7 +347,7 @@ struct PhoneSessionPicker: View {
                                 }.frame(minHeight: 40).contentShape(Rectangle())
                             }.buttonStyle(.plain)
                                 .disabled(!selected && (!home.online || model.state.placements.compactMap { $0 }.count >= 2))
-                                .accessibilityLabel((selected ? "Deselect " : "Select ") + row.title)
+                                .accessibilityLabel((selected ? "Deselect " : "Select ") + row.title + PadRowMarker.spoken(markers))
                                 .accessibilityAddTraits(selected ? .isSelected : [])
                         }
                         if home.online && service.canCreateRemote(home.deviceID) {
@@ -419,7 +423,7 @@ struct PadPane: View {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
                 PadProviderLogo(engine: snapshot?.engine.isEmpty == false ? snapshot!.engine : service.remoteRow(globalID: id)?.engine ?? "")
-                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.participantKind == "agent" || service.remoteRow(globalID: id)?.engine == "agent").font(UIDevice.current.userInterfaceIdiom == .phone ? .headline : .title3).lineLimit(1).truncationMode(.tail)
+                PadSessionName(title: snapshot?.title ?? service.remoteRow(globalID: id)?.title ?? "Session", isAgent: service.remoteRow(globalID: id)?.isAgentRow == true, isPaused: service.remoteRow(globalID: id)?.showsLoopPaused == true).font(UIDevice.current.userInterfaceIdiom == .phone ? .headline : .title3).lineLimit(1).truncationMode(.tail)
                 PadSessionActivity(id: id, service: service)
                 Spacer(minLength: 0)
                 Button { sessionActions = service.remoteRow(globalID: id) } label: {
@@ -756,12 +760,35 @@ private struct PadProviderLogo: View {
     }
 }
 
+// Leading-column marker for a remote row: the Mac's red paused-loop icon or
+// the unseen-response eye. Busy takes precedence; approval "!" outranks the eye.
+struct PadRowMarker: View {
+    let markers: RemoteRowMarkers
+    static func spoken(_ markers: RemoteRowMarkers) -> String {
+        (markers.paused ? ". Agent loop paused: " + (markers.pausedReason ?? "") : "") + (markers.unseen ? ". Unseen response" : "")
+    }
+    var body: some View {
+        if markers.paused {
+            Image(systemName: "pause.circle.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(Color.red)
+                .accessibilityLabel("Agent loop paused: " + (markers.pausedReason ?? ""))
+                .help(markers.pausedReason ?? "Loop paused. Re-enable it in Agent Setup / Loop.")
+                .accessibilityIdentifier("session-paused")
+        } else if markers.unseen {
+            Text("👀").font(.system(size: 10)).fixedSize()
+                .accessibilityLabel("Unseen response").help("Unseen response: take with 1, 2 or 3 to read it.")
+                .accessibilityIdentifier("session-unseen")
+        }
+    }
+}
+
 struct PadSessionName: View {
     let title: String
     let isAgent: Bool
+    var isPaused = false
+    var unread = false
     var body: some View {
         HStack(spacing: 4) {
-            Text(title).lineLimit(1).truncationMode(.tail)
+            Text(title).lineLimit(1).truncationMode(.tail).bold(unread).foregroundStyle(isPaused ? Color.red : Color.primary)
             if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
         }
     }

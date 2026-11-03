@@ -197,6 +197,53 @@ final class ConverseTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         XCTAssertFalse(model.state.placements.contains(id), "Later home traffic must not recheck an unchecked session")
     }
+    func testRemoteSidebarMarkersPausedUnseenAndPersisted() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-markers-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let home = String(repeating: "c", count: 64), sid = UUID(), aid = UUID()
+        let id = DeviceGlobalID(home: home, session: sid).string, agentID = DeviceGlobalID(home: home, session: aid).string
+        var sequence: UInt64 = 10
+        func launch() throws -> (DeviceSyncService, PadModel, DevicePeer) {
+            let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
+            let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+            peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+            service.adoptPeerForTesting(peer)
+            return (service, PadModel(service: service), peer)
+        }
+        func sidebar(_ service: DeviceSyncService, _ peer: DevicePeer, response: TimeInterval, paused: Bool) throws {
+            sequence += 1
+            var chat = DeviceSidebarRow(globalID: id, sessionID: sid, title: "Work", assistant: "Claude", engine: "claude", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+            chat.lastResponseAt = Date(timeIntervalSinceReferenceDate: response)
+            var agent = DeviceSidebarRow(globalID: agentID, sessionID: aid, title: "Converse Steward", assistant: "Agent", engine: "agent", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false, participantKind: "agent")
+            agent.loopPaused = paused; agent.pausedReason = paused ? "Over budget." : nil; agent.lastResponseAt = chat.lastResponseAt
+            let payload = DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: sequence, rows: [chat, agent])
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: sequence, payload: try JSONEncoder().encode(payload)))
+        }
+        func markers(_ service: DeviceSyncService, _ id: String) throws -> RemoteRowMarkers { service.remoteMarkers(try XCTUnwrap(service.remoteRow(globalID: id))) }
+        var (service, model, peer) = try launch()
+        try sidebar(service, peer, response: 100, paused: true)
+        XCTAssertEqual(try markers(service, agentID), RemoteRowMarkers(paused: true, pausedReason: "Over budget.", unseen: false), "A paused remote agent renders red with its reason, never the eye")
+        XCTAssertFalse(try markers(service, id).unseen, "First sight after install is seen")
+        try sidebar(service, peer, response: 200, paused: false)
+        XCTAssertTrue(try markers(service, id).unseen, "A new response while not displayed here shows the eye")
+        let resumedAgent = try markers(service, agentID)
+        XCTAssertFalse(resumedAgent.unseen || resumedAgent.paused, "Agents never get the eye; unpausing clears the red marker")
+        (service, model, peer) = try launch()
+        try sidebar(service, peer, response: 200, paused: false)
+        XCTAssertTrue(try markers(service, id).unseen, "The eye survives relaunch")
+        service.homes[home]?.lastSeen = Date()
+        model.assign(id, pane: 0)
+        XCTAssertFalse(try markers(service, id).unseen, "Taking the session with 1, 2 or 3 clears the eye")
+        try sidebar(service, peer, response: 300, paused: false)
+        XCTAssertFalse(try markers(service, id).unseen, "A response while displayed here is seen")
+        model.park(id)
+        try sidebar(service, peer, response: 400, paused: false)
+        XCTAssertTrue(try markers(service, id).unseen, "After parking, the next response shows the eye again")
+        (service, model, peer) = try launch()
+        XCTAssertEqual(model.state.placements, [nil, nil, nil])
+        try sidebar(service, peer, response: 400, paused: false)
+        XCTAssertTrue(try markers(service, id).unseen, "Relaunch keeps an uncleared eye without marking anything new")
+    }
     func testTranscriptFocusSelectsPaneWithoutEditingDraft() {
         var focusCount = 0
         let parent = PadTranscript(messages: [], draft: "Untouched", images: [:], editable: true, lineNumbers: true,
@@ -532,6 +579,8 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(service.remoteLeases.isEmpty, "Admission does not take a session")
         try await eventually("Group directory reaches iPad") { service.homes.values.contains { !$0.rows.isEmpty } }
         let row = try XCTUnwrap(service.homes.values.flatMap(\.rows).first)
+        XCTAssertNotNil(row.lastResponseAt, "The Mac home reports its latest response time")
+        XCTAssertFalse(service.remoteMarkers(row).unseen, "First sight of a home session after install is not unseen")
         service.acquireRemote(globalID: row.globalID)
         try await eventually("Group member takes the home session") { service.remoteTranscripts[row.globalID] != nil }
         let transcript = try XCTUnwrap(service.remoteTranscripts[row.globalID])
@@ -566,6 +615,9 @@ final class ConverseTests: XCTestCase {
         let created = await service.requestParticipant(home: home, action: "agent.create", title: "iPad-created paused agent")
         XCTAssertEqual(created.outcome, "completed", created.detail)
         let target = try XCTUnwrap(created.target)
+        try await eventually("The paused Mac agent shows the red paused marker with its reason on iPad") {
+            service.remoteRow(globalID: target).map { service.remoteMarkers($0).paused && service.remoteMarkers($0).pausedReason?.isEmpty == false && !service.remoteMarkers($0).unseen } == true
+        }
         let loaded = await service.requestParticipant(home: home, action: "agent.settings", target: target)
         var settings = try XCTUnwrap(loaded.settings)
         XCTAssertFalse(settings.enabled)
@@ -581,6 +633,7 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(saved.outcome, "completed", saved.detail)
         XCTAssertEqual(saved.settings?.turnLimit, 3, "Save acknowledges the per-activation limit even with an exhausted legacy counter")
         XCTAssertEqual(saved.settings?.enabled, true, "The iPad can restart a loop using a text schedule")
+        try await eventually("Restarting the loop republishes the iPad row unpaused") { service.remoteRow(globalID: target).map { !service.remoteMarkers($0).paused } == true }
         let refreshed = await service.requestParticipant(home: home, action: "agent.settings", target: target)
         XCTAssertEqual(refreshed.settings?.scheduleText, settings.scheduleText)
         XCTAssertEqual(refreshed.settings?.objective, settings.objective)

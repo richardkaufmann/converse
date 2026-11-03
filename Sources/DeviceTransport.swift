@@ -98,6 +98,7 @@ final class DeviceSyncService: ObservableObject {
     @Published var remoteLeases: [String: UInt64] = [:]
     @Published var remoteTranscripts: [String: DeviceTranscriptPayload] = [:]
     @Published var remoteOffline: Set<String> = []
+    @Published private(set) var remoteSeen = RemoteSeenWatermarks()
     @Published var outbox: [DeviceOutboxRecord] = []
     @Published var blobReady: [String: Bool] = [:]
     @Published var blobCache: [String: URL] = [:]
@@ -176,7 +177,7 @@ final class DeviceSyncService: ObservableObject {
         #if os(macOS)
         parkingLibraryOverride = ParkingLotLibrary(folder: folder.appendingPathComponent("parking-test-profile"))
         #endif
-        loadResumeEpochs()
+        loadResumeEpochs(); loadRemoteSeen()
         identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: false)
         trustStore = try DeviceTrustStore(folder: folder)
         commandStore = try DeviceCommandStore(folder: folder)
@@ -210,7 +211,7 @@ final class DeviceSyncService: ObservableObject {
         do {
             let folder = storageFolder
             if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true { deviceNameOverride = (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") }
-            loadResumeEpochs()
+            loadResumeEpochs(); loadRemoteSeen()
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)
             try initializeGroups(folder: folder)
@@ -764,7 +765,8 @@ extension DeviceSyncService {
                              model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
                              status: session.status, busy: session.busy, queued: session.pending.count, queuePaused: session.queuePaused,
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
-                             accountName: session.entry.accountName, messagingEnabled: session.switchboardEnabled, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention)
+                             accountName: session.entry.accountName, messagingEnabled: session.switchboardEnabled, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention,
+                             loopPaused: session.agent == nil ? nil : session.agentLoopPaused, pausedReason: session.pausedLoopReason, lastResponseAt: session.lastResponseAt)
         }
         let parkingRows = parkingLibrary.lots.filter(\.active).map { lot in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot.id).string, sessionID: lot.id,
@@ -782,6 +784,8 @@ extension DeviceSyncService {
         guard let payload = try? JSONEncoder().encode(sidebarPayload()) else { return }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.sidebarSnapshot.rawValue, homeSeq: stateStore?.nextSeq(), payload: payload))
     }
+    func sidebarPayloadForTesting() -> DeviceSidebarPayload { sidebarPayload() }
+    func publishSidebarForTesting() { publishSidebarIfChanged() }
     private func publishSidebarIfChanged() {
         guard started, peers.values.contains(where: { $0.trustedReady }) else { return }
         let json = (try? JSONEncoder().encode(sidebarPayload())).flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -1028,6 +1032,7 @@ extension DeviceSyncService {
             }
             homes[peerHome] = RemoteHomeState(deviceID: peerHome, deviceName: payload.homeDeviceName, online: true, rows: payload.rows, lastSeen: Date())
             for row in payload.rows { remoteOffline.remove(row.globalID) }
+            observeRemoteResponses(home: peerHome, rows: payload.rows)
             if let encoded = try? JSONEncoder().encode(homes.values.map { DeviceSidebarPayload(homeDeviceID: $0.deviceID, homeDeviceName: $0.deviceName, homeSeq: 0, rows: $0.rows) }) { stateStore?.saveSidebarCache(encoded) }
         #if os(macOS)
         case DeviceMessageKind.leaseAcquire.rawValue, DeviceMessageKind.leaseResume.rawValue:
@@ -1285,6 +1290,24 @@ extension DeviceSyncService {
         guard !locallyRemoved else { return nil }
         return peers.values.first { $0.trustedReady && !$0.controlOnly && (!groupsEnabled || currentGroup != nil) && $0.hello?.deviceID == home && Date().timeIntervalSince($0.lastSeen) <= 20 && homes[home]?.online == true }
     }
+    // Unseen-response markers are per viewing device and survive relaunch.
+    private var remoteSeenFile: URL { storageFolder.appendingPathComponent("remote-seen.json") }
+    private func loadRemoteSeen() {
+        remoteSeen = (try? JSONDecoder().decode(RemoteSeenWatermarks.self, from: Data(contentsOf: remoteSeenFile))) ?? RemoteSeenWatermarks()
+    }
+    private func saveRemoteSeen() { try? JSONEncoder().encode(remoteSeen).write(to: remoteSeenFile, options: .atomic) }
+    func observeRemoteResponses(home: String, rows: [DeviceSidebarRow]) {
+        if remoteSeen.observe(home: home, rows: rows, displayed: viewerHasPlacement) { saveRemoteSeen() }
+    }
+    func markRemoteSeen(globalID: String) {
+        guard let row = remoteRow(globalID: globalID), remoteSeen.markSeen(row) else { return }
+        saveRemoteSeen()
+    }
+    // Sidebar marker inputs for a remote row, shared by Mac and iPad views.
+    func remoteMarkers(_ row: DeviceSidebarRow) -> RemoteRowMarkers {
+        RemoteRowMarkers(paused: row.showsLoopPaused, pausedReason: row.showsLoopPaused ? row.pausedHelp : nil,
+                         unseen: remoteSeen.isUnseen(row) && !viewerHasPlacement(row.globalID))
+    }
     private func loadResumeEpochs() {
         resumeEpochs = (try? JSONDecoder().decode([String: UInt64].self, from: Data(contentsOf: storageFolder.appendingPathComponent("display-resume.json")))) ?? [:]
     }
@@ -1322,6 +1345,7 @@ extension DeviceSyncService {
     }
     func acquireRemote(globalID: String) {
         guard let global = DeviceGlobalID(globalID), let peer = peerForHome(global.home) else { lastOutcome = "Home is offline."; return }
+        markRemoteSeen(globalID: globalID)
         // Coalesce: moving panes or double-clicking must not mint a second
         // epoch that invalidates the first grant.
         guard pendingTakes[globalID] == nil, remoteLeases[globalID] == nil else { return }
@@ -1488,7 +1512,7 @@ extension DeviceSyncService {
 
 
 extension DeviceSyncService {
-    private func viewerHasPlacement(_ globalID: String) -> Bool {
+    func viewerHasPlacement(_ globalID: String) -> Bool {
         if let isPlaced { return isPlaced(globalID) }
         #if os(macOS)
         return Workspace.shared.placements[placementID(forGlobal: globalID)] != nil

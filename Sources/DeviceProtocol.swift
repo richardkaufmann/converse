@@ -128,6 +128,58 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var participantKind: String? = nil
     var attention: String? = nil
     var linkedSessionIDs: [String]? = nil
+    // Sidebar markers for viewers. Optional so older peers ignore them and
+    // older payloads still decode. lastResponseAt is the home's clock (the
+    // default Date encoding, as observedAt); viewers only compare it with
+    // earlier values from the same home.
+    var loopPaused: Bool? = nil
+    var pausedReason: String? = nil
+    var lastResponseAt: Date? = nil
+    var isAgentRow: Bool { participantKind == "agent" || engine == "agent" }
+    // Same red marker as a local paused agent loop.
+    var showsLoopPaused: Bool { isAgentRow && loopPaused == true }
+    var pausedHelp: String { pausedReason.flatMap { $0.isEmpty ? nil : $0 } ?? "Loop paused. Re-enable it in Agent Setup / Loop." }
+}
+
+struct RemoteRowMarkers: Equatable {
+    var paused = false
+    var pausedReason: String? = nil
+    var unseen = false
+}
+
+// Per-viewing-device unseen-response watermarks for remote sessions, keyed by
+// global ID. A row is unseen when its home reports a newer response than the
+// last one this device displayed. The first observation of a session counts
+// as seen, so installs and relaunches never mark everything unseen. Agents
+// and Parking Lots never carry the eye (matching local Mac rows).
+struct RemoteSeenWatermarks: Codable, Equatable {
+    var seen: [String: Date] = [:]
+    static func eligible(_ row: DeviceSidebarRow) -> Bool { !row.isAgentRow && row.engine != "parking" }
+    func isUnseen(_ row: DeviceSidebarRow) -> Bool {
+        guard Self.eligible(row), let latest = row.lastResponseAt, let mark = seen[row.globalID] else { return false }
+        return latest > mark
+    }
+    // Adopts one home's snapshot. Displayed sessions advance to the latest
+    // response; sessions the home no longer lists are forgotten. Returns
+    // whether anything changed so callers persist only real changes.
+    @discardableResult
+    mutating func observe(home: String, rows: [DeviceSidebarRow], displayed: (String) -> Bool) -> Bool {
+        let before = seen
+        let present = Set(rows.map(\.globalID))
+        for id in seen.keys where DeviceGlobalID(id)?.home == home && !present.contains(id) { seen.removeValue(forKey: id) }
+        for row in rows where Self.eligible(row) {
+            if seen[row.globalID] == nil || displayed(row.globalID) { markSeen(row) }
+        }
+        return seen != before
+    }
+    // Taking or displaying a session here shows its transcript.
+    @discardableResult
+    mutating func markSeen(_ row: DeviceSidebarRow) -> Bool {
+        let before = seen[row.globalID]
+        let mark = max(before ?? .distantPast, row.lastResponseAt ?? .distantPast)
+        seen[row.globalID] = mark
+        return before != mark
+    }
 }
 
 // Discovery metadata only; links never confer permission to read or edit.
