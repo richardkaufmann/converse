@@ -850,7 +850,7 @@ final class Store: ObservableObject {
         let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
-            let quotaResult: Result<String, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
+            let quotaResult: Result<MuseQuotaReading, Error>? = fetchQuota && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil ? Result { try MuseQuota.query(entry: entry) } : nil
             DispatchQueue.main.async {
                 s.probingStatus = false
                 // A pre-change metadata read must not revert the picker after
@@ -868,6 +868,11 @@ final class Store: ObservableObject {
                         if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
                         s.toolStatus.accountUsage?.context = context
                     }
+                    // Keep the last measured limits (and their age) between quota reads.
+                    if let previousUsage, !previousUsage.limits.isEmpty, s.toolStatus.accountUsage?.limits.isEmpty != false {
+                        if s.toolStatus.accountUsage == nil { s.toolStatus.accountUsage = AccountUsage() }
+                        s.toolStatus.accountUsage?.limits = previousUsage.limits; s.toolStatus.accountUsage?.observedAt = previousUsage.observedAt
+                    }
                     s.accountStatus = identity; s.toolStatus.account = identity; s.toolStatus.accountObservedAt = Date()
                     if snapshot.status.quota == "Muse has no observed account quota", let previousQuota, (previousQuota.contains("observed ") || previousQuota.contains("% used")) { s.toolStatus.quota = previousQuota; s.toolStatus.accountUsage = previousUsage }
                     if !s.started { self.updateExplicitStatus(s) }; self.saveSoon()
@@ -880,9 +885,10 @@ final class Store: ObservableObject {
                 if let quotaResult {
                     s.quotaRefreshedAt = Date()
                     switch quotaResult {
-                    case .success(let value):
-                        let context = s.toolStatus.accountUsage?.context
-                        s.toolStatus.quota = value; s.toolStatus.accountUsage = AccountUsage(context: context)
+                    case .success(let reading):
+                        var usage = reading.usage ?? AccountUsage()
+                        usage.context = s.toolStatus.accountUsage?.context
+                        s.toolStatus.quota = reading.text; s.toolStatus.accountUsage = usage
                     case .failure(let error): s.toolStatus.quota = error.localizedDescription
                     }
                 }
@@ -3362,6 +3368,18 @@ func selfTest() {
     let ttyQuota = MuseQuota.parse("\u{001B}[17;1H│ Weekly 2% used · Resets Nov 1 at 4:00 PM │\n│ Current 7% used · Resets at 10:42 PM │")
     check(ttyQuota?.contains("Weekly 2% used · resets Nov 1 at 4:00 PM") == true && ttyQuota?.contains("Current 7%") == true && ttyQuota?.contains("\u{001B}") == false, "CLI quota parsing preserves weekly percent and reset time without terminal escapes")
     check(MuseQuota.parse("Weekly: unavailable") == nil, "Unavailable quota is never presented as zero")
+    // Captured from `muse usage --json` (Muse Code 1.4.14).
+    let usageSample = Data(#"{"schemaVersion":1,"allowance":{"tier":"Muse Code Max Usage","window":{"usedPercent":2,"resetsAtMs":1793685586000},"weekly":{"usedPercent":8,"resetsAtMs":1794182400000},"asOfMs":1793670990782,"source":"mint"},"reason":null,"hint":null}"#.utf8)
+    let usageReading = try? MuseQuota.allowance(usageSample)
+    let weeklyLimit = usageReading?.usage?.limits.first { $0.name == "Weekly" }
+    check(weeklyLimit?.usedPercent == 8 && weeklyLimit?.resetsAt == Date(timeIntervalSince1970: 1794182400) && usageReading?.usage?.limits.first?.name == "Window" && abs((usageReading?.usage?.observedAt?.timeIntervalSince1970 ?? 0) - 1793670990.782) < 0.01, "Muse usage report supplies weekly and window limits with reset and observation times")
+    check(usageReading?.text.contains("weekly 8% used") == true && AccountUsage.museLimits(usageReading?.text ?? "").map(\.usedPercent) == [2, 8], "Muse usage report keeps a readable quota summary")
+    var unavailableThrows = false
+    do { _ = try MuseQuota.allowance(Data(#"{"schemaVersion":1,"allowance":null,"reason":"not signed in","hint":"Run muse login"}"#.utf8)) } catch { unavailableThrows = error.localizedDescription.contains("not signed in") }
+    var fellBack = false
+    do { fellBack = try MuseQuota.allowance(Data("Weekly: 8% used".utf8)) == nil } catch {}
+    check(unavailableThrows && fellBack, "Missing Muse allowance reports Muse's reason; non-report output falls back to the terminal reader")
+    check(MuseQuota.listsUsage("Commands:\n  serve  Serve\n  usage            Show your subscription allowance\n") && !MuseQuota.listsUsage("Commands:\n  serve  Serve\n  exec  Run one prompt\n"), "Converse runs muse usage only when the installed CLI lists it")
     let fresh = Session(entry: entry)
     store.changeSetting(fresh, .effort("max"))
     check(fresh.choices.effort == "max" && fresh.toolStatus.effort == "max" && fresh.process == nil, "New-session setting is scoped and saved without starting a turn")
@@ -3610,7 +3628,7 @@ func selfTest() {
 signal(SIGPIPE, SIG_IGN)
 if CommandLine.arguments.contains("--agent-image-live-test") { exit(MainActor.assumeIsolated { agentImageLiveTest() } ? 0 : 1) }
 if CommandLine.arguments.contains("--probe-muse-quota") {
-    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse"))); exit(0) }
+    do { print(try MuseQuota.query(entry: Entry(name: "Muse", command: "muse", directory: "~", engine: "muse")).text); exit(0) }
     catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
 if let at = CommandLine.arguments.firstIndex(of: "--probe-muse-status"), CommandLine.arguments.count > at + 1 {
