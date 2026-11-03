@@ -108,6 +108,20 @@ struct AgentSchedule: Equatable {
         func clockText(_ minute: Int) -> String { String(format: "%02d:%02d", minute / 60, minute % 60) }
         return kind == .daily ? "At \(clockText(startMinute)) on \(days), \(zoneID)." : "Every \(period) from \(clockText(startMinute)) to before \(clockText(endMinute)), \(days), \(zoneID)."
     }
+    // Status lines show local time. A calendar schedule kept in another zone
+    // also names its own wall clock, e.g. "Nov 3 at 6:30 AM PST (9:30 AM EST)".
+    func nextRunLabel(_ date: Date, local: TimeZone = .current, locale: Locale = .current) -> String {
+        func label(_ zone: TimeZone, withDate: Bool) -> String {
+            let formatter = DateFormatter(); formatter.locale = locale; formatter.timeZone = zone
+            formatter.setLocalizedDateFormatFromTemplate(withDate ? "MMMdjmmz" : "jmmz")
+            return formatter.string(from: date)
+        }
+        guard kind != .interval, let zone = TimeZone(identifier: zoneID), zone.secondsFromGMT(for: date) != local.secondsFromGMT(for: date) else { return label(local, withDate: true) }
+        var localCalendar = Calendar(identifier: .gregorian); localCalendar.timeZone = local
+        var zoneCalendar = localCalendar; zoneCalendar.timeZone = zone
+        let sameDay = localCalendar.dateComponents([.year, .month, .day], from: date) == zoneCalendar.dateComponents([.year, .month, .day], from: date)
+        return label(local, withDate: true) + " (" + label(zone, withDate: !sameDay) + ")"
+    }
     // Calendar wall-clock matching avoids hard-coded UTC offsets and repeated
     // local times. Missing DST times are skipped; a repeated daily time runs once.
     func boundary(_ minute: Int, on day: Date) -> Date? {

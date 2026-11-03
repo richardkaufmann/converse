@@ -30,5 +30,32 @@ func agentScheduleSelfTests(_ check: (Bool, String) -> Void) {
             catch { check(true, "Unsupported/unsafe schedule rejected: " + text) }
         }
         check(market.preview(after: before, count: 100).count == 10, "Schedule preview has bounded work")
+        // Bug D2A179D2: the saved Meta Stock Agent loop, replayed across the
+        // 2026-11-01 fall-back weekend. Fixed instants; no device-zone dependence.
+        var saved = AgentConfig()
+        saved.intervalSeconds = 900; saved.scheduleText = "every 20 minutes while the US stock market is open"; saved.scheduleTimeZone = "America/New_York"
+        saved.remainingRuns = 0; saved.maxTurnsPerLoop = 1; saved.enabled = true; saved.lastLoopAt = date("2026-10-30T19:50:00Z")
+        try saved.restoreSchedule(at: date("2026-11-02T12:00:00Z"))
+        check(saved.canSchedule && saved.nextRunAt == date("2026-11-02T14:30:00Z"), "Saved market loop with remainingRuns 0 still schedules; Friday 15:50 EDT resumes Monday 09:30 EST")
+        check(!saved.due(at: date("2026-11-02T13:30:00Z")) && !saved.due(at: date("2026-11-02T14:29:59Z")), "No Monday run at the stale EDT 09:30 (08:30 EST) or before the open")
+        var mondayRuns: [Date] = [], cursor = date("2026-11-02T14:30:00Z")
+        while cursor < date("2026-11-03T00:00:00Z"), saved.reserveRun(at: cursor.addingTimeInterval(2)) { mondayRuns.append(cursor); cursor = saved.nextRunAt ?? .distantFuture }
+        check(mondayRuns.count == 20 && mondayRuns.last == date("2026-11-02T20:50:00Z") && saved.nextRunAt == date("2026-11-03T14:30:00Z"),
+              "Saved market loop runs every 20 minutes from 09:30 to 15:50 EST on the first post-DST Monday, then Tuesday 09:30")
+        for zone in ["America/Los_Angeles", "Asia/Tokyo", "UTC"] {
+            check(try rule("every 20 minutes while the US stock market is open", zone: zone) == market, "Market schedule ignores the saved/device zone " + zone)
+        }
+        check(market.next(after: date("2026-03-06T20:50:00Z")) == date("2026-03-09T13:30:00Z") && !market.permits(date("2026-03-09T13:29:00Z")) && market.permits(date("2026-03-09T13:30:00Z")),
+              "Spring-forward weekend: Friday 15:50 EST resumes Monday 09:30 EDT")
+        func plain(_ s: String) -> String { s.replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{00A0}", with: " ") }
+        let us = Locale(identifier: "en_US"), pacific = TimeZone(identifier: "America/Los_Angeles")!, eastern = TimeZone(identifier: "America/New_York")!
+        check(plain(market.nextRunLabel(date("2026-11-03T14:30:00Z"), local: pacific, locale: us)) == "Nov 3 at 6:30 AM PST (9:30 AM EST)",
+              "Loop status names the market's New York time beside local time")
+        check(plain(market.nextRunLabel(date("2026-10-30T13:30:00Z"), local: pacific, locale: us)) == "Oct 30 at 6:30 AM PDT (9:30 AM EDT)",
+              "Next-run label tracks daylight time before the fall-back boundary")
+        check(plain(market.nextRunLabel(date("2026-11-03T14:30:00Z"), local: eastern, locale: us)) == "Nov 3 at 9:30 AM EST", "Next-run label stays single when local time is the schedule's zone")
+        check(plain(market.nextRunLabel(date("2026-11-03T14:30:00Z"), local: TimeZone(identifier: "Australia/Sydney")!, locale: us)).hasSuffix(" (Nov 3 at 9:30 AM EST)"),
+              "Next-run label dates the schedule's wall clock when it falls on another local day")
+        check(!fixed.nextRunLabel(date("2026-11-03T14:30:00Z"), local: eastern, locale: us).contains("("), "Fixed intervals show only local time")
     } catch { check(false, "Schedule fixture failed: " + error.localizedDescription) }
 }

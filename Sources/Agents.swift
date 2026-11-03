@@ -86,7 +86,7 @@ struct AgentConfig: Codable, Equatable {
         let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "") : "Loop on · every " + intervalLabel
         let next = max(nextRunAt ?? future, rule.permits(now) ? (nextRunAt ?? future) : future)
         guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
-        return schedule + " · next " + next.formatted(date: .abbreviated, time: .shortened)
+        return schedule + " · next " + rule.nextRunLabel(next)
     }
     var canSchedule: Bool { enabled && turnLimit > 0 }
     func scheduleRule() throws -> AgentSchedule { try AgentSchedule.compile(interval: intervalSeconds, text: scheduleText, zone: scheduleTimeZone) }
