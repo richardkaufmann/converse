@@ -64,6 +64,8 @@ struct SavedSession: Codable {
     var supportTeachingVersion: Int? = nil
     var supportAssistant: Bool? = nil
     var clearedThroughMessageID: UUID? = nil
+    // The sidebar 👀 must survive relaunch (including installing an update).
+    var unseenResponse: Bool? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -206,6 +208,7 @@ final class Session: ObservableObject, Identifiable {
         id = saved.id; entry = saved.entry; title = saved.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New conversation" : saved.title; messages = saved.messages; agent = saved.agent
         supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
         clearedThroughMessageID = saved.clearedThroughMessageID
+        unseenResponse = saved.unseenResponse ?? false
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -231,7 +234,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -2839,7 +2842,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func updatePaneWidths(_ placements: [UUID: PaneLocation]) {
         for (_, state) in windows {
-            paneLayouts[state.id]?.setPaneCount(placements.values.filter { $0.windowID == state.id }.count)
+            let mine = placements.filter { $0.value.windowID == state.id }
+            paneLayouts[state.id]?.setPaneCount(mine.count)
+            paneLayouts[state.id]?.setPaneContents(mine.map { "\($0.value.pane)=\($0.key.uuidString)" }.sorted().joined(separator: ","))
         }
     }
     func sessionWasDeleted(_ session: Session) { Workspace.shared.park(session.id) }
@@ -2862,7 +2867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func assign(_ session: Session, to state: WindowState, pane: Int) {
         guard Store.shared.sessions.contains(where: { $0.id == session.id }) else { return }
         // Taking a session shows its transcript: any unseen response is seen.
-        session.unseenResponse = false
+        if session.unseenResponse { session.unseenResponse = false; Store.shared.saveSoon() }
         DeviceSyncService.shared.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: session.id)
         DeviceSyncService.shared.localTake(sessionID: session.id)
         Workspace.shared.assign(session.id, to: state.id, pane: pane)

@@ -68,8 +68,13 @@ final class Workspace: ObservableObject {
     // and a visible pane means the response was seen.
     func flagsUnseenResponse(_ session: Session, success: Bool, interrupted: Bool) -> Bool {
         guard success, !interrupted, !session.isAgentSession, placements[session.id] == nil else { return false }
-        guard let last = session.messages.last, last.role == "assistant", !last.text.isEmpty || !last.images.isEmpty else { return false }
-        return true
+        // Claude/Codex turns often end with activity rows or notices after the
+        // answer, so look for any non-empty reply since the human's last message.
+        for message in session.messages.reversed() {
+            if message.role == "user" { return false }
+            if message.role == "assistant", !message.text.isEmpty || !message.images.isEmpty { return true }
+        }
+        return false
     }
     func park(_ sessionID: UUID) {
         MainActor.assumeIsolated {

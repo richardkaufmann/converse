@@ -142,7 +142,7 @@ Undo covers saved changes. If a simultaneous edit is rejected because the lot ha
 
 ### Text substitutions
 
-On Mac, type a smiley or arrow followed by a space: `:-)` becomes 🙂, `-->` becomes →, `<--` becomes ←, and `==>` becomes ⇒. Other supported forms include `:)`, `:(`, `;-)`, `:D`, `:P`, `<-->`, `<==`, `<==>`, `<->`, `...`, `(c)`, `(r)` and `(tm)`. These work in conversation drafts and Parking Lots, including drafts for remote sessions displayed on this Mac. Pasted text, Markdown code blocks, inline code, indented code, and lines beginning with `/` or `$` stay literal.
+On Mac, type a smiley or arrow followed by a space: `:-)` becomes 🙂, `--` becomes an em dash (—), `-->` becomes →, `<--` becomes ←, and `==>` becomes ⇒. Other supported forms include `:)`, `:(`, `;-)`, `:D`, `:P`, `<-->`, `<==`, `<==>`, `<->`, `...`, `(c)`, `(r)` and `(tm)`. These work in conversation drafts and Parking Lots, including drafts for remote sessions displayed on this Mac. Pasted text, Markdown code blocks, inline code, indented code, and lines beginning with `/` or `$` stay literal.
 
 Don't like a substitution? **⌘Z** restores exactly what you typed; **Backspace immediately after the substitution** does the same. A **Turn off substitutions** button appears as soon as text converts, so you do not have to Undo to discover the setting. When substitutions are off, typing a shortcut that would convert shows **Turn on substitutions**. These buttons disappear after ten seconds; another eligible shortcut brings them back. You can also use **Settings → Text substitutions while typing**, or simply ask App Support to turn them on or off. The setting starts on and is saved for this app on this Mac; changing it never rewrites existing text.
 

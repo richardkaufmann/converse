@@ -377,6 +377,23 @@ final class WindowPaneLayout {
             self.schedule()
         }
     }
+    private var contentSignature = ""
+    // Replacing what a pane shows (session → Parking Lot, etc.) swaps the split's
+    // subview at the same count. AppKit gives the newcomer a default width and the
+    // divider observer would record that as the user's proportions. Re-apply the
+    // saved weights instead, once now and once after late-mounting content.
+    func setPaneContents(_ signature: String) {
+        guard signature != contentSignature else { return }
+        let first = contentSignature.isEmpty
+        contentSignature = signature
+        guard !first, paneCount > 0 else { return }
+        schedule()
+        let token = revision
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, self.revision == token else { return }
+            self.schedule()
+        }
+    }
     private func windowResized() {
         guard !applying else { return }
         weights = Array(repeating: 1, count: max(0, paneCount))

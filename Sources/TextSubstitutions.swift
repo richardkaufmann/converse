@@ -20,7 +20,7 @@ final class TextSubstitutions: ObservableObject {
     }
     static let undoName = "Text Substitution"
     static let replacements = [":-)":"🙂", ":)":"🙂", ":-(":"🙁", ":(":"🙁", ";-)":"😉", ";)":"😉",
-        ":-D":"😃", ":D":"😃", ":-P":"😛", ":P":"😛", "-->":"→", "<--":"←", "<-->":"↔",
+        ":-D":"😃", ":D":"😃", ":-P":"😛", ":P":"😛", "--":"—", "-->":"→", "<--":"←", "<-->":"↔",
         "==>":"⇒", "<==":"⇐", "<==>":"⇔", "<->":"↔", "...":"…", "(c)":"©", "(r)":"®", "(tm)":"™"]
     struct Match { let range: NSRange; let replacement: String }
     // Only a standalone token followed by a typed space. Never guess at prose

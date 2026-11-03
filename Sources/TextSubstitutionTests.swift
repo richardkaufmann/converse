@@ -7,6 +7,12 @@ import SwiftUI
         let match = TextSubstitutions.match(in: input, caret: input.utf16.count)
         check(match.map { (input as NSString).replacingCharacters(in: $0.range, with: $0.replacement) } == "🦊 hello " + replacement + " ", "Substitution preserves Unicode offsets and space: " + token)
     }
+    // Em dash: a standalone -- becomes —, but option-style tokens stay literal.
+    for literal in ["git --amend ", "--verbose ", "a--b "] {
+        check(TextSubstitutions.match(in: literal, caret: literal.utf16.count) == nil, "Option-like dashes stay literal: " + literal.debugDescription)
+    }
+    check(TextSubstitutions.match(in: "word -- ", caret: "word -- ".utf16.count)?.replacement == "—", "A standalone -- becomes an em dash")
+    check(TextSubstitutions.match(in: "go --> ", caret: "go --> ".utf16.count)?.replacement == "→", "--> still becomes an arrow, not an em dash")
     for literal in ["word:-) ", "https://example.com/:-) ", "`hello :-) ", "``hello :-) ", "`` ` hello :-) ", "````\n```\n:-) ", "```swift\n:-) ", "~~~\n--> ", "    :-) ", "\t--> ", "/help :-) ", "$ echo :-) ", ":-)"] {
         check(TextSubstitutions.match(in: literal, caret: literal.utf16.count) == nil, "Substitution leaves code/command/token literal: " + literal.debugDescription)
     }

@@ -67,6 +67,12 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         store.assign(chat.id, to: window.id, pane: 1)
         check(!store.flagsUnseenResponse(chat, success: true, interrupted: false), "A session on screen earns no unread marker")
         chat.unseenResponse = true
+        check(Session(chat.saved).unseenResponse, "An unseen response survives relaunch")
+        let trailing = Session(entry: Entry(name: "Trailing", command: "claude", directory: NSTemporaryDirectory(), engine: "claude"))
+        trailing.messages = [Message(role: "user", text: "q"), Message(role: "assistant", text: "answer"), Message(role: "activity", text: "Using Bash"), Message(role: "notice", text: "diagnostic")]
+        check(Workspace.shared.flagsUnseenResponse(trailing, success: true, interrupted: false), "A reply followed by activity rows still earns the unseen marker")
+        trailing.messages.append(Message(role: "user", text: "next"))
+        check(!Workspace.shared.flagsUnseenResponse(trailing, success: true, interrupted: false), "A turn with no reply since the last human message earns no marker")
         check(chat.sidebarSummary(workspace: store, windowID: window.id).contains("UNSEEN RESPONSE"), "Row hover surfaces an unseen response with its take hint")
         let agentSession = Session(entry: Entry(name: "Helper", command: "", directory: "~", engine: "agent", accountName: "Work"))
         agentSession.agent = AgentConfig()
