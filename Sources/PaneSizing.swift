@@ -56,6 +56,8 @@ final class PaneDividerHandle: NSView {
         lastDragEvent = Date()
         gutterLog.info("gutter drag began")
         freezeText(in: window?.contentView)
+        let frozen = frozenText.count
+        gutterLog.debug("froze \(frozen, privacy: .public) containers")
         dragBegan?()
         startReleaseMonitor()
         scheduleIdleCheck()
@@ -67,7 +69,11 @@ final class PaneDividerHandle: NSView {
         lastLocationInWindow = event.locationInWindow
         // A pause thawed wrapping while the button stayed down; suspend it
         // again as soon as the pointer moves.
-        if frozenText.isEmpty { freezeText(in: window?.contentView) }
+        if frozenText.isEmpty {
+            freezeText(in: window?.contentView)
+            let refrozen = frozenText.count
+            gutterLog.debug("refroze \(refrozen, privacy: .public) containers on pointer motion")
+        }
         pendingPosition = dragStart.divider + split.convert(event.locationInWindow, from: nil).x - dragStart.pointer
         // Consume only the newest pointer position each display interval.
         // Reflowing every queued mouse event makes long transcripts lag behind.
@@ -104,6 +110,7 @@ final class PaneDividerHandle: NSView {
 
     override func mouseUp(with event: NSEvent) {
         guard dragStart != nil else { return }
+        gutterLog.info("drag ended via handle mouseUp")
         endDrag(at: event.locationInWindow)
     }
     // AppKit delivers mouseUp to the view under the cursor, not necessarily
@@ -117,6 +124,8 @@ final class PaneDividerHandle: NSView {
         dragFrame?.cancel(); dragFrame = nil
         pendingPosition = start.divider + split.convert(locationInWindow, from: nil).x - start.pointer
         applyDragFrame()
+        let thawing = frozenText.count
+        gutterLog.debug("thawing \(thawing, privacy: .public) containers")
         dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
     }
@@ -125,7 +134,12 @@ final class PaneDividerHandle: NSView {
         releaseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             // A release in another window has foreign coordinates; leave it
             // to the stale sweep instead of jumping the divider to garbage.
-            if self?.dragStart != nil, event.window === self?.window { self?.endDrag(at: event.locationInWindow) }
+            if self?.dragStart != nil, event.window === self?.window {
+                gutterLog.info("drag ended via release monitor")
+                self?.endDrag(at: event.locationInWindow)
+            } else if self?.dragStart != nil {
+                gutterLog.info("release monitor ignored mouseUp: window mismatch")
+            }
             return event
         }
     }
@@ -145,6 +159,7 @@ final class PaneDividerHandle: NSView {
     private func idleCheckFired() {
         idleCheck = nil
         guard dragStart != nil else { return }
+        gutterLog.debug("idle check: buttons=\(NSEvent.pressedMouseButtons, privacy: .public)")
         // The button is already up but no release reached this handle or the
         // monitor. End the drag only once events have gone quiet: ending on
         // button-up alone would kill an active tap-to-drag mid-gesture.
@@ -152,6 +167,7 @@ final class PaneDividerHandle: NSView {
             let quiet = Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval
             gutterLog.info("idle check: button up, quiet=\(quiet, privacy: .public)")
             if quiet {
+                gutterLog.info("drag ended via idle check")
                 endDrag(at: lastLocationInWindow)
                 return
             }
@@ -176,6 +192,8 @@ final class PaneDividerHandle: NSView {
         gutterLog.info("stale sweep ended a missed release")
         stopReleaseMonitor(); idleCheck?.cancel(); idleCheck = nil
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
+        let staleThawing = frozenText.count
+        gutterLog.debug("thawing \(staleThawing, privacy: .public) containers")
         dragStart = nil; thawText(); dragEnded?()
         window?.invalidateCursorRects(for: self)
         return true
