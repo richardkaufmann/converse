@@ -836,13 +836,19 @@ public sealed partial class DeviceSyncService : IDisposable
 
     private async Task SendRawAsync(Peer peer, byte[] message)
     {
+        await peer.SendLock.WaitAsync();
+        try { await WriteFrameAsync(peer, message); }
+        finally { peer.SendLock.Release(); }
+    }
+
+    // Callers hold peer.SendLock.
+    private static async Task WriteFrameAsync(Peer peer, byte[] message)
+    {
         if (message.Length > 65535) { peer.Client.Dispose(); return; }
         var framed = new byte[2 + message.Length];
         framed[0] = (byte)(message.Length >> 8); framed[1] = (byte)message.Length;
         message.CopyTo(framed, 2);
-        await peer.SendLock.WaitAsync();
-        try { await peer.Client.GetStream().WriteAsync(framed); }
-        finally { peer.SendLock.Release(); }
+        await peer.Client.GetStream().WriteAsync(framed);
     }
 
     private async Task HandleRawAsync(Peer peer, byte[] message)
@@ -1584,11 +1590,21 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         if (peer.Keys is null) return;
         var framed = DeviceFrame.Encode(envelope);
-        for (var offset = 0; offset < framed.Length; offset += 60_000)
+        // Encrypt under the send lock: each Encrypt advances the Noise nonce,
+        // so concurrent sends that encrypted first and then raced for the
+        // socket could write out of nonce order. The peer's Decrypt then
+        // failed and dropped the connection (and every display lease on it).
+        // Holding the lock across chunks also keeps one envelope contiguous.
+        await peer.SendLock.WaitAsync();
+        try
         {
-            var chunk = framed.AsMemory(offset, Math.Min(60_000, framed.Length - offset)).ToArray();
-            await SendRawAsync(peer, peer.Keys.Sender.Encrypt(chunk));
+            for (var offset = 0; offset < framed.Length; offset += 60_000)
+            {
+                var chunk = framed.AsMemory(offset, Math.Min(60_000, framed.Length - offset)).ToArray();
+                await WriteFrameAsync(peer, peer.Keys.Sender.Encrypt(chunk));
+            }
         }
+        finally { peer.SendLock.Release(); }
     }
 
     // ---- Home side ----

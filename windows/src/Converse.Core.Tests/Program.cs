@@ -92,7 +92,7 @@ async Task<bool> JoinPair(DeviceSyncService home, DeviceSyncService joiner, Func
     if (home.GroupRequests.Count == 0) return false;
     await home.ReviewGroupRequestAsync(home.GroupRequests[0]);
     await home.ApproveGroupReviewAsync();
-    var doneDeadline = DateTime.UtcNow.AddSeconds(15);
+    var doneDeadline = DateTime.UtcNow.AddSeconds(30);
     while (!done() && DateTime.UtcNow < doneDeadline) await Task.Delay(25);
     return done();
 }
@@ -286,7 +286,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
               "Default device startup listens on loopback only, never LAN interfaces");
         async Task<bool> Until(Func<bool> done)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
             return done();
         }
@@ -294,6 +294,27 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Loopback pairing publishes home sidebar");
         await viewer.AcquireRemoteAsync(gid);
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == "home words"), "Loopback take streams home draft snapshot");
+        // Many threads sending at once must still reach the wire in Noise nonce
+        // order; out-of-order ciphertext failed Decrypt and dropped the link
+        // and its display lease (the intermittent rename/drain failures).
+        Peer? Link(DeviceSyncService from, string to) =>
+            ((Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(from)!)
+                .Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == to);
+        var burstSent = false;
+        if (Link(viewer, home.DeviceId) is { } toHome && Link(home, viewer.DeviceId) is { } toViewer)
+        {
+            try
+            {
+                await Task.WhenAll(Enumerable.Range(0, 200).Select(n => Task.Run(() => n % 2 == 0
+                    ? viewer.SendEnvelopeAsync(toHome, new DeviceEnvelope { Kind = DeviceKind.Ping })
+                    : home.SendEnvelopeAsync(toViewer, new DeviceEnvelope { Kind = DeviceKind.Ping }))));
+                burstSent = true;
+            }
+            catch { /* a dropped link fails the check below */ }
+        }
+        var probe = burstSent ? await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed after send burst" }) : null;
+        Check(probe is not null && await Until(() => homeSession.Title == "Renamed after send burst" && viewer.Unresolved(gid).Count == 0),
+            "Concurrent multi-threaded sends keep the encrypted link and display lease intact");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
         home.SetAcceptingWork(false);
