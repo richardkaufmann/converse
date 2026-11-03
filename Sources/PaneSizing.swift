@@ -1,5 +1,8 @@
 import AppKit
+import os
 import SwiftUI
+
+private let gutterLog = Logger(subsystem: "local.richard.Converse", category: "gutter")
 
 // Transparent handles overlap the pane edges, so easier grabbing costs no
 // transcript space. Keep SwiftUI's split-view delegates and constraints intact.
@@ -51,6 +54,7 @@ final class PaneDividerHandle: NSView {
         dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
         lastLocationInWindow = event.locationInWindow
         lastDragEvent = Date()
+        gutterLog.info("gutter drag began")
         freezeText(in: window?.contentView)
         dragBegan?()
         startReleaseMonitor()
@@ -138,18 +142,28 @@ final class PaneDividerHandle: NSView {
     private func isButtonDown() -> Bool {
         buttonDownOverride?() ?? (NSEvent.pressedMouseButtons & 1 != 0)
     }
-    fileprivate func idleCheckFired() {
+    private func idleCheckFired() {
         idleCheck = nil
         guard dragStart != nil else { return }
         // The button is already up but no release reached this handle or the
-        // monitor: end the drag now instead of waiting for the stale sweep.
+        // monitor. End the drag only once events have gone quiet: ending on
+        // button-up alone would kill an active tap-to-drag mid-gesture.
         if !isButtonDown() {
-            endDrag(at: lastLocationInWindow)
+            let quiet = Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval
+            gutterLog.info("idle check: button up, quiet=\(quiet, privacy: .public)")
+            if quiet {
+                endDrag(at: lastLocationInWindow)
+                return
+            }
+            scheduleIdleCheck()
             return
         }
         // Pointer motion stopped with the button still down: reflow now
         // instead of waiting for a release that may never reach this handle.
-        if Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval { thawText() }
+        if Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval {
+            gutterLog.debug("idle check: button held, thawing")
+            thawText()
+        }
         scheduleIdleCheck()
     }
     // Without this sweep a missed release freezes transcript wrapping and the
@@ -159,6 +173,7 @@ final class PaneDividerHandle: NSView {
         // A held button is a pause, not a missed release: the idle check
         // reflows wrapping while the sweep leaves the live drag alone.
         guard !isButtonDown() else { return false }
+        gutterLog.info("stale sweep ended a missed release")
         stopReleaseMonitor(); idleCheck?.cancel(); idleCheck = nil
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = nil; thawText(); dragEnded?()
@@ -486,13 +501,13 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         check(ended == 1 && longText.textContainer!.widthTracksTextView, "A held-button pause keeps the drag alive until release")
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2, "A held-button release lands on the pointer position")
         handle.dragEnded = previousEnded
-        // With the button up, the idle path ends a missed release right away.
-        // The applied divider position proves the drag ended: a thaw alone
-        // would leave the pre-drag position in place.
+        // With the button up, the scheduled idle check ends a missed release
+        // once events go quiet. The applied divider position proves the drag
+        // ended: a thaw alone would leave the pre-drag position in place.
         handle.buttonDownOverride = { false }
         handle.mouseDown(with: event(.leftMouseDown, 0))
         handle.mouseDragged(with: event(.leftMouseDragged, 0))
-        handle.idleCheckFired()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.7))
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2 && longText.textContainer!.widthTracksTextView, "An idle check ends a button-up drag without waiting for the stale sweep")
         // A second release through the shared path must be a no-op.
         var repeatEnded = 0
@@ -514,11 +529,13 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         func staleEvent(_ type: NSEvent.EventType) -> NSEvent {
             NSEvent.mouseEvent(with: type, location: content.convert(NSPoint(x: staleHandle.frame.midX, y: staleHandle.frame.midY), to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         }
+        staleHandle.buttonDownOverride = { false }
         staleHandle.mouseDown(with: staleEvent(.leftMouseDown))
         check(!probe.textContainer!.widthTracksTextView, "A gutter grab suspends transcript wrapping")
         check(!staleHandle.cancelStaleDrag(now: Date()), "An active gutter drag is not mistaken for a stale one")
         check(staleHandle.cancelStaleDrag(now: Date().addingTimeInterval(10)), "A missed gutter release is recovered as stale")
         check(probe.textContainer!.widthTracksTextView, "Recovering a missed release restores transcript wrapping")
+        staleHandle.buttonDownOverride = nil
         probe.removeFromSuperview()
     } else { check(false, "Stale-drag fixture handle exists") }
     longText.removeFromSuperview()
