@@ -609,6 +609,7 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
 }
 
 MdnsChecks.Run(Check);
+MdnsChecks.RunGroupDevices(Check);
 
 // mDNS name decoding with compression pointer.
 {

@@ -30,11 +30,22 @@ internal sealed class MdnsResponseCache
             var length = U16(offset + 8); offset += 10;
             if (offset + length > packet.Length) throw new InvalidDataException("Truncated mDNS data");
             // PTR has multiple values under the service type; key each by its target.
-            if (type == 12 && owner == MdnsDiscovery.ServiceType)
+            // Other PTRs are irrelevant, and the lookup assumes owner == target.
+            if (type == 12)
             {
+                if (owner != MdnsDiscovery.ServiceType) { offset += length; continue; }
                 var cursor = offset;
                 owner = MdnsDiscovery.ReadName(packet, ref cursor).ToLowerInvariant();
                 if (cursor > offset + length) throw new InvalidDataException("Invalid mDNS PTR");
+            }
+            // Decode SRV targets now: a cached malformed SRV would otherwise
+            // fail every later lookup until its TTL expired.
+            if (type == 33 && ttl != 0)
+            {
+                if (length < 7) throw new InvalidDataException("Invalid mDNS SRV");
+                var cursor = offset + 6;
+                MdnsDiscovery.ReadName(packet, ref cursor);
+                if (cursor > offset + length) throw new InvalidDataException("Invalid mDNS SRV");
             }
             if (type is 1 or 12 or 16 or 28 or 33)
                 updates.Add(((owner, type), new(packet, offset, length, now.AddSeconds(Math.Min(ttl, 86400u)), now), ttl == 0));
@@ -51,31 +62,39 @@ internal sealed class MdnsResponseCache
         var found = new List<MdnsService>();
         foreach (var (key, ptr) in _records.Where(p => p.Key.Type == 12))
         {
-            var instance = key.Name;
-            if (!instance.EndsWith("." + MdnsDiscovery.ServiceType, StringComparison.OrdinalIgnoreCase) ||
-                !_records.TryGetValue((instance, 33), out var srv) || srv.Length < 7) continue;
-            var port = (srv.Packet[srv.Offset + 4] << 8) | srv.Packet[srv.Offset + 5];
-            var cursor = srv.Offset + 6;
-            var host = MdnsDiscovery.ReadName(srv.Packet, ref cursor);
-            if (cursor > srv.Offset + srv.Length || port == 0) continue;
-            var seen = ptr.Seen > srv.Seen ? ptr.Seen : srv.Seen;
-            if (_records.TryGetValue((host.ToLowerInvariant(), 1), out var address) && address.Length == 4)
-                host = new IPAddress(address.Packet.AsSpan(address.Offset, 4)).ToString();
-            else if (_records.TryGetValue((host.ToLowerInvariant(), 28), out address) && address.Length == 16)
-                host = new IPAddress(address.Packet.AsSpan(address.Offset, 16)).ToString();
-            Dictionary<string, string>? txt = null;
-            if (_records.TryGetValue((instance, 16), out var text))
-            {
-                txt = new(StringComparer.OrdinalIgnoreCase);
-                foreach (var (name, value) in MdnsDiscovery.ParseTxt(text.Packet.AsSpan(text.Offset, text.Length).ToArray())) txt[name] = value;
-                if (text.Seen > seen) seen = text.Seen;
-            }
-            // Preserve the advertised spelling, including dots in device names.
-            cursor = ptr.Offset;
-            var display = MdnsDiscovery.ReadName(ptr.Packet, ref cursor);
-            display = display[..^(MdnsDiscovery.ServiceType.Length + 1)];
-            found.Add(new(display, host, port, MdnsDiscovery.GroupHint(txt), txt?.GetValueOrDefault("device"), seen));
+            try { if (Service(key.Name, ptr) is { } service) found.Add(service); }
+            catch (Exception e) when (e is InvalidDataException or IndexOutOfRangeException or ArgumentException) { } // one bad entry cannot hide others
         }
         return found;
+    }
+
+    private MdnsService? Service(string instance, Record ptr)
+    {
+        if (!instance.EndsWith("." + MdnsDiscovery.ServiceType, StringComparison.OrdinalIgnoreCase) ||
+            !_records.TryGetValue((instance, 33), out var srv) || srv.Length < 7) return null;
+        var port = (srv.Packet[srv.Offset + 4] << 8) | srv.Packet[srv.Offset + 5];
+        var cursor = srv.Offset + 6;
+        var host = MdnsDiscovery.ReadName(srv.Packet, ref cursor);
+        if (cursor > srv.Offset + srv.Length || port == 0) return null;
+        var seen = ptr.Seen > srv.Seen ? ptr.Seen : srv.Seen;
+        if (_records.TryGetValue((host.ToLowerInvariant(), 1), out var address) && address.Length == 4)
+            host = new IPAddress(address.Packet.AsSpan(address.Offset, 4)).ToString();
+        else if (_records.TryGetValue((host.ToLowerInvariant(), 28), out address) && address.Length == 16)
+            host = new IPAddress(address.Packet.AsSpan(address.Offset, 16)).ToString();
+        Dictionary<string, string>? txt = null;
+        if (_records.TryGetValue((instance, 16), out var text))
+        {
+            txt = new(StringComparer.OrdinalIgnoreCase);
+            foreach (var (name, value) in MdnsDiscovery.ParseTxt(text.Packet.AsSpan(text.Offset, text.Length).ToArray())) txt[name] = value;
+            if (text.Seen > seen) seen = text.Seen;
+        }
+        // Preserve the advertised spelling, including dots in device names.
+        cursor = ptr.Offset;
+        var display = MdnsDiscovery.ReadName(ptr.Packet, ref cursor);
+        display = display[..^(MdnsDiscovery.ServiceType.Length + 1)];
+        // The device hint becomes a sidebar/trust lookup key; drop anything
+        // that is not a real device ID (64 lowercase hex).
+        var device = txt?.GetValueOrDefault("device");
+        return new(display, host, port, MdnsDiscovery.GroupHint(txt), MdnsDiscovery.IsDeviceId(device) ? device : null, seen);
     }
 }

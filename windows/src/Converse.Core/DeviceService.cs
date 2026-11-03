@@ -1150,7 +1150,7 @@ public sealed partial class DeviceSyncService : IDisposable
         lock (DiscoveredDevices)
         {
             var found = DiscoveredDevices.FirstOrDefault(d =>
-                d.DeviceID == deviceId || d.Name.EndsWith("[" + deviceId[..8] + "]", StringComparison.Ordinal));
+                d.DeviceID == deviceId || d.Name.EndsWith("[" + ShortDeviceId(deviceId) + "]", StringComparison.Ordinal));
             return found is null ? null : (found.Host, found.Port);
         }
     }
@@ -1181,13 +1181,16 @@ public sealed partial class DeviceSyncService : IDisposable
         return groups.OrderBy(g => g.Name.ToLowerInvariant()).ThenBy(g => g.Id, StringComparer.Ordinal).ToList();
     }
 
+    // Labels show an 8-character prefix; trust files and LAN hints can carry shorter IDs.
+    internal static string ShortDeviceId(string id) => id.Length > 8 ? id[..8] : id;
+
     public List<(string DeviceID, string Label)> GroupDevices(ConverseGroup group)
     {
         var rows = new List<(string, string)>();
         var members = Trust.Devices.Where(d => d.GroupID == group.Id && d.DeviceID != DeviceId)
             .OrderBy(d => d.Name.ToLowerInvariant()).ThenBy(d => d.DeviceID, StringComparer.Ordinal).ToList();
         foreach (var device in members)
-            rows.Add((device.DeviceID, (device.DisplayName ?? device.Name) + " [" + device.DeviceID[..8] + "]"));
+            rows.Add((device.DeviceID, (device.DisplayName ?? device.Name) + " [" + ShortDeviceId(device.DeviceID) + "]"));
         // Swift parity: this device appears only under its current group,
         // never under left groups or strangers' advertisements.
         if (group.Id == CurrentGroup?.Id)
@@ -1201,7 +1204,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (id is not null && (id == DeviceId || members.Any(d => d.DeviceID == id))) continue;
                 var label = id is null ? found.Name + " (unverified)"
                     : members.Any(d => d.Name == found.Name)
-                        ? found.Name + " [" + id[..8] + "]" : found.Name;
+                        ? found.Name + " [" + ShortDeviceId(id) + "]" : found.Name;
                 rows.Add((id ?? found.Name, label));
             }
         }
