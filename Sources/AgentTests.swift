@@ -576,6 +576,7 @@ import Foundation
     let evidenceInput = evidenceText(requestBody).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
+    check((requestBody?["instructions"] as? String)?.contains(AgentPolicy.scoreboardScope) == true, "Agent scoreboard instructions limit metrics to that agent's own objective and scope")
     check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
 
