@@ -926,26 +926,48 @@ public sealed partial class ConversationPane : UserControl
         _ => new RichTextBlock { FontSize = 16 },
     };
 
-    private static FrameworkElement? TryMakeImage(string path)
+    private FrameworkElement? TryMakeImage(string path)
     {
         try
         {
             if (!File.Exists(path)) return null;
-            // DecodePixelWidth bounds the decode; MaxWidth bounds layout.
-            var bitmap = new BitmapImage
-            {
-                DecodePixelWidth = 960,
-                UriSource = new Uri(path, UriKind.Absolute),
-            };
-            return new Image
+            // Decode at natural size first: a forced 960-pixel decode upscaled
+            // small images before layout. MaxWidth then caps layout at both 480
+            // and the image's own width, so nothing is drawn larger than it is.
+            var uri = new Uri(path, UriKind.Absolute);
+            var bitmap = new BitmapImage { UriSource = uri };
+            var image = new Image
             {
                 Source = bitmap,
                 MaxWidth = 480,
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Left,
             };
+            bitmap.ImageOpened += (_, _) =>
+            {
+                var natural = bitmap.PixelWidth;
+                if (natural > 0) image.MaxWidth = Math.Min(image.MaxWidth, natural);
+                // Bound memory for very large images, as the old decode did.
+                if (natural > 960) image.Source = new BitmapImage { DecodePixelWidth = 960, UriSource = uri };
+                FollowAfterImageLoad();
+            };
+            return image;
         }
         catch { return null; }
+    }
+
+    // An image that finishes loading after the follow-scroll grows the
+    // transcript; keep a following reader at the end instead of stranding
+    // them mid-image. Readers who scrolled up are left where they are.
+    private void FollowAfterImageLoad()
+    {
+        if (JumpLatestButton.Visibility == Visibility.Visible) return;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (JumpLatestButton.Visibility == Visibility.Visible) return;
+            TranscriptScroller.UpdateLayout();
+            OwnChangeView(TranscriptScroller, TranscriptScroller.ScrollableHeight);
+        });
     }
 
 
