@@ -163,6 +163,10 @@ public sealed class MdnsDiscovery : IDisposable
         return entries;
     }
 
+    // Device IDs are SHA-256 hex of the Noise static key (DeviceBlob.DeviceIdForPublicKey).
+    internal static bool IsDeviceId(string? value) =>
+        value is { Length: 64 } && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
     internal static ConverseGroup? GroupHint(Dictionary<string, string>? txt)
     {
         if (txt is null || !txt.TryGetValue("group", out var id) || !Guid.TryParse(id, out _)) return null;
@@ -241,6 +245,7 @@ public sealed class MdnsDiscovery : IDisposable
             if (length == 0) { offset++; break; }
             if ((length & 0xC0) == 0xC0)
             {
+                if (offset + 1 >= packet.Length) throw new InvalidDataException("Truncated mDNS name pointer");
                 var pointer = ((length & 0x3F) << 8) | packet[offset + 1];
                 if (!jumped) next = offset + 2;
                 jumped = true;

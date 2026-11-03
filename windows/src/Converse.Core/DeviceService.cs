@@ -836,13 +836,19 @@ public sealed partial class DeviceSyncService : IDisposable
 
     private async Task SendRawAsync(Peer peer, byte[] message)
     {
+        await peer.SendLock.WaitAsync();
+        try { await WriteFrameAsync(peer, message); }
+        finally { peer.SendLock.Release(); }
+    }
+
+    // Callers hold peer.SendLock.
+    private static async Task WriteFrameAsync(Peer peer, byte[] message)
+    {
         if (message.Length > 65535) { peer.Client.Dispose(); return; }
         var framed = new byte[2 + message.Length];
         framed[0] = (byte)(message.Length >> 8); framed[1] = (byte)message.Length;
         message.CopyTo(framed, 2);
-        await peer.SendLock.WaitAsync();
-        try { await peer.Client.GetStream().WriteAsync(framed); }
-        finally { peer.SendLock.Release(); }
+        await peer.Client.GetStream().WriteAsync(framed);
     }
 
     private async Task HandleRawAsync(Peer peer, byte[] message)
@@ -1150,7 +1156,7 @@ public sealed partial class DeviceSyncService : IDisposable
         lock (DiscoveredDevices)
         {
             var found = DiscoveredDevices.FirstOrDefault(d =>
-                d.DeviceID == deviceId || d.Name.EndsWith("[" + deviceId[..8] + "]", StringComparison.Ordinal));
+                d.DeviceID == deviceId || d.Name.EndsWith("[" + ShortDeviceId(deviceId) + "]", StringComparison.Ordinal));
             return found is null ? null : (found.Host, found.Port);
         }
     }
@@ -1181,13 +1187,16 @@ public sealed partial class DeviceSyncService : IDisposable
         return groups.OrderBy(g => g.Name.ToLowerInvariant()).ThenBy(g => g.Id, StringComparer.Ordinal).ToList();
     }
 
+    // Labels show an 8-character prefix; trust files and LAN hints can carry shorter IDs.
+    internal static string ShortDeviceId(string id) => id.Length > 8 ? id[..8] : id;
+
     public List<(string DeviceID, string Label)> GroupDevices(ConverseGroup group)
     {
         var rows = new List<(string, string)>();
         var members = Trust.Devices.Where(d => d.GroupID == group.Id && d.DeviceID != DeviceId)
             .OrderBy(d => d.Name.ToLowerInvariant()).ThenBy(d => d.DeviceID, StringComparer.Ordinal).ToList();
         foreach (var device in members)
-            rows.Add((device.DeviceID, (device.DisplayName ?? device.Name) + " [" + device.DeviceID[..8] + "]"));
+            rows.Add((device.DeviceID, (device.DisplayName ?? device.Name) + " [" + ShortDeviceId(device.DeviceID) + "]"));
         // Swift parity: this device appears only under its current group,
         // never under left groups or strangers' advertisements.
         if (group.Id == CurrentGroup?.Id)
@@ -1201,7 +1210,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (id is not null && (id == DeviceId || members.Any(d => d.DeviceID == id))) continue;
                 var label = id is null ? found.Name + " (unverified)"
                     : members.Any(d => d.Name == found.Name)
-                        ? found.Name + " [" + id[..8] + "]" : found.Name;
+                        ? found.Name + " [" + ShortDeviceId(id) + "]" : found.Name;
                 rows.Add((id ?? found.Name, label));
             }
         }
@@ -1581,11 +1590,21 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         if (peer.Keys is null) return;
         var framed = DeviceFrame.Encode(envelope);
-        for (var offset = 0; offset < framed.Length; offset += 60_000)
+        // Encrypt under the send lock: each Encrypt advances the Noise nonce,
+        // so concurrent sends that encrypted first and then raced for the
+        // socket could write out of nonce order. The peer's Decrypt then
+        // failed and dropped the connection (and every display lease on it).
+        // Holding the lock across chunks also keeps one envelope contiguous.
+        await peer.SendLock.WaitAsync();
+        try
         {
-            var chunk = framed.AsMemory(offset, Math.Min(60_000, framed.Length - offset)).ToArray();
-            await SendRawAsync(peer, peer.Keys.Sender.Encrypt(chunk));
+            for (var offset = 0; offset < framed.Length; offset += 60_000)
+            {
+                var chunk = framed.AsMemory(offset, Math.Min(60_000, framed.Length - offset)).ToArray();
+                await WriteFrameAsync(peer, peer.Keys.Sender.Encrypt(chunk));
+            }
         }
+        finally { peer.SendLock.Release(); }
     }
 
     // ---- Home side ----

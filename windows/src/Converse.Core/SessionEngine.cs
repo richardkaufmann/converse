@@ -472,11 +472,37 @@ public sealed class SessionStore
             return "Inject not applied: the queue is already empty. Nothing was sent.";
         if (id is null && session.Pending.Count > 1)
         {
-            var merged = string.Join("\n\n", session.Pending.Select(p => p.Text));
-            var images = session.Pending.SelectMany(p => p.Images).ToList();
-            var ids = session.Pending.SelectMany(p => (p.ComponentIDs ?? new()).Append(p.Id)).Distinct().ToList();
+            // Mac sanitizeGroupQueue parity: check each part's Group sender
+            // before merging, so a revoked origin drops only its own input.
+            var parts = session.Pending.Where(p => p.OriginGroupID is null || AcceptGroupPrompt?.Invoke(p) == true).ToList();
+            // A merged prompt carries one origin. Parts from other senders stay
+            // queued behind it under their own origin instead of borrowing it.
+            var origin = parts.FirstOrDefault(p => p.OriginGroupID is not null || p.OriginHomeID is not null);
+            var merge = parts.Where(p => p.OriginGroupID is null && p.OriginHomeID is null
+                || p.OriginGroupID == origin?.OriginGroupID && p.OriginHomeID == origin?.OriginHomeID).ToList();
             session.Pending.Clear();
-            session.Pending.Add(new PendingPrompt { Text = merged, Images = images, ComponentIDs = ids });
+            if (merge.Count > 1)
+                // Strictest flags win (Mac parity): a merged peer or agent prompt
+                // must not run as a foreground hop-0 human turn.
+                session.Pending.Add(new PendingPrompt
+                {
+                    Text = string.Join("\n\n", merge.Select(p => p.Text)),
+                    Images = merge.SelectMany(p => p.Images).ToList(),
+                    ComponentIDs = merge.SelectMany(p => (p.ComponentIDs ?? new()).Append(p.Id)).Distinct().ToList(),
+                    Autonomous = merge.Any(p => p.Autonomous || p.AgentRunReserved),
+                    AgentRunReserved = merge.Any(p => p.AgentRunReserved),
+                    Hop = merge.Max(p => p.Hop),
+                    AppControlDepth = merge.Max(p => p.AppControlDepth),
+                    OriginGroupID = origin?.OriginGroupID,
+                    OriginHomeID = origin?.OriginHomeID,
+                });
+            else session.Pending.AddRange(merge);
+            session.Pending.AddRange(parts.Except(merge));
+            if (session.Pending.Count == 0)
+            {
+                Save();
+                return "Inject not applied: the queued group messages were discarded because their senders are no longer in this group. Nothing was sent.";
+            }
         }
         else if (id is not null)
         {

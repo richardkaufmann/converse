@@ -2,6 +2,15 @@ using Converse.Core;
 
 static class SwitchboardSupervisionChecks
 {
+    // Wait on conditions with generous deadlines, never fixed poll counts:
+    // the Windows 11 ARM64 VM runs these far slower than a Mac.
+    static async Task<bool> Eventually(Func<bool> done, int seconds = 30)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+        return done();
+    }
+
     // Models garble request UUIDs (observed: first 8 hex digits intact, the rest
     // invented). A reply must never be dropped for a bad inReplyTo.
     static async Task ReplyTolerance(Action<bool, string> check)
@@ -73,7 +82,7 @@ static class SwitchboardSupervisionChecks
 
             var pending = Pin(await Ask(asker), "44444444");
             store.FinalParticipantReply!(answerer, "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "tell", to = asker.Id.ToString(), text = "Fenced answer", inReplyTo = "44444444" }) + "\n```");
-            for (var i = 0; i < 100 && !Delivered("Fenced answer", pending); i++) await Task.Delay(10);
+            await Eventually(() => Delivered("Fenced answer", pending));
             check(Delivered("Fenced answer", pending) && Answered(pending) && LastNotice().Contains("supplied 44444444)"),
                 "A truncated non-UUID inReplyTo in a fenced command is corrected and delivered");
             var instruction = DeviceSyncService.ReplyInstruction(real, true, null);
@@ -81,8 +90,53 @@ static class SwitchboardSupervisionChecks
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }
+    // Inject all must not launder peer or agent prompts into a foreground
+    // hop-0 human turn, and must still apply Group admission per part.
+    static void InjectAllFlags(Action<bool, string> check)
+    {
+        var root = Directory.CreateTempSubdirectory("converse-inject-flags-").FullName;
+        try
+        {
+            var group = Guid.NewGuid().ToString(); var peer = new string('a', 64); var removed = new string('b', 64); var other = new string('c', 64);
+            var store = new SessionStore(root, new FakeRunner()) { AcceptGroupPrompt = p => p.OriginHomeID != removed };
+            ChatSession Busy(params PendingPrompt[] prompts) { var s = new ChatSession { MessagingEnabled = true, Busy = true }; s.Pending.AddRange(prompts); return s; }
+
+            var human = new PendingPrompt { Text = "human" };
+            var tell = new PendingPrompt { Text = "peer", Autonomous = true, Hop = 3, AppControlDepth = 2, OriginGroupID = group, OriginHomeID = peer };
+            var local = new PendingPrompt { Text = "agent", Autonomous = true, Hop = 1, AppControlDepth = 1 };
+            var mixed = Busy(human, tell, local);
+            var result = store.InjectPending(mixed);
+            var m = mixed.Pending.SingleOrDefault();
+            check(result is null && m is { Autonomous: true, Hop: 3, AppControlDepth: 2, AgentRunReserved: false } && m.OriginGroupID == group && m.OriginHomeID == peer
+                && m.Text == "human\n\npeer\n\nagent" && new[] { human.Id, tell.Id, local.Id }.All(m.ComponentIDs!.Contains),
+                "Inject all keeps the strictest flags: autonomous, max hop/app-control depth, and the Group origin");
+
+            var reserved = Busy(new PendingPrompt { Text = "typed" }, new PendingPrompt { Text = "run", Autonomous = true, AgentRunReserved = true });
+            store.InjectPending(reserved);
+            check(reserved.Pending.SingleOrDefault() is { Autonomous: true, AgentRunReserved: true }, "Inject all keeps an agent run reservation");
+
+            var revoked = new PendingPrompt { Text = "from removed member", Autonomous = true, Hop = 4, OriginGroupID = group, OriginHomeID = removed };
+            var stale = Busy(new PendingPrompt { Text = "mine" }, revoked, new PendingPrompt { Text = "also mine" });
+            store.InjectPending(stale);
+            check(stale.Pending.SingleOrDefault() is { Autonomous: false, Hop: 0, OriginGroupID: null, Text: "mine\n\nalso mine" } p && !p.ComponentIDs!.Contains(revoked.Id),
+                "Inject all drops a part whose Group origin is no longer allowed and keeps unrelated human input");
+            var onlyRevoked = Busy(revoked, new PendingPrompt { Text = "x", OriginGroupID = group, OriginHomeID = removed });
+            check(store.InjectPending(onlyRevoked) is string refused && refused.Length > 0 && onlyRevoked.Pending.Count == 0,
+                "Inject all reports honestly when every part came from a removed Group member");
+
+            var fromOther = new PendingPrompt { Text = "other peer", Autonomous = true, Hop = 2, OriginGroupID = group, OriginHomeID = other };
+            var two = Busy(new PendingPrompt { Text = "mine" }, tell, fromOther, new PendingPrompt { Text = "later" });
+            store.InjectPending(two);
+            check(two.Pending.Count == 2 && two.Pending[0] is { OriginHomeID: var first, Text: "mine\n\npeer\n\nlater" } && first == peer
+                && two.Pending[1] == fromOther,
+                "Inject all never merges prompts from different Group senders under one origin");
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
     public static async Task Run(Action<bool, string> check, Func<DeviceSyncService, DeviceSyncService, Func<bool>, Task<bool>> join)
     {
+        InjectAllFlags(check);
         await ReplyTolerance(check);
         var root = Directory.CreateTempSubdirectory("converse-supervision-").FullName;
         try
@@ -97,7 +151,7 @@ static class SwitchboardSupervisionChecks
             {
                 var body = System.Text.Json.JsonSerializer.Serialize(new { command = action, to = answerer.Id.ToString(), text = "Question", replyExpected = false });
                 store.FinalParticipantReply!(asker, "```converse\n" + body + "\n```");
-                for (var i = 0; i < 100 && answerer.Pending.Count < count; i++) await Task.Delay(10);
+                await Eventually(() => answerer.Pending.Count >= count);
             }
             await Command("tell", 1);
             check(asker.SwitchboardExpectations.Count == 0 && answerer.Pending.Count == 1, "Plain tell delivers without requesting a receipt turn");
@@ -160,30 +214,52 @@ static class SwitchboardSupervisionChecks
             var lotGlobal = new DeviceGlobalID(peerHome.DeviceId, lotID).ToString();
             var linkedRow = DeviceJson.Decode<DeviceSidebarRow>(DeviceJson.Encode(new DeviceSidebarRow { GlobalID = lotGlobal, SessionID = lotID, Title = "Linked Mac lot", Engine = "parking", ParticipantKind = "parkingLot", LinkedSessionIDs = new[] { ID(asker) } }));
             // The live peer republishes its sidebar (now also on response/pause
-            // marker changes), which replaces this replica's rows. Re-inject the
-            // fixture row right before each directory query instead of once.
-            void ensureLinked() { var rows = home.Homes[peerHome.DeviceId].Rows; if (!rows.Any(r => r.GlobalID == lotGlobal)) rows.Add(linkedRow); }
-            ensureLinked();
-            ensureLinked(); var linked = System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true));
-            check(linked.Contains("Linked Mac lot") && linked.Contains("linkedToMe\":true") && home.ParkingLotDirectory(answerer, true).Length == 0, "Windows discovers Group lots linked to the exact session identity");
-            ensureLinked(); var beforeDirectory = asker.Pending.Count;
-            store.FinalParticipantReply!(asker, "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```");
-            check(asker.Pending.Count == beforeDirectory + 1 && asker.Pending.Last().Text.Contains("Linked Mac lot"), "Windows session command returns linked lot discovery");
-            asker.Agent = new AgentConfig(); ensureLinked();
-            check(System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("requires Agent Setup access"), "Windows linked agent gets no content permission implicitly");
-            asker.Agent.Settings.Watched.Add(lotGlobal); ensureLinked();
-            check(System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("scoped Group read-only evidence"), "Windows scoped agent sees the actual read-only capability");
+            // marker changes), which swaps in a new replica state without this
+            // fixture row, even between re-injecting it and querying. Re-inject
+            // before each attempt and accept a result only when no republish
+            // replaced the state during the query; otherwise retry. A stable
+            // attempt returns its real answer, so negative checks stay honest.
+            async Task<bool> withLinkedLot(Func<bool> query)
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(30);
+                while (true)
+                {
+                    var state = home.Homes[peerHome.DeviceId];
+                    if (!state.Rows.Any(r => r.GlobalID == lotGlobal)) state.Rows.Add(linkedRow);
+                    var result = query();
+                    if (ReferenceEquals(home.Homes[peerHome.DeviceId], state) || DateTime.UtcNow >= deadline) return result;
+                    await Task.Delay(25);
+                }
+            }
+            check(await withLinkedLot(() =>
+            {
+                var linked = System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true));
+                return linked.Contains("Linked Mac lot") && linked.Contains("linkedToMe\":true") && home.ParkingLotDirectory(answerer, true).Length == 0;
+            }), "Windows discovers Group lots linked to the exact session identity");
+            var beforeDirectory = asker.Pending.Count;
+            check(await withLinkedLot(() =>
+            {
+                // An interrupted attempt may have queued a directory without the lot.
+                while (asker.Pending.Count > beforeDirectory) asker.Pending.RemoveAt(asker.Pending.Count - 1);
+                store.FinalParticipantReply!(asker, "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```");
+                return asker.Pending.Count == beforeDirectory + 1 && asker.Pending.Last().Text.Contains("Linked Mac lot");
+            }), "Windows session command returns linked lot discovery");
+            asker.Agent = new AgentConfig();
+            check(await withLinkedLot(() => System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("requires Agent Setup access")), "Windows linked agent gets no content permission implicitly");
+            asker.Agent.Settings.Watched.Add(lotGlobal);
+            check(await withLinkedLot(() => System.Text.Json.JsonSerializer.Serialize(home.ParkingLotDirectory(asker, true)).Contains("scoped Group read-only evidence")), "Windows scoped agent sees the actual read-only capability");
             asker.Agent = null;
             var outsiderID = new string('c', 64);
             home.Homes[outsiderID] = new RemoteHomeState { DeviceID = outsiderID, DeviceName = "Old Group", Online = true, Rows = new() { linkedRow } };
-            ensureLinked();
-            check(home.ParkingLotDirectory(asker, true).Length == 1, "Windows excludes cached lots outside the current Group");
+            check(await withLinkedLot(() => home.ParkingLotDirectory(asker, true).Length == 1), "Windows excludes cached lots outside the current Group");
             home.Homes.Remove(outsiderID); home.Homes[peerHome.DeviceId].Rows.RemoveAll(r => r.GlobalID == lotGlobal);
             check(DeviceJson.Decode<DeviceSidebarRow>(System.Text.Encoding.UTF8.GetBytes("{}" )).LinkedSessionIDs is null, "Older sidebar rows remain compatible without links");
 
-            async Task<bool> Until(Func<bool> done) { for (var i = 0; i < 200 && !done(); i++) await Task.Delay(25); return done(); }
+            Task<bool> Until(Func<bool> done) => Eventually(done);
             var remoteID = new DeviceGlobalID(peerHome.DeviceId, remote.Id).ToString();
-            await Until(() => home.Homes.GetValueOrDefault(peerHome.DeviceId)?.Rows.Any(r => r.GlobalID == remoteID) == true && peerHome.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == ID(a)) == true);
+            // Cross-home tells silently skip targets whose row is not yet
+            // messaging-enabled, so wait for exactly that precondition.
+            await Until(() => home.Homes.GetValueOrDefault(peerHome.DeviceId)?.Rows.Any(r => r.GlobalID == remoteID && r.MessagingEnabled == true) == true && peerHome.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == ID(a) && r.MessagingEnabled == true) == true);
             await home.SendAgentTellAsync(a, remoteID, "Across homes");
             await peerHome.SendAgentTellAsync(remote, ID(a), "Back across homes");
             check(await Until(() => a.Pending.Count == 1 && remote.Pending.Count == 1 &&
