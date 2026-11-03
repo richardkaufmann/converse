@@ -103,9 +103,23 @@ final class PaneDividerHandle: NSView {
         }
         for child in view.subviews { freezeText(in: child) }
     }
+    // Re-enabling widthTracksTextView only follows *later* frame changes. The
+    // pane already reached its new width during the drag, so without matching
+    // it here the transcript stays wrapped at the pre-drag width until some
+    // unrelated resize happens.
     private func thawText() {
         let saved = frozenText; frozenText.removeAll()
-        for (container, tracks) in saved { container.widthTracksTextView = tracks }
+        for (container, tracks) in saved {
+            container.widthTracksTextView = tracks
+            Self.matchTrackedWidth(container)
+        }
+    }
+    static func matchTrackedWidth(_ container: NSTextContainer) {
+        guard container.widthTracksTextView, let text = container.textView else { return }
+        let width = max(0, text.bounds.width - 2 * text.textContainerInset.width)
+        if abs(container.containerSize.width - width) > 0.5 {
+            container.containerSize = NSSize(width: width, height: container.containerSize.height)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -479,6 +493,11 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     longText.string = String(repeating: "Long transcript text that wraps as the pane gets narrower. More prose for realistic wrapping.\n", count: 10000)
     inner.arrangedSubviews[0].addSubview(longText)
     longText.layoutManager!.ensureLayout(for: longText.textContainer!)
+    // Tracking restored is not enough: the container must actually match the
+    // view's current width, or the transcript stays wrapped at the old width.
+    func reflowed(_ text: NSTextView) -> Bool {
+        text.textContainer!.widthTracksTextView && abs(text.textContainer!.containerSize.width - (text.bounds.width - 2 * text.textContainerInset.width)) < 0.5
+    }
     for target in [outer, inner] {
         guard let handle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === target && $0.dividerIndex == 0 }) else { check(false, "Burst-drag fixture handle exists"); continue }
         let before = target.arrangedSubviews[0].frame.maxX
@@ -502,6 +521,7 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseUp(with: event(.leftMouseUp, 37))
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Gutter release applies the final pointer position without waiting for a timer")
         check(longText.textContainer!.widthTracksTextView && longText.selectedRange() == selection, "Release restores native wrapping and preserves the editor selection")
+        check(reflowed(longText), "Release reflows the transcript to the pane's new width (container \(longText.textContainer!.containerSize.width), view \(longText.bounds.width), frozen at \(wrapping))")
         NotificationCenter.default.removeObserver(observer)
         settle()
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 37) < 2, "Final gutter layout preserves the user's released position")
@@ -511,12 +531,12 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseDragged(with: event(.leftMouseDragged, -12))
         check(!longText.textContainer!.widthTracksTextView, "Resumed gutter motion suspends wrapping again")
         RunLoop.current.run(until: Date().addingTimeInterval(0.65))
-        check(longText.textContainer!.widthTracksTextView, "A paused gutter drag reflows without waiting for release")
+        check(reflowed(longText), "A paused gutter drag reflows to the current width without waiting for release")
         var ended = 0
         let previousEnded = handle.dragEnded
         handle.dragEnded = { previousEnded?(); ended += 1 }
         handle.endDrag(at: content.convert(NSPoint(x: point.x - 12, y: point.y), to: nil))
-        check(ended == 1 && longText.textContainer!.widthTracksTextView, "A held-button pause keeps the drag alive until release")
+        check(ended == 1 && reflowed(longText), "A held-button pause keeps the drag alive until release")
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2, "A held-button release lands on the pointer position")
         handle.dragEnded = previousEnded
         // With the button up, the scheduled idle check ends a missed release
@@ -526,7 +546,7 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseDown(with: event(.leftMouseDown, 0))
         handle.mouseDragged(with: event(.leftMouseDragged, 0))
         RunLoop.current.run(until: Date().addingTimeInterval(0.7))
-        check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2 && longText.textContainer!.widthTracksTextView, "An idle check ends a button-up drag without waiting for the stale sweep")
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2 && reflowed(longText), "An idle check ends a button-up drag without waiting for the stale sweep")
         // A second release through the shared path must be a no-op.
         var repeatEnded = 0
         let previousRepeatEnded = handle.dragEnded
@@ -538,7 +558,7 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseDown(with: event(.leftMouseDown, 0))
         handle.mouseDragged(with: event(.leftMouseDragged, 5))
         NSApp.sendEvent(event(.leftMouseUp, 5))
-        check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && longText.textContainer!.widthTracksTextView, "A real mouseUp through the event stream ends the drag via the release monitor")
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && reflowed(longText), "A real mouseUp through the event stream ends the drag via the release monitor")
         handle.buttonDownOverride = nil
     }
     if let staleHandle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
@@ -552,7 +572,7 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         check(!probe.textContainer!.widthTracksTextView, "A gutter grab suspends transcript wrapping")
         check(!staleHandle.cancelStaleDrag(now: Date()), "An active gutter drag is not mistaken for a stale one")
         check(staleHandle.cancelStaleDrag(now: Date().addingTimeInterval(10)), "A missed gutter release is recovered as stale")
-        check(probe.textContainer!.widthTracksTextView, "Recovering a missed release restores transcript wrapping")
+        check(reflowed(probe), "Recovering a missed release restores transcript wrapping")
         staleHandle.buttonDownOverride = nil
         probe.removeFromSuperview()
     } else { check(false, "Stale-drag fixture handle exists") }
