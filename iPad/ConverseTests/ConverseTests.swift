@@ -878,8 +878,9 @@ final class ConverseTests: XCTestCase {
     func testUnloadedImageCaptionRemainsClickable() {
         let url = URL(string: "https://upload.wikimedia.org/example.jpg")!
         let rendered = PadTranscript.render("![Grasshopper](" + url.absoluteString + ")")
-        XCTAssertEqual(rendered.string, "Grasshopper")
-        XCTAssertEqual(rendered.attribute(.link, at: 0, effectiveRange: nil) as? URL, url)
+        // Web images never load unasked; the viewer shows the caption and full URL.
+        XCTAssertEqual(rendered.string, "Grasshopper: " + url.absoluteString)
+        XCTAssertEqual(rendered.attribute(.link, at: ("Grasshopper: " as NSString).length, effectiveRange: nil) as? URL, url)
         XCTAssertEqual(TranscriptStyle.imageLinks("`![example](https://example.com/a.png)`"), "`![example](https://example.com/a.png)`")
     }
     func testUnalignedCoalescedFrames() throws {
