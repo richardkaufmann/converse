@@ -97,6 +97,11 @@ final class DeviceSyncService: ObservableObject {
     var pairingRequestCount: Int { waitingPairings.count + (pairingPrompt == nil ? 0 : 1) }
     @Published var remoteLeases: [String: UInt64] = [:]
     @Published var remoteTranscripts: [String: DeviceTranscriptPayload] = [:]
+    #if os(iOS)
+    // Newest whole-document lot rows, unmerged. The transcript merge keeps paged
+    // session history; a lot snapshot always replaces the document it describes.
+    @Published var remoteLotSnapshots: [String: [DeviceWireMessage]] = [:]
+    #endif
     @Published var remoteOffline: Set<String> = []
     @Published private(set) var remoteSeen = RemoteSeenWatermarks()
     @Published var outbox: [DeviceOutboxRecord] = []
@@ -754,6 +759,9 @@ extension DeviceSyncService {
         pendingTakes.removeValue(forKey: id)
         remoteLeases.removeValue(forKey: id); leaseBoots.removeValue(forKey: id)
         remoteTranscripts.removeValue(forKey: id); remoteOffline.remove(id)
+        #if os(iOS)
+        remoteLotSnapshots.removeValue(forKey: id)
+        #endif
         parkViewer(id)
     }
     private func sidebarPayload() -> DeviceSidebarPayload {
@@ -1128,6 +1136,9 @@ extension DeviceSyncService {
             } else {
                 remoteTranscripts[payload.globalID] = payload
             }
+            #if os(iOS)
+            if payload.engine == "parking" && !payload.prepend { remoteLotSnapshots[payload.globalID] = payload.messages }
+            #endif
             if drafts.adoptIfNewer(session: payload.globalID, version: payload.draftVersion, text: payload.draft) {
                 draftAttachments[payload.globalID] = payload.draftImageHashes ?? []
                 persistDrafts()
@@ -1351,6 +1362,9 @@ extension DeviceSyncService {
         guard pendingTakes[globalID] == nil, remoteLeases[globalID] == nil else { return }
         // Fresh take must not hydrate from a stale retained transcript.
         remoteTranscripts.removeValue(forKey: globalID)
+        #if os(iOS)
+        remoteLotSnapshots.removeValue(forKey: globalID)
+        #endif
         pendingTakes[globalID] = Date()
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseAcquire.rawValue, sessionID: globalID))
     }
@@ -1541,6 +1555,12 @@ extension DeviceSyncService {
         serviceStatus = "Disconnected while in background. Available displays restore after reconnecting."
     }
     func resumeViewer() { startIfNeeded() }
+    #if os(iOS)
+    // Lot viewing is a nonexclusive read subscription, so the mobile viewer may
+    // renew it unprompted. These never apply to ordinary session leases.
+    func lotHomeReachable(_ globalID: String) -> Bool { DeviceGlobalID(globalID).flatMap { peerForHome($0.home) } != nil }
+    func lotSubscriptionPending(_ globalID: String) -> Bool { pendingTakes[globalID] != nil }
+    #endif
     func storedDraft(globalID: String) -> String? { drafts.text(session: globalID) }
 }
 

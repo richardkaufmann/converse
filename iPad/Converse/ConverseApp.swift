@@ -419,6 +419,9 @@ struct PadPane: View {
     var snapshot: DeviceTranscriptPayload? { service.remoteTranscripts[id] }
     init(id: String, pane: Int, model: PadModel) { self.id = id; self.pane = pane; self.model = model; self.service = model.service }
     var body: some View {
+        if model.isParkingLot(id) { PadLotPane(id: id, pane: pane, model: model) } else { sessionBody }
+    }
+    var sessionBody: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(String(pane + 1)).font(.caption.bold()).foregroundStyle(.white).padding(5).background(.green, in: RoundedRectangle(cornerRadius: 3))
@@ -443,11 +446,9 @@ struct PadPane: View {
                     Spacer()
                 }.font(.callout).padding(10).foregroundStyle(.secondary)
                     .accessibilityIdentifier("session-reconnecting")
-            } else if model.isParkingLot(id), service.remoteLeases[id] != nil, !service.remoteOffline.contains(id) {
-                Text("Parking Lot · read only").font(.caption).foregroundStyle(.secondary).padding(8)
             } else if !model.canControl(id) {
                 HStack {
-                    Text(service.remoteOffline.contains(id) ? "Home offline. Your draft is preserved." : (model.isParkingLot(id) ? "This lot view isn't live. Take it to refresh." : "Take this session to edit and send."))
+                    Text(service.remoteOffline.contains(id) ? "Home offline. Your draft is preserved." : "Take this session to edit and send.")
                     Spacer(); Button("Take here") { service.acquireRemote(globalID: id) }
                 }.font(.callout).padding(10).background(Color.orange.opacity(0.18))
             }

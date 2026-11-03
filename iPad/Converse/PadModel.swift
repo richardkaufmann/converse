@@ -31,6 +31,11 @@ final class PadModel: ObservableObject {
     @Published var newAgentHome: String?
     @Published var lineNumbers = true
     @Published var focusedPane = 0
+    // Parking Lot viewer state is local and in memory: what is shown, the
+    // newest copy from home, and collapsed headings.
+    @Published var lotViews: [String: LotViewerState] = [:]
+    @Published var lotCollapsed: [String: Set<UUID>] = [:]
+    var lotSubscriptionsSuspended = false
     private var edits: [String: DispatchWorkItem] = [:]
     private var hydratedEpochs: [String: UInt64] = [:]
     private var observer: AnyCancellable?
@@ -89,7 +94,7 @@ final class PadModel: ObservableObject {
         for index in state.placements.indices where state.placements[index] == id { state.placements[index] = nil }
         persist()
     }
-    func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id) }
+    func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id); lotViews.removeValue(forKey: id) }
     func draft(_ id: String) -> PadDraft { state.drafts[id] ?? PadDraft() }
     func edit(_ id: String, text: String) {
         var draft = draft(id); draft.text = text; draft.dirty = true; state.drafts[id] = draft
@@ -142,6 +147,7 @@ final class PadModel: ObservableObject {
         }
         if service.pairingPrompt != nil { connectShown = true }
         if changed { persist() }
+        reconcileLots()
     }
     func resolveDraft(_ id: String, keepLocal: Bool) {
         if !keepLocal, let snapshot = service.remoteTranscripts[id] {
@@ -212,12 +218,14 @@ final class PadModel: ObservableObject {
     }
     func background() {
         let task = UIApplication.shared.beginBackgroundTask(withName: "Preserve Converse drafts")
+        lotSubscriptionsSuspended = true
         for id in state.drafts.keys { flush(id) }; persist(); service.suspendViewer(); hydratedEpochs = [:]
         if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
     }
     func foreground() {
         if UIDevice.current.userInterfaceIdiom == .phone { constrainPhonePlacements() }
         service.resumeViewer()
+        lotSubscriptionsSuspended = false; reconcileLots()
     } // Saved displays resume conditionally after the home reconnects.
 }
 

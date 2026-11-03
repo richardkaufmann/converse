@@ -136,7 +136,7 @@ Group members may read your active lots. Agents need explicit access to each lot
 
 **Talk…** starts a voice conversation about the lot on Mac. Choose a model, then discuss ideas or ask it to organize them. The helper can read this lot; select any other sessions it needs in Agent Setup. You review proposed changes before they are saved. Voice transcription uses your saved Meta key. You can also type in the helper’s conversation. Sessions, agents and this conversational helper can change the notes. And yes, there’s Undo: **⌘Z** reverses the latest content change, including a cut, reorder or assistant edit; **⇧⌘Z** redoes it. Each lot keeps its own undo history while the app is open.
 
-Other devices in your Group can view a Mac’s Parking Lots and receive updates. Viewing is read only for now, and several devices can read the same lot without moving it away from its home. iPhone and iPad do not host their own lots yet.
+Other devices in your Group can view a Mac’s Parking Lots, and several devices can read the same lot without moving it away from its home. On iPhone and iPad you get a read-only view of the Mac’s lot; when the Mac’s copy changes, a **Refresh** button appears so you can pull in the latest. To change a lot, edit it on the Mac or ask a session or agent: a session’s edits wait for you to **Apply** them on the Mac, while an agent with review turned off applies them directly. iPhone and iPad do not host their own lots yet.
 
 Undo covers saved changes. If a simultaneous edit is rejected because the lot has changed, it never enters the undo history. That can reject a whole paste, not just one keystroke; Undo cannot recover that rejected text.
 
