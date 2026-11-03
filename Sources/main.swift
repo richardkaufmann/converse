@@ -2427,7 +2427,7 @@ struct Conversation: View {
                             Text("Last turn: " + session.toolStatus.usage).help("Last turn: " + session.toolStatus.usage)
                             refreshButton
                         }
-                        HStack(spacing: 12) { settingControls }.disabled(session.changingSetting)
+                        HStack(spacing: 12) { SessionSettingControls(model: settingsMenu, perform: performSetting) }.disabled(session.changingSetting)
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.fixedSize(horizontal: true, vertical: false)
                     HStack(spacing: 8) {
@@ -2441,8 +2441,8 @@ struct Conversation: View {
                             Text("Last turn: " + session.toolStatus.usage)
                             Button("Refresh status") { store.refreshStatus(session, quota: true) }.disabled(session.probingStatus)
                             Divider()
-                            Group { settingControls }.disabled(session.changingSetting)
-                        } label: { Image(systemName: "ellipsis.circle") }
+                            Group { SessionSettingSubmenus(model: settingsMenu, perform: performSetting) }.disabled(session.changingSetting)
+                        } label: { Image(systemName: "ellipsis.circle") }.id(settingsMenu)
                             .fixedSize().accessibilityLabel("Session settings")
                             .help("Account: " + store.sessionLoginLabel(session) + "\nLast turn: " + session.toolStatus.usage + "\nModel, effort, permissions and account settings")
                     }
@@ -2465,30 +2465,8 @@ struct Conversation: View {
         Button { store.refreshStatus(session, quota: true) } label: { Image(systemName: "arrow.clockwise") }
             .buttonStyle(.plain).disabled(session.probingStatus).help("Refresh this account's models and session status")
     }
-    @ViewBuilder private var settingControls: some View {
-                        Menu("Model: " + session.toolStatus.model) {
-                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "model") }; Divider() }
-                            ForEach(session.modelChoices) { model in Button(model.label) { store.changeSetting(session, .model(model)) } }
-                            Divider()
-                            Button("Other model…") { store.chooseCustomModel(session) }
-                        }.menuStyle(.borderlessButton).fixedSize()
-                        Menu("Effort: " + session.toolStatus.effort) {
-                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "effort") }; Divider() }
-                            if session.availableEfforts.isEmpty { Text(session.probingStatus ? "Loading supported effort levels…" : "This model has no reported effort options") }
-                            ForEach(session.availableEfforts, id: \.self) { effort in Button(effort) { store.changeSetting(session, .effort(effort)) } }
-                            Divider()
-                            Button("Other effort…") { store.chooseCustomEffort(session) }
-                        }.menuStyle(.borderlessButton).fixedSize()
-                        Menu("Permissions: " + session.toolStatus.access) {
-                            if session.entry.engine != "muse" { Button("CLI default") { store.clearOverride(session, field: "access") }; Divider() }
-                            ForEach(session.accessChoices) { access in Button(access.label) { store.changeSetting(session, .access(access.id)) }.disabled(!access.available) }
-                        }.menuStyle(.borderlessButton).fixedSize()
-                        if session.compactionState != nil {
-                            Button("Compact") { _ = store.requestCompaction(session) }
-                                .disabled(session.compacting || session.compactionRequested || session.changingSetting)
-                                .help(session.busy ? "Compact after this turn" : "Compact context")
-                        }
-    }
+    private var settingsMenu: SessionSettingsMenuModel { SessionSettingsMenuModel(session) }
+    private func performSetting(_ action: SessionSettingAction) { store.perform(action, session: session) }
 
 }
 
@@ -3184,6 +3162,7 @@ func selfTest() {
     providerSelfTests(check)
     MainActor.assumeIsolated { textSubstitutionSelfTests(check) }
     conversationLayoutSelfTests(check)
+    sessionSettingsMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
     let r = UUID(); s.messages.append(Message(id: r, role: "assistant", text: ""))
