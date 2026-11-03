@@ -207,6 +207,12 @@ final class Session: ObservableObject, Identifiable {
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
         pending = saved.pending ?? []; queuePaused = !(saved.pending ?? []).isEmpty
         draft = saved.draft; attachments = saved.attachments; remoteID = saved.remoteID; started = saved.started
+        // A submitted reply already reached this transcript; only its turn was cut short.
+        // Before "interrupted" existed, that was the sole path to a failed reply.
+        for index in switchboardObligations.indices where switchboardObligations[index].kind == "reply" &&
+            (switchboardObligations[index].state == "failed" || (switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil)) {
+            switchboardObligations[index].state = "interrupted"
+        }
         for index in switchboardObligations.indices where switchboardObligations[index].state == "submitted" && switchboardObligations[index].finishedAt == nil { switchboardObligations[index].state = "cancelled" }
         if saved.compactionInProgress == true {
             queuePaused = true
@@ -286,6 +292,8 @@ final class Store: ObservableObject {
             entries = SetupCatalog.entries
         }
         for session in sessions { attachIdentity(session); importResponseImages(session, allowRemote: false) }
+        // Replace a sender's stale "failed"/"processing" receipt for replies reclassified on load.
+        for session in sessions where session.switchboardObligations.contains(where: { $0.state == "interrupted" }) { refreshSwitchboardReceipts(session) }
         if !sessions.isEmpty { save() }
     }
     deinit { configurationAudit.record("store_closed") }

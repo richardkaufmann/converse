@@ -15,7 +15,9 @@ struct SwitchboardObligation: Codable, Identifiable {
     var replyDeliveryID: UUID?
     var groupID: String?
     var originHomeID: String?
-    var terminal: Bool { ["resolved", "completed", "failed", "escalated", "cancelled"].contains(state) }
+    // "interrupted": a reply already in the receiving transcript whose turn did
+    // not finish. Replies carry no obligation, so this is never a failure.
+    var terminal: Bool { ["resolved", "completed", "failed", "interrupted", "escalated", "cancelled"].contains(state) }
     var displayState: String {
         switch state {
         case "queued": return intervenedAt == nil ? "Queued" : "Recovery queued"
@@ -23,6 +25,7 @@ struct SwitchboardObligation: Codable, Identifiable {
         case "completed": return "Completed"
         case "resolved": return kind == "request" ? "Answered" : "Delivered"
         case "awaitingReceipt": return "Reply sent · awaiting receipt"
+        case "interrupted": return "Reply delivered · turn interrupted"
         case "failed", "deliveryFailed": return "Failed"
         case "escalated": return "Needs attention"
         case "cancelled": return "Cancelled"
@@ -179,7 +182,7 @@ extension Store {
     func switchboardTurnFinished(_ session: Session, now: Date = Date(), success: Bool = true) {
         for index in session.switchboardObligations.indices where session.switchboardObligations[index].state == "submitted" && session.switchboardObligations[index].finishedAt == nil {
             session.switchboardObligations[index].finishedAt = now
-            if !success { session.switchboardObligations[index].state = "failed" }
+            if !success { session.switchboardObligations[index].state = session.switchboardObligations[index].kind == "reply" ? "interrupted" : "failed" }
             else if session.switchboardObligations[index].kind != "request" { session.switchboardObligations[index].state = "completed" }
         }
         refreshSwitchboardReceipts(session)
