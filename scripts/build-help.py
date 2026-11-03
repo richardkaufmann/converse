@@ -67,6 +67,22 @@ def build_book(source, app_version="development", source_commit="unknown", app_b
                 sourceSHA256=hashlib.sha256(source.encode()).hexdigest(), topics=topics)
 
 
+def source_commit(directory):
+    """Describe the checkout, or "unknown" when git is missing or this is not a repository."""
+    def git(*arguments):
+        try:
+            return subprocess.run(["git", *arguments], cwd=directory, text=True, capture_output=True)
+        except OSError:  # includes FileNotFoundError when git is not installed
+            return None
+    commit = git("rev-parse", "HEAD")
+    if commit is None or commit.returncode != 0:
+        return "unknown"
+    dirty = git("status", "--porcelain")
+    if dirty is not None and dirty.returncode == 0 and dirty.stdout.strip():
+        return commit.stdout.strip() + "-dirty"
+    return commit.stdout.strip()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("readme", nargs="?", default=str(Path(__file__).resolve().parents[1] / "README.md"))
@@ -78,12 +94,7 @@ if __name__ == "__main__":
     readme = Path(args.readme).resolve()
     source = readme.read_text(encoding="utf-8")
     version = json.loads((readme.parent / "VERSION.json").read_text())
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=readme.parent, text=True, capture_output=True)
-    source_commit = commit.stdout.strip() if commit.returncode == 0 else "unknown"
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=readme.parent, text=True, capture_output=True)
-    if dirty.returncode == 0 and dirty.stdout.strip():
-        source_commit += "-dirty"
-    book = build_book(source, version["version"], source_commit, version["build"])
+    book = build_book(source, version["version"], source_commit(readme.parent), version["build"])
     if not book["topics"]:
         raise SystemExit("README produced no Help topics")
     destination = args.out or (Path(args.output_directory) if args.output_directory else readme.parent / ".build" / "Help") / "Content.json"
