@@ -188,6 +188,7 @@ final class Session: ObservableObject, Identifiable {
     var claudeTextBlockPending = false
     var claudeStreamSeparators: [NSRange] = []
     var claudeBackgroundTasks: [String: String] = [:]
+    var claudeNoticedDenials: Set<String> = []
     var process: Process?
     var muse: MuseConnection?
     var museClosing = false
@@ -565,7 +566,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if clearDisplayBeforeReply { clearSessionDisplay(s) }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeBackgroundTasks = [:]; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeBackgroundTasks = [:]; s.claudeNoticedDenials = []; s.status = "Working…"
         s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
@@ -1235,6 +1236,9 @@ final class Store: ObservableObject {
                     replace = true
                 }
                 if let errors = obj["errors"] as? [String] { s.messages.append(Message(role: "notice", text: errors.joined(separator: "\n"))) }
+                if let denials = obj["permission_denials"] as? [[String: Any]], let notice = PermissionDenialNotice.text(denials, seen: &s.claudeNoticedDenials) {
+                    s.messages.append(Message(role: "notice", text: notice))
+                }
             }
         } else {
             if type == "thread.started" { s.remoteID = obj["thread_id"] as? String }
@@ -3499,6 +3503,27 @@ func selfTest() {
     store.consume(#"{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"Hello"}]}}"#, session: c, responseID: r)
     store.consume(#"{"type":"result","result":"Hello world"}"#, session: c, responseID: r)
     check(c.messages.last?.text == "Hello world" && c.remoteID == "test-session", "Claude response deduplication and session identity")
+    // Scrubbed from a real `claude -p --permission-mode default` result (2.1.308).
+    let denied = Session(entry: Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
+    denied.messages.append(Message(id: r, role: "assistant", text: ""))
+    let deniedResult = #"{"type":"result","subtype":"success","is_error":false,"result":"Neither step ran.","session_id":"s","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_1","tool_input":{"file_path":"/tmp/denialprobe/hello.txt","content":"SECRET CONTENTS"}},{"tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"touch made-by-bash.txt","description":"Create empty file"}}]}"#
+    store.consume(deniedResult, session: denied, responseID: r)
+    let deniedNotices = denied.messages.filter { $0.role == "notice" }.map(\.text)
+    check(deniedNotices == ["This session’s Access setting blocked: Write (/tmp/denialprobe/hello.txt), Bash (touch made-by-bash.txt). To allow it, change Access in the footer (for example Auto or Bypass permissions) and send again."],
+          "Claude permission denials become one Access notice without file contents")
+    store.consume(deniedResult, session: denied, responseID: r)
+    check(denied.messages.filter { $0.role == "notice" }.count == 1 && denied.messages.first { $0.id == r }?.text == "Neither step ran.", "A repeated result in one turn does not repeat the denial notice")
+    store.consume(#"{"type":"result","result":"Done","permission_denials":[]}"#, session: c, responseID: r)
+    check(!c.messages.contains { $0.role == "notice" }, "No permission denials, no notice")
+    var unseen = Set<String>()
+    let many = (1...5).map { ["tool_name": "Edit", "tool_use_id": "t\($0)", "tool_input": ["file_path": "/tmp/f\($0).swift", "old_string": "x"]] as [String: Any] }
+    let manyText = PermissionDenialNotice.text(many, seen: &unseen) ?? ""
+    check(manyText.contains("Edit (/tmp/f1.swift), Edit (/tmp/f2.swift), Edit (/tmp/f3.swift) +2 more.") && !manyText.contains("f4"), "More than three denials list three then +N more")
+    let longCommand = PermissionDenialNotice.summary(tool: "Bash", input: ["command": "echo " + String(repeating: "a", count: 200) + "\nrm -rf build"])
+    let longPath = PermissionDenialNotice.summary(tool: "Write", input: ["file_path": "/" + String(repeating: "d/", count: 60) + "end.txt"])
+    check(longCommand.count == 80 && longCommand.hasSuffix("…") && !longCommand.contains("\n") && longPath.count == 80 && longPath.hasPrefix("…") && longPath.hasSuffix("end.txt"),
+          "Denied commands and paths are truncated to a short single line")
+    check(PermissionDenialNotice.text([["tool_name": "mcp__x__y", "tool_use_id": "m", "tool_input": ["secret": "token"]]], seen: &unseen)?.contains("blocked: mcp__x__y. To allow") == true, "Unknown tool inputs are not shown")
     let x = Session(entry: Entry(name: "Codex", command: "codex", directory: "~", engine: "codex"))
     x.messages.append(Message(id: r, role: "assistant", text: ""))
     store.consume(#"{"type":"thread.started","thread_id":"thread-123"}"#, session: x, responseID: r)

@@ -98,7 +98,7 @@ A **coding session** connects a conversation to a project folder on your compute
 5. Type: “Read this project and explain how it is organized. Don't change any files yet.” Press **Return** to send. On Mac, **Command-Return** or **Shift-Return** adds a new line instead.
 6. Confirm that the response describes the intended project. Then ask for a small change, review it, and continue in the same session.
 
-Muse can show approval questions in the pane. Claude and Codex run without their normal terminal interface here, so their full terminal approval dialogs are not embedded. If a task is blocked by permissions, review the access setting rather than assuming an approval window will appear.
+Muse can show approval questions in the pane. Claude and Codex run without their normal terminal interface here, so their full terminal approval dialogs are not embedded. If a task is blocked by permissions, review the access setting rather than assuming an approval window will appear. When Claude’s access setting blocks a tool, Converse adds a notice to the session naming what was blocked, such as a file path or command, so you can change Access in the footer and send again.
 
 ## Use
 

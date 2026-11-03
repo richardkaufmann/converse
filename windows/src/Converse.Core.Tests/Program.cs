@@ -1092,6 +1092,32 @@ MdnsChecks.Run(Check);
     Check(failedResponse.Text == "part" && failed.TurnFailed, "Error results replace without separator games");
 }
 
+// Claude permission denials (scrubbed from a real `claude -p --permission-mode
+// default` result, 2.1.308) become one Access notice, Mac parity.
+{
+    var store = new SessionStore(Directory.CreateTempSubdirectory("converse-denial-").FullName, new FakeRunner());
+    var session = store.Create(store.Entries.First(e => e.Engine == "claude"));
+    var response = new ChatMessage { Role = "assistant", Text = "" };
+    var denied = """{"type":"result","subtype":"success","is_error":false,"result":"Neither step ran.","session_id":"s","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_1","tool_input":{"file_path":"/tmp/denialprobe/hello.txt","content":"SECRET CONTENTS"}},{"tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"touch made-by-bash.txt","description":"Create empty file"}}]}""";
+    store.Consume(denied, session, response);
+    var notices = session.Messages.Where(m => m.Role == "notice").Select(m => m.Text).ToList();
+    Check(notices.Count == 1 && notices[0] == "This session’s Access setting blocked: Write (/tmp/denialprobe/hello.txt), Bash (touch made-by-bash.txt). To allow it, change Access in the footer (for example Auto or Bypass permissions) and send again.",
+        "Claude permission denials become one Access notice without file contents");
+    store.Consume(denied, session, response);
+    Check(session.Messages.Count(m => m.Role == "notice") == 1 && response.Text == "Neither step ran.", "A repeated result in one turn does not repeat the denial notice");
+    var clean = store.Create(store.Entries.First(e => e.Engine == "claude"));
+    store.Consume("""{"type":"result","result":"Done","permission_denials":[]}""", clean, new ChatMessage { Role = "assistant", Text = "" });
+    Check(!clean.Messages.Any(m => m.Role == "notice"), "No permission denials, no notice");
+    using var many = System.Text.Json.JsonDocument.Parse("[" + string.Join(",", Enumerable.Range(1, 5).Select(i => $$$"""{"tool_name":"Edit","tool_use_id":"t{{{i}}}","tool_input":{"file_path":"/tmp/f{{{i}}}.swift","old_string":"x"}}""")) + "]");
+    var manyText = PermissionDenialNotice.Text(many.RootElement, new HashSet<string>()) ?? "";
+    Check(manyText.Contains("Edit (/tmp/f1.swift), Edit (/tmp/f2.swift), Edit (/tmp/f3.swift) +2 more.") && !manyText.Contains("f4"), "More than three denials list three then +N more");
+    using var longCommand = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string> { ["command"] = "echo " + new string('a', 200) + "\nrm -rf build" }));
+    using var longPath = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string> { ["file_path"] = "/" + string.Concat(Enumerable.Repeat("d/", 60)) + "end.txt" }));
+    var command = PermissionDenialNotice.Summary(longCommand.RootElement);
+    var path = PermissionDenialNotice.Summary(longPath.RootElement);
+    Check(command.Length == 80 && command.EndsWith("…") && !command.Contains('\n') && path.Length == 80 && path.StartsWith("…") && path.EndsWith("end.txt"), "Denied commands and paths are truncated to a short single line");
+}
+
 // Round-12 item 3c: a final snapshot that omits the first streamed block
 // (text -> tool -> text) joins on overlap instead of deleting it.
 {
