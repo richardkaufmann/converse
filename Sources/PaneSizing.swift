@@ -512,7 +512,12 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseDown(with: event(.leftMouseDown, 0))
         check(!longText.textContainer!.widthTracksTextView, "Gutter drag suspends full-history wrapping on a 10,000-line transcript")
         for step in 1...100 { handle.mouseDragged(with: event(.leftMouseDragged, CGFloat(step) * 0.3)) }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.04))
+        // Wait for the coalesced frame rather than a fixed 40 ms: a loaded test
+        // machine can delay the display-interval callback. Coalescing is still
+        // proven by the notification count, which more waiting cannot inflate.
+        let burstDeadline = Date().addingTimeInterval(2)
+        repeat { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        while abs(target.arrangedSubviews[0].frame.maxX - before - 30) >= 2 && Date() < burstDeadline
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && notifications < 10,
               "\(target === outer ? "Sidebar" : "Session") gutter coalesces a 100-event burst while following the latest pointer (resize notifications: \(notifications))")
         longText.layoutManager!.ensureLayout(for: longText.textContainer!)

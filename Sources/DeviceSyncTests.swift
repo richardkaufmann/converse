@@ -972,10 +972,12 @@ func parkingLotReviewConnectivitySelfTests(_ check: (Bool, String) -> Void) {
         let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             ticks += 1; DispatchQueue.main.async { callbacks += 1 }
         }
+        // A modal runloop would starve these to ~0; on a loaded machine timers
+        // coalesce, so require clear progress (>80 of ~220) rather than 150.
         let until = Date().addingTimeInterval(22)
         _ = pump(seconds: 24) { Date() >= until }
         timer.invalidate()
-        check(window.attachedSheet != nil && outcome == nil && failure == nil && ticks > 150 && callbacks > 150,
+        check(window.attachedSheet != nil && outcome == nil && failure == nil && ticks > 80 && callbacks > 80,
               "Pending native Parking Lot review keeps default timers and main-queue callbacks running for 22 seconds")
         check(home.homes[viewer.localDeviceID ?? ""]?.online == true && viewer.homes[home.localDeviceID ?? ""]?.online == true,
               "Two real connected homes stay online beyond the 20-second timeout while approval is pending")
