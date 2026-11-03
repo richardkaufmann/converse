@@ -232,7 +232,7 @@ struct ParkingLotSidebar: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
             ProviderLogo(engine: "parking").frame(width: 24)
-            HStack(spacing: 2) {
+            PaneButtonGroup {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
                     .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
                 ForEach(1...3, id: \.self) { pane in
@@ -240,7 +240,7 @@ struct ParkingLotSidebar: View {
                 }
                 PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")
-            }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
+            }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .contextMenu {
                 Button("Linked Sessions…") { showingLinks = true }
