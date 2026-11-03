@@ -97,6 +97,40 @@ struct ProviderCommand {
     }
     static func toml(_ value: String) -> String { "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
 }
+// Headless Claude denies tools its permission mode does not allow and lists
+// them in the final result. Name them once, so a refusal does not look like
+// Converse failing. Summaries show a path or command, never file contents.
+enum PermissionDenialNotice {
+    static func summary(tool: String, input: [String: Any]) -> String {
+        for key in ["file_path", "notebook_path", "path", "command", "url", "pattern", "query"] {
+            guard let raw = input[key] as? String else { continue }
+            let value = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            guard !value.isEmpty else { continue }
+            if key.hasSuffix("path") {
+                let path = NSString(string: value).abbreviatingWithTildeInPath
+                return path.count > 80 ? "…" + String(path.suffix(79)) : path
+            }
+            return value.count > 80 ? String(value.prefix(79)) + "…" : value
+        }
+        return ""
+    }
+    // Returns nil when nothing new was denied; `seen` keeps later results in
+    // the same turn from repeating tools already named.
+    static func text(_ denials: [[String: Any]], seen: inout Set<String>) -> String? {
+        var items: [String] = []
+        for denial in denials {
+            let tool = (denial["tool_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "a tool"
+            let detail = summary(tool: tool, input: denial["tool_input"] as? [String: Any] ?? [:])
+            let item = detail.isEmpty ? tool : "\(tool) (\(detail))"
+            let key = denial["tool_use_id"] as? String ?? item
+            guard seen.insert(key).inserted, !items.contains(item) else { continue }
+            items.append(item)
+        }
+        guard !items.isEmpty else { return nil }
+        let listed = items.prefix(3).joined(separator: ", ") + (items.count > 3 ? " +\(items.count - 3) more" : "")
+        return "This session’s Access setting blocked: \(listed). To allow it, change Access in the footer (for example Auto or Bypass permissions) and send again."
+    }
+}
 // Bounded prompt-free RPC. Reading status never resumes or attaches a conversation.
 final class ProviderProbeConnection {
     let process: Process

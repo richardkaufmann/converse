@@ -112,6 +112,7 @@ public sealed class ChatSession
     [System.Text.Json.Serialization.JsonIgnore] internal bool ResumeAfterInterrupt { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal bool ClaudeTextBlockPending { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal List<(int Location, int Length)> ClaudeStreamSeparators { get; } = new();
+    [System.Text.Json.Serialization.JsonIgnore] internal HashSet<string> ClaudeNoticedDenials { get; } = new();
     [System.Text.Json.Serialization.JsonIgnore] public List<MuseRequest> Requests { get; set; } = new();
     [System.Text.Json.Serialization.JsonIgnore] public bool AnsweringRequest { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal MuseMspClient? Muse { get; set; }
@@ -731,6 +732,7 @@ public sealed class SessionStore
         session.StreamedText = false;
         session.ClaudeTextBlockPending = false;
         session.ClaudeStreamSeparators.Clear();
+        session.ClaudeNoticedDenials.Clear();
         session.Status = "Working…";
         var response = new ChatMessage { Role = "assistant", Text = "", CreatedAt = DateTime.UtcNow };
         session.Messages.Add(response);
@@ -884,6 +886,8 @@ public sealed class SessionStore
             else if (type == "result")
             {
                 if (obj.TryGetProperty("is_error", out var isError) && isError.ValueKind == JsonValueKind.True) session.TurnFailed = true;
+                if (obj.TryGetProperty("permission_denials", out var denials) && PermissionDenialNotice.Text(denials, session.ClaudeNoticedDenials) is { } denialNotice)
+                    session.Messages.Add(new ChatMessage { Role = "notice", Text = denialNotice });
                 if (GetString(obj, "result") is { } result)
                 {
                     response.FinalReply = result;
