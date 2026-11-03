@@ -119,4 +119,17 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         if values.count != unique.count { check(false, "All shared pane assignments remain exclusive"); return }
     }
     check(true, "All shared pane assignments remain exclusive across repeated moves")
+    do {
+        let panes = Workspace(), here = WindowState(workspace: panes), there = WindowState(workspace: panes)
+        let mine = UUID(), other = UUID()
+        panes.assign(mine, to: here.id, pane: 1); panes.assign(other, to: here.id, pane: 2)
+        check(panes.paneIsAvailable(1, for: mine, in: here.id) && !panes.paneIsAvailable(2, for: mine, in: here.id) && panes.paneIsAvailable(3, for: mine, in: here.id), "Sidebar pane is available when empty here or already showing this session, not when another session would be evicted")
+        check(panes.paneIsAvailable(1, for: mine, in: there.id) && !panes.paneIsAvailable(1, for: other, in: here.id) && !panes.paneIsAvailable(4, for: mine, in: here.id), "Pane availability is judged per window and only for panes 1-3")
+        let hover = SidebarHoverState()
+        hover.setHovered(true); let row = hover.wantsDetails
+        hover.setButtonsHovered(true); let buttons = hover.wantsDetails
+        hover.setButtonsHovered(false); let back = hover.wantsDetails
+        hover.setHovered(false)
+        check(row && !buttons && back && !hover.wantsDetails, "Sidebar row summary card is suppressed while the pointer is over the row's buttons")
+    }
 }

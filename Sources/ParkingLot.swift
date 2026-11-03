@@ -235,7 +235,7 @@ struct ParkingLotSidebar: View {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
                     .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane) { show(pane) }
+                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane, available: workspace.paneIsAvailable(pane, for: lot.id, in: state.id)) { show(pane) }
                 }
                 PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")

@@ -6,9 +6,16 @@ import SwiftUI
 final class SidebarHoverState: ObservableObject {
     weak var anchor: SidebarHoverView?
     var inside = false
+    // The P/1/2/3/X buttons carry their own tooltips; never stack the row card on top.
+    var overButtons = false
+    var wantsDetails: Bool { inside && !overButtons }
     func setHovered(_ inside: Bool) {
         self.inside = inside
-        anchor?.setHovered(inside)
+        anchor?.setHovered(wantsDetails)
+    }
+    func setButtonsHovered(_ over: Bool) {
+        overButtons = over
+        if over { anchor?.closeDetails() } else { anchor?.setHovered(wantsDetails) }
     }
 }
 struct SidebarHoverDetails: NSViewRepresentable {
@@ -34,7 +41,7 @@ final class SidebarHoverView: NSView {
         opening?.cancel()
         guard inside else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.hoverState?.inside == true, self.window?.isVisible == true else { return }
+            guard let self, self.hoverState?.wantsDetails == true, self.window?.isVisible == true else { return }
             self.showDetails()
         }
         opening = work
@@ -65,7 +72,7 @@ final class SidebarHoverView: NSView {
         watchdog = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self else { return }
             let inPanel = self.popover?.contentViewController?.view.window?.frame.contains(NSEvent.mouseLocation) == true
-            if self.window?.isVisible != true || self.popover?.isShown != true || (self.hoverState?.inside != true && !self.pointerInRow && !inPanel) { self.closeDetails() }
+            if self.window?.isVisible != true || self.popover?.isShown != true || self.hoverState?.overButtons == true || (self.hoverState?.inside != true && !self.pointerInRow && !inPanel) { self.closeDetails() }
         }
     }
     static func attributedDetails(_ details: String) -> NSAttributedString {

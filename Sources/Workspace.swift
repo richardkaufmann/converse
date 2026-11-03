@@ -56,6 +56,12 @@ final class Workspace: ObservableObject {
         guard let location = placements[sessionID], location.windowID == windowID else { return nil }
         return location.pane
     }
+    // Taking this pane displaces nobody: it is empty here or already shows this session.
+    func paneIsAvailable(_ pane: Int, for sessionID: UUID, in windowID: UUID) -> Bool {
+        guard names[windowID] != nil, (1...3).contains(pane) else { return false }
+        let occupant = session(in: windowID, pane: pane)
+        return occupant == nil || occupant == sessionID
+    }
     func assign(_ sessionID: UUID, to windowID: UUID, pane: Int) {
         guard names[windowID] != nil, (1...3).contains(pane) else { return }
         let destination = PaneLocation(windowID: windowID, pane: pane)
@@ -170,16 +176,20 @@ struct PaneButton: View {
     let label: String
     let selected: Bool
     var destructive = false
+    // Orange on hover means taking this pane will not evict another session.
+    var available = false
     let action: () -> Void
+    @State private var hovered = false
     var body: some View {
+        let open = hovered && available
         Button(action: action) {
             Text(label).font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(selected ? Color.white : Color.black)
+                .foregroundStyle(selected && !open ? Color.white : Color.black)
                 .frame(width: 18, height: 19)
-                .background(selected ? (destructive ? Color(red: 0.55, green: 0.06, blue: 0.08) : Color(red: 0.12, green: 0.52, blue: 0.28)) : .white)
+                .background(open ? Color.orange : selected ? (destructive ? Color(red: 0.55, green: 0.06, blue: 0.08) : Color(red: 0.12, green: 0.52, blue: 0.28)) : .white)
                 .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(selected ? 0 : 0.18), lineWidth: 0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 2))
-        }.buttonStyle(.plain)
+        }.buttonStyle(.plain).onHover { hovered = $0 }
     }
 }
 extension Session {
@@ -239,11 +249,11 @@ struct SidebarSession: View {
             HStack(spacing: 2) {
                 PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane) { AppDelegate.shared.assign(session, to: state, pane: pane) }
+                    PaneButton(label: String(pane), selected: localPane == pane, available: workspace.paneIsAvailable(pane, for: session.id, in: state.id)) { AppDelegate.shared.assign(session, to: state, pane: pane) }
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)").help("Move this session to pane \(pane) here, taking it back from any other display.")
                 }
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored.")
-            }.frame(width: 98).fixedSize(horizontal: true, vertical: false)
+            }.frame(width: 98).fixedSize(horizontal: true, vertical: false).contentShape(Rectangle()).onHover { hover.setButtonsHovered($0) }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .foregroundStyle(workspace.showsParkedApproval(session) ? Color.black : Color.primary)

@@ -204,7 +204,7 @@ struct RemoteSidebarRow: View {
                     .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
                     .help("Close this session on its home and remove it from every viewer. The home must support remote closing.")
                 }
-            }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online)
+            }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online).contentShape(Rectangle()).onHover { hover.setButtonsHovered($0) }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
