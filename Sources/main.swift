@@ -179,6 +179,7 @@ final class Session: ObservableObject, Identifiable {
     var streamedText = false
     var claudeTextBlockPending = false
     var claudeStreamSeparators: [NSRange] = []
+    var claudeBackgroundTasks: [String: String] = [:]
     var process: Process?
     var muse: MuseConnection?
     var museClosing = false
@@ -548,7 +549,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if clearDisplayBeforeReply { clearSessionDisplay(s) }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeBackgroundTasks = [:]; s.status = "Working…"
         s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
@@ -627,6 +628,10 @@ final class Store: ObservableObject {
                 let retryFailure = s.retryDetail
                 s.retryDetail = nil
                 s.busy = false; s.process = nil
+                if !s.claudeBackgroundTasks.isEmpty {
+                    if !s.interrupted { s.messages.append(Message(role: "notice", text: "Claude ended this turn while still reporting work in progress: " + s.claudeBackgroundTasks.values.sorted().joined(separator: "; ") + ". No completion was reported; ask the session for its status before assuming that work finished.")) }
+                    s.claudeBackgroundTasks = [:]
+                }
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
                 if s.entry.engine == "codex", p.terminationStatus == 0, !s.turnFailed, !s.interrupted,
@@ -1125,6 +1130,11 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "activity", text: text))
         // Tool activity is retained for diagnostics, but does not reset visible-answer timing.
     }
+    static func claudeWorkingStatus(_ s: Session) -> String {
+        let tasks = s.claudeBackgroundTasks.values.sorted()
+        guard let first = tasks.first else { return "Working…" }
+        return "Working… · " + (tasks.count == 1 ? "task: " : "\(tasks.count) tasks: ") + String(first.prefix(60)) + (tasks.count > 1 ? " +\(tasks.count - 1)" : "")
+    }
     static func claudeUnseparated(_ text: String, session: Session) -> String {
         let unseparated = NSMutableString(string: text)
         for range in session.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length {
@@ -1139,7 +1149,7 @@ final class Store: ObservableObject {
             s.status = ProviderRetry.status(s.entry.engine)
             saveSoon(); objectWillChange.send(); return
         }
-        if s.retryDetail != nil { s.retryDetail = nil; s.status = "Working…" }
+        if s.retryDetail != nil { s.retryDetail = nil; s.status = s.entry.engine == "claude" ? Store.claudeWorkingStatus(s) : "Working…" }
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
@@ -1163,6 +1173,13 @@ final class Store: ObservableObject {
             }
         } else if s.entry.engine == "claude" {
             if let sid = obj["session_id"] as? String { s.remoteID = sid }
+            // Subagents and background shells can keep the CLI working after
+            // its first result. Name them so the turn does not look finished.
+            if type == "system", let task = obj["task_id"] as? String, let subtype = obj["subtype"] as? String, ["task_started", "task_notification"].contains(subtype) {
+                if subtype == "task_started" { s.claudeBackgroundTasks[task] = (obj["description"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unnamed task" }
+                else { s.claudeBackgroundTasks[task] = nil }
+                if s.busy && s.status.hasPrefix("Working") { s.status = Store.claudeWorkingStatus(s) }
+            }
             if type == "stream_event", let event = obj["event"] as? [String: Any] {
                 if event["type"] as? String == "content_block_start", let block = event["content_block"] as? [String: Any], block["type"] as? String == "text" {
                     s.claudeTextBlockPending = true
@@ -3332,6 +3349,16 @@ func selfTest() {
     check(pong.messages[0].text == "A genuine correction", "A genuinely different Claude result still replaces accumulated output")
     pongLine(#"{"type":"result","is_error":true,"result":"correction"}"#)
     check(pong.turnFailed && pong.messages[0].text == "correction", "Claude error results replace output even when they are a subset")
+    let background = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
+    let backgroundID = UUID(); background.messages = [Message(id: backgroundID, role: "assistant", text: "")]; background.busy = true; background.status = "Working…"
+    store.consume(#"{"type":"system","subtype":"task_started","task_id":"t1","description":"Audit the gutter","is_backgrounded":true}"#, session: background, responseID: backgroundID)
+    store.consume(#"{"type":"result","result":"Started a background audit."}"#, session: background, responseID: backgroundID)
+    check(background.busy && background.status == "Working… · task: Audit the gutter" && background.messages[0].text == "Started a background audit.", "Claude background work stays visible as busy after the first result")
+    store.consume(#"{"type":"system","subtype":"task_started","task_id":"t2","description":"Run tests"}"#, session: background, responseID: backgroundID)
+    check(background.status == "Working… · 2 tasks: Audit the gutter +1", "Several outstanding Claude tasks are counted")
+    store.consume(#"{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed"}"#, session: background, responseID: backgroundID)
+    store.consume(#"{"type":"system","subtype":"task_notification","task_id":"t2","status":"failed"}"#, session: background, responseID: backgroundID)
+    check(background.status == "Working…" && background.claudeBackgroundTasks.isEmpty, "Finished Claude tasks clear the background status")
     let blocks = Session(entry: Entry(name: "Claude", command: "claude", directory: "/tmp", engine: "claude"))
     let blocksID = UUID(); blocks.messages = [Message(id: blocksID, role: "assistant", text: "")]
     store.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"Unique block"},{"type":"text","text":"Unique block"}]}}"#, session: blocks, responseID: blocksID)
