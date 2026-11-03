@@ -2,6 +2,9 @@ import Combine
 import CryptoKit
 import Foundation
 import Network
+import os
+
+private let lotSyncLog = Logger(subsystem: "local.richard.Converse", category: "lotsync")
 
 struct DiscoveredDevice: Identifiable, Equatable {
     var id: String { endpoint.debugDescription }
@@ -795,6 +798,7 @@ extension DeviceSyncService {
     private func sendTranscript(to peer: DevicePeer, sessionID: UUID, beforeOffset: Int? = nil) {
         if let lot = parkingLibrary.lot(sessionID), lot.active {
             guard peer.leasedSessions.contains(sessionID), let home = identity?.deviceID else { return }
+            lotSyncLog.debug("lot snapshot rev \(lot.document.revision, privacy: .public) rows \(lot.document.rows.count, privacy: .public) to subscribed viewer")
             let payload = DeviceTranscriptPayload(globalID: DeviceGlobalID(home: home, session: lot.id).string,
                 homeSeq: stateStore?.nextSeq() ?? 0, epoch: 0, boot: boot,
                 messages: lot.exportMessages.map(wireMessage),
@@ -1030,6 +1034,7 @@ extension DeviceSyncService {
             // Notes are nonexclusive read subscriptions: viewing never displaces another reader or the home editor.
             if let lot = homeParkingLot(envelope) {
                 peer.leasedSessions.insert(lot.id)
+                lotSyncLog.info("lot subscribed: \(lot.name, privacy: .public)")
                 sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.leaseGranted.rawValue, boot: boot, sessionID: envelope.sessionID, epoch: 0))
                 sendTranscript(to: peer, sessionID: lot.id); return
             }
@@ -1052,7 +1057,10 @@ extension DeviceSyncService {
         case DeviceMessageKind.leaseHeartbeat.rawValue:
             if let (session, _) = homeSession(envelope), let epoch = envelope.epoch { _ = leases?.heartbeat(session: session.id, device: peerHome, epoch: epoch) }
         case DeviceMessageKind.leaseRelease.rawValue:
-            if let lot = homeParkingLot(envelope) { peer.leasedSessions.remove(lot.id); return }
+            if let lot = homeParkingLot(envelope) {
+                lotSyncLog.info("lot unsubscribed: \(lot.name, privacy: .public)")
+                peer.leasedSessions.remove(lot.id); return
+            }
             if let (session, _) = homeSession(envelope), let epoch = envelope.epoch {
                 leases?.release(session: session.id, device: peerHome, epoch: epoch); peer.leasedSessions.remove(session.id); publishSidebarIfChanged()
             }
