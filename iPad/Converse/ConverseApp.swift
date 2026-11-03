@@ -443,7 +443,7 @@ struct PadPane: View {
                 Text("Parking Lot · read only").font(.caption).foregroundStyle(.secondary).padding(8)
             } else if !model.canControl(id) {
                 HStack {
-                    Text(service.remoteOffline.contains(id) ? "Home offline. Your draft is preserved." : "Take this session to edit and send.")
+                    Text(service.remoteOffline.contains(id) ? "Home offline. Your draft is preserved." : (model.isParkingLot(id) ? "This lot view isn't live. Take it to refresh." : "Take this session to edit and send."))
                     Spacer(); Button("Take here") { service.acquireRemote(globalID: id) }
                 }.font(.callout).padding(10).background(Color.orange.opacity(0.18))
             }
