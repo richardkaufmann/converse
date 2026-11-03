@@ -57,9 +57,9 @@ python3 iPad/distribute.py upload .build/Converse-iPad.xcarchive .build/iPadUplo
 
 ## Parking Lots
 
-Group members can open Mac-hosted Parking Lots as read-only panes on iPhone and iPad. Headings, done markers and item images arrive with the snapshot; subsequent edits update the open pane. Renames update the sidebar, and deleted lots disappear from it. Creation, editing and Talk remain on the Mac. Mobile viewers cannot send a draft or take an editing lease for a Parking Lot.
+Group members can open Mac-hosted Parking Lots as read-only panes on iPhone and iPad. The viewer draws numbered items, blue headings with collapse chevrons, grey struck-through done items, comment-count bubbles (tap to read) and item image thumbnails (tap for full size). Opening shows the latest copy; later Mac edits show a **Refresh** button instead of replacing what you are reading. The viewer renews its nonexclusive lot subscription on open, reconnect and foreground, so it never needs Take and never moves anything on the Mac. A row that does not parse is shown as plain text. Renames update the sidebar, and deleted lots disappear from it. Creation, editing and Talk remain on the Mac. Mobile viewers cannot send a draft or take an editing lease for a Parking Lot.
 
-`./iPad/test.sh --interop` exercises the real isolated Mac Group connection, including Parking Lot discovery, opening, attached-image transfer, live updates and reopening. Set `CONVERSE_APP_OUTPUT` to the built Mac app and `CONVERSE_IPAD_SIMULATOR` to an iPad or iPhone simulator UUID. The snapshot tests also verify read-only behavior, rename and deletion. Simulator results do not replace physical-device discovery and reconnect testing.
+`./iPad/test.sh --interop` exercises the real isolated Mac Group connection, including Parking Lot discovery, opening, attached-image transfer, live updates, the Refresh flow, subscription renewal and reopening. Set `CONVERSE_APP_OUTPUT` to the built Mac app and `CONVERSE_IPAD_SIMULATOR` to an iPad or iPhone simulator UUID. The snapshot tests also verify read-only behavior, rename and deletion. Simulator results do not replace physical-device discovery and reconnect testing.
 
 ## Use
 

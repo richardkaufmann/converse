@@ -491,7 +491,177 @@ final class ConverseTests: XCTestCase {
         try await eventually("Home Parking Lot edits arrive without reopening") { (service.remoteTranscripts[row.globalID]?.draftVersion ?? 0) > oldRevision }
         service.releaseRemote(globalID: row.globalID); service.acquireRemote(globalID: row.globalID)
         try await eventually("Parking Lot reopens with attached image") { service.remoteTranscripts[row.globalID]?.messages.contains { $0.imageHashes.contains(hash) } == true }
+        // Viewer: open shows the latest; Mac edits (the fixture rewrites "Live
+        // update N" every second) offer Refresh instead of replacing the view.
+        func liveNumber(_ messages: [DeviceWireMessage]?) -> Int? {
+            messages?.lazy.compactMap { LotViewerParser.parse($0) }.first { $0.text.hasPrefix("Live update ") }.flatMap { Int($0.text.dropFirst("Live update ".count)) }
+        }
+        model.reconcileLots()
+        try await eventually("Lot viewer shows the opened lot") { model.lotViews[row.globalID]?.displayed != nil }
+        let viewer = try XCTUnwrap(model.lotViews[row.globalID])
+        let entries = viewer.entries.compactMap { if case .row(let row) = $0 { return row }; return nil }
+        XCTAssertEqual(entries.count, viewer.entries.count, "Every Mac lot row parses")
+        XCTAssertEqual(entries.first?.heading, true); XCTAssertEqual(entries.first?.text, "Mobile ideas")
+        XCTAssertEqual(entries.dropFirst().first?.number, 1); XCTAssertEqual(entries.dropFirst().first?.images, [hash])
+        XCTAssertEqual(entries.dropFirst(2).first?.number, 2)
+        let shown = try XCTUnwrap(liveNumber(viewer.displayed))
+        try await eventually("Mac edit offers Refresh", timeout: 15) { model.lotViews[row.globalID]?.refreshAvailable == true }
+        XCTAssertEqual(liveNumber(model.lotViews[row.globalID]?.displayed), shown, "The open view is not replaced")
+        model.applyLotRefresh(row.globalID)
+        let refreshed = try XCTUnwrap(liveNumber(model.lotViews[row.globalID]?.displayed))
+        XCTAssertGreaterThan(refreshed, shown, "Refresh shows the newer Mac content")
+        // A dropped subscription (reconnect/foreground) renews automatically and
+        // keeps the shown copy; it never needs Take.
+        service.releaseRemote(globalID: row.globalID, preservingDisplay: true)
+        XCTAssertNil(service.remoteLeases[row.globalID])
+        model.ensureLotSubscription(row.globalID)
+        XCTAssertTrue(service.lotSubscriptionPending(row.globalID), "Viewer renews its own lot subscription")
+        try await eventually("Lot subscription renews without Take", timeout: 15) { service.remoteLeases[row.globalID] == 0 }
+        XCTAssertEqual(liveNumber(model.lotViews[row.globalID]?.displayed), refreshed)
+        try await eventually("Renewed subscription keeps offering Refresh", timeout: 15) { model.lotViews[row.globalID]?.refreshAvailable == true }
     }
+    // Mirrors ParkingLotStore.markdown/exportMessages (Mac-only AppKit source).
+    func lotText(heading: Bool = false, number: Int = 1, done: Bool = false, _ text: String, notes: [(String, String)] = []) -> String {
+        (heading ? "# " : "\(number). ") + (done ? "[Done] " : "") + text.replacingOccurrences(of: "\n", with: "\n   ")
+            + notes.map { "\n   > " + $0.0 + ": " + $0.1.replacingOccurrences(of: "\n", with: "\n   > ") }.joined()
+    }
+    func lotMessage(_ text: String, id: UUID = UUID(), images: [String] = [], role: String = "assistant") -> DeviceWireMessage {
+        DeviceWireMessage(id: id, role: role, text: text, imageHashes: images)
+    }
+    func testLotParserReadsMacRowsAndFallsBackToPlain() throws {
+        let messages = [
+            lotMessage(lotText(heading: true, "Bugs")),
+            lotMessage(lotText(number: 1, "Fix scrolling\nOnly on iPad\n\nAfter rotation")),
+            lotMessage(lotText(number: 2, done: true, "Ship it"), images: ["hash-a", "hash-b"]),
+            lotMessage(lotText(heading: true, done: true, "Old ideas", notes: [("Richard", "Archive?")])),
+            lotMessage(lotText(number: 1, "", notes: [("Agent:Planner", "Steps: one\ntwo\n\nthree"), ("Claude", "Agreed")])),
+            lotMessage(lotText(number: 2, "Quote\n> not a comment")),
+            lotMessage("Not a lot row"),
+            lotMessage(lotText(number: 3, "user"), role: "user"),
+            lotMessage("1. Broken\nunindented"),
+            lotMessage("1. a\n   > A: comment\n   trailing text"),
+            lotMessage("0. zero"), lotMessage("x1. x"), lotMessage("#Heading")
+        ]
+        let entries = LotViewerParser.entries(messages)
+        XCTAssertEqual(entries.map(\.id), messages.map(\.id), "Every message keeps its row and order")
+        func row(_ index: Int) throws -> LotViewerRow {
+            guard case .row(let row) = entries[index] else { XCTFail("Row \(index) did not parse"); throw CocoaError(.coderInvalidValue) }
+            return row
+        }
+        XCTAssertEqual(try row(0), LotViewerRow(id: messages[0].id, heading: true, number: nil, done: false, text: "Bugs", comments: [], images: []))
+        XCTAssertEqual(try row(1).number, 1); XCTAssertEqual(try row(1).text, "Fix scrolling\nOnly on iPad\n\nAfter rotation")
+        XCTAssertEqual(try row(2).number, 2); XCTAssertTrue(try row(2).done); XCTAssertEqual(try row(2).text, "Ship it", "Done is a style, not text")
+        XCTAssertEqual(try row(2).images, ["hash-a", "hash-b"])
+        XCTAssertTrue(try row(3).heading); XCTAssertTrue(try row(3).done); XCTAssertEqual(try row(3).comments, [LotViewerComment(author: "Richard", text: "Archive?")])
+        XCTAssertEqual(try row(4).number, 1, "Numbering restarts after each heading")
+        XCTAssertEqual(try row(4).text, "")
+        XCTAssertEqual(try row(4).comments, [LotViewerComment(author: "Agent:Planner", text: "Steps: one\ntwo\n\nthree"), LotViewerComment(author: "Claude", text: "Agreed")])
+        XCTAssertEqual(try row(5).text, "Quote\n> not a comment"); XCTAssertTrue(try row(5).comments.isEmpty)
+        for index in 6..<messages.count {
+            XCTAssertEqual(entries[index], .plain(messages[index]), "Malformed message \(index) renders as it arrived")
+        }
+    }
+    func testLotRefreshOnlyForChangedContentAndApplyClearsIt() {
+        let ids = (0..<3).map { _ in UUID() }
+        let base = [lotMessage(lotText(heading: true, "Ideas"), id: ids[0]), lotMessage(lotText(number: 1, "One"), id: ids[1]), lotMessage(lotText(number: 2, "Two", notes: [("A", "x")]), id: ids[2], images: ["h1"])]
+        var state = LotViewerState()
+        XCTAssertFalse(state.refreshAvailable)
+        XCTAssertTrue(state.receive(base)); XCTAssertEqual(state.displayed, base, "First snapshot shows immediately")
+        XCTAssertFalse(state.refreshAvailable)
+        var resent = base; resent[1].messageNumber = 9; resent[1].createdAtUnixSeconds = 1
+        XCTAssertFalse(state.receive(resent), "A sync tick resend with the same content is no change"); XCTAssertFalse(state.refreshAvailable)
+        var variants: [(String, [DeviceWireMessage])] = []
+        var text = base; text[1].text = lotText(number: 1, "One, revised"); variants.append(("text", text))
+        var done = base; done[1].text = lotText(number: 1, done: true, "One"); variants.append(("done", done))
+        var comment = base; comment[2].text = lotText(number: 2, "Two", notes: [("A", "x"), ("B", "y")]); variants.append(("comment", comment))
+        variants.append(("order", [base[0], base[2], base[1]]))
+        var image = base; image[2].imageHashes = ["h2"]; variants.append(("image", image))
+        variants.append(("deleted row", Array(base.dropFirst())))
+        var added = base; added.insert(lotMessage(lotText(number: 1, "New")), at: 1); variants.append(("added row", added))
+        for (name, next) in variants {
+            var copy = state
+            XCTAssertTrue(copy.receive(next), name); XCTAssertTrue(copy.refreshAvailable, name + " offers Refresh")
+            XCTAssertEqual(copy.displayed, base, name + " does not replace the view")
+            copy.applyRefresh()
+            XCTAssertEqual(copy.displayed, next, name); XCTAssertFalse(copy.refreshAvailable, name + " Refresh hides after applying")
+            XCTAssertEqual(copy.entries, LotViewerParser.entries(next))
+        }
+        var reverted = state
+        reverted.receive(text); XCTAssertTrue(reverted.refreshAvailable)
+        reverted.receive(base); XCTAssertFalse(reverted.refreshAvailable, "Changing back to what is shown hides Refresh")
+        let entries = LotViewerParser.entries(base + [lotMessage(lotText(heading: true, "Later")), lotMessage(lotText(number: 1, "Kept"))])
+        let folded = LotViewerParser.visible(entries, collapsed: [ids[0]])
+        XCTAssertEqual(folded.map(\.entry.id), [ids[0], entries[3].id, entries[4].id]); XCTAssertEqual(folded[0].hidden, 2)
+    }
+    func testLotSubscriptionRenewalDecisions() throws {
+        XCTAssertTrue(LotSubscription.shouldSubscribe(placed: true, isLot: true, suspended: false, homeReachable: true, subscribed: false, pending: false))
+        for (placed, isLot, suspended, reachable, subscribed, pending) in [(false, true, false, true, false, false), (true, false, false, true, false, false),
+                                                                           (true, true, true, true, false, false), (true, true, false, false, false, false),
+                                                                           (true, true, false, true, true, false), (true, true, false, true, false, true)] {
+            XCTAssertFalse(LotSubscription.shouldSubscribe(placed: placed, isLot: isLot, suspended: suspended, homeReachable: reachable, subscribed: subscribed, pending: pending))
+        }
+        // Unreachable homes are not asked (no "Home is offline." churn) and
+        // ordinary sessions are never taken automatically.
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "c", count: 64), lot = UUID(), session = UUID()
+        let lotID = DeviceGlobalID(home: home, session: lot).string, sessionID = DeviceGlobalID(home: home, session: session).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        let rows = [DeviceSidebarRow(globalID: lotID, sessionID: lot, title: "Lot", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only", status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false),
+                    DeviceSidebarRow(globalID: sessionID, sessionID: session, title: "Work", assistant: "Codex", engine: "codex", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)]
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: rows))))
+        model.state.placements = [lotID, sessionID, nil]
+        XCTAssertTrue(model.isLotRow(lotID)); XCTAssertFalse(model.isLotRow(sessionID))
+        service.lastOutcome = ""
+        model.ensureLotSubscription(lotID); model.ensureLotSubscription(sessionID); model.reconcileLots()
+        XCTAssertTrue(service.remoteLeases.isEmpty); XCTAssertFalse(service.lotSubscriptionPending(lotID)); XCTAssertFalse(service.lotSubscriptionPending(sessionID))
+        XCTAssertEqual(service.lastOutcome, "")
+    }
+    func testLotViewerKeepsShownCopyUntilRefreshAndRendersPhoneAndPad() async throws {
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "d", count: 64), sid = UUID()
+        let id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        let row = DeviceSidebarRow(globalID: id, sessionID: sid, title: "Roadmap", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only", status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: [row]))))
+        model.state.placements[0] = id; service.remoteLeases[id] = 0
+        func send(_ seq: UInt64, _ messages: [DeviceWireMessage]) throws {
+            let payload = DeviceTranscriptPayload(globalID: id, homeSeq: seq, epoch: 0, messages: messages, total: messages.count, draft: "", draftVersion: seq, busy: false, status: "Parking Lot · read only", title: "Roadmap", engine: "parking")
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "transcript.snapshot", sessionID: id, epoch: 0, payload: try JSONEncoder().encode(payload)))
+            model.reconcileLots()
+        }
+        let heading = lotMessage(lotText(heading: true, "Now")), first = lotMessage(lotText(number: 1, "First https://example.com", notes: [("Richard", "Why?")]))
+        let second = lotMessage(lotText(number: 2, done: true, "Second"), images: ["missing-hash"])
+        let later = lotMessage(lotText(heading: true, "Later")), third = lotMessage(lotText(number: 1, "Third"))
+        try send(2, [heading, first, second, later, third])
+        XCTAssertEqual(model.lotViews[id]?.displayed?.count, 5); XCTAssertEqual(model.lotViews[id]?.refreshAvailable, false)
+        try send(3, [heading, first, second, later, third])
+        XCTAssertEqual(model.lotViews[id]?.refreshAvailable, false, "Resent unchanged lot shows no Refresh")
+        // Deleting the first section: the session transcript merge would keep
+        // the deleted rows; the lot viewer uses the whole new document.
+        try send(4, [later, third])
+        XCTAssertEqual(model.lotViews[id]?.refreshAvailable, true)
+        XCTAssertEqual(model.lotViews[id]?.displayed?.map(\.id), [heading, first, second, later, third].map(\.id), "Shown copy waits for Refresh")
+        model.applyLotRefresh(id)
+        XCTAssertEqual(model.lotViews[id]?.displayed?.map(\.id), [later, third].map(\.id)); XCTAssertEqual(model.lotViews[id]?.refreshAvailable, false)
+        try send(5, [lotMessage(lotText(number: 1, "Top")), later, third])
+        XCTAssertEqual(model.lotViews[id]?.refreshAvailable, true)
+        model.toggleLotHeading(id, heading: later.id); XCTAssertEqual(model.lotCollapsed[id], [later.id])
+        for size in [CGSize(width: 390, height: 844), CGSize(width: 1024, height: 1366), CGSize(width: 320, height: 568)] {
+            let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+            let host = UIHostingController(rootView: PadPane(id: id, pane: 0, model: model)); window.rootViewController = host
+            window.makeKeyAndVisible(); defer { window.isHidden = true }
+            try await Task.sleep(for: .milliseconds(150)); host.view.layoutIfNeeded()
+            XCTAssertFalse(Self.views(host.view).contains { $0 is TailTextView }, "Lots use the read-only viewer, not the session editor")
+        }
+        model.park(id)
+        XCTAssertNil(model.lotViews[id]); XCTAssertNil(service.remoteLeases[id])
+        model.state.placements[0] = id; service.remoteLeases[id] = 0
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 6, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 6, rows: []))))
+        XCTAssertNil(service.remoteLotSnapshots[id], "Deleted lots drop their copy")
+    }
+    static func views(_ root: UIView) -> [UIView] { [root] + root.subviews.flatMap { views($0) } }
     func testClosedHomeSessionDisappearsFromIPadAndRejectsLateSnapshots() throws {
         let service = try service(), model = PadModel(service: service)
         let home = String(repeating: "a", count: 64), sid = UUID()
