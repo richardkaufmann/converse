@@ -343,17 +343,14 @@ struct ParkingLotView: View {
                 ProviderLogo(engine: "parking")
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
-                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
-            }.padding(.horizontal, 8).padding(.vertical, 4)
-            Divider()
-            HStack {
-                Spacer()
                 Button(reordering ? "Done" : "Reorder") {
                     let previous = undoFocus.view?.window?.firstResponder
                     reordering.toggle()
                     DispatchQueue.main.async { undoFocus.activate(ifUnchangedFrom: previous) }
-                }
-            }.padding(8)
+                }.controlSize(.small)
+                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+            }.padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
             if !reordering {
