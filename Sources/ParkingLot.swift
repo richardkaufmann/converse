@@ -387,6 +387,7 @@ private struct ParkingLotFrames: PreferenceKey {
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     parkingOutlineSelfTests(check)
+    parkingLinkEditorSelfTests(check)
     parkingLibrarySelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }

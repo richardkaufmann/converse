@@ -120,6 +120,7 @@ struct ParkingLotEditor: NSViewRepresentable {
         text.minSize = NSSize(width: 0, height: 0); text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         text.delegate = context.coordinator; text.owner = context.coordinator
         text.setAccessibilityLabel("Parking Lot outline")
+        text.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue, .cursor: NSCursor.pointingHand]
         scroll.documentView = text; context.coordinator.text = text; context.coordinator.render()
         return scroll
     }
@@ -162,19 +163,65 @@ struct ParkingLotEditor: NSViewRepresentable {
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
                 if length > 0 { body.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: length)) }
             }
+            let anchor = caret ?? oldAnchor
+            linkEditing = text.editingFocus ? anchor.flatMap { anchor in projection.entries.first { $0.row.id == anchor.0 }.map { (anchor.0, min(anchor.1, $0.range.length)) } } : nil
             for entry in projection.entries where entry.range.length > 0 {
                 body.addAttribute(.foregroundColor, value: ParkingOutlineText.color(for: entry.row), range: entry.range)
                 if entry.row.isDone { body.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: entry.range) }
+                styleLinks(body, entry)
             }
             text.textStorage?.setAttributedString(body)
             text.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
-            let anchor = caret ?? oldAnchor
             if let anchor, let entry = projection.entries.first(where: { $0.row.id == anchor.0 }) {
                 text.setSelectedRange(NSRange(location: entry.range.location + min(anchor.1, entry.range.length), length: caret == nil ? min(oldSelection.length, max(0, body.length - entry.range.location - min(anchor.1, entry.range.length))) : 0))
             } else { text.setSelectedRange(NSRange(location: min(oldSelection.location, body.length), length: 0)) }
             text.updateCommentButtons()
             text.needsDisplay = true
             if caret != nil { text.scrollRangeToVisible(text.selectedRange()) }
+        }
+        // The row holding the caret shows raw Markdown, and a link being typed
+        // stays plain until a space or other boundary follows it.
+        var linkEditing: (UUID, Int)?
+        static let hiddenFont = NSFont.systemFont(ofSize: 0.01)
+        func styleLinks(_ storage: NSMutableAttributedString, _ entry: ParkingOutline.Entry) {
+            let links = LotLinks.find(in: entry.row.text)
+            guard !links.isEmpty else { return }
+            storage.addAttributes([.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13),
+                                   .foregroundColor: ParkingOutlineText.color(for: entry.row)], range: entry.range)
+            storage.removeAttribute(.link, range: entry.range); storage.removeAttribute(.toolTip, range: entry.range)
+            let caret = linkEditing.flatMap { $0.0 == entry.row.id ? $0.1 : nil }
+            for link in links {
+                if let caret, caret >= link.range.location, caret <= LotLinks.tokenEnd(link, in: entry.row.text) { continue }
+                let label = NSRange(location: entry.range.location + link.label.location, length: link.label.length)
+                storage.addAttributes([.link: link.url, .toolTip: link.isFile ? link.url.path : link.url.absoluteString], range: label)
+                guard link.isMarkdown else { continue }
+                let opening = NSRange(location: entry.range.location + link.range.location, length: 1)
+                let closing = NSRange(location: NSMaxRange(label), length: NSMaxRange(link.range) - link.label.location - link.label.length)
+                for syntax in [opening, closing] {
+                    storage.addAttributes(caret == nil ? [.font: Self.hiddenFont, .foregroundColor: NSColor.clear] : [.foregroundColor: NSColor.secondaryLabelColor], range: syntax)
+                }
+            }
+        }
+        /// Restyle only the rows whose caret state changed; text and selection are untouched.
+        func refreshLinks() {
+            guard !rendering, let text, let storage = text.textStorage, storage.length == (projection.string as NSString).length else { return }
+            let selection = text.selectedRange()
+            let anchor = text.editingFocus ? projection.index(at: selection.location).map { (projection.entries[$0].row.id, selection.location - projection.entries[$0].range.location) } : nil
+            guard anchor?.0 != linkEditing?.0 || anchor?.1 != linkEditing?.1 else { return }
+            let changed = Set([anchor?.0, linkEditing?.0].compactMap { $0 })
+            linkEditing = anchor
+            storage.beginEditing()
+            for entry in projection.entries where changed.contains(entry.row.id) && entry.range.length > 0 { styleLinks(storage, entry) }
+            storage.endEditing()
+        }
+        func textViewDidChangeSelection(_ notification: Notification) {
+            // A click restyles after mouse tracking ends, so text never shifts under a drag.
+            if let type = NSApp.currentEvent?.type, [.leftMouseDown, .leftMouseDragged].contains(type), text?.window != nil { return }
+            refreshLinks()
+        }
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            if let url = link as? URL { ParkingOutlineText.follow(url) }
+            return true
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard !rendering, let replacementString, let displayed,
@@ -453,7 +500,48 @@ final class ParkingOutlineText: NSTextView {
         if point.x < 32, let entry = owner?.projection.entries.first(where: { $0.row.heading && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }), !entry.placeholder {
             owner?.toggle(entry.row.id); return
         }
+        // Clicking a link follows it instead of placing the caret for editing.
+        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           let (url, index) = link(at: point) {
+            clicked(onLink: url, at: index); return
+        }
         super.mouseDown(with: event)
+        owner?.refreshLinks()
+    }
+    func link(at point: NSPoint) -> (URL, Int)? {
+        guard let manager = layoutManager, let container = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        let glyph = manager.glyphIndex(for: local, in: container)
+        guard manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(local) else { return nil }
+        let index = manager.characterIndexForGlyph(at: glyph)
+        guard index < storage.length, let url = storage.attribute(.link, at: index, effectiveRange: nil) as? URL else { return nil }
+        return (url, index)
+    }
+    // The window records the new first responder after these return.
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder()
+        if result { DispatchQueue.main.async { [weak self] in self?.owner?.refreshLinks() } }
+        return result
+    }
+    override func resignFirstResponder() -> Bool {
+        let result = super.resignFirstResponder()
+        if result { DispatchQueue.main.async { [weak self] in self?.owner?.refreshLinks() } }
+        return result
+    }
+    /// A row being edited shows raw link text; tests have no window and count as focused.
+    var editingFocus: Bool { window == nil || window?.firstResponder === self }
+    enum LinkAction: Equatable { case open(URL), reveal(URL), unavailable }
+    /// Web and mail links open; local files are only revealed in Finder, never launched.
+    static func action(for url: URL) -> LinkAction {
+        if url.isFileURL { return FileManager.default.fileExists(atPath: url.path) ? .reveal(url) : .unavailable }
+        return ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") ? .open(url) : .unavailable
+    }
+    static func follow(_ url: URL) {
+        switch action(for: url) {
+        case .open(let url): NSWorkspace.shared.open(url)
+        case .reveal(let url): NSWorkspace.shared.activateFileViewerSelecting([url])
+        case .unavailable: NSSound.beep()
+        }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let owner else { return super.menu(for: event) }
@@ -710,4 +798,54 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
         check(lot.document.rows.suffix(2).map(\.id) == [target, newID], "A session can add an identified heading and refer to it later in the same transaction")
     } catch { check(false, "Outline batch reorganization: " + error.localizedDescription) }
     check(store.switchboardTeaching(session).contains("Converse or KAOS") && store.switchboardTeaching(session).contains("Confirm the proposed reorganization"), "General session teaching includes contextual organization and user confirmation")
+}
+
+func parkingLinkEditorSelfTests(_ check: (Bool, String) -> Void) {
+    lotLinkSelfTests(check)
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-links-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder); lot.open()
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+    text.isRichText = false; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text; coordinator.render()
+    let heading = lot.document.rows[0].id, item = lot.document.rows[1].id
+    let stored = "See https://x.com/a and [Docs](https://d.com/b)."
+    lot.update(item, text: stored)
+    coordinator.render(caret: (heading, 0))
+    func entry() -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == item }! }
+    func attribute(_ key: NSAttributedString.Key, _ offset: Int) -> Any? { text.textStorage?.attribute(key, at: entry().range.location + offset, effectiveRange: nil) }
+    check(attribute(.link, 4) as? URL == URL(string: "https://x.com/a") && attribute(.link, 0) == nil && attribute(.link, 19) == nil, "Parking Lot items render bare URLs as links without the trailing words")
+    check(attribute(.link, 25) as? URL == URL(string: "https://d.com/b") && (attribute(.font, 24) as? NSFont)?.pointSize ?? 13 < 1 && (attribute(.font, 31) as? NSFont)?.pointSize ?? 13 < 1, "A Markdown link outside the edited row shows only its clickable label")
+    check(lot.document.rows[1].text == stored, "Link styling leaves the stored item text plain")
+    text.setSelectedRange(NSRange(location: entry().range.location + 1, length: 0))
+    check((attribute(.font, 24) as? NSFont)?.pointSize == 13 && attribute(.link, 25) != nil, "Moving the caret into a row reveals its Markdown for editing")
+    text.setSelectedRange(NSRange(location: 0, length: 0))
+    check((attribute(.font, 24) as? NSFont)?.pointSize ?? 13 < 1, "Leaving the row hides Markdown syntax again")
+    text.layoutManager?.ensureLayout(for: text.textContainer!)
+    if let manager = text.layoutManager, let container = text.textContainer {
+        func point(_ offset: Int) -> NSPoint {
+            let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: entry().range.location + offset, length: 1), actualCharacterRange: nil)
+            let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            return NSPoint(x: rect.midX + text.textContainerOrigin.x, y: rect.midY + text.textContainerOrigin.y)
+        }
+        check(text.link(at: point(26))?.0 == URL(string: "https://d.com/b") && text.link(at: point(1)) == nil, "Clicking a link label follows it; clicking other text edits")
+    }
+    // Live styling: the URL stays plain while typed and becomes a link at the space.
+    let typedRow = coordinator.projection.entries.first { $0.placeholder && !$0.row.heading }!
+    text.setSelectedRange(NSRange(location: typedRow.range.location, length: 0))
+    text.insertText("Visit https://y.com/z", replacementRange: text.selectedRange())
+    let typedID = coordinator.projection.entries.first { $0.row.text == "Visit https://y.com/z" }!.row.id
+    func typedLink() -> Any? { let typed = coordinator.projection.entries.first { $0.row.id == typedID }!; return text.textStorage?.attribute(.link, at: typed.range.location + 8, effectiveRange: nil) }
+    check(typedLink() == nil, "A URL being typed stays plain until a boundary follows it")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    check(typedLink() as? URL == URL(string: "https://y.com/z") && lot.document.rows.contains { $0.text == "Visit https://y.com/z " }, "Typing a space after a URL styles it as a link, as with text substitutions")
+    text.undo(nil)
+    check(lot.document.rows.contains { $0.text == "Visit https://y.com/z" } && typedLink() == nil, "Undo removes the space and the live link styling together")
+    lot.setDone(item, true); coordinator.render(caret: (heading, 0))
+    check(attribute(.link, 4) != nil && attribute(.strikethroughStyle, 4) != nil, "Done items keep clickable links")
+    check(ParkingOutlineText.action(for: URL(string: "https://x.com")!) == .open(URL(string: "https://x.com")!) && ParkingOutlineText.action(for: URL(string: "javascript:alert(1)")!) == .unavailable, "Web links open in the browser; other schemes do nothing")
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let teaching = Store.shared.switchboardTeaching(Session(entry: Entry(name: "Link writer", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")))
+    check(teaching.contains("[label](https://url) and appear clickable") && teaching.contains("reveals in Finder"), "Session teaching explains how to write clickable lot links")
+    check(ParkingOutlineText.action(for: folder) == .reveal(folder) && ParkingOutlineText.action(for: folder.appendingPathComponent("missing.txt")) == .unavailable, "File links reveal existing items in Finder and never launch them")
 }

@@ -181,17 +181,9 @@ enum LotStyle {
     static var compact: Bool { UIDevice.current.userInterfaceIdiom == .phone }
     static var thumbnailHeight: CGFloat { compact ? 56 : 80 }
     static var gutter: CGFloat { compact ? 26 : 34 }
-    static func linked(_ text: String) -> AttributedString {
-        var result = AttributedString(text)
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return result }
-        for match in detector.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let url = match.url, let range = Range(match.range, in: text),
-                  let lower = AttributedString.Index(range.lowerBound, within: result),
-                  let upper = AttributedString.Index(range.upperBound, within: result) else { continue }
-            result[lower..<upper].link = url
-        }
-        return result
-    }
+    // Sources/LotLinks.swift: web and Markdown links match the Mac lot. File
+    // links name the home Mac's disk, so they stay plain text here.
+    static func linked(_ text: String) -> AttributedString { LotLinks.attributed(text, files: false) }
 }
 
 enum LotThumbnails {

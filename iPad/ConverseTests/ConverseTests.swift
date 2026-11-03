@@ -18,6 +18,12 @@ final class ConverseTests: XCTestCase {
         view.selectedRange = NSRange(location: 12, length: 4); view.copy(nil)
         XCTAssertEqual(UIPasteboard.general.string, "Café (https://example.com/docs)")
     }
+    func testParkingLotLinksMatchMacAndKeepFileLinksPlain() {
+        let styled = LotStyle.linked("See [the repo](https://github.com/x/y), https://x.com/a. and /Users/me/a.txt")
+        XCTAssertEqual(String(styled.characters), "See the repo, https://x.com/a. and /Users/me/a.txt")
+        XCTAssertEqual(styled.runs.compactMap(\.link), [URL(string: "https://github.com/x/y")!, URL(string: "https://x.com/a")!])
+        XCTAssertTrue(LotStyle.linked("[x](javascript:alert(1))").runs.allSatisfy { $0.link == nil })
+    }
     func testPhonePaneCollapseKeepsEditorAndKeyboardFocus() async throws {
         guard UIDevice.current.userInterfaceIdiom == .phone else { return }
         let service = try service(), model = PadModel(service: service)
