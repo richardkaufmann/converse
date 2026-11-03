@@ -325,6 +325,11 @@ extension Store {
     }
 }
 
+extension Color {
+    /// Shared pane-number badge so conversation and lot headers cannot drift apart.
+    static let paneNumberBadge = Color(red: 0.12, green: 0.52, blue: 0.28)
+}
+
 struct SessionPane: View {
     @ObservedObject var session: Session
     @ObservedObject var workspace: Workspace
@@ -333,7 +338,7 @@ struct SessionPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
+                Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color.paneNumberBadge).clipShape(RoundedRectangle(cornerRadius: 3))
                 ProviderLogo(engine: session.entry.engine)
                 SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
