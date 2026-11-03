@@ -5,6 +5,7 @@ import Network
 import Security
 
 func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
+    remoteMarkerSelfTests(check)
     let restoreRecord = DeviceOutboxRecord(commandID: UUID(), sessionID: "fixture", payload: DeviceCommandPayload(action: "submit", text: "old send", blobHashes: ["old-image"]), payloadHash: "fixture", outcome: "failed")
     let composer = RemoteComposer(); composer.draft = "new typing"; composer.blobHashes = ["new-image"]; composer.sentCommandID = restoreRecord.commandID
     composer.restoreFailedSend(restoreRecord)
@@ -289,6 +290,33 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             for chunk in captured { out.append(contentsOf: try decoder.append(try viewerKeys.receiver.decrypt(chunk))) }
             return out
         }
+        // Remote sidebar markers: the home populates them and a pause,
+        // unpause or new response republishes the sidebar.
+        func publishedRow(_ id: UUID) throws -> DeviceSidebarRow? {
+            captured = []; home.publishSidebarForTesting()
+            return try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.sidebarSnapshot.rawValue }
+                .compactMap { $0.payload.flatMap { try? JSONDecoder().decode(DeviceSidebarPayload.self, from: $0) } }.last?.rows.first { $0.sessionID == id }
+        }
+        let firstMarkerRow = try publishedRow(session.id)
+        let homeResponse = session.messages.last { $0.role == "assistant" }?.createdAt
+        check(homeResponse != nil && firstMarkerRow?.lastResponseAt == homeResponse && firstMarkerRow?.loopPaused == nil && firstMarkerRow?.pausedReason == nil, "Mac home sidebar carries lastResponseAt and no loop marker for ordinary sessions")
+        let markerMessages = session.messages
+        let freshAt = (homeResponse ?? Date()).addingTimeInterval(60)
+        session.messages.append(Message(role: "assistant", text: "fresh answer", createdAt: freshAt))
+        check(try publishedRow(session.id)?.lastResponseAt == freshAt, "A new home response republishes the sidebar with a newer lastResponseAt")
+        session.messages = markerMessages
+        let markerAgent = Session(entry: Entry(name: "Steward", command: "", directory: NSTemporaryDirectory(), engine: "agent"))
+        markerAgent.agent = AgentConfig(); markerAgent.agent?.attention = "Over budget."
+        Store.shared.sessions.append(markerAgent)
+        let pausedRow = try publishedRow(markerAgent.id)
+        check(pausedRow?.loopPaused == true && pausedRow?.pausedReason == "Over budget." && pausedRow?.showsLoopPaused == true, "A paused home agent publishes loopPaused with its reason")
+        markerAgent.agent?.enabled = true
+        let resumedRow = try publishedRow(markerAgent.id)
+        check(resumedRow?.loopPaused == false && resumedRow?.pausedReason == nil && resumedRow?.showsLoopPaused == false, "Re-enabling the loop republishes the row unpaused")
+        markerAgent.agent?.enabled = false
+        check(try publishedRow(markerAgent.id)?.loopPaused == true, "Pausing again republishes the paused marker")
+        Store.shared.sessions.removeAll { $0.id == markerAgent.id }
+        captured = []
         let lot = try home.parkingLibrary.create(name: "Shared ideas")
         let lotID = DeviceGlobalID(home: homeIdentity.deviceID, session: lot.id).string
         var lotRows = lot.document.rows; lotRows[1].images = [draftImage.path]
@@ -982,4 +1010,118 @@ func parkingLotReviewConnectivitySelfTests(_ check: (Bool, String) -> Void) {
         _ = pump { outcome != nil || failure != nil }
         check(failure?.localizedDescription.contains("access changed") == true && lot.document.rows[0].text == "Keep on cancellation", "Revoked scope is rechecked after native approval")
     } catch { check(false, "Approval connectivity: " + error.localizedDescription) }
+}
+
+// Remote sidebar markers: wire compatibility, home response time, and the
+// per-viewing-device paused and unseen-response logic.
+func remoteMarkerSelfTests(_ check: (Bool, String) -> Void) {
+    let home = "home-a", sid = UUID(), gid = DeviceGlobalID(home: "home-a", session: sid).string
+    let older = #"{"globalID":"home-a/x","sessionID":"\#(sid.uuidString)","title":"Old","assistant":"Muse","engine":"muse","model":"","effort":"","access":"","status":"Ready","busy":false,"queued":0,"queuePaused":false}"#
+    let decodedOld = try? JSONDecoder().decode(DeviceSidebarRow.self, from: Data(older.utf8))
+    check(decodedOld?.title == "Old" && decodedOld?.loopPaused == nil && decodedOld?.pausedReason == nil && decodedOld?.lastResponseAt == nil, "Older sidebar rows without marker fields still decode")
+    var row = DeviceSidebarRow(globalID: gid, sessionID: sid, title: "Work", assistant: "Muse", engine: "muse", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+    let plain = (try? JSONEncoder().encode(row)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    check(!plain.contains("loopPaused") && !plain.contains("pausedReason") && !plain.contains("lastResponseAt"), "Rows without markers omit the new fields on the wire")
+    var marked = row; marked.loopPaused = true; marked.pausedReason = "Over budget."; marked.lastResponseAt = Date(timeIntervalSinceReferenceDate: 815313600.25)
+    let markedJSON = (try? JSONEncoder().encode(marked)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    check((try? JSONDecoder().decode(DeviceSidebarRow.self, from: Data(markedJSON.utf8))) == marked && markedJSON.contains(#""lastResponseAt":815313600.25"#), "Marker fields round-trip with Apple-epoch seconds, matching C# viewers")
+    let csharp = #"{"globalID":"\#(gid)","sessionID":"\#(sid.uuidString)","title":"Steward","assistant":"Agent","engine":"agent","model":"","effort":"","access":"","status":"Ready","busy":false,"queued":0,"queuePaused":false,"participantKind":"agent","loopPaused":true,"pausedReason":"Over budget.","lastResponseAt":815313600.25}"#
+    let fromCSharp = try? JSONDecoder().decode(DeviceSidebarRow.self, from: Data(csharp.utf8))
+    check(fromCSharp?.showsLoopPaused == true && fromCSharp?.pausedHelp == "Over budget." && fromCSharp?.lastResponseAt == Date(timeIntervalSinceReferenceDate: 815313600.25), "C#-encoded marker rows decode and render paused on Swift viewers")
+
+    // Home response time: newest assistant reply; a running turn's partial reply never counts.
+    let t = { (s: Double) in Date(timeIntervalSinceReferenceDate: s) }
+    var turn = [Message(role: "user", text: "q1", createdAt: t(5)), Message(role: "assistant", text: "a1", createdAt: t(10)),
+                Message(role: "user", text: "q2", createdAt: t(20)), Message(role: "assistant", text: "partial", createdAt: t(30))]
+    check(Session.lastResponseAt(turn, busy: false) == t(30) && Session.lastResponseAt(turn, busy: true) == t(10), "lastResponseAt excludes a running turn's partial reply")
+    turn.append(Message(role: "assistant", text: "", createdAt: t(40)))
+    turn.append(Message(role: "activity", text: "tool", createdAt: t(50)))
+    check(Session.lastResponseAt(turn, busy: false) == t(30) && Session.lastResponseAt([], busy: false) == nil, "Empty replies, activity and empty sessions carry no newer response")
+
+    // Paused marker inputs.
+    var agent = row; agent.engine = "agent"; agent.participantKind = "agent"; agent.loopPaused = true
+    check(agent.showsLoopPaused && agent.pausedHelp == "Loop paused. Re-enable it in Agent Setup / Loop.", "A paused remote agent shows the red marker with a default explanation")
+    agent.pausedReason = "Never run — enable the loop in Agent Setup."
+    check(agent.pausedHelp == "Never run — enable the loop in Agent Setup.", "The home's paused reason becomes the marker's help")
+    var notAgent = row; notAgent.loopPaused = true
+    agent.loopPaused = false
+    check(!agent.showsLoopPaused && !notAgent.showsLoopPaused && !row.showsLoopPaused, "Running loops, ordinary sessions and older homes show no paused marker")
+
+    // Unseen watermarks (pure).
+    var marks = RemoteSeenWatermarks()
+    row.lastResponseAt = t(100)
+    check(marks.observe(home: home, rows: [row], displayed: { _ in false }) && !marks.isUnseen(row), "First observation of a session counts as seen")
+    var newer = row; newer.lastResponseAt = t(200)
+    _ = marks.observe(home: home, rows: [newer], displayed: { _ in false })
+    check(marks.isUnseen(newer), "A newer response while not displayed here marks the session unseen")
+    check(marks.observe(home: home, rows: [newer], displayed: { $0 == gid }) && !marks.isUnseen(newer), "Displaying the session here clears the marker")
+    var newest = newer; newest.lastResponseAt = t(300)
+    _ = marks.observe(home: home, rows: [newest], displayed: { _ in false })
+    check(marks.isUnseen(newest) && marks.markSeen(newest) && !marks.isUnseen(newest), "Taking the session here clears the marker")
+    var fresh = RemoteSeenWatermarks(); var noReply = row; noReply.lastResponseAt = nil
+    _ = fresh.observe(home: home, rows: [noReply], displayed: { _ in false })
+    _ = fresh.observe(home: home, rows: [newer], displayed: { _ in false })
+    check(fresh.isUnseen(newer), "A session first seen with no reply gets the marker for its first reply")
+    var agentRow = agent; agentRow.lastResponseAt = t(100)
+    var lot = row; lot.engine = "parking"; lot.globalID = DeviceGlobalID(home: home, session: UUID()).string; lot.lastResponseAt = t(100)
+    var agentMarks = RemoteSeenWatermarks()
+    _ = agentMarks.observe(home: home, rows: [agentRow, lot], displayed: { _ in false })
+    agentRow.lastResponseAt = t(900); lot.lastResponseAt = t(900)
+    _ = agentMarks.observe(home: home, rows: [agentRow, lot], displayed: { _ in false })
+    check(!agentMarks.isUnseen(agentRow) && !agentMarks.isUnseen(lot) && agentMarks.seen.isEmpty, "Agents and Parking Lots never carry the unseen marker")
+    _ = marks.observe(home: "home-b", rows: [], displayed: { _ in false })
+    check(marks.seen[gid] != nil, "Another home's snapshot leaves this home's watermarks alone")
+    _ = marks.observe(home: home, rows: [], displayed: { _ in false })
+    check(marks.seen[gid] == nil, "Sessions closed on their home are forgotten")
+
+    // Viewer service: snapshot adoption, take, persistence across relaunch.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-markers-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+        let homeID = "marker-home"
+        let sessionID = UUID(), agentID = UUID()
+        let sessionGID = DeviceGlobalID(home: homeID, session: sessionID).string, agentGID = DeviceGlobalID(home: homeID, session: agentID).string
+        func makeViewer() throws -> (DeviceSyncService, DevicePeer) {
+            let viewer = DeviceSyncService()
+            try viewer.configureForTesting(folder: root)
+            viewer.isPlaced = { _ in false }
+            let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+            peer.hello = DeviceHello(deviceID: homeID, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+            viewer.adoptPeerForTesting(peer)
+            return (viewer, peer)
+        }
+        var seq: UInt64 = 100
+        func sidebar(_ viewer: DeviceSyncService, _ peer: DevicePeer, response: Double?, paused: Bool) throws {
+            seq += 1
+            var chat = DeviceSidebarRow(globalID: sessionGID, sessionID: sessionID, title: "Chat", assistant: "Claude", engine: "claude", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+            chat.lastResponseAt = response.map(t)
+            var steward = DeviceSidebarRow(globalID: agentGID, sessionID: agentID, title: "Converse Steward", assistant: "Agent", engine: "agent", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false, participantKind: "agent")
+            steward.loopPaused = paused; steward.pausedReason = paused ? "Paused by Stop." : nil; steward.lastResponseAt = response.map(t)
+            let payload = DeviceSidebarPayload(homeDeviceID: homeID, homeDeviceName: "Home", homeSeq: seq, rows: [chat, steward])
+            viewer.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.sidebarSnapshot.rawValue, homeSeq: seq, payload: try JSONEncoder().encode(payload)))
+        }
+        func markers(_ viewer: DeviceSyncService, _ id: String) -> RemoteRowMarkers { viewer.remoteRow(globalID: id).map(viewer.remoteMarkers) ?? RemoteRowMarkers() }
+        var (viewer, peer) = try makeViewer()
+        try sidebar(viewer, peer, response: 100, paused: true)
+        check(markers(viewer, agentGID) == RemoteRowMarkers(paused: true, pausedReason: "Paused by Stop.", unseen: false), "Viewer renders a remote paused agent with its reason and no eye")
+        check(markers(viewer, sessionGID) == RemoteRowMarkers(), "First remote snapshot after install marks nothing unseen")
+        try sidebar(viewer, peer, response: 200, paused: false)
+        check(markers(viewer, sessionGID).unseen && !markers(viewer, agentGID).unseen && !markers(viewer, agentGID).paused, "A new remote response marks the session unseen; agents stay unmarked and unpause republishes")
+        (viewer, peer) = try makeViewer()
+        try sidebar(viewer, peer, response: 200, paused: false)
+        check(markers(viewer, sessionGID).unseen, "Unseen markers persist across relaunch")
+        viewer.homes[homeID]?.lastSeen = Date()
+        viewer.acquireRemote(globalID: sessionGID)
+        check(!markers(viewer, sessionGID).unseen, "Taking the session with 1, 2 or 3 here clears the eye")
+        (viewer, peer) = try makeViewer()
+        try sidebar(viewer, peer, response: 200, paused: false)
+        check(!markers(viewer, sessionGID).unseen, "A cleared marker stays cleared after relaunch")
+        try sidebar(viewer, peer, response: 300, paused: false)
+        check(markers(viewer, sessionGID).unseen, "A later response marks it unseen again")
+        viewer.isPlaced = { $0 == sessionGID }
+        check(!markers(viewer, sessionGID).unseen, "A session displayed here never shows the eye")
+        try sidebar(viewer, peer, response: 300, paused: false)
+        viewer.isPlaced = { _ in false }
+        check(!markers(viewer, sessionGID).unseen, "Displaying the session here advances its seen watermark")
+    } catch { check(false, "Remote marker viewer harness failed: " + error.localizedDescription) }
 }

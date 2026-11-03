@@ -312,6 +312,25 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Title == homeSession.Title
             && viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == gid && r.Title == homeSession.Title)),
             "Home rename updates both remote pane snapshot and sidebar without a new turn");
+        // Remote sidebar markers: a new response and a paused agent loop
+        // both republish the home sidebar with the new optional fields.
+        var responseAt = new DateTime(2026, 11, 2, 12, 0, 0, DateTimeKind.Utc);
+        homeSession.Messages.Add(new ChatMessage { Role = "assistant", Text = "Marker response", CreatedAt = responseAt });
+        homeStore.Save();
+        var expectedResponse = (responseAt - new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        Check(await Until(() => viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == gid && r.LastResponseAt == expectedResponse && r.LoopPaused is null)),
+            "A new home response republishes the sidebar with lastResponseAt (Apple epoch)");
+        var pausedAgent = new ChatSession { Title = "Paused marker agent", Agent = new AgentConfig { Attention = "Over budget." } };
+        pausedAgent.Agent.Settings.Enabled = false;
+        homeStore.Sessions.Add(pausedAgent); homeStore.Save();
+        var pausedGid = new DeviceGlobalID(home.DeviceId, pausedAgent.Id).ToString();
+        Check(await Until(() => viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == pausedGid && r.LoopPaused == true && r.PausedReason == "Over budget." && r.ParticipantKind == "agent")),
+            "A paused home agent reaches viewers with loopPaused and its reason");
+        pausedAgent.Agent.Settings.Enabled = true; homeStore.Save();
+        Check(await Until(() => viewer.Homes[home.DeviceId].Rows.Any(r => r.GlobalID == pausedGid && r.LoopPaused == false && r.PausedReason is null)),
+            "Re-enabling the loop republishes the row unpaused");
+        homeStore.Sessions.Remove(pausedAgent); homeStore.Save();
+        Check(await Until(() => viewer.Homes[home.DeviceId].Rows.All(r => r.GlobalID != pausedGid)), "Marker fixture agent leaves the viewer sidebar");
         // Make the previous process's counter larger than a fresh process's
         // startup traffic, exactly the condition rejected by a Mac viewer.
         for (var n = 0; n < 40; n++) homeStore.Save();
@@ -2379,6 +2398,36 @@ MdnsChecks.Run(Check);
     finally { Cleanup(dir); }
 }
 
+// Remote sidebar markers: additive optional fields, Swift wire parity.
+{
+    var older = DeviceJson.Decode<DeviceSidebarRow>(Utf8("{\"globalID\":\"h/00000000-0000-0000-0000-000000000001\",\"title\":\"Old\",\"busy\":false,\"queued\":0,\"queuePaused\":false}"));
+    Check(older.LoopPaused is null && older.PausedReason is null && older.LastResponseAt is null && older.Title == "Old", "Older sidebar rows without marker fields still decode");
+    var plain = System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(new DeviceSidebarRow { Title = "Plain" }));
+    Check(!plain.Contains("loopPaused") && !plain.Contains("pausedReason") && !plain.Contains("lastResponseAt"), "Rows without markers omit the new fields on the wire");
+    // Exact Swift JSONEncoder output shape: Date as Apple-epoch seconds.
+    var swift = DeviceJson.Decode<DeviceSidebarRow>(Utf8("{\"globalID\":\"h\\/x\",\"sessionID\":\"00000000-0000-0000-0000-000000000002\",\"title\":\"Steward\",\"assistant\":\"Agent\",\"engine\":\"agent\",\"model\":\"\",\"effort\":\"\",\"access\":\"\",\"status\":\"Ready\",\"busy\":false,\"queued\":0,\"queuePaused\":false,\"participantKind\":\"agent\",\"loopPaused\":true,\"pausedReason\":\"Over budget.\",\"lastResponseAt\":815313600.25}"));
+    Check(swift.LoopPaused == true && swift.PausedReason == "Over budget." && swift.LastResponseAt == 815313600.25, "Swift-encoded marker fields decode on C# viewers");
+    var round = DeviceJson.Decode<DeviceSidebarRow>(DeviceJson.Encode(new DeviceSidebarRow { LoopPaused = false, PausedReason = "r", LastResponseAt = 1.5 }));
+    Check(round.LoopPaused == false && round.PausedReason == "r" && round.LastResponseAt == 1.5, "Marker fields round-trip in C#");
+    var epoch = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    var turn = new List<ChatMessage> {
+        new() { Role = "user", Text = "q1", CreatedAt = epoch.AddSeconds(5) },
+        new() { Role = "assistant", Text = "a1", CreatedAt = epoch.AddSeconds(10) },
+        new() { Role = "user", Text = "q2", CreatedAt = epoch.AddSeconds(20) },
+        new() { Role = "assistant", Text = "partial", CreatedAt = epoch.AddSeconds(30) },
+    };
+    Check(SidebarMarkers.LastResponseAt(turn, busy: false) == 30 && SidebarMarkers.LastResponseAt(turn, busy: true) == 10,
+        "lastResponseAt is the newest assistant reply, excluding a running turn's partial reply");
+    turn.Add(new ChatMessage { Role = "assistant", Text = "", CreatedAt = epoch.AddSeconds(40) });
+    Check(SidebarMarkers.LastResponseAt(turn, busy: false) == 30 && SidebarMarkers.LastResponseAt(new List<ChatMessage>(), false) is null, "Empty replies and empty sessions carry no newer response");
+    var chat = new ChatSession();
+    var never = new ChatSession { Agent = new AgentConfig() };
+    var ran = new ChatSession { Agent = new AgentConfig { LastLoopUtc = DateTime.UtcNow } };
+    Check(SidebarMarkers.LoopPaused(chat) is null && SidebarMarkers.PausedReason(chat) is null, "Ordinary sessions carry no loop marker");
+    Check(SidebarMarkers.LoopPaused(never) == true && SidebarMarkers.PausedReason(never)!.StartsWith("Never run") && SidebarMarkers.PausedReason(ran) == "Loop paused. Re-enable it in Agent Setup / Loop.", "Paused agents explain why, matching the Mac wording");
+    ran.Agent!.Settings.Enabled = true;
+    Check(SidebarMarkers.LoopPaused(ran) == false && SidebarMarkers.PausedReason(ran) is null, "Running loops are not paused");
+}
 await SwitchboardSupervisionChecks.Run(Check, JoinPair);
 await AppSupportChecks.Run(Check);
 await AgentChecks.Run(Check, JoinPair);

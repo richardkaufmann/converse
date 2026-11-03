@@ -137,6 +137,14 @@ final class Session: ObservableObject, Identifiable {
         if agent.lastOutcome.isEmpty || agent.lastOutcome == "Not run yet" { return "Never run — enable the loop in Agent Setup." }
         return agent.lastOutcome
     }
+    // Remote viewers' unseen marker: the newest assistant response this home
+    // holds. A running turn's partial reply never counts until it finishes.
+    var lastResponseAt: Date? { Session.lastResponseAt(messages, busy: busy) }
+    static func lastResponseAt(_ messages: [Message], busy: Bool) -> Date? {
+        var candidates = messages[...]
+        if busy, let turn = messages.lastIndex(where: { $0.role == "user" }) { candidates = messages[..<turn] }
+        return candidates.last { $0.role == "assistant" && (!$0.text.isEmpty || !$0.images.isEmpty) }?.createdAt
+    }
     // A Parking Lot Talk helper with nothing going on stays out of the
     // sidebar; the lot's Talk button reopens it. Busy or queued helpers stay
     // listed so their work can always be reached.

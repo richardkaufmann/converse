@@ -114,7 +114,7 @@ struct DeviceSidebarSection: View {
                             ForEach(order.ordered(rowIDs, scope: home.deviceID), id: \.self) { id in
                               if let row = home.rows.first(where: { $0.globalID == id }) {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
-                                RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel,
+                                RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
                                                  park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                                  assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
@@ -147,6 +147,7 @@ struct RemoteSidebarRow: View {
     let homeName: String
     let online: Bool
     var showsModel = true
+    var markers = RemoteRowMarkers()
     let localPane: Int?
     let park: () -> Void
     let assign: (Int) -> Void
@@ -159,6 +160,8 @@ struct RemoteSidebarRow: View {
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if let account = row.accountName { text += "\nAccount: " + account }
+        if let reason = markers.pausedReason { text = "LOOP PAUSED — " + reason + "\n" + text }
+        if markers.unseen { text = "UNSEEN RESPONSE — take with 1, 2 or 3 to read it.\n" + text }
         let warning = (row.engine == "agent" && !(row.attention ?? "").isEmpty) ? "ATTENTION REQUIRED\n" + (row.attention ?? "") + "\n\n" : ""
         return warning + text + "\nExecution stays on " + homeName + "."
     }
@@ -168,9 +171,24 @@ struct RemoteSidebarRow: View {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
                     .padding(3).background(.yellow, in: RoundedRectangle(cornerRadius: 3)).help(attention)
             }
-            ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"))
-                .help(online ? (row.busy ? row.status : "Idle") : "Home offline")
-            SessionName(title: row.title, isAgent: row.participantKind == "agent" || row.engine == "agent", isParkingLot: row.engine == "parking").frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            if markers.paused && !(online && row.busy) {
+                // Same marker as a local paused agent loop (SessionActivity).
+                Image(systemName: "pause.circle.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(Color.red)
+                    .frame(width: 12, height: 12)
+                    .accessibilityLabel("Agent loop paused")
+                    .help(markers.pausedReason ?? row.pausedHelp)
+            } else {
+                ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"), unread: markers.unseen)
+                    .help(online ? (row.busy ? row.status : (markers.unseen ? "Unseen response: take with 1, 2 or 3 to read it." : "Idle")) : "Home offline")
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                SessionName(title: row.title, isAgent: row.isAgentRow, isParkingLot: row.engine == "parking", isPaused: markers.paused, unread: markers.unseen).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                if let reason = markers.pausedReason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .help(reason).accessibilityLabel("Paused: " + reason)
+                }
+            }
             if showsModel {
                 ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.engine == "parking" ? "Parking Lot" : row.model)
             }
@@ -257,7 +275,7 @@ struct RemotePane: View {
             HStack(spacing: 8) {
                 Text(String(pane)).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
                 if let engine = transcript?.engine, !engine.isEmpty { ProviderLogo(engine: engine) }
-                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent", isParkingLot: isParkingLot).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                SessionName(title: transcript?.title ?? service.remoteRow(globalID: globalID)?.title ?? "Remote session", isAgent: service.remoteRow(globalID: globalID)?.participantKind == "agent" || service.remoteRow(globalID: globalID)?.engine == "agent", isParkingLot: isParkingLot, isPaused: service.remoteRow(globalID: globalID)?.showsLoopPaused == true).font(.system(size: 15, weight: .medium)).lineLimit(1).truncationMode(.tail)
                 Text("on " + homeName).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.tail).help("This session runs on " + homeName + ".")
                 Spacer(minLength: 0)

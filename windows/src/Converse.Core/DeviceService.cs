@@ -1589,7 +1589,7 @@ public sealed partial class DeviceSyncService : IDisposable
     }
 
     // ---- Home side ----
-    private DeviceSidebarPayload SidebarPayload(ulong sequence) => new()
+    internal DeviceSidebarPayload SidebarPayload(ulong sequence) => new()
     {
         HomeDeviceID = DeviceId,
         HomeDeviceName = DeviceName,
@@ -1612,6 +1612,8 @@ public sealed partial class DeviceSyncService : IDisposable
             LeaseEpoch = _leases.Holder(session.Id)?.Epoch,
             AccountName = session.Entry.AccountName,
             MessagingEnabled = session.MessagingEnabled, ParticipantKind = session.Agent is null ? null : "agent", Attention = session.Agent?.Attention,
+            LoopPaused = SidebarMarkers.LoopPaused(session), PausedReason = SidebarMarkers.PausedReason(session),
+            LastResponseAt = SidebarMarkers.LastResponseAt(session.Messages, session.Busy),
         }).ToList(),
     };
 
