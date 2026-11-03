@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class ParkingLotLibrary: ObservableObject {
-    struct Record: Codable, Equatable, Identifiable { var id: UUID; var name: String; var linkedSessionIDs: [String]? = nil }
+    struct Record: Codable, Equatable, Identifiable { var id: UUID; var name: String; var linkedSessionIDs: [String]? = nil; var confirmSessionEdits: Bool? = nil }
     static let shared = ParkingLotLibrary(folder: Store.shared.folder)
     @Published private(set) var records: [Record] = []
     @Published var error = ""
@@ -54,6 +54,12 @@ final class ParkingLotLibrary: ObservableObject {
         var next = records
         next[index].linkedSessionIDs = Array(Set(parsed)).sorted()
         try save(next)
+    }
+    /// Missing means on, so catalogs from older builds keep requiring review.
+    func confirmsSessionEdits(_ id: UUID) -> Bool { records.first { $0.id == id }?.confirmSessionEdits ?? true }
+    func setConfirmsSessionEdits(_ id: UUID, _ value: Bool) throws {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { throw AgentFailure.message("This Parking Lot was deleted.") }
+        var next = records; next[index].confirmSessionEdits = value ? nil : false; try save(next)
     }
     func delete(_ id: UUID) throws {
         guard let lot = lot(id), let record = records.first(where: { $0.id == id }) else { return }
@@ -335,6 +341,13 @@ func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
         check(library.links(other.id).isEmpty, "Legacy catalogs default to no linked sessions")
         try library.setLinks(other.id, to: [linkedID, linkedID], expected: [])
         check(library.links(other.id) == [linkedID], "Parking Lot links use stable global identities and deduplicate")
+        check(library.confirmsSessionEdits(other.id) && library.records.allSatisfy { $0.confirmSessionEdits == nil }, "Lots require confirmation for session updates by default")
+        let older = try JSONDecoder().decode(ParkingLotLibrary.Record.self, from: Data("{\"id\":\"\(UUID())\",\"name\":\"Old\"}".utf8))
+        check(older.confirmSessionEdits == nil, "Catalog records from older builds decode with confirmation on")
+        try library.setConfirmsSessionEdits(other.id, false)
+        check(!library.confirmsSessionEdits(other.id) && !ParkingLotLibrary(folder: folder).confirmsSessionEdits(other.id) && ParkingLotLibrary(folder: folder).confirmsSessionEdits(ParkingLotStore.id), "Turning confirmation off persists for that lot only")
+        try library.setConfirmsSessionEdits(other.id, true)
+        check(ParkingLotLibrary(folder: folder).records.first { $0.id == other.id }?.confirmSessionEdits == nil, "Turning confirmation back on restores the default record")
         do { try library.setLinks(other.id, to: [], expected: []); check(false, "Stale link update rejected") }
         catch { check(library.links(other.id) == [linkedID], "Stale link settings cannot overwrite a newer selection") }
         do { try library.setLinks(other.id, to: ["bad"], expected: [linkedID]); check(false, "Invalid link rejected") }
@@ -452,7 +465,7 @@ extension DeviceSyncService {
             ParkingLotRoute(id: record.id, globalID: DeviceGlobalID(home: home, session: record.id).string,
                             name: record.name, homeDeviceID: home, homeDeviceName: (deviceNameOverride ?? identity?.deviceName ?? "Converse"), online: true,
                             linkedToMe: parkingLibrary.links(record.id).contains(selfID),
-                            access: agent.map { $0.allows(local: record.id, home: home) ? "scoped local read/edit" : "requires Agent Setup access" } ?? "local read; edits require review")
+                            access: agent.map { $0.allows(local: record.id, home: home) ? "scoped local read/edit" : "requires Agent Setup access" } ?? (parkingLibrary.confirmsSessionEdits(record.id) ? "local read; edits require review" : "local read; edits save immediately (confirmation off)"))
         }
         let remote = participantHomes.flatMap { host in
             host.rows.filter { $0.engine == "parking" || $0.participantKind == "parkingLot" }.map { row in

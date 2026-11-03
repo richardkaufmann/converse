@@ -216,6 +216,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
 
 struct ParkingLotSidebar: View {
     @State private var showingLinks = false
+    @ObservedObject private var library = ParkingLotLibrary.shared
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
@@ -243,6 +244,9 @@ struct ParkingLotSidebar: View {
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .contextMenu {
                 Button("Linked Sessions…") { showingLinks = true }
+                Toggle("Confirmation Required for Session Updates", isOn: Binding(get: { library.confirmsSessionEdits(lot.id) }, set: { value in
+                    do { try library.setConfirmsSessionEdits(lot.id, value) } catch { library.error = error.localizedDescription }
+                }))
                 Button("Rename Parking Lot…") { ParkingLotLibrary.shared.promptRename(lot) }
                 Button("Delete Parking Lot…") { ParkingLotLibrary.shared.promptDelete(lot) }
             }

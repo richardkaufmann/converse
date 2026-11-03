@@ -792,6 +792,22 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: id, text: "Old proposal")])
     let stale = store.parkingLotCommand(command, session: session, lot: lot, confirm: { _ in lot.update(id, text: "While reviewing"); return true })
     check(stale.contains("No changes applied") && lot.document.rows[0].text == "While reviewing", "Review cannot apply a stale proposal over edits made while the confirmation is open")
+    // Confirmation off removes only the review sheet: same validation, stale check, scope and Undo.
+    command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: id, text: "Saved without review")])
+    var asked = false
+    let beforeDirect = lot.document.rows
+    let direct = store.parkingLotCommand(command, session: session, lot: lot, confirm: { _ in asked = true; return false }, requiresConfirmation: false)
+    check(!asked && direct.contains("confirmation off") && !direct.contains("approved") && lot.document.rows[0].text == "Saved without review", "With confirmation off, session edits save without the review sheet")
+    lot.undoManager.undo()
+    check(lot.document.rows == beforeDirect, "Lot Undo reverses an edit saved without confirmation")
+    command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision - 1, operations: [.init(action: "update", id: id, text: "Stale direct")])
+    let staleDirect = store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false)
+    check(staleDirect.contains("No changes applied") && lot.document.rows == beforeDirect, "With confirmation off, a stale revision still applies nothing")
+    session.supportAutonomous = true
+    command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: id, text: "Autonomous")])
+    check(store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false).contains("Nothing was read or changed") && lot.document.rows == beforeDirect, "Confirmation off never lets autonomous messages bypass scope")
+    session.supportAutonomous = false
+    check(store.switchboardTeaching(session).contains("If a lot's confirmation is off"), "Session teaching explains lots with confirmation off")
     let newID = UUID(), target = lot.document.rows.last!.id
     do {
         try lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "add", id: newID, text: "Project", heading: true), .init(action: "move", id: target, before: newID)]), author: "Session")
