@@ -251,6 +251,8 @@ struct ParkingLotSidebar: View {
 }
 struct ParkingLotView: View {
     @ObservedObject var lot: ParkingLotStore
+    @ObservedObject var workspace: Workspace
+    let pane: Int
     @State private var reordering = false
     @StateObject private var undoFocus = ParkingLotUndoFocus()
     @State private var talking = false
@@ -336,6 +338,14 @@ struct ParkingLotView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color(red: 0.12, green: 0.52, blue: 0.28)).clipShape(RoundedRectangle(cornerRadius: 3))
+                ProviderLogo(engine: "parking")
+                SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
+                Spacer(minLength: 0)
+                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+            }.padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
             HStack {
                 Spacer()
                 Button(reordering ? "Done" : "Reorder") {

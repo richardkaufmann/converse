@@ -14,6 +14,7 @@ final class PaneDividerHandle: NSView {
     private var dragFrame: DispatchWorkItem?
     private var idleCheck: DispatchWorkItem?
     private var releaseMonitor: Any?
+    private var lastLocationInWindow: NSPoint = .zero
     private var frozenText: [(NSTextContainer, Bool)] = []
     /// Pointer motion stops count as the end of dragging for wrapping: reflow
     /// follows quickly even with the button still held.
@@ -45,6 +46,7 @@ final class PaneDividerHandle: NSView {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = (split.convert(event.locationInWindow, from: nil).x, split.arrangedSubviews[dividerIndex].frame.maxX)
+        lastLocationInWindow = event.locationInWindow
         lastDragEvent = Date()
         freezeText(in: window?.contentView)
         dragBegan?()
@@ -55,6 +57,7 @@ final class PaneDividerHandle: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         lastDragEvent = Date()
+        lastLocationInWindow = event.locationInWindow
         // A pause thawed wrapping while the button stayed down; suspend it
         // again as soon as the pointer moves.
         if frozenText.isEmpty { freezeText(in: window?.contentView) }
@@ -128,9 +131,16 @@ final class PaneDividerHandle: NSView {
         idleCheck = check
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleThawInterval, execute: check)
     }
-    private func idleCheckFired() {
+    // Visible to the same-file self-tests, which drive a button-up idle check directly.
+    fileprivate func idleCheckFired() {
         idleCheck = nil
         guard dragStart != nil else { return }
+        // The button is already up but no release reached this handle or the
+        // monitor: end the drag now instead of waiting for the stale sweep.
+        if NSEvent.pressedMouseButtons & 1 == 0 {
+            endDrag(at: lastLocationInWindow)
+            return
+        }
         // Pointer motion stopped with the button still down: reflow now
         // instead of waiting for a release that may never reach this handle.
         if Date().timeIntervalSince(lastDragEvent) > Self.idleThawInterval { thawText() }
@@ -140,6 +150,9 @@ final class PaneDividerHandle: NSView {
     // layout loop forever. Returns true when it ended a stale drag.
     func cancelStaleDrag(now: Date = Date()) -> Bool {
         guard dragStart != nil, now.timeIntervalSince(lastDragEvent) > Self.staleDragInterval else { return false }
+        // A held button is a pause, not a missed release: the idle check
+        // reflows wrapping while the sweep leaves the live drag alone.
+        guard NSEvent.pressedMouseButtons & 1 == 0 else { return false }
         stopReleaseMonitor(); idleCheck?.cancel(); idleCheck = nil
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
         dragStart = nil; thawText(); dragEnded?()
@@ -459,14 +472,27 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         check(!longText.textContainer!.widthTracksTextView, "Resumed gutter motion suspends wrapping again")
         RunLoop.current.run(until: Date().addingTimeInterval(0.65))
         check(longText.textContainer!.widthTracksTextView, "A paused gutter drag reflows without waiting for release")
-        // The monitor path shares one release with the handle path.
+        // The paused drag above already ended through the idle path, so a
+        // second release through the shared path must be a no-op.
         var ended = 0
         let previousEnded = handle.dragEnded
         handle.dragEnded = { previousEnded?(); ended += 1 }
         handle.endDrag(at: content.convert(NSPoint(x: point.x - 12, y: point.y), to: nil))
-        check(ended == 1 && longText.textContainer!.widthTracksTextView, "An off-gutter release applies once and restores wrapping")
-        check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2, "An off-gutter release lands on the pointer position")
+        check(ended == 0 && longText.textContainer!.widthTracksTextView, "A repeat release after the idle path ends the drag is a no-op")
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 25) < 2, "The idle-ended release lands on the pointer position")
         handle.dragEnded = previousEnded
+        // An idle check with the button up ends a missed release right away.
+        // The applied divider position proves the drag ended: a thaw alone
+        // would leave the pre-drag position in place.
+        handle.mouseDown(with: event(.leftMouseDown, 0))
+        handle.mouseDragged(with: event(.leftMouseDragged, -12))
+        handle.idleCheckFired()
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 13) < 2 && longText.textContainer!.widthTracksTextView, "An idle check ends a button-up drag without waiting for the stale sweep")
+        // A release through the app event stream ends the drag via the monitor.
+        handle.mouseDown(with: event(.leftMouseDown, 0))
+        handle.mouseDragged(with: event(.leftMouseDragged, 5))
+        NSApp.sendEvent(event(.leftMouseUp, 5))
+        check(abs(target.arrangedSubviews[0].frame.maxX - before - 18) < 2 && longText.textContainer!.widthTracksTextView, "A real mouseUp through the event stream ends the drag via the release monitor")
     }
     if let staleHandle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
         let probe = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
