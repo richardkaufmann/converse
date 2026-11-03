@@ -420,4 +420,70 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
     check(TranscriptStyle.trafficSummary("{\"ordinary\":\"JSON\"}") == nil && TranscriptStyle.trafficSummary("Example:\n```converse\n{\"command\":\"tell\"}\n```") == nil,
           "Ordinary JSON and quoted switchboard examples remain expanded")
     check(TranscriptStyle.trafficSummary("```converse\n{\"command\":\"tell\",\"to\":\"Muse\",\"text\":\"Review\"}\n```") == "Tell to Muse · Review", "Unexecuted command summaries never claim delivery")
+    // A delivered reply carries no obligation: an interrupted receiving turn is not a delivery failure.
+    let replyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("reply-interrupted-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: replyFolder) }
+    let replyStore = Store(folder: replyFolder)
+    replyStore.startAgentRun = { _, _ in }
+    let replyAsker = replyStore.create(entry), replyAnswerer = replyStore.create(entry), replyWatcher = replyStore.create(entry)
+    replyAsker.switchboardEnabled = true; replyAnswerer.switchboardEnabled = true
+    replyAsker.queuePaused = true; replyAnswerer.queuePaused = true; replyWatcher.queuePaused = true
+    replyWatcher.agent = AgentConfig(watchedSessions: [replyAsker.id])
+    func exchange(_ text: String) -> UUID? {
+        let ask = UUID()
+        guard replyStore.deliverSwitchboard(from: replyAsker, to: replyAnswerer.id.uuidString, text: text, id: ask, hop: 1, replyExpected: true) == nil else { return nil }
+        replyAnswerer.pending.removeAll()
+        let reply = UUID()
+        guard replyStore.deliverSwitchboard(from: replyAnswerer, to: replyAsker.id.uuidString, text: "Answer: " + text, id: reply, hop: 1, inReplyTo: ask) == nil else { return nil }
+        return reply
+    }
+    func replyRecord(_ session: Session?, _ id: UUID?) -> SwitchboardObligation? { session?.switchboardObligations.first { $0.id == id && $0.kind == "reply" } }
+    let interruptedReply = exchange("first")
+    check(replyRecord(replyAsker, interruptedReply)?.state == "queued" && replyAnswerer.switchboardObligations.last?.state == "resolved", "Correlated reply registers on the asker and resolves the answerer's request")
+    replyStore.switchboardStarted(replyAsker, prompt: replyAsker.pending.removeFirst())
+    replyStore.switchboardTurnFinished(replyAsker, success: false)
+    let interruptedRecord = replyRecord(replyAsker, interruptedReply)
+    check(interruptedRecord?.state == "interrupted" && interruptedRecord?.terminal == true && interruptedRecord?.displayState == "Reply delivered · turn interrupted",
+          "A delivered reply whose turn fails or is interrupted ends interrupted, not failed")
+    check(replyAnswerer.messages.last { $0.text.contains(interruptedReply?.uuidString ?? "-") }?.text.hasPrefix("Switchboard: reply delivered · turn interrupted →") == true &&
+          replyAnswerer.switchboardObligations.last?.state == "resolved", "Answerer receipt reports the reply as delivered; its request stays resolved")
+    let interruptedEvidence = replyStore.switchboardRecoveryEvidence(for: replyWatcher).first { $0["delivery"] as? String == interruptedReply?.uuidString }
+    check(interruptedEvidence?["state"] as? String == "Reply delivered · turn interrupted" && interruptedEvidence?["canRecover"] as? Bool == false,
+          "Agent supervision evidence states the reply was delivered and never offers a resend")
+    check(TranscriptStyle.trafficSummary("Switchboard: reply delivered · turn interrupted → Steward [id] · delivery [tell]\nAnswer") == "Reply delivered to Steward · turn interrupted · Answer",
+          "Interrupted reply traffic row never reads as a failure")
+    // Restart while the reply-triggered turn is running; undelivered replies stay pending; legacy failed replies are repaired.
+    let legacyReply = exchange("second")
+    replyStore.switchboardStarted(replyAsker, prompt: replyAsker.pending.removeFirst())
+    replyStore.switchboardTurnFinished(replyAsker, success: true)
+    if let index = replyAsker.switchboardObligations.firstIndex(where: { $0.id == legacyReply }) { replyAsker.switchboardObligations[index].state = "failed" }
+    let runningReply = exchange("third")
+    replyStore.switchboardStarted(replyAsker, prompt: replyAsker.pending.removeFirst())
+    let undeliveredReply = exchange("fourth")
+    let ask = UUID()
+    _ = replyStore.deliverSwitchboard(from: replyAnswerer, to: replyAsker.id.uuidString, text: "Request", id: ask, hop: 1, replyExpected: true)
+    replyStore.switchboardStarted(replyAsker, prompt: replyAsker.pending.removeLast())
+    check(replyRecord(replyAsker, runningReply)?.state == "submitted" && replyRecord(replyAsker, undeliveredReply)?.state == "queued" &&
+          replyAsker.switchboardObligations.first { $0.id == ask }?.state == "submitted", "Fixture holds a running reply, an undelivered reply and a running request")
+    try? replyStore.saveChecked()
+    let reloadedStore = Store(folder: replyFolder)
+    let replyReload = reloadedStore.sessions.first { $0.id == replyAsker.id }
+    check(reloadedStore.sessions.first { $0.id == replyAnswerer.id }?.messages.last { $0.text.contains(runningReply?.uuidString ?? "-") }?.text.hasPrefix("Switchboard: reply delivered · turn interrupted →") == true,
+          "Restart updates the answerer's receipt instead of leaving it processing or failed")
+    check(replyRecord(replyReload, runningReply)?.state == "interrupted", "Restart with an in-flight delivered reply yields interrupted")
+    check(replyRecord(replyReload, legacyReply)?.state == "interrupted", "Legacy failed replies (only reachable after delivery) reload as interrupted")
+    check(replyRecord(replyReload, undeliveredReply)?.state == "queued", "An undelivered reply is not marked delivered by restart")
+    check(replyReload?.switchboardObligations.first { $0.id == ask }?.state == "cancelled", "Restart still cancels an in-flight request")
+    replyStore.switchboardTurnFinished(replyAsker, success: false)
+    check(replyAsker.switchboardObligations.first { $0.id == ask }?.state == "failed" && replyRecord(replyAsker, undeliveredReply)?.state == "queued",
+          "Failed turns still fail requests and leave undelivered replies untouched")
+    replyAsker.pending.removeAll()
+    replyStore.superviseSwitchboard(now: Date().addingTimeInterval(600))
+    check(replyRecord(replyAsker, undeliveredReply)?.state == "cancelled", "A reply that never reached the transcript is cancelled, never shown as delivered")
+    let legacyJSON = #"{"id":"\#(UUID().uuidString)","source":"s","sourceName":"Old","promptID":"\#(UUID().uuidString)","kind":"request","state":"failed","createdAt":0}"#
+    let futureJSON = legacyJSON.replacingOccurrences(of: "\"failed\"", with: "\"futureState\"")
+    let legacy = try? JSONDecoder().decode(SwitchboardObligation.self, from: Data(legacyJSON.utf8))
+    let future = try? JSONDecoder().decode(SwitchboardObligation.self, from: Data(futureJSON.utf8))
+    check(legacy?.state == "failed" && legacy?.displayState == "Failed" && legacy?.terminal == true, "Persisted legacy failed state still decodes and displays as failed")
+    check(future?.state == "futureState" && future?.terminal == false, "Unknown persisted states decode safely for cross-version archives")
 }

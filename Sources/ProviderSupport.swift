@@ -416,7 +416,7 @@ struct SwitchboardStatusView: View {
     var body: some View {
         if let item = current {
             HStack(spacing: 6) {
-                Image(systemName: item.state == "completed" || item.state == "resolved" ? "checkmark.circle" : "arrow.left.arrow.right")
+                Image(systemName: ["completed", "resolved", "interrupted"].contains(item.state) ? "checkmark.circle" : "arrow.left.arrow.right")
                 Text(item.displayState + (item.state == "queued" && session.queuePaused ? " · paused" : "") + " · " + (item.kind == "request" ? "ask" : "tell") + " from " + item.sourceName).lineLimit(1)
                 Spacer(minLength: 4)
                 Button("Delivery details") { details.toggle() }.buttonStyle(.link)
@@ -426,7 +426,8 @@ struct SwitchboardStatusView: View {
                             ForEach(records) { record in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(record.displayState + " · " + record.sourceName).fontWeight(.semibold)
-                                    Text(record.kind == "request" ? "Ask · answer, blocker, or decline expected" : "Tell · no reply required")
+                                    Text(record.kind == "request" ? "Ask · answer, blocker, or decline expected" : record.kind == "reply" ? "Reply · no reply required" : "Tell · no reply required")
+                                    if record.state == "interrupted" { Text("Reply is in this transcript; the turn it started did not finish. Nothing needs resending.") }
                                     Text(record.id.uuidString).font(.caption2).textSelection(.enabled)
                                     if record.intervenedAt != nil { Text("One recovery used; no further automatic injections.") }
                                 }
