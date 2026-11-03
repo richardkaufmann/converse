@@ -122,6 +122,7 @@ internal static class AppSupportChecks
                 check(calls == 0 && instructions.Contains("optional appControl object"), "Native-agent teaching preserves JSON format and never executes prose commands");
                 check(instructions.Contains("Never search the web for bare") && instructions.Contains("site:github.com/richardkaufmann/converse") && instructions.Contains("no relevant result is found"), "Previously taught agents receive current scoped research policy on their next request");
                 check(instructions.Contains(AgentPolicy.ScoreboardScope), "Agent scoreboard instructions limit metrics to that agent's own objective and scope");
+                check(instructions.Contains(AgentPolicy.ObjectiveGoverns), "Agent instructions make the current objective govern supplied evidence and older notes");
                 explicitAction = true; session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 1, "Native agents dispatch only the explicit appControl operation");
             }
