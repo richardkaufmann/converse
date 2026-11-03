@@ -132,7 +132,8 @@ struct SessionActivity: View {
             }.fixedSize()
         } else {
             ConversationActivity(busy: session.busy, status: session.status,
-                                 waiting: !session.requests.isEmpty || session.status.hasPrefix("Waiting"), showApproval: showApproval)
+                                 waiting: !session.requests.isEmpty || session.status.hasPrefix("Waiting"), showApproval: showApproval,
+                                 unread: session.unseenResponse)
         }
     }
 }
@@ -142,6 +143,7 @@ struct ConversationActivity: View {
     var status: String
     var waiting = false
     var showApproval = false
+    var unread = false
     var body: some View {
         Group {
             if showApproval {
@@ -152,8 +154,11 @@ struct ConversationActivity: View {
                         .overlay(Circle().strokeBorder(.black.opacity(0.12), lineWidth: 0.5))
                         .rotationEffect(.degrees(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.5) * 240))
                 }
+            } else if unread {
+                // Same 12-point column as the agent loop icons, so markers line up.
+                Text("👀").font(.system(size: 10)).fixedSize().help("Unseen response: take with 1, 2 or 3 to read it.")
             } else { Color.clear }
-        }.frame(width: 12, height: 12).accessibilityLabel(showApproval ? "Permission required" : (busy ? status : "Idle"))
+        }.frame(width: 12, height: 12).accessibilityLabel(showApproval ? "Permission required" : (busy ? status : (unread ? "Unseen response" : "Idle")))
     }
 }
 struct PaneButton: View {
@@ -360,7 +365,6 @@ struct SessionName: View {
     var unread: Bool = false
     var body: some View {
         HStack(spacing: 4) {
-            if unread { Text("👀").fixedSize().help("Unseen response: take with 1, 2 or 3 to read it.").accessibilityLabel("Unseen response") }
             if isPaused {
                 Text(title).lineLimit(1).truncationMode(.tail).bold(unread).foregroundStyle(Color.red)
             } else {
