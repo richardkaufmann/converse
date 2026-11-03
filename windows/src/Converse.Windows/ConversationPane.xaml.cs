@@ -902,6 +902,11 @@ public sealed partial class ConversationPane : UserControl
         {
             if (TryMakeImage(imagePath) is { } figure) body.Children.Add(figure);
         }
+        // Web images in replies load only when the reader asks (Mac parity).
+        // Viewers show the link; the home loads it.
+        if (!isUser && _selected?.LocalSessionID is { } imageSessionId)
+            foreach (var (_, _, caption, url) in ResponseImages.ParseWebRefs(line.Text))
+                body.Children.Add(BuildImageLinkRow(imageSessionId, line.Text, caption, url));
         var dark = (Content as FrameworkElement)?.ActualTheme == ElementTheme.Dark;
         var border = new Border
         {
@@ -918,6 +923,44 @@ public sealed partial class ConversationPane : UserControl
         return border;
     }
 
+
+    // Hovering a reply's web image link reveals Load image beneath it, with
+    // the suspicion warning beside the button; suspicious links confirm.
+    private FrameworkElement BuildImageLinkRow(Guid sessionId, string messageText, string caption, string url)
+    {
+        var row = new StackPanel { Spacing = 2, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+        row.Children.Add(new TextBlock { Text = url, FontSize = 13, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Microsoft.UI.Colors.SteelBlue) });
+        var reasons = ImageLinkSuspicion.Reasons(url, caption);
+        var load = new Button { Content = "Load image", FontSize = 12, Padding = new Thickness(8, 2, 8, 2) };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(load, "Load image from " + (Uri.TryCreate(url, UriKind.Absolute, out var parsed) ? parsed.Host : "link"));
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Visibility = Visibility.Collapsed };
+        actions.Children.Add(load);
+        if (reasons.Count > 0)
+            actions.Children.Add(new TextBlock { Text = ImageLinkSuspicion.Warning(reasons), FontSize = 12, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Microsoft.UI.Colors.DarkOrange) });
+        row.Children.Add(actions);
+        row.PointerEntered += (_, _) => actions.Visibility = Visibility.Visible;
+        row.PointerExited += (_, _) => { if (load.IsEnabled) actions.Visibility = Visibility.Collapsed; };
+        load.Click += async (_, _) =>
+        {
+            var session = _host.Store.Sessions.FirstOrDefault(s => s.Id == sessionId);
+            var message = session?.Messages.LastOrDefault(m => m.Role == "assistant" && m.Text == messageText);
+            if (session is null || message is null) return;
+            if (reasons.Count > 0)
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = XamlRoot, Title = "Load anyway?",
+                    Content = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "This image link looks suspicious: " + string.Join(", ", reasons) + ".\n\n" + url + "\n\nA link written by a prompt injection can leak conversation details when loaded." },
+                    PrimaryButtonText = "Load anyway", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close,
+                };
+                if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            }
+            load.IsEnabled = false; load.Content = "Loading…";
+            await _host.Store.LoadResponseImageAsync(session, message, url);
+            _host.RequestRefresh();
+        };
+        return row;
+    }
 
     private FrameworkElement RenderMdBlock(MdBlock block, bool isUser) => block switch
     {

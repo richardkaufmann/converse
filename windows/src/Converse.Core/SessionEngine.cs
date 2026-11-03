@@ -777,9 +777,10 @@ public sealed class SessionStore
             if (string.IsNullOrEmpty(response.Text) && finalReply is not null)
                 response.Text = VisibleText(finalReply);
         }
-        // Explicit image refs in the reply become managed attachments
+        // Explicit local image refs in the reply become managed attachments
         // (Mac importResponseImages parity); the viewer resolves them by
-        // hash, so generation stays wherever the agent ran.
+        // hash, so generation stays wherever the agent ran. Web images wait
+        // for the reader's Load image click (LoadResponseImageAsync).
         if (success && !string.IsNullOrEmpty(response.Text))
             await ResponseImages.ImportAsync(Folder, session, response);
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
@@ -791,6 +792,20 @@ public sealed class SessionStore
         // Push the completed turn before the queued next one mutates state.
         TranscriptAdvanced?.Invoke(session);
         if (shouldRun) RunNext(session);
+        Changed?.Invoke();
+    }
+
+    // The reader clicked Load image under one web image link in a reply
+    // homed here. One fetch per click; the result persists and reaches
+    // the lease holder like any transcript change.
+    public async Task LoadResponseImageAsync(ChatSession session, ChatMessage message, string url)
+    {
+        if (!Sessions.Contains(session) || !session.Messages.Contains(message)) return;
+        var loaded = await ResponseImages.LoadWebImageAsync(Folder, session, message, url);
+        if (loaded is null) return;
+        if (loaded == false) session.Messages.Add(new ChatMessage { Role = "notice", Text = ResponseImages.UnreachableNotice(url), CreatedAt = DateTime.UtcNow });
+        Save();
+        TranscriptAdvanced?.Invoke(session);
         Changed?.Invoke();
     }
 
