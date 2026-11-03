@@ -506,6 +506,7 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         handle.mouseDragged(with: event(.leftMouseDragged, 5))
         NSApp.sendEvent(event(.leftMouseUp, 5))
         check(abs(target.arrangedSubviews[0].frame.maxX - before - 30) < 2 && longText.textContainer!.widthTracksTextView, "A real mouseUp through the event stream ends the drag via the release monitor")
+        handle.buttonDownOverride = nil
     }
     if let staleHandle = content.subviews.compactMap({ $0 as? PaneDividerHandle }).first(where: { $0.split === inner && $0.dividerIndex == 0 }) {
         let probe = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
