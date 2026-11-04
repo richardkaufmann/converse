@@ -60,6 +60,14 @@ enum LotLinks {
         }
         return value
     }
+    /// A dropped file as a Markdown link: the filename is shown and the path is
+    /// percent-encoded, so spaces and parentheses stay inside one link.
+    static func markdown(file url: URL) -> String {
+        let label = url.lastPathComponent.replacingOccurrences(of: "[", with: "(").replacingOccurrences(of: "]", with: ")")
+            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\u{2028}", with: " ")
+        let target = URL(fileURLWithPath: url.path).absoluteString.replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+        return "[" + label + "](" + target + ")"
+    }
     /// End of the word containing a link, so live styling waits for a boundary.
     static func tokenEnd(_ link: Link, in text: String) -> Int {
         let source = text as NSString
@@ -106,5 +114,11 @@ func lotLinkSelfTests(_ check: (Bool, String) -> Void) {
     check(urls("and/or A /B test, 3/4 http:// nothing") == [] && String(LotLinks.attributed("Plain text — no links.", files: true).characters) == "Plain text — no links.", "Lot links: text without links is unchanged")
     check(LotLinks.attributed("[Spec](file:///Users/me/a.pdf) and /Users/me/b", files: false).runs.allSatisfy { $0.link == nil }, "Lot links: remote viewers render file links as plain text")
     let typing = "go https://x.com"
+    for path in ["/Users/me/Downloads/KAOS Labs Logo.png", "/Users/me/Desktop/Shot (1) [v2] 10.15\u{202F}AM.png", "/tmp/x"] {
+        let source = LotLinks.markdown(file: URL(fileURLWithPath: path))
+        let found = LotLinks.find(in: "See " + source + " now")
+        check(found.count == 1 && found[0].isMarkdown && found[0].url.path == path && NSMaxRange(found[0].range) == 4 + (source as NSString).length, "Lot links: a dropped file's Markdown link keeps the whole path: " + path)
+    }
+    check(LotLinks.markdown(file: URL(fileURLWithPath: "/Users/me/a b.txt")) == "[a b.txt](file:///Users/me/a%20b.txt)", "Lot links: dropped file links show the filename")
     check(LotLinks.tokenEnd(LotLinks.find(in: typing)[0], in: typing) == (typing as NSString).length && LotLinks.tokenEnd(LotLinks.find(in: "https://x.com/a. more")[0], in: "https://x.com/a. more") == 16, "Lot links: live styling waits for the word boundary")
 }

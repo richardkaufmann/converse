@@ -165,6 +165,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
             let anchor = caret ?? oldAnchor
             linkEditing = text.editingFocus ? anchor.flatMap { anchor in projection.entries.first { $0.row.id == anchor.0 }.map { (anchor.0, min(anchor.1, $0.range.length)) } } : nil
+            if let settled, !(linkEditing.map { $0 == settled } ?? false) { self.settled = nil }
             for entry in projection.entries where entry.range.length > 0 {
                 body.addAttribute(.foregroundColor, value: ParkingOutlineText.color(for: entry.row), range: entry.range)
                 if entry.row.isDone { body.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: entry.range) }
@@ -182,6 +183,9 @@ struct ParkingLotEditor: NSViewRepresentable {
         // The row holding the caret shows raw Markdown, and a link being typed
         // stays plain until a space or other boundary follows it.
         var linkEditing: (UUID, Int)?
+        // Pasted or dropped text arrives complete, so its row renders finished
+        // links at once and keeps them until the caret moves.
+        var settled: (UUID, Int)?
         static let hiddenFont = NSFont.systemFont(ofSize: 0.01)
         func styleLinks(_ storage: NSMutableAttributedString, _ entry: ParkingOutline.Entry) {
             let links = LotLinks.find(in: entry.row.text)
@@ -189,7 +193,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             storage.addAttributes([.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13),
                                    .foregroundColor: ParkingOutlineText.color(for: entry.row)], range: entry.range)
             storage.removeAttribute(.link, range: entry.range); storage.removeAttribute(.toolTip, range: entry.range)
-            let caret = linkEditing.flatMap { $0.0 == entry.row.id ? $0.1 : nil }
+            let caret = settled?.0 == entry.row.id ? nil : linkEditing.flatMap { $0.0 == entry.row.id ? $0.1 : nil }
             for link in links {
                 if let caret, caret >= link.range.location, caret <= LotLinks.tokenEnd(link, in: entry.row.text) { continue }
                 let label = NSRange(location: entry.range.location + link.label.location, length: link.label.length)
@@ -203,11 +207,12 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
         }
         /// Restyle only the rows whose caret state changed; text and selection are untouched.
-        func refreshLinks() {
+        func refreshLinks(settle: Bool = false) {
             guard !rendering, let text, let storage = text.textStorage, storage.length == (projection.string as NSString).length else { return }
             let selection = text.selectedRange()
             let anchor = text.editingFocus ? projection.index(at: selection.location).map { (projection.entries[$0].row.id, selection.location - projection.entries[$0].range.location) } : nil
-            guard anchor?.0 != linkEditing?.0 || anchor?.1 != linkEditing?.1 else { return }
+            if settle { settled = anchor } else if let settled, !(anchor.map { $0 == settled } ?? false) { self.settled = nil }
+            guard settle || anchor?.0 != linkEditing?.0 || anchor?.1 != linkEditing?.1 else { return }
             let changed = Set([anchor?.0, linkEditing?.0].compactMap { $0 })
             linkEditing = anchor
             storage.beginEditing()
@@ -376,7 +381,7 @@ final class ParkingOutlineText: NSTextView {
         immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
     }
     override func deleteBackward(_ sender: Any?) {
-        if immediateSubstitution?.matches(self) == true, undoManager?.undoActionName == TextSubstitutions.undoName { undo(sender); return }
+        if immediateSubstitution?.matches(self) == true, [TextSubstitutions.undoName, Self.fileLinkUndoName].contains(undoManager?.undoActionName ?? "") { undo(sender); return }
         immediateSubstitution = nil
         if let owner, selectedRange().length == 0,
            let index = owner.projection.index(at: selectedRange().location) {
@@ -448,7 +453,55 @@ final class ParkingOutlineText: NSTextView {
             } catch { owner.parent.lot.error = error.localizedDescription }
             return
         }
-        if let value = board.string(forType: .string) { insertText(value, replacementRange: selectedRange()) }
+        if let value = board.string(forType: .string) {
+            insertText(value, replacementRange: selectedRange())
+            if !LotLinks.find(in: value).isEmpty { owner.refreshLinks(settle: true) }
+        }
+    }
+    static let fileLinkUndoName = "File Link"
+    static func droppedFiles(_ board: NSPasteboard) -> [URL] {
+        (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .map { (($0 as NSURL).filePathURL ?? $0).standardizedFileURL }
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let owner, isEditable else { return false }
+        let board = sender.draggingPasteboard
+        let files = (sender.draggingSource as AnyObject?) === self ? [] : Self.droppedFiles(board)
+        if !files.isEmpty {
+            insertFileLinks(files, at: characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil)))
+            return true
+        }
+        // NSTextView registers drop Undo after the edit; the lot groups Undo
+        // explicitly, so without an open group the drop raises mid-operation.
+        undoManager?.beginUndoGrouping()
+        let dropped = super.performDragOperation(sender)
+        undoManager?.endUndoGrouping()
+        if let value = board.string(forType: .string), !LotLinks.find(in: value).isEmpty { owner.refreshLinks(settle: true) }
+        return dropped
+    }
+    /// Files dropped from Finder become Markdown links. Like a text substitution,
+    /// one Undo (or an immediate Backspace) restores the plain path first.
+    func insertFileLinks(_ urls: [URL], at location: Int) {
+        guard let owner, !urls.isEmpty else { return }
+        immediateSubstitution = nil
+        suppressSubstitutions = true; defer { suppressSubstitutions = false }
+        window?.makeFirstResponder(self)
+        let plain = urls.map(\.path).joined(separator: ", ")
+        let linked = urls.map(LotLinks.markdown(file:)).joined(separator: ", ")
+        setSelectedRange(NSRange(location: min(location, (string as NSString).length), length: 0))
+        let start = selectedRange().location
+        var revision = owner.parent.lot.document.revision
+        insertText(plain, replacementRange: selectedRange())
+        guard owner.parent.lot.document.revision != revision else { return }
+        revision = owner.parent.lot.document.revision
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+        super.insertText(linked, replacementRange: NSRange(location: start, length: (plain as NSString).length))
+        guard owner.parent.lot.document.revision != revision else { return }
+        setSelectedRange(NSRange(location: start + (linked as NSString).length, length: 0))
+        undoManager?.setActionName(Self.fileLinkUndoName)
+        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+        owner.refreshLinks(settle: true)
     }
     func rowRect(_ entry: ParkingOutline.Entry) -> NSRect {
         guard let manager = layoutManager, let container = textContainer else { return .zero }
@@ -864,4 +917,97 @@ func parkingLinkEditorSelfTests(_ check: (Bool, String) -> Void) {
     let teaching = Store.shared.switchboardTeaching(Session(entry: Entry(name: "Link writer", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")))
     check(teaching.contains("[label](https://url) and appear clickable") && teaching.contains("reveals in Finder"), "Session teaching explains how to write clickable lot links")
     check(ParkingOutlineText.action(for: folder) == .reveal(folder) && ParkingOutlineText.action(for: folder.appendingPathComponent("missing.txt")) == .unavailable, "File links reveal existing items in Finder and never launch them")
+    parkingDropSelfTests(check)
+}
+
+// Drives the drop path NSTextView uses for Finder drags, in a real window.
+private final class TestDrop: NSObject, NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard; let draggingLocation: NSPoint; weak var draggingDestinationWindow: NSWindow?
+    init(_ board: NSPasteboard, at point: NSPoint, in window: NSWindow) { draggingPasteboard = board; draggingLocation = point; draggingDestinationWindow = window }
+    var draggingSourceOperationMask: NSDragOperation { .copy }
+    var draggedImageLocation: NSPoint { draggingLocation }
+    var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    var draggingFormation: NSDraggingFormation = .default
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions = [], for view: NSView?, classes: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
+}
+
+func parkingDropSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-drop-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder); lot.open()
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+    text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    window.contentView = text; coordinator.render(); window.makeFirstResponder(text)
+    let item = lot.document.rows[1].id
+    func entry() -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == item }! }
+    func row() -> String { lot.document.rows.first { $0.id == item }!.text }
+    func linked(_ offset: Int) -> URL? { text.textStorage?.attribute(.link, at: entry().range.location + offset, effectiveRange: nil) as? URL }
+    // The display must match the saved rows, and only Markdown syntax may use the hidden font.
+    func cleanDisplay() -> Bool {
+        guard let storage = text.textStorage, storage.string == coordinator.projection.string else { return false }
+        var syntax = IndexSet()
+        for entry in coordinator.projection.entries {
+            for link in LotLinks.find(in: entry.row.text) where link.isMarkdown {
+                syntax.insert(integersIn: entry.range.location + link.range.location ..< entry.range.location + link.label.location)
+                syntax.insert(integersIn: entry.range.location + NSMaxRange(link.label) ..< entry.range.location + NSMaxRange(link.range))
+            }
+        }
+        var clean = true
+        storage.enumerateAttribute(.font, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let font = value as? NSFont, font.pointSize < 1, !syntax.contains(integersIn: range.location ..< NSMaxRange(range)) { clean = false }
+        }
+        return clean
+    }
+    func drop(_ objects: [NSPasteboardWriting]) -> Bool {
+        let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+        board.clearContents(); board.writeObjects(objects)
+        text.layoutManager?.ensureLayout(for: text.textContainer!)
+        let end = text.firstRect(forCharacterRange: NSRange(location: NSMaxRange(entry().range), length: 0), actualRange: nil)
+        let info = TestDrop(board, at: window.convertPoint(fromScreen: NSPoint(x: end.maxX + 1, y: end.midY)), in: window)
+        guard text.draggingEntered(info).contains(.copy), text.prepareForDragOperation(info) else { return false }
+        let result = text.performDragOperation(info); text.concludeDragOperation(info)
+        return result
+    }
+    // Paste: a complete URL is a link at once, even with the caret right after it.
+    lot.update(item, text: "Pasted "); coordinator.render(caret: (item, 7))
+    let paste = NSPasteboard.withUniqueName(); paste.clearContents(); paste.setString("https://x.com/a", forType: .string)
+    text.paste(from: paste); paste.releaseGlobally()
+    check(row() == "Pasted https://x.com/a" && linked(8) == URL(string: "https://x.com/a") && cleanDisplay(), "Pasting a URL styles it as a link immediately")
+    // Finder drop: files become Markdown links rendered as their filenames, spaces included.
+    let spaced = URL(fileURLWithPath: "/Users/me/Downloads/KAOS Labs Logo.png"), plain = URL(fileURLWithPath: "/Users/me/Desktop/converse.jpeg")
+    lot.update(item, text: "Logo is with "); coordinator.render(caret: (item, 13))
+    let before = lot.document.rows
+    check(drop([spaced as NSURL, plain as NSURL]), "Dropping files on a Parking Lot row is accepted")
+    let expected = "Logo is with [KAOS Labs Logo.png](file:///Users/me/Downloads/KAOS%20Labs%20Logo.png), [converse.jpeg](file:///Users/me/Desktop/converse.jpeg)"
+    check(row() == expected && lot.document.rows.count == before.count, "Dropped files insert one Markdown link per file in the same row, separated by commas")
+    let links = LotLinks.find(in: row())
+    let hidden = (text.textStorage?.attribute(.font, at: entry().range.location + NSMaxRange(links[0].label), effectiveRange: nil) as? NSFont)?.pointSize ?? 13
+    check(links.count == 2 && linked(links[0].label.location)?.path == spaced.path && linked(NSMaxRange(links[0].label) - 1)?.path == spaced.path
+          && linked(links[1].label.location)?.path == plain.path && linked(links[0].range.location) == nil && hidden < 1 && cleanDisplay(),
+          "Dropped file links render immediately as clickable filenames with the path hidden")
+    check(text.selectedRange() == NSRange(location: NSMaxRange(entry().range), length: 0), "The caret follows the dropped links")
+    text.undo(nil)
+    check(row() == "Logo is with /Users/me/Downloads/KAOS Labs Logo.png, /Users/me/Desktop/converse.jpeg" && cleanDisplay(), "One Undo after a drop restores the plain paths")
+    text.undo(nil)
+    check(lot.document.rows == before && cleanDisplay(), "A second Undo removes the drop entirely")
+    check(drop([plain as NSURL]) && row() == "Logo is with [converse.jpeg](file:///Users/me/Desktop/converse.jpeg)", "Dropping one file inserts its link")
+    text.deleteBackward(nil)
+    check(row() == "Logo is with /Users/me/Desktop/converse.jpeg", "Backspace right after a drop restores the plain path")
+    text.deleteBackward(nil)
+    check(row() == "Logo is with /Users/me/Desktop/converse.jpe", "A second Backspace deletes normally")
+    // Text dragged in from another app still uses NSTextView's drop, inside an Undo group.
+    lot.update(item, text: "Dragged "); coordinator.render(caret: (item, 8))
+    check(drop(["https://y.com/z" as NSString]) && row() == "Dragged https://y.com/z" && linked(9) == URL(string: "https://y.com/z") && cleanDisplay(), "Dropped text is inserted and its links style immediately")
+    text.undo(nil)
+    check(row() == "Dragged ", "Undo removes dropped text")
+    window.close()
 }
