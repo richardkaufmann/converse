@@ -249,8 +249,8 @@ import SwiftUI
     let support = guide.support!, coding = guide.coding!, agent = guide.agent!
     check(store.sessions.count == 3 && support.supportAssistant && library.records.count == 1 && record.lotID == ParkingLotStore.id && record.stage == "choose", "First run seeds App Support, the starter Parking Lot, a coding session and an agent")
     let ids = [support.id, record.lotID, coding.id, agent.id].map(\.uuidString)
-    check(order.ordered(ids.shuffled(), scope: "local") == ids && SidebarOrder(folder: store.folder).ordered(ids.reversed(), scope: "local") == ids, "Sidebar order is App Support, Parking Lot, Coding Session, Agent and survives restart")
-    check(store.setupCompleted && support.entry.engine == "support" && support.messages.isEmpty && coding.title == "Coding Session" && agent.title == "Agent", "Seeding skips the setup sheet; App Support waits for a provider choice")
+    check(order.ordered(ids.shuffled(), scope: "local") == ids && SidebarOrder(folder: store.folder).ordered(ids.reversed(), scope: "local") == ids, "Sidebar order is App Support, Parking Lot, Coding, Agent and survives restart")
+    check(store.setupCompleted && support.entry.engine == "support" && support.messages.isEmpty && support.title == "Converse App Support" && library.records.first?.name == "Parking Lot" && coding.title == "Coding" && agent.title == "Agent", "Seeding skips the setup sheet; App Support waits for a provider choice")
     check(guide.seedIfNeeded(library: library, order: order) == nil && store.sessions.count == 3, "Seeding runs once")
     // Launch places only App Support (AppDelegate.select uses the first free pane).
     let workspace = Workspace(), window = WindowState(workspace: workspace)
@@ -258,7 +258,9 @@ import SwiftUI
     check(workspace.pane(for: support.id, in: window.id) == 1 && workspace.placements.count == 1 && [coding.id, agent.id, record.lotID].allSatisfy { workspace.placements[$0] == nil }, "One pane up: App Support in pane 1; Parking Lot, coding session and agent parked")
     let lot = library.lot(record.lotID)!
     let shoeRow = lot.document.rows.first { $0.images?.isEmpty == false }
-    check(shoeRow?.text == FirstRunText.lotWelcome && shoeRow.flatMap { $0.images?.first }.map { FileManager.default.fileExists(atPath: $0) } == true, "Starter Parking Lot has a welcome item with the shoe picture as an item image")
+    check(shoeRow?.text == "An app that pulls data from wherever and figures out how to do whatever" && shoeRow.flatMap { $0.images?.first }.map { FileManager.default.fileExists(atPath: $0) } == true, "Starter Parking Lot's first item carries the shoe picture")
+    check(lot.document.rows.map(\.text) == ["What Are We Building", FirstRunText.lotFirstItem, "New features", "Bugs"] && lot.document.rows.map(\.heading) == [true, false, true, true], "Starter Parking Lot: What Are We Building with one item, then New features and Bugs headings")
+    check(!lot.document.rows.contains { !$0.heading && $0.text.isEmpty } && !lot.document.rows.contains { $0.text.contains("Welcome to Converse") }, "Starter Parking Lot has no empty items and no old welcome section")
     check(agent.agent?.watchedSessions.contains(record.lotID) == true && agent.agent?.watchedSessions.contains(coding.id) == true && agent.agent?.enabled == false, "Agent may read the starter lot and coding session and starts paused")
     let shoe = ConverseShoe.save(in: store.folder).flatMap { NSImage(contentsOfFile: $0) }
     check(shoe.map { $0.size.width <= 160 && $0.size.width >= 100 } == true, "Shoe picture is small (≤ 160 pt)")
@@ -293,8 +295,9 @@ import SwiftUI
             let name = AssistantFamily.name(engine)
             let profile = s.preferredLogin(engine: engine)!
             let c = g.coding!, a = g.agent!, sup = g.support!
-            check(c.entry.engine == engine && c.entry.accountID == profile.id && c.title == name + " Coding Session" && c.switchboardEnabled, "Coding session uses the chosen provider and login: " + engine)
-            check(c.messages.map(\.text) == [FirstRunText.codingWelcome] && c.messages[0].role == "assistant", "Coding session shows its pre-loaded welcome once: " + engine)
+            check(c.entry.engine == engine && c.entry.accountID == profile.id && c.title == name + " Coding" && c.switchboardEnabled, "Coding session uses the chosen provider and login: " + engine)
+            check(c.messages.map(\.text) == ["What shall we build today? You can also ask me to read the Parking Lot and react to it and update it."] && c.messages[0].role == "assistant", "Coding session shows its pre-loaded welcome once: " + engine)
+            check(c.title == ["muse": "Muse Coding", "codex": "Codex Coding", "claude": "Claude Coding"][engine] && a.title == ["muse": "Muse Agent", "codex": "Codex Agent", "claude": "Claude Agent"][engine], "Starter sessions take the short provider name: " + engine)
             let model = a.agent?.model ?? ""
             if engine == "muse" && key { check(model == "muse-spark-1.3", "Muse with a saved Meta key runs the agent on Muse Spark") }
             else { check(AgentModels.parse(model)?.engine == engine && AgentModels.parse(model)?.account == profile.id, "Agent runs on the chosen provider's CLI login: " + engine + (key ? " with key" : "")) }
@@ -308,7 +311,7 @@ import SwiftUI
     // Changing provider before login replaces, never duplicates.
     let (switching, switchGuide, _, _) = fresh("switch")
     switchGuide.choose("claude"); switchGuide.reopen(); switchGuide.choose("codex")
-    check(switchGuide.coding?.title == "Codex Coding Session" && switchGuide.support?.messages.filter { $0.role == "assistant" }.count == 2 && switchGuide.support?.messages.last?.text == FirstRunText.loginPrompt("codex") && switching.sessions.count == 3, "Changing the provider rebinds everything without duplicate welcomes")
+    check(switchGuide.coding?.title == "Codex Coding" && switchGuide.agent?.title == "Codex Agent" && switchGuide.support?.messages.filter { $0.role == "assistant" }.count == 2 && switchGuide.support?.messages.last?.text == FirstRunText.loginPrompt("codex") && switching.sessions.count == 3, "Changing the provider rebinds everything without duplicate welcomes")
     // Other text during login is held.
     let held = switchGuide.support!
     held.draft = "What can you do?"; switching.submit(held)
@@ -339,7 +342,7 @@ import SwiftUI
     check(FirstRunText.providers.allSatisfy { laterGuide.cli[$0] != nil }, "Choose a provider after Decide later re-checks provider CLIs instead of leaving the buttons stuck")
     spin { !laterGuide.cli.values.contains(.checking) }
     laterGuide.choose("claude")
-    check(laterGuide.stage == "login" && laterGuide.coding?.title == "Claude Coding Session", "Choose a provider works after Decide later")
+    check(laterGuide.stage == "login" && laterGuide.coding?.title == "Claude Coding", "Choose a provider works after Decide later")
 
     // Meta key: secure field only, saved via Keychain writer, never in chat.
     let (museStore, museGuide, _, _) = fresh("meta")
@@ -400,8 +403,12 @@ import SwiftUI
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
         do { try process.run(); process.waitUntilExit(); return process.terminationStatus == 0 } catch { return false }
     }
+    let journeyPanes = Workspace(), journeyWindow = WindowState(workspace: journeyPanes)
+    journeyGuide.place = { journeyPanes.assign($0.id, to: journeyWindow.id, pane: $1) }
     journeyGuide.choose("claude")
     let journeySupport = journeyGuide.support!
+    journeyPanes.assign(journeySupport.id, to: journeyWindow.id, pane: 1)
+    check(journeyPanes.placements.count == 1, "Journey: only App Support is up before sign-in")
     check(journeySupport.draft == "/login", "Journey: /login is prefilled")
     journey.submit(journeySupport)
     check(opened.count == 1 && (try? String(contentsOf: opened[0], encoding: .utf8)).map { $0.contains("auth") && $0.contains("login") && $0.contains(fakeCLI.lastPathComponent) } == true, "Return on /login opens the chosen provider's own login (claude auth login)")
@@ -410,7 +417,10 @@ import SwiftUI
     check(AgentModels.parse(journeySupport.agent?.model ?? "")?.engine == "claude" && AgentModels.parse(journeySupport.agent?.model ?? "")?.account == "claude-default" && journeySupport.supportTeachingVersion == AppSupport.version, "Journey: App Support becomes a taught agent on the same Claude login")
     check(journey.preferredLogin(engine: "claude")?.id == journeyGuide.coding?.entry.accountID, "Journey: new sessions keep using the login the coding session uses")
     spin(20) { !journeySupport.busy && journeySupport.pending.isEmpty }
-    check(journeySupport.displayedMessages.contains { $0.role == "assistant" && $0.text.contains("Converse App Support") }, "Journey: App Support introduces itself after login")
+    check(journeyPanes.pane(for: journeySupport.id, in: journeyWindow.id) == 1 && journeyPanes.pane(for: journeyGuide.coding!.id, in: journeyWindow.id) == 2 && journeyPanes.placements.count == 2, "Journey: after sign-in App Support is in pane 1 and Claude Coding in pane 2")
+    check(journeySupport.displayedMessages.first.map { $0.role == "notice" && $0.text == FirstRunText.supportHelp } == true && journeySupport.displayedMessages.contains { $0.role == "assistant" && $0.text.contains("Converse App Support") }, "Journey: App Support shows the help message, then its reply")
+    check(FirstRunText.supportHelp.hasPrefix("You can ask me to set up your agent, change options in the app, or just ask me about the weather!") && FirstRunText.supportHelp.hasSuffix("Those \"1 2 3\" icons on the left can be used to assign these sessions (including me) to the first, second and third panes."), "Help message uses Richard's wording")
+    check(!journeySupport.messages.contains { $0.role == "user" && $0.text.contains(FirstRunText.supportHelp) } && !AgentPromptContext.conversation(journeySupport.messages, excluding: UUID()).contains { $0["text"] == FirstRunText.supportHelp }, "Journey: the help message is never model input")
     check(!journeySupport.displayedMessages.contains { $0.text.contains("[Converse switchboard instructions]") || $0.text.contains(AppSupport.connectionReply) } && journeySupport.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Journey: login check and teaching are hidden from view but retained")
     journeyGuide.dismiss()
     check(!journeyGuide.active && withExtendedLifetime(Store(folder: journey.folder)) { $0.firstRun.stage == "dismissed" }, "The finished first-run bar can be hidden for good")
@@ -420,12 +430,13 @@ import SwiftUI
 
 /// Offscreen PNGs of the App Support welcome in each state (no screen capture).
 @MainActor func renderFirstRun(root: URL, check: (Bool, String) -> Void) {
-    guard let target = ProcessInfo.processInfo.environment["CONVERSE_NUX4_RENDERS"] else { return }
+    let environment = ProcessInfo.processInfo.environment
+    guard let target = environment["CONVERSE_NUX_RENDERS"] ?? environment["CONVERSE_NUX4_RENDERS"] else { return }
     let output = URL(fileURLWithPath: target)
     try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-    func save<V: View>(_ view: V, _ name: String, height: CGFloat) -> Bool {
-        let host = NSHostingView(rootView: view.frame(width: 900, height: height))
-        host.frame = NSRect(x: 0, y: 0, width: 900, height: height)
+    func save<V: View>(_ view: V, _ name: String, width: CGFloat = 900, height: CGFloat) -> Bool {
+        let host = NSHostingView(rootView: view.frame(width: width, height: height))
+        host.frame = NSRect(x: 0, y: 0, width: width, height: height)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host; host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
@@ -434,7 +445,7 @@ import SwiftUI
         window.close()
         return (try? bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent(name + ".png"))) != nil
     }
-    var states: [(String, FirstRunGuide, Store)] = []
+    var states: [(String, FirstRunGuide, Store, ParkingLotLibrary)] = []
     for (name, engine, cli, key) in [("1-choose", nil, ["muse", "codex", "claude"], false), ("2-choose-codex-missing", nil, ["muse", "claude"], false),
                                      ("3-login-claude", "claude", ["muse", "codex", "claude"], false), ("4-login-muse-no-key", "muse", ["muse", "codex", "claude"], false),
                                      ("5-login-muse-key-saved", "muse", ["muse", "codex", "claude"], true), ("6-decide-later", "later", ["muse", "codex", "claude"], false),
@@ -443,24 +454,35 @@ import SwiftUI
         let store = Store(folder: folder)
         store.accounts = ["muse", "codex", "claude"].map { AccountProfile(id: $0 + "-default", name: AssistantFamily.name($0), engine: $0, directory: folder.appendingPathComponent("Logins/" + $0).path, useDefaultStore: false) }
         for index in store.entries.indices { store.entries[index].command = "/usr/bin/true" }
-        let guide = store.firstRun
-        guide.cliCheck = { cli.contains($0.engine) }; guide.metaKeySaved = { key }
-        _ = guide.seedIfNeeded(library: ParkingLotLibrary(folder: folder), order: SidebarOrder(folder: folder))
+        let guide = store.firstRun, library = ParkingLotLibrary(folder: folder)
+        guide.cliCheck = { cli.contains($0.engine) }; guide.metaKeySaved = { key }; guide.place = { _, _ in }
+        _ = guide.seedIfNeeded(library: library, order: SidebarOrder(folder: folder))
         guide.checkCLIs()
         let deadline = Date().addingTimeInterval(5)
         while guide.cli.values.contains(.checking) && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         if engine == "later" { guide.decideLater() }
-        else if engine == "done" { guide.choose("claude"); guide.connected(guide.support!); guide.support!.pending.removeAll(); guide.support!.draft = "" }
+        else if engine == "done" {
+            // As send() shows the hand-off: hidden request, cleared display, help notice, reply.
+            guide.choose("claude"); guide.connected(guide.support!)
+            let support = guide.support!, handoff = support.pending.removeFirst(); support.pending.removeAll(); support.draft = ""
+            support.messages.append(Message(role: "user", text: handoff.text)); store.clearSessionDisplay(support)
+            support.messages.append(Message(role: "notice", text: handoff.displayNotice ?? ""))
+            support.messages.append(Message(role: "assistant", text: AppSupport.closingInvitation))
+        }
         else if let engine { guide.choose(engine) }
-        states.append((name, guide, store))
+        states.append((name, guide, store, library))
     }
     var saved = 0
-    for (name, guide, store) in states {
+    for (name, guide, store, _) in states {
         if save(Conversation(session: guide.support!, store: store), name, height: 640) { saved += 1 }
     }
     if let done = states.last {
         if save(Conversation(session: done.1.coding!, store: done.2), "8-coding-welcome", height: 420) { saved += 1 }
         if save(Conversation(session: done.1.agent!, store: done.2), "9-agent-welcome", height: 420) { saved += 1 }
+        // Panes 1 and 2 as the window shows them after sign-in (sidebar omitted).
+        let panes = HStack(spacing: 0) { Conversation(session: done.1.support!, store: done.2); Divider(); Conversation(session: done.1.coding!, store: done.2) }
+        if save(panes, "10-signed-in-two-panes", width: 1400, height: 640) { saved += 1 }
+        if let lot = done.3.lot(done.1.record!.lotID), save(ParkingLotView(lot: lot, workspace: Workspace(), pane: 3), "11-starter-lot", height: 520) { saved += 1 }
     }
-    check(saved == states.count + 2, "Saved \(saved) offscreen first-run renders to " + output.path)
+    check(saved == states.count + 4, "Saved \(saved) offscreen first-run renders to " + output.path)
 }

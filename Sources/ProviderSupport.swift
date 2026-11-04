@@ -32,6 +32,8 @@ struct PendingPrompt: Codable, Identifiable {
     var autonomous: Bool? = nil
     var supportContinuation: Bool? = nil
     var clearDisplayBeforeReply: Bool? = nil
+    /// A local notice shown right after the display clears; never model input.
+    var displayNotice: String? = nil
     var agentLoopTick: Bool? = nil
     var id = UUID()
     var text: String
