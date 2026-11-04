@@ -116,6 +116,7 @@ struct DeviceSidebarSection: View {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                                 freePanes: Set((1...3).filter { workspace.paneIsAvailable($0, for: service.placementID(forGlobal: row.globalID), in: state.id) }),
                                                  park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                                  assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
                             }
@@ -149,6 +150,8 @@ struct RemoteSidebarRow: View {
     var showsModel = true
     var markers = RemoteRowMarkers()
     let localPane: Int?
+    // Panes in this window that taking the session would not evict anyone from.
+    var freePanes: Set<Int> = []
     let park: () -> Void
     let assign: (Int) -> Void
     @StateObject private var hover = SidebarHoverState()
@@ -193,10 +196,10 @@ struct RemoteSidebarRow: View {
                 ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.engine == "parking" ? "Parking Lot" : row.model)
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
-            HStack(spacing: 2) {
+            PaneButtonGroup(onHover: { hover.setButtonsHovered($0) }) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane) { assign(pane) }
+                    PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane)) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
                 if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
@@ -204,7 +207,7 @@ struct RemoteSidebarRow: View {
                     .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
                     .help("Close this session on its home and remove it from every viewer. The home must support remote closing.")
                 }
-            }.frame(width: 98).fixedSize(horizontal: true, vertical: false).disabled(!online).contentShape(Rectangle()).onHover { hover.setButtonsHovered($0) }
+            }.disabled(!online)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
