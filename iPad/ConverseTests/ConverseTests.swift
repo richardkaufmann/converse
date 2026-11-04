@@ -811,8 +811,10 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(saved.settings?.enabled, true, "The iPad can restart a loop using a text schedule")
         try await eventually("Restarting the loop republishes the iPad row unpaused") { service.remoteRow(globalID: target).map { !service.remoteMarkers($0).paused } == true }
         let refreshed = await service.requestParticipant(home: home, action: "agent.settings", target: target)
-        XCTAssertEqual(refreshed.settings?.scheduleText, settings.scheduleText)
-        XCTAssertEqual(refreshed.settings?.objective, settings.objective)
+        // Since 0.6.0 the Mac home moves a remote editor's text schedule into the objective.
+        let schedule = settings.scheduleText ?? ""
+        XCTAssertEqual(refreshed.settings?.scheduleText ?? "", "", "The home no longer keeps a separate text schedule")
+        XCTAssertEqual(refreshed.settings?.objective, schedule.isEmpty ? settings.objective : settings.objective + "\nSchedule: " + schedule, "A remote text schedule is preserved as the objective's last line")
         XCTAssertEqual(refreshed.settings?.artDirection, settings.artDirection, "Art direction survives a remote save and reload independently of the objective")
         XCTAssertEqual(refreshed.settings?.discordShareScoreboard, true)
         XCTAssertEqual(refreshed.settings?.discordShareSessionInformation, true)
