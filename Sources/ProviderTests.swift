@@ -269,6 +269,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         check(saved.title == "Renamed now" && saved.entry.directory == changedFolder.path && saved.remoteID == remote, engine + " renamed title and working folder survive relaunch")
         do { try store.configure(session, title: "Invalid", command: session.entry.command, directory: changedFolder.appendingPathComponent("missing").path); check(false, engine + " rejects missing working folders") }
         catch { check(session.title == "Renamed now" && session.entry.directory == changedFolder.path, engine + " rejects missing working folders without partially changing title or directory") }
+        if engine == "claude" { claudeLiveInputSelfTests(store, entry: entry, pump: { pump($0, seconds: $1) }, check) }
 
     }
     let museEntry = Entry(name: "Muse fixture", command: "python3 " + ProviderCommand.quote(fixture) + " muse", directory: NSTemporaryDirectory(), engine: "muse")
@@ -468,4 +469,59 @@ func compactionSelfTests(_ check: (Bool, String) -> Void) {
     check(c.toolStatus.accountUsage?.context == nil && c.compactionState?.recommended == false, "Provider automatic compaction clears the stale Claude recommendation")
     let wire = DeviceCompactionState(recommended: true, phase: "queued", percent: 88, detail: "fixture")
     check((try? JSONDecoder().decode(DeviceCompactionState.self, from: JSONEncoder().encode(wire))) == wire, "Compaction capability and state survive remote serialization")
+}
+
+// Fixture background task: started by "bg-start", finished (with Claude's own
+// notification turn) after "bg-ping" or stdin EOF; "bg-exit" quits with it running.
+func claudeLiveInputSelfTests(_ store: Store, entry: Entry, pump: (() -> Bool, Double) -> Void, _ check: (Bool, String) -> Void) {
+    let choices = SessionChoices(model: "sonnet", effort: "high", access: "manual")
+    func reply(_ s: Session) -> String? { s.messages.last { $0.role == "assistant" }?.text }
+    func pid(_ s: Session) -> String? { reply(s)?.components(separatedBy: "pid=").dropFirst().first }
+    func ready(_ s: Session) -> Bool { !s.busy && s.status.hasPrefix("Ready") }
+    let live = store.create(entry); live.choices = choices
+    live.draft = "bg-start"; store.submit(live)
+    pump({ ready(live) }, 8)
+    let process = live.claudeLive?.process, firstPID = pid(live) ?? "missing"
+    check(live.status == "Ready · task: Fixture subagent" && process?.isRunning == true && live.started && reply(live) == "started pid=" + firstPID, "Claude: a result with a background task outstanding ends the turn as Ready and keeps the process")
+    live.switchboardEnabled = true
+    live.draft = "switchboard-output:```converse\n{\"command\":\"list-sessions\"}\n```"; store.submit(live)
+    check(live.busy && live.pending.isEmpty && live.draft.isEmpty && live.status == "Working… · task: Fixture subagent", "Claude: a prompt while only a background task runs is sent at once, not queued")
+    pump({ ready(live) && reply(live)?.hasPrefix("answer: [Converse switchboard directory") == true }, 8)
+    check(live.messages.contains { $0.role == "user" && $0.text.hasPrefix("[Converse switchboard directory") } && reply(live)?.hasPrefix("answer: [Converse switchboard directory") == true && live.claudeLive?.process === process && process?.isRunning == true, "Claude: switchboard runs per turn and its reply reaches the same live process")
+    live.switchboardEnabled = false
+    live.draft = "bg-ping"; store.submit(live)
+    pump({ reply(live) == "answer: bg-ping pid=" + firstPID }, 8)
+    check(reply(live) == "answer: bg-ping pid=" + firstPID && live.claudeLive?.process === process, "Claude: the later prompt is answered by the same process, without a restart")
+    live.unseenResponse = false
+    pump({ live.claudeLive == nil && !live.busy }, 8)
+    check(reply(live) == "background finished pid=" + firstPID && live.unseenResponse && live.claudeBackgroundTasks.isEmpty && live.status == "Ready" && process?.isRunning == false && !live.messages.contains { $0.role == "notice" && $0.text.contains("Fixture subagent") }, "Claude: the background task survives, its completion turn finishes per turn with an unseen marker, then the process exits")
+    let held = store.create(entry); held.choices = choices
+    held.draft = "bg-start"; store.submit(held)
+    pump({ ready(held) }, 8)
+    let heldProcess = held.claudeLive?.process
+    held.draft = "with-image"; held.attachments = [store.folder.appendingPathComponent("live-input-images/shot.png").path]; store.submit(held)
+    check(held.pending.count == 1 && !held.busy && held.status == "Ready after background task · task: Fixture subagent" && held.claudeLive?.inputOpen == false, "Claude: an image outside the live process's folders is held, and the process is asked to finish")
+    pump({ held.claudeLive == nil && !held.busy && held.pending.isEmpty && reply(held)?.hasPrefix("answer: with-image") == true }, 10)
+    check(heldProcess?.isRunning == false && held.messages.contains { $0.text.hasPrefix("background finished") } && reply(held)?.contains("Attached image files") == true, "Claude: the held image prompt runs after the background task, in a new resumed process")
+    let stopped = store.create(entry); stopped.choices = choices
+    stopped.draft = "bg-start"; store.submit(stopped)
+    pump({ ready(stopped) }, 8)
+    let stoppedProcess = stopped.claudeLive?.process
+    store.stop(stopped)
+    pump({ stopped.claudeLive == nil }, 8)
+    check(stoppedProcess?.isRunning == false && stopped.status == "Stopped" && stopped.claudeBackgroundTasks.isEmpty && !stopped.messages.contains { $0.text.hasPrefix("background finished") }, "Claude: Stop while only a background task runs ends the process and its task")
+    let expired = store.create(entry); expired.choices = choices
+    expired.draft = "bg-exit"; store.submit(expired)
+    pump({ expired.claudeLive == nil && !expired.busy && expired.started }, 8)
+    check(expired.status == "Ready" && expired.claudeBackgroundTasks.isEmpty && expired.messages.contains { $0.role == "notice" && $0.text.contains("Fixture subagent") }, "Claude: a live process that exits on its own reports unfinished work and returns to Ready")
+    expired.draft = "queued"; store.submit(expired)
+    pump({ !expired.busy && reply(expired) == "answer: queued" }, 8)
+    check(reply(expired) == "answer: queued" && expired.claudeLive == nil, "Claude: after the live process has exited, the next prompt uses the --resume launch")
+    ClaudeLiveProcess.forcedOff = true
+    let classic = store.create(entry); classic.choices = choices
+    classic.draft = "classic"; store.submit(classic)
+    check(classic.busy && classic.claudeLive == nil, "Claude: with live input off, turns use the prompt-argument launch")
+    pump({ !classic.busy }, 8)
+    check(reply(classic) == "answer: classic", "Claude: the prompt-argument launch still completes")
+    ClaudeLiveProcess.forcedOff = false
 }

@@ -192,6 +192,8 @@ final class Session: ObservableObject, Identifiable {
     var claudeBackgroundTasks: [String: String] = [:]
     var claudeNoticedDenials: Set<String> = []
     var process: Process?
+    // Set while a Claude process can take further turns; see ClaudeLiveProcess.
+    @Published var claudeLive: ClaudeLiveProcess?
     var muse: MuseConnection?
     var museClosing = false
     @Published var requests: [MuseRequest] = []
@@ -361,6 +363,7 @@ final class Store: ObservableObject {
         s.compactionRequested = false
         s.queuePaused = true; s.resumeAfterInterrupt = false
         if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
+        if !s.busy { stopClaudeLive(s) }
         interruptProcess(s)
     }
     func interruptProcess(_ s: Session) {
@@ -376,6 +379,8 @@ final class Store: ObservableObject {
             return
         }
         guard let p = s.process, p.isRunning else { return }
+        // A live Claude process must exit, as an argument-prompt process does.
+        if let live = s.claudeLive, live.process === p { live.closeInput() }
         s.status = "Stopping…"; p.interrupt()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { if p.isRunning { s.status = "Still stopping… · queued input is held" } }
@@ -406,11 +411,12 @@ final class Store: ObservableObject {
         if handleLocalCommand(s) { return }
         let hasInput = !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty
         guard hasInput else { if interrupt { stop(s) }; return }
-        if s.busy || !s.pending.isEmpty {
+        if s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
             let prompt = PendingPrompt(text: s.draft, images: s.attachments)
             if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
             s.draft = ""; s.attachments = []; s.queuePaused = false
             if interrupt && s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
+            else if interrupt && claudeLiveBlocks(s, images: prompt.images) { stopClaudeLive(s) }
             else if !s.busy { runNext(s) }
             save(); return
         }
@@ -448,6 +454,10 @@ final class Store: ObservableObject {
         s.injectionAll = id == nil
         s.injectionNotice = s.busy ? "Interrupting — your queued prompt is next" : "Starting your queued prompt…"
         if s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
+        else if claudeLiveBlocks(s, images: s.pending.first?.images ?? []) {
+            // Held for a background task the live process cannot share: end it.
+            s.injectionNotice = "Stopping the background task — your queued prompt is next"; stopClaudeLive(s)
+        }
         else { runNext(s) }
         save()
         return nil
@@ -484,7 +494,11 @@ final class Store: ObservableObject {
             s.injectionNotice = "Queued injection cancelled: that prompt is no longer in the queue."
             s.injectionTargetID = nil
         }
-        if !s.busy, !s.changingSetting, s.compactionRequested { startCompaction(s); return }
+        if !s.busy, !s.changingSetting, s.compactionRequested {
+            // Compaction resumes the same transcript: let the live process finish first.
+            if let live = s.claudeLive { live.closeInput(); s.status = Store.claudeReadyStatus(s); return }
+            startCompaction(s); return
+        }
         guard !s.busy, !s.changingSetting, !s.queuePaused, !s.pending.isEmpty else { return }
         // A tick queued just before a window closes must not run after that
         // window (or after a changed restriction). Its persisted reservation is
@@ -496,6 +510,10 @@ final class Store: ObservableObject {
             save()
         }
         guard !s.pending.isEmpty else { return }
+        if let next = s.pending.first, claudeLiveBlocks(s, images: next.images) {
+            // Held until the live process exits; closing input lets it finish its tasks.
+            s.claudeLive?.closeInput(); s.status = Store.claudeReadyStatus(s); return
+        }
         if let config = s.agent, let next = s.pending.first,
            ((next.switchboardHop ?? 0) > 0 || next.autonomous == true), next.agentRunReserved != true {
             guard config.turnLimit > 0 else {
@@ -556,6 +574,7 @@ final class Store: ObservableObject {
         }
         if handleLocalCommand(s) { return }
         guard !s.busy && !s.changingSetting, !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty else { return }
+        guard !claudeLiveBlocks(s, images: s.attachments) else { return } // submit and runNext hold it first
         let directory = NSString(string: s.entry.directory).expandingTildeInPath
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
@@ -571,7 +590,9 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "user", text: text, images: images))
         if clearDisplayBeforeReply { clearSessionDisplay(s) }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
-        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeBackgroundTasks = [:]; s.claudeNoticedDenials = []; s.status = "Working…"
+        s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeNoticedDenials = []; s.status = "Working…"
+        // A live process's background tasks keep running into this turn.
+        if s.claudeLive == nil { s.claudeBackgroundTasks = [:] } else { s.status = Store.claudeWorkingStatus(s) }
         s.claudeLastContext = nil
         let responseID = UUID(); s.messages.append(Message(id: responseID, role: "assistant", text: ""))
         if s.agent != nil {
@@ -595,6 +616,7 @@ final class Store: ObservableObject {
         if s.entry.engine == "muse" && usesInteractiveMuse {
             sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
         }
+        if let live = s.claudeLive { deliverClaudeLive(s, live: live, prompt: prompt, responseID: responseID); save(); return }
         switch s.entry.engine {
         case "muse":
             args = ["exec", "--json", "--session-id", s.id.uuidString]
@@ -618,15 +640,18 @@ final class Store: ObservableObject {
             }
         }
         let finalDirectory = finalOutputDirectory
-        args += ["--", prompt]
+        let liveInput = ClaudeLiveProcess.eligible(s)
+        args += liveInput ? ["--input-format", "stream-json"] : ["--", prompt]
         let p = ProviderCommand.process(entry: s.entry, arguments: args, effort: s.choices.effort)
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
+        let live = liveInput ? ClaudeLiveProcess(process: p, session: s, images: images, responseID: responseID) : nil
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe; p.standardInput = live?.input ?? FileHandle.nullDevice
         s.process = p; save()
         do { try p.run() } catch {
             if let finalDirectory { try? FileManager.default.removeItem(at: finalDirectory) }
             s.busy = false; s.process = nil; s.status = "Failed to start"
             s.messages.append(Message(role: "notice", text: error.localizedDescription)); s.queuePaused = true; save(); return
         }
+        if let live { s.claudeLive = live; live.write(prompt) }
         DispatchQueue.global(qos: .userInitiated).async {
             var buffer = Data()
             while true {
@@ -636,17 +661,24 @@ final class Store: ObservableObject {
                 while let newline = buffer.firstIndex(of: 10) {
                     let line = String(decoding: buffer[..<newline], as: UTF8.self)
                     buffer.removeSubrange(...newline)
-                    DispatchQueue.main.async { self.consume(line, session: s, responseID: responseID) }
+                    DispatchQueue.main.async { if let live { self.consumeClaudeLive(line, session: s, live: live) } else { self.consume(line, session: s, responseID: responseID) } }
                 }
             }
             if !buffer.isEmpty {
                 let line = String(decoding: buffer, as: UTF8.self)
-                DispatchQueue.main.async { self.consume(line, session: s, responseID: responseID) }
+                DispatchQueue.main.async { if let live { self.consumeClaudeLive(line, session: s, live: live) } else { self.consume(line, session: s, responseID: responseID) } }
             }
             p.waitUntilExit()
             let finalReply = finalDirectory.flatMap { try? String(contentsOf: $0.appendingPathComponent("answer.txt"), encoding: .utf8) }
             if let finalDirectory { try? FileManager.default.removeItem(at: finalDirectory) }
             DispatchQueue.main.async {
+                if let live {
+                    live.closeInput()
+                    if s.claudeLive === live { s.claudeLive = nil }
+                    guard live.turnOpen else { self.claudeLiveExited(s, live: live, status: p.terminationStatus); return }
+                }
+                // The turn still open at exit: a live process may have moved on from the launch prompt.
+                let turnID = live?.responseID ?? responseID
                 let retryFailure = s.retryDetail
                 s.retryDetail = nil
                 s.busy = false; s.process = nil
@@ -657,7 +689,7 @@ final class Store: ObservableObject {
                 s.status = s.interrupted ? "Interrupted" : (p.terminationStatus == 0 && !s.turnFailed ? "Ready" : "Failed · exit \(p.terminationStatus)")
                 if p.terminationStatus == 0 { s.started = true }
                 if s.entry.engine == "codex", p.terminationStatus == 0, !s.turnFailed, !s.interrupted,
-                   let i = s.messages.firstIndex(where: { $0.id == responseID }) {
+                   let i = s.messages.firstIndex(where: { $0.id == turnID }) {
                     s.messages[i].finalReply = finalReply
                     if s.messages[i].text.isEmpty, let finalReply {
                         s.messages[i].text = Store.visibleText(finalReply)
@@ -666,7 +698,7 @@ final class Store: ObservableObject {
                         s.messages.append(Message(role: "notice", text: "Switchboard: Codex final-answer capture was unavailable; no command was dispatched."))
                     }
                 }
-                if let i = s.messages.firstIndex(where: { $0.id == responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
+                if let i = s.messages.firstIndex(where: { $0.id == turnID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
                 if (p.terminationStatus != 0 || s.turnFailed) && !s.interrupted {
                     let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")
                     if AccountLogin.requiresSignIn(output) { s.needsSignIn = true }
@@ -961,7 +993,7 @@ final class Store: ObservableObject {
             self.save()
         }
         if s.entry.engine != "muse" || !s.started {
-            remember(); s.settingNotice = s.busy ? "Change saved · applies next turn" : "Change saved · applies when the next turn starts"; return
+            remember(); s.settingNotice = s.claudeLive != nil && !s.claudeBackgroundTasks.isEmpty ? "Change saved · applies once Claude’s background task finishes" : s.busy ? "Change saved · applies next turn" : "Change saved · applies when the next turn starts"; return
         }
         if s.busy {
             guard !s.museClosing, let connection = s.muse, connection.turnID != nil else {
@@ -1152,11 +1184,7 @@ final class Store: ObservableObject {
         s.messages.append(Message(role: "activity", text: text))
         // Tool activity is retained for diagnostics, but does not reset visible-answer timing.
     }
-    static func claudeWorkingStatus(_ s: Session) -> String {
-        let tasks = s.claudeBackgroundTasks.values.sorted()
-        guard let first = tasks.first else { return "Working…" }
-        return "Working… · " + (tasks.count == 1 ? "task: " : "\(tasks.count) tasks: ") + String(first.prefix(60)) + (tasks.count > 1 ? " +\(tasks.count - 1)" : "")
-    }
+    static func claudeWorkingStatus(_ s: Session) -> String { "Working…" + claudeTaskSuffix(s) }
     static func claudeUnseparated(_ text: String, session: Session) -> String {
         let unseparated = NSMutableString(string: text)
         for range in session.claudeStreamSeparators.reversed() where NSMaxRange(range) <= unseparated.length {
@@ -1197,11 +1225,7 @@ final class Store: ObservableObject {
             if let sid = obj["session_id"] as? String { s.remoteID = sid }
             // Subagents and background shells can keep the CLI working after
             // its first result. Name them so the turn does not look finished.
-            if type == "system", let task = obj["task_id"] as? String, let subtype = obj["subtype"] as? String, ["task_started", "task_notification"].contains(subtype) {
-                if subtype == "task_started" { s.claudeBackgroundTasks[task] = (obj["description"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unnamed task" }
-                else { s.claudeBackgroundTasks[task] = nil }
-                if s.busy && s.status.hasPrefix("Working") { s.status = Store.claudeWorkingStatus(s) }
-            }
+            trackClaudeTask(obj, session: s)
             if type == "stream_event", let event = obj["event"] as? [String: Any] {
                 if event["type"] as? String == "content_block_start", let block = event["content_block"] as? [String: Any], block["type"] as? String == "text" {
                     s.claudeTextBlockPending = true
@@ -2411,6 +2435,7 @@ struct Conversation: View {
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
                 if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
                 if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
+                else if session.claudeLive != nil { Button("Stop") { Store.shared.stop(session) }.help("Stop Claude’s background task") }
             }.padding(.horizontal, 10).padding(.vertical, 5)
             if !session.shareNotice.isEmpty {
                 HStack {
@@ -2668,7 +2693,7 @@ struct ConverseQuitWarning {
         // Built-in support must never hold up Quit, even during a reply or check.
         // Use its persisted role, not its editable display name.
         let work = sessions.filter { !$0.supportAssistant }
-        let running = work.filter(\.busy).count
+        let running = work.filter { $0.busy || $0.claudeLive != nil }.count
         // Store contains home sessions only; remote viewers must not warn about
         // agents whose execution continues on a different device.
         let agents = work.filter { $0.agent?.canSchedule == true }.count
@@ -2704,7 +2729,7 @@ extension Store {
         // Stop the scheduler before stopping CLI sessions or saving. Agent shutdown
         // preserves enabled loops and held queues; ordinary Stop deliberately pauses.
         stopAgents()
-        for session in sessions where session.busy && session.agent == nil { stop(session) }
+        for session in sessions where (session.busy || session.claudeLive != nil) && session.agent == nil { stop(session) }
         save()
         return true
     }
