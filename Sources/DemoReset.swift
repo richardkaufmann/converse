@@ -41,4 +41,20 @@ enum DemoReset {
             }
         }
     }
+
+    /// Setup Preview (not Demo) is for screenshots and first-run testing: it starts
+    /// clean on every launch. Only its own folder and Keychain items are touched.
+    static func wipeSetupPreview(folder: URL) throws {
+        guard Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true,
+              Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool != true,
+              folder.lastPathComponent == "Converse Setup Preview" else { return }
+        if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
+        for service in ["app.kaoslabs.Converse.NUXPreview.Agent", "local.richard.Converse.NUXPreview.device"] {
+            let status = SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: service] as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Could not clear Setup Preview's saved keys. Unlock Keychain and reopen it to retry."])
+            }
+        }
+        if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+    }
 }

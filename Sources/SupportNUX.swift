@@ -104,6 +104,8 @@ final class SupportNUXController: ObservableObject {
         session.supportProbeCompletion = { [weak self, weak session] connected in
             guard let self, self.generation == token, let session else { return }
             self.checking = false
+            // The check is plumbing, not conversation: keep it out of the transcript.
+            session.messages.removeAll { ($0.role == "user" && $0.text.hasPrefix(FirstRunGuide.connectionCheckPrefix)) || ($0.role == "assistant" && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == AppSupport.connectionReply) }
             if connected {
                 self.store.configureSupportAgent(session)
                 self.status = "Connected. Converse App Support is ready."
@@ -111,7 +113,7 @@ final class SupportNUXController: ObservableObject {
                 self.store.enqueueSwitchboard(session, text: "The user has completed provider login. Introduce yourself briefly as Converse App Support. Offer Security and privacy at converse-help://security, the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Also include these getting-started links: \(AppSupport.guideLinks). Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request. End your welcome with exactly: \(AppSupport.closingInvitation)" + "\n\n" + self.store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true)
             } else { self.status = self.onConnected != nil ? "The model didn’t answer yet. Click Log in again, or I’m already signed in to check once more." : "The model did not confirm a working connection. Setup remains locked. Retry login or check the connection again." }
         }
-        session.draft = "Connection check only: reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
+        session.draft = FirstRunGuide.connectionCheckPrefix + " reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
         store.send(session)
         if !session.busy { session.supportProbeCompletion = nil; checking = false; status = "Could not start the connection check. Retry the provider login." }
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self, weak session] in
@@ -253,6 +255,7 @@ enum ConverseShoe {
 enum FirstRunCLI: Equatable { case checking, installed, missing(String) }
 
 final class FirstRunGuide: ObservableObject {
+    static let connectionCheckPrefix = "Connection check only:"
     @Published private(set) var record: FirstRunRecord?
     @Published var cli: [String: FirstRunCLI] = [:]
     @Published var metaKey = ""
@@ -352,6 +355,13 @@ final class FirstRunGuide: ObservableObject {
         var supportEntry = entry; supportEntry.directory = workspace.path
         if support.entry.engine != engine { support.remoteID = nil; support.started = false }
         support.entry = supportEntry
+        // App Support also runs as an agent: bind its agent model to the same login,
+        // or a Muse subscription sign-in would still be checked through the Meta API.
+        if support.agent != nil {
+            let model = agentModel(engine, account: profile.id)
+            support.agent?.model = model; support.toolStatus.model = AgentModels.label(model)
+            support.agent?.attention = ""
+        }
         if let coding, !coding.busy, !coding.messages.contains(where: { $0.role == "user" }) {
             if coding.entry.engine != engine || coding.entry.accountID != profile.id {
                 coding.remoteID = nil; coding.started = false; coding.choices = SessionChoices(); coding.toolStatus = ToolStatus()

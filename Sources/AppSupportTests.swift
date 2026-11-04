@@ -287,6 +287,19 @@ import SwiftUI
     let help = try? HelpBook.load()
     check(help?.topics.contains { $0.id == FirstRunText.installTopic } == true, "How to install opens a bundled Help topic")
 
+    // Richard's 126 test: App Support runs as an agent; choosing Muse without a Meta key
+    // must bind it to the Muse sign-in, not leave it on Muse Spark via the Meta API.
+    do {
+        let (s, g, _, _) = fresh("support-agent-muse", metaKey: false)
+        let sup = g.support!
+        if sup.agent == nil { sup.agent = AgentConfig() }
+        sup.agent?.model = "muse-spark-1.3"; sup.agent?.attention = "Paused: Add a Meta API key"
+        g.choose("muse")
+        let profile = s.preferredLogin(engine: "muse")!
+        let parsed = AgentModels.parse(sup.agent?.model ?? "")
+        check(parsed?.engine == "muse" && parsed?.account == profile.id && sup.agent?.attention == "", "Choosing Muse without a Meta key runs App Support on the Muse sign-in and clears the Meta-key banner")
+    }
+
     // Each provider choice
     for engine in FirstRunText.providers {
         for key in engine == "muse" ? [false, true] : [false] {
@@ -303,6 +316,11 @@ import SwiftUI
             else { check(AgentModels.parse(model)?.engine == engine && AgentModels.parse(model)?.account == profile.id, "Agent runs on the chosen provider's CLI login: " + engine + (key ? " with key" : "")) }
             check(a.title == name + " Agent" && a.messages.count == 1 && a.messages[0].text.contains("Right-click \(name) Agent in the left panel for Agent Setup, Run once, Show scoreboard"), "Agent welcome explains right-clicking its name: " + engine)
             check(sup.entry.engine == engine && sup.entry.accountID == profile.id, "App Support uses the same login: " + engine)
+            if sup.agent != nil {
+                let supportModel = sup.agent?.model ?? ""
+                if engine == "muse" && key { check(supportModel == "muse-spark-1.3", "App Support uses Muse Spark when a Meta key is saved") }
+                else { check(AgentModels.parse(supportModel)?.engine == engine && AgentModels.parse(supportModel)?.account == profile.id, "App Support's agent model follows the chosen sign-in (no Meta key needed): " + engine) }
+            }
             check(sup.draft == "/login" && sup.messages.filter { $0.text == FirstRunText.loginPrompt(engine) }.count == 1, "App Support asks to press Return with /login prefilled: " + engine)
             check(sup.messages.filter { $0.text.hasPrefix("# " + FirstRunText.title) && !$0.images.isEmpty }.count == 1, "Welcome with the shoe appears once: " + engine)
             check(g.record?.stage == "login" && g.record?.provider == engine && g.record?.teachCoding == true, "First run waits for login and remembers to teach the coding session: " + engine)

@@ -3819,6 +3819,7 @@ if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == tr
     let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
     setenv("CONVERSE_DATA_DIR", isolated.path, 1)
     do {
+        try DemoReset.wipeSetupPreview(folder: isolated)
         if try DemoReset.consume(folder: isolated, enabled: DemoReset.enabled, clearCredentials: DemoReset.clearCredentials) != nil,
            let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
     } catch {
