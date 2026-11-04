@@ -54,18 +54,24 @@ The repository and release links currently require access to the private reposit
 You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later. See [Set up Discord, Jolly and GitHub](#set-up-discord-jolly-and-github) to connect your own accounts and services.
 
 
-You need **one working provider** before you can ask an assistant for help. A provider is the service behind the model: Meta Muse, Anthropic's Claude, or OpenAI's Codex. Its account and usage charges are separate from Converse.
+On a brand-new Mac installation, Converse opens with four things in the left panel: **Converse App Support**, a **Parking Lot**, a **Coding Session** and an **Agent**. Only App Support is up. It says hello and asks one question: which provider should lead? Pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude**. A provider is the service behind the model; its account and usage charges are separate from Converse.
 
-On a new Mac or Windows installation, Converse shows **Converse App Support** (the built-in assistant for help with this app) and asks you to pick a provider. Choose just one:
+1. **Click a provider.** Converse sets everything up to use it and renames the sessions to match, for example **Claude Coding Session** and **Claude Agent**. The Parking Lot is already linked to both.
+2. **Press Return.** App Support has typed `/login` for you. Return opens that provider's normal login (`claude auth login`, `codex login` or `muse login`) in Terminal and your browser. Finish there and come back. Already signed in? Click **I'm already signed in** instead.
+3. **Wait for one short answer.** Converse asks the model for a single reply to prove the login works (this may use a little quota), then App Support introduces itself.
+4. **Click your coding session.** It greets you with something to try: *Add a new heading called Things To Do to the Parking Lot, with a first item "Get with Converse"*. Your agent has a greeting too; right-click its name for **Agent Setup**, **Run once**, **Show scoreboard** and more.
 
-1. **Install its command-line tool if needed.** Converse uses the provider's installed program, often called its *CLI*, to connect. Follow the installation link shown by setup, return, and retry the provider choice. You do not need all three tools.
-2. **Complete that provider's sign-in.** Converse opens its login flow in Terminal and/or your browser. Finish there, then return to Converse. Do not put passwords, API keys or login codes into the conversation.
-3. **Wait for the connection check.** Converse asks the model for one short response. This may use provider quota. A successful login alone is not enough: setup waits until the model actually answers. Failed or cancelled setup stays on this step so you can retry.
-4. **Meet App Support.** After the check, setup and teaching text disappear from view, and the support conversation is ready. Try: “What can I do in Converse?” or “Help me create a session for my project.”
+Not ready to choose? Click **Decide later**. Everything else keeps working, and **Choose a provider…** brings the question back. If a provider's button is greyed out, its command-line tool isn't installed yet: use **How to install** ([Install a provider CLI](#install-a-provider-cli)), then **Check again**. Do not put passwords, API keys or login codes into a conversation.
+
+**Picking Meta Muse?** Coding sessions use your Muse login. Muse Spark agents and Muse Image scoreboards also need a **Meta Model API key**: [get one on Meta's developer site](https://dev.meta.ai/docs/models) and paste it into the masked field App Support shows (or later into Agent Setup). If a key is already saved, Converse doesn't ask again.
+
+**Keys stay in your Keychain.** Converse saves API keys and tokens in the macOS Keychain and logins stay with each provider's own tool. Nothing secret goes into a conversation, a settings file or this repository, so there is nothing to commit and no `.env` file to fill in.
+
+**What works without a Meta key:** Claude and Codex coding sessions (and Muse CLI sessions), agents running on those logins, messages between sessions through the [switchboard](#messaging-between-sessions), [Parking Lots](#parking-lots) and [Groups](#connect-your-devices-into-a-group). The key adds Muse Spark API agents, scoreboard art, voice and the image tools.
 
 For a problem involving another Group system, App Support can find its support agent and ask for a scoped, read-only health report. It uses live session IDs, reports unavailable peers, and does not turn a peer message into permission to change settings.
 
-Ask App Support to “open a Muse coding session” and it creates and displays one, using your saved login. Ask how to do it and it explains the steps. It can also read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
+Ask App Support to “open another Muse coding session” and it creates and displays one, using your saved login. Ask how to do it and it explains the steps. It can also read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
 
 **Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Existing sessions keep their logins. New sessions and agents default to the provider login verified during setup; you can choose another login in setup. Demo and the normal app keep separate credentials. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
 
@@ -88,6 +94,16 @@ Reports go to `richardkaufmann/converse`. While the repository is private, your 
 Only the report text you review is included. Logs, screenshots, attachments and other conversations are not added automatically. If you use the browser route, its prefilled report link contains that text and may appear in browser history. Keep secrets and unrelated private information out of reports. Saved GitHub credentials stay in the Mac Keychain or Windows Credential Manager; they are never given to the model or placed in a report. Discord is not involved.
 
 Copying a selected passage on Mac, iPhone or iPad preserves link destinations in plain-text paste—for example, `Cursor Agent (https://cursor.com/docs/agent/overview)`. Copying a whole response also preserves its Markdown links.
+
+## Install a provider CLI
+
+Converse drives each provider's own command-line tool (*CLI*). You need only one. On a Mac:
+
+- **Anthropic Claude:** `curl -fsSL https://claude.ai/install.sh | bash` ([Claude Code setup](https://code.claude.com/docs/en/setup))
+- **OpenAI Codex:** `npm install -g @openai/codex` or `brew install --cask codex` ([Codex CLI](https://developers.openai.com/codex/cli/))
+- **Meta Muse:** `mkdir -p ~/.local/bin && curl -fsSL https://api.meta.ai/muse-launcher.sh -o ~/.local/bin/muse && chmod +x ~/.local/bin/muse`
+
+Converse looks in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and your login shell's `PATH`. After installing, click **Check again** in App Support.
 
 ## Set up your first coding session
 
