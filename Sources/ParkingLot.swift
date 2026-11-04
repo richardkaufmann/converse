@@ -87,6 +87,11 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         commit([ParkingLotRow(heading: true, text: "New features"), ParkingLotRow(heading: false, text: ""),
                 ParkingLotRow(heading: true, text: "Bugs"), ParkingLotRow(heading: false, text: "")])
     }
+    /// First-run starter content for a lot that has never been saved.
+    func openStarter(_ rows: [ParkingLotRow]) {
+        guard !active, error.isEmpty else { return }
+        commit(rows)
+    }
     private func persist(_ next: ParkingLotDocument) throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(next).write(to: file, options: .atomic)

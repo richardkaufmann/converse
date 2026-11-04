@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 @MainActor func appSupportSelfTests(_ check: @escaping (Bool, String) -> Void) {
     let linkText = NSMutableAttributedString(string: "Café 🐈 and docs")
@@ -217,4 +218,237 @@ import Foundation
         check(reloaded.create(bound).entry.accountID == explicit.id && ordinary.entry.accountID == verified.id, "Explicit alternate login and existing session bindings are preserved: " + engine)
     }
 
+}
+
+// First run on a brand-new data folder: four sessions, one pane, a provider
+// choice that renames and binds them, and /login through the provider's CLI.
+@MainActor func firstRunSelfTests(_ check: @escaping (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-first-run-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func spin(_ seconds: Double = 10, until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+    func fresh(_ name: String, cli: Set<String> = ["muse", "codex", "claude"], metaKey: Bool = false) -> (Store, FirstRunGuide, ParkingLotLibrary, SidebarOrder) {
+        let folder = root.appendingPathComponent(name)
+        let store = Store(folder: folder)
+        // Isolated logins: never the real ~/.claude or ~/.codex.
+        store.accounts = ["muse", "codex", "claude"].map { AccountProfile(id: $0 + "-default", name: AssistantFamily.name($0), engine: $0, directory: folder.appendingPathComponent("Logins/" + $0).path, useDefaultStore: false) }
+        let library = ParkingLotLibrary(folder: folder), order = SidebarOrder(folder: folder)
+        let guide = store.firstRun
+        guide.cliCheck = { cli.contains($0.engine) }
+        guide.metaKeySaved = { metaKey }
+        _ = guide.seedIfNeeded(library: library, order: order)
+        guide.checkCLIs(); spin { !guide.cli.values.contains(.checking) }
+        return (store, guide, library, order)
+    }
+
+    // Seeding
+    let (store, guide, library, order) = fresh("seed")
+    let record = guide.record!
+    let support = guide.support!, coding = guide.coding!, agent = guide.agent!
+    check(store.sessions.count == 3 && support.supportAssistant && library.records.count == 1 && record.lotID == ParkingLotStore.id && record.stage == "choose", "First run seeds App Support, the starter Parking Lot, a coding session and an agent")
+    let ids = [support.id, record.lotID, coding.id, agent.id].map(\.uuidString)
+    check(order.ordered(ids.shuffled(), scope: "local") == ids && SidebarOrder(folder: store.folder).ordered(ids.reversed(), scope: "local") == ids, "Sidebar order is App Support, Parking Lot, Coding Session, Agent and survives restart")
+    check(store.setupCompleted && support.entry.engine == "support" && support.messages.isEmpty && coding.title == "Coding Session" && agent.title == "Agent", "Seeding skips the setup sheet; App Support waits for a provider choice")
+    check(guide.seedIfNeeded(library: library, order: order) == nil && store.sessions.count == 3, "Seeding runs once")
+    // Launch places only App Support (AppDelegate.select uses the first free pane).
+    let workspace = Workspace(), window = WindowState(workspace: workspace)
+    workspace.assign(support.id, to: window.id, pane: workspace.firstAvailablePane(in: window.id))
+    check(workspace.pane(for: support.id, in: window.id) == 1 && workspace.placements.count == 1 && [coding.id, agent.id, record.lotID].allSatisfy { workspace.placements[$0] == nil }, "One pane up: App Support in pane 1; Parking Lot, coding session and agent parked")
+    let lot = library.lot(record.lotID)!
+    let shoeRow = lot.document.rows.first { $0.images?.isEmpty == false }
+    check(shoeRow?.text == FirstRunText.lotWelcome && shoeRow.flatMap { $0.images?.first }.map { FileManager.default.fileExists(atPath: $0) } == true, "Starter Parking Lot has a welcome item with the shoe picture as an item image")
+    check(agent.agent?.watchedSessions.contains(record.lotID) == true && agent.agent?.watchedSessions.contains(coding.id) == true && agent.agent?.enabled == false, "Agent may read the starter lot and coding session and starts paused")
+    let shoe = ConverseShoe.save(in: store.folder).flatMap { NSImage(contentsOfFile: $0) }
+    check(shoe.map { $0.size.width <= 160 && $0.size.width >= 100 } == true, "Shoe picture is small (≤ 160 pt)")
+    guide.linkLot(home: "home-mac", library: library)
+    let links = library.links(record.lotID)
+    check(Set(links) == Set([coding.id, agent.id].map { DeviceGlobalID(home: "home-mac", session: $0).string }), "Starter Parking Lot links to the coding session and agent")
+    guide.linkLot(home: "home-mac", library: library)
+    check(library.links(record.lotID) == links && ParkingLotLibrary(folder: store.folder).links(record.lotID) == links, "Lot links are added once and persist")
+    let restoredStore = Store(folder: store.folder), restoredGuide = restoredStore.firstRun
+    check(restoredGuide.record == guide.record && restoredGuide.active, "First-run progress survives restart")
+
+    // Typing before choosing never disappears or reaches a provider.
+    support.draft = "hello?"
+    store.submit(support)
+    check(support.draft == "hello?" && support.messages.last?.text.contains("Pick a provider above") == true && !support.busy, "Typing in App Support before a choice keeps the draft and explains what to do")
+
+    // Missing CLI disables its button with a hint.
+    let (partialStore, partial, _, _) = fresh("missing", cli: ["claude"])
+    defer { withExtendedLifetime(partialStore) {} }
+    if case .missing(let hint) = partial.cli["codex"] { check(hint.contains("codex") && hint.contains("Check again"), "Missing CLI shows a one-line install hint") } else { check(false, "Missing CLI is detected") }
+    check(partial.cli["claude"] == .installed, "Installed CLI is enabled")
+    partial.choose("codex")
+    check(partial.stage == "choose" && partial.coding?.entry.engine == "claude" && partial.support?.entry.engine == "support", "A missing provider cannot be chosen")
+    let help = try? HelpBook.load()
+    check(help?.topics.contains { $0.id == FirstRunText.installTopic } == true, "How to install opens a bundled Help topic")
+
+    // Each provider choice
+    for engine in FirstRunText.providers {
+        for key in engine == "muse" ? [false, true] : [false] {
+            let (s, g, _, _) = fresh("choose-" + engine + (key ? "-key" : ""), metaKey: key)
+            g.choose(engine)
+            let name = AssistantFamily.name(engine)
+            let profile = s.preferredLogin(engine: engine)!
+            let c = g.coding!, a = g.agent!, sup = g.support!
+            check(c.entry.engine == engine && c.entry.accountID == profile.id && c.title == name + " Coding Session" && c.switchboardEnabled, "Coding session uses the chosen provider and login: " + engine)
+            check(c.messages.map(\.text) == [FirstRunText.codingWelcome] && c.messages[0].role == "assistant", "Coding session shows its pre-loaded welcome once: " + engine)
+            let model = a.agent?.model ?? ""
+            if engine == "muse" && key { check(model == "muse-spark-1.3", "Muse with a saved Meta key runs the agent on Muse Spark") }
+            else { check(AgentModels.parse(model)?.engine == engine && AgentModels.parse(model)?.account == profile.id, "Agent runs on the chosen provider's CLI login: " + engine + (key ? " with key" : "")) }
+            check(a.title == name + " Agent" && a.messages.count == 1 && a.messages[0].text.contains("Right-click \(name) Agent in the left panel for Agent Setup, Run once, Show scoreboard"), "Agent welcome explains right-clicking its name: " + engine)
+            check(sup.entry.engine == engine && sup.entry.accountID == profile.id, "App Support uses the same login: " + engine)
+            check(sup.draft == "/login" && sup.messages.filter { $0.text == FirstRunText.loginPrompt(engine) }.count == 1, "App Support asks to press Return with /login prefilled: " + engine)
+            check(sup.messages.filter { $0.text.hasPrefix("# " + FirstRunText.title) && !$0.images.isEmpty }.count == 1, "Welcome with the shoe appears once: " + engine)
+            check(g.record?.stage == "login" && g.record?.provider == engine && g.record?.teachCoding == true, "First run waits for login and remembers to teach the coding session: " + engine)
+        }
+    }
+    // Changing provider before login replaces, never duplicates.
+    let (switching, switchGuide, _, _) = fresh("switch")
+    switchGuide.choose("claude"); switchGuide.reopen(); switchGuide.choose("codex")
+    check(switchGuide.coding?.title == "Codex Coding Session" && switchGuide.support?.messages.filter { $0.role == "assistant" }.count == 2 && switchGuide.support?.messages.last?.text == FirstRunText.loginPrompt("codex") && switching.sessions.count == 3, "Changing the provider rebinds everything without duplicate welcomes")
+    // Other text during login is held.
+    let held = switchGuide.support!
+    held.draft = "What can you do?"; switching.submit(held)
+    check(held.draft == "What can you do?" && !held.busy && held.messages.last?.role == "notice", "Text other than /login waits until sign-in")
+
+    // The coding session learns the switchboard with its first request, once.
+    let codingSession = switchGuide.coding!
+    codingSession.queuePaused = true
+    switchGuide.teachIfNeeded(codingSession); switchGuide.teachIfNeeded(codingSession)
+    check(codingSession.pending.filter { $0.text.contains("[Converse switchboard instructions]") }.count == 1 && switchGuide.record?.teachCoding == false && codingSession.switchboardEnabled && codingSession.pending.first?.clearDisplayBeforeReply == true, "Coding session is taught the switchboard once, before its first request")
+
+    // Decide later
+    let (later, laterGuide, _, _) = fresh("later")
+    laterGuide.decideLater()
+    let laterSupport = laterGuide.support!
+    laterSupport.draft = "hi"; later.submit(laterSupport)
+    check(laterGuide.stage == "later" && later.setupCompleted && laterSupport.draft == "hi" && !laterSupport.busy && later.sessions.count == 3, "Decide later leaves a usable app and keeps App Support waiting")
+    laterGuide.reopen(); laterGuide.choose("claude")
+    check(laterGuide.stage == "login" && laterGuide.coding?.title == "Claude Coding Session", "Choose a provider works after Decide later")
+
+    // Meta key: secure field only, saved via Keychain writer, never in chat.
+    let (museStore, museGuide, _, _) = fresh("meta")
+    museGuide.choose("muse")
+    var written: [String] = []
+    museGuide.metaKeyWriter = { written.append($0) }
+    museGuide.metaKey = "  fixture-meta-key  "; museGuide.saveMetaKey()
+    check(written == ["fixture-meta-key"] && museGuide.metaKey.isEmpty && museGuide.agent?.agent?.model == "muse-spark-1.3", "Saving a Meta key switches the Muse agent to Muse Spark")
+    check(!museStore.sessions.contains { $0.messages.contains { $0.text.contains("fixture-meta-key") } || $0.draft.contains("fixture-meta-key") }, "The Meta key never enters a transcript or draft")
+    check(AppSupport.credentialStatus(metaKeySaved: true).contains("already saved") && AppSupport.credentialStatus(metaKeySaved: true).contains("never tell them to add one") && AppSupport.credentialStatus(metaKeySaved: false).contains("secure field"), "App Support teaching reflects whether a Meta key is saved")
+    check(AppSupport.instructions(agent: true).contains("Credential status"), "Teaching includes the live credential status")
+
+    // Existing stores are untouched.
+    let existingFolder = root.appendingPathComponent("existing")
+    let existing = Store(folder: existingFolder)
+    let kept = existing.create(existing.defaultEntry(engine: "codex")); kept.title = "My work"; existing.save()
+    let reopened = Store(folder: existingFolder)
+    check(reopened.firstRun.seedIfNeeded(library: ParkingLotLibrary(folder: existingFolder), order: SidebarOrder(folder: existingFolder)) == nil && reopened.sessions.map(\.title) == ["My work"] && !FileManager.default.fileExists(atPath: existingFolder.appendingPathComponent("first-run.json").path), "Existing stores with sessions are untouched")
+    let completed = Store(folder: root.appendingPathComponent("completed")); completed.setupCompleted = true; completed.save()
+    let completedReload = Store(folder: completed.folder)
+    check(completedReload.firstRun.seedIfNeeded(library: ParkingLotLibrary(folder: completed.folder), order: SidebarOrder(folder: completed.folder)) == nil && completedReload.sessions.isEmpty, "A store that already finished setup is never reseeded")
+    let reopenedSupport = reopened.sessions[0]; reopenedSupport.draft = "/login"
+    check(!reopened.firstRun.intercept(reopenedSupport), "/login keeps its normal meaning outside first run")
+
+    // Return on /login opens each provider's own login command for the shared login.
+    for engine in ["muse", "codex"] {
+        let (loginStore, loginGuide, _, _) = fresh("login-" + engine)
+        if engine == "muse" { loginStore.accounts[0].directory = "" } // the real Muse default
+        var scripts: [String] = []
+        loginStore.loginFileOpener = { scripts.append((try? String(contentsOf: $0, encoding: .utf8)) ?? ""); return true }
+        loginGuide.choose(engine)
+        let target = loginGuide.support!
+        loginStore.submit(target)
+        let expected = engine == "codex" ? "CODEX_HOME" : "exec muse"
+        check(scripts.count == 1 && scripts[0].contains("login") && scripts[0].contains(expected) && loginGuide.login.waitingForLogin && target.draft.isEmpty, "Return on /login opens \(engine) login in Terminal and waits for it")
+    }
+
+    // /login journey with a deterministic local CLI: login, model check, handoff.
+    let (journey, journeyGuide, _, _) = fresh("journey")
+    let fakeCLI = root.appendingPathComponent("fake-claude.command")
+    try! """
+    #!/bin/zsh
+    if [[ "$1" == "--version" ]]; then print 'fixture 1'; exit 0; fi
+    if [[ "$1" == "auth" && "$2" == "login" ]]; then print -n login > \(ProviderCommand.quote(root.appendingPathComponent("login-ran").path)); exit 0; fi
+    cat >/dev/null
+    if [[ "$*" != *"--tools"* ]]; then
+      print '{"type":"result","is_error":false,"result":"CONVERSE_CONNECTION_OK"}'
+    else
+      print -r '{"type":"result","is_error":false,"result":"{\\"reply\\":\\"Hi, I am Converse App Support.\\",\\"attention\\":\\"\\"}"}'
+    fi
+    """.write(to: fakeCLI, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeCLI.path)
+    journey.entries[journey.entries.firstIndex { $0.engine == "claude" }!].command = ProviderCommand.quote(fakeCLI.path)
+    var opened: [URL] = []
+    journey.loginFileOpener = { file in
+        opened.append(file)
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/zsh"); process.arguments = [file.path]
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        do { try process.run(); process.waitUntilExit(); return process.terminationStatus == 0 } catch { return false }
+    }
+    journeyGuide.choose("claude")
+    let journeySupport = journeyGuide.support!
+    check(journeySupport.draft == "/login", "Journey: /login is prefilled")
+    journey.submit(journeySupport)
+    check(opened.count == 1 && (try? String(contentsOf: opened[0], encoding: .utf8)).map { $0.contains("auth") && $0.contains("login") && $0.contains(fakeCLI.lastPathComponent) } == true, "Return on /login opens the chosen provider's own login (claude auth login)")
+    spin(20) { journeyGuide.stage == "done" }
+    check(FileManager.default.fileExists(atPath: root.appendingPathComponent("login-ran").path) && journeyGuide.stage == "done", "Journey: provider login finished and one model response verified the connection")
+    check(AgentModels.parse(journeySupport.agent?.model ?? "")?.engine == "claude" && AgentModels.parse(journeySupport.agent?.model ?? "")?.account == "claude-default" && journeySupport.supportTeachingVersion == AppSupport.version, "Journey: App Support becomes a taught agent on the same Claude login")
+    check(journey.preferredLogin(engine: "claude")?.id == journeyGuide.coding?.entry.accountID, "Journey: new sessions keep using the login the coding session uses")
+    spin(20) { !journeySupport.busy && journeySupport.pending.isEmpty }
+    check(journeySupport.displayedMessages.contains { $0.role == "assistant" && $0.text.contains("Converse App Support") }, "Journey: App Support introduces itself after login")
+    check(!journeySupport.displayedMessages.contains { $0.text.contains("[Converse switchboard instructions]") || $0.text.contains(AppSupport.connectionReply) } && journeySupport.messages.contains { $0.text.contains("[Converse switchboard instructions]") }, "Journey: login check and teaching are hidden from view but retained")
+    journeyGuide.dismiss()
+    check(!journeyGuide.active && withExtendedLifetime(Store(folder: journey.folder)) { $0.firstRun.stage == "dismissed" }, "The finished first-run bar can be hidden for good")
+
+    renderFirstRun(root: root, check: check)
+}
+
+/// Offscreen PNGs of the App Support welcome in each state (no screen capture).
+@MainActor func renderFirstRun(root: URL, check: (Bool, String) -> Void) {
+    guard let target = ProcessInfo.processInfo.environment["CONVERSE_NUX4_RENDERS"] else { return }
+    let output = URL(fileURLWithPath: target)
+    try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    func save<V: View>(_ view: V, _ name: String, height: CGFloat) -> Bool {
+        let host = NSHostingView(rootView: view.frame(width: 900, height: height))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: height)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host; host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return false }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        window.close()
+        return (try? bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent(name + ".png"))) != nil
+    }
+    var states: [(String, FirstRunGuide, Store)] = []
+    for (name, engine, cli, key) in [("1-choose", nil, ["muse", "codex", "claude"], false), ("2-choose-codex-missing", nil, ["muse", "claude"], false),
+                                     ("3-login-claude", "claude", ["muse", "codex", "claude"], false), ("4-login-muse-no-key", "muse", ["muse", "codex", "claude"], false),
+                                     ("5-login-muse-key-saved", "muse", ["muse", "codex", "claude"], true), ("6-decide-later", "later", ["muse", "codex", "claude"], false),
+                                     ("7-done", "done", ["muse", "codex", "claude"], false)] as [(String, String?, [String], Bool)] {
+        let folder = root.appendingPathComponent("render-" + name)
+        let store = Store(folder: folder)
+        store.accounts = ["muse", "codex", "claude"].map { AccountProfile(id: $0 + "-default", name: AssistantFamily.name($0), engine: $0, directory: folder.appendingPathComponent("Logins/" + $0).path, useDefaultStore: false) }
+        for index in store.entries.indices { store.entries[index].command = "/usr/bin/true" }
+        let guide = store.firstRun
+        guide.cliCheck = { cli.contains($0.engine) }; guide.metaKeySaved = { key }
+        _ = guide.seedIfNeeded(library: ParkingLotLibrary(folder: folder), order: SidebarOrder(folder: folder))
+        guide.checkCLIs()
+        let deadline = Date().addingTimeInterval(5)
+        while guide.cli.values.contains(.checking) && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        if engine == "later" { guide.decideLater() }
+        else if engine == "done" { guide.choose("claude"); guide.connected(guide.support!); guide.support!.pending.removeAll(); guide.support!.draft = "" }
+        else if let engine { guide.choose(engine) }
+        states.append((name, guide, store))
+    }
+    var saved = 0
+    for (name, guide, store) in states {
+        if save(Conversation(session: guide.support!, store: store), name, height: 640) { saved += 1 }
+    }
+    if let done = states.last {
+        if save(Conversation(session: done.1.coding!, store: done.2), "8-coding-welcome", height: 420) { saved += 1 }
+        if save(Conversation(session: done.1.agent!, store: done.2), "9-agent-welcome", height: 420) { saved += 1 }
+    }
+    check(saved == states.count + 2, "Saved \(saved) offscreen first-run renders to " + output.path)
 }
