@@ -20,6 +20,32 @@ public sealed class AgentConfig
     // Label/value pairs the current art reflects; null on older archives.
     public List<string>? ArtSignature { get; set; }
     public int LoopsSinceScoreboard { get; set; }
+    // Consecutive transient failures, and why the host last paused the loop.
+    public int? TransientFailures { get; set; }
+    public string? PauseReason { get; set; }
+    // Mirrors Sources/AgentRetry.swift: transient failures keep the loop on and
+    // retry at the next tick; the third in a row or any permanent one pauses.
+    public void RecordFailure(string message, bool transient, DateTime now)
+    {
+        if (!Settings.Enabled) { Attention = Clip(message); PreservePause(); return; }
+        if (transient)
+        {
+            var count = Math.Min(AgentRunFailure.RetryLimit, Math.Max(0, TransientFailures ?? 0) + 1);
+            if (count < AgentRunFailure.RetryLimit) { TransientFailures = count; Attention = AgentRunFailure.RetryPrefix + message + $" ({count} of {AgentRunFailure.RetryLimit})"; return; }
+            message += $" — failed {count} times in a row";
+        }
+        Settings.Enabled = false; TransientFailures = null;
+        PauseReason = Clip("Paused: " + message + " (" + now.ToLocalTime().ToString("g") + ")"); Attention = PauseReason;
+    }
+    public void RecordSuccess() { TransientFailures = null; PreservePause(); }
+    // Later manual or group-requested runs add to a pause reason, never hide it.
+    public void PreservePause()
+    {
+        if (Settings.Enabled || PauseReason is not { } reason || Attention.StartsWith(reason, StringComparison.Ordinal)) return;
+        Attention = Clip(Attention.Length == 0 ? reason : reason + " · " + Attention);
+    }
+    public void ClearPause() { PauseReason = null; TransientFailures = null; }
+    private static string Clip(string text) => text[..Math.Min(text.Length, 1000)];
     public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
     public void RestoreSchedule(DateTime now)
     {
@@ -44,10 +70,12 @@ public sealed class AgentConfig
         var keepDeadline = Settings.Enabled && proposed.Enabled && NextRunUtc is not null
             && Settings.IntervalSeconds == proposed.IntervalSeconds
             && Settings.ScheduleText == proposed.ScheduleText && Settings.ScheduleTimeZone == proposed.ScheduleTimeZone;
+        var wasEnabled = Settings.Enabled;
         proposed = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(proposed));
         proposed.ArtDirection ??= Settings.ArtDirection; // Old editors must preserve owner art direction.
         proposed.Revision = checked((Settings.Revision ?? 0) + 1);
         Settings = proposed;
+        if (proposed.Enabled && !wasEnabled) ClearPause();
         if (!keepDeadline) NextRunUtc = proposed.Enabled ? next : null;
     }
 }
@@ -78,6 +106,28 @@ public static class AgentArtPolicy
     }
 }
 
+public static class AgentRunFailure
+{
+    public const int RetryLimit = 3;
+    public const string RetryPrefix = "Retrying: ";
+    // Timeouts, unreachable or lost networks and HTTP 429/5xx are transient;
+    // credentials, settings, budgets, schedules and Stop are not.
+    public static bool IsTransient(Exception e) => e switch
+    {
+        AgentHttpStatusException h => h.Status == 429 || h.Status >= 500,
+        HttpRequestException => true,
+        TimeoutException => true,
+        TaskCanceledException t => t.InnerException is TimeoutException,
+        IOException => true,
+        _ => false,
+    };
+    public static string Describe(Exception e) => e switch
+    {
+        AgentHttpStatusException h => $"Agent service returned HTTP {h.Status}.",
+        TimeoutException or TaskCanceledException => "The request timed out.",
+        _ => "The network request failed.",
+    };
+}
 public sealed class AgentHttpStatusException(int status, bool mentionsPromptCache)
     : InvalidOperationException($"Agent service returned HTTP {status}. Check credentials and account access.")
 {
@@ -246,7 +296,7 @@ public sealed class AgentRuntime
             var human = reply["reply"]?.GetValue<string>() ?? throw new InvalidOperationException("Agent reply is missing.");
             token.ThrowIfCancellationRequested();
             config = session.Agent!; message.Text = human[..Math.Min(24000, human.Length)];
-            config.Attention = Clip(reply["attention"], 1000); config.Memory = Clip(reply["memory"], 8000);
+            config.Attention = Clip(reply["attention"], 1000); config.Memory = Clip(reply["memory"], 8000); config.RecordSuccess();
             if (refresh && reply["scoreboard"] is JsonObject board)
             {
                 var sources = new HashSet<string>();
@@ -286,7 +336,13 @@ public sealed class AgentRuntime
         }
         catch (Exception e)
         {
-            if (!_stopping) { config.Settings.Enabled = false; config.Attention = e is OperationCanceledException ? "Agent interrupted; loop paused." : e is InvalidOperationException or ArgumentException ? e.Message : "Agent request failed. Check network and settings; loop paused."; message.Text = config.Attention; session.Status = "Needs attention"; }
+            if (!_stopping)
+            {
+                if (e is OperationCanceledException && token.IsCancellationRequested) { config.Settings.Enabled = false; config.Attention = "Agent interrupted; loop paused."; }
+                else if (AgentRunFailure.IsTransient(e)) config.RecordFailure(AgentRunFailure.Describe(e), true, DateTime.UtcNow);
+                else config.RecordFailure(e is InvalidOperationException or ArgumentException ? e.Message : "Agent request failed. Check network and settings; loop paused.", false, DateTime.UtcNow);
+                message.Text = config.Attention; session.Status = "Needs attention";
+            }
         }
         finally
         {

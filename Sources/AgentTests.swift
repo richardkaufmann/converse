@@ -19,6 +19,7 @@ import Foundation
     photoShareSelfTests(check)
     agentScheduleSelfTests(check)
     agentPaceSelfTests(check)
+    agentRetrySelfTests(check)
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
     agentDiscordRouterSelfTests(check)

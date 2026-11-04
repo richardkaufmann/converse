@@ -101,7 +101,7 @@ enum AgentPolicy {
     func finishCancelledTurn(_ session: Session, store: Store) {
         let wasEnabled = session.agent?.enabled == true
         let stopPressed = session.queuePaused
-        finish(session, store: store, success: false, error: "Agent stopped. Your draft and queued messages are preserved.")
+        finish(session, store: store, success: false, error: "Agent stopped. Your draft and queued messages are preserved.", kind: .cancelled)
         guard !shuttingDown else { return }
         if wasEnabled {
             session.agent?.enabled = true
@@ -252,8 +252,7 @@ enum AgentPolicy {
                     session.agent?.snapshot = snapshot; session.agent?.widgetSummary = String(display.prefix(1200))
                 }
                 if let memory = decoded.memory { session.agent?.workingMemory = String(memory.prefix(4000)) }
-                if let attention = reply?.attention { session.agent?.attention = String(attention.prefix(1000)) }
-                session.agent?.lastRunAt = Date(); session.agent?.lastOutcome = "Completed"
+                session.agent?.lastRunAt = Date(); session.agent?.recordSuccess("Completed", attention: reply?.attention)
                 session.agent?.applyPace(suggestedMinutes: decoded.nextRunInMinutes?.value, reason: decoded.paceReason?.value, at: Date())
                 if let reply {
                     self.deliver(reply, from: session, store: store)
@@ -296,7 +295,7 @@ enum AgentPolicy {
                 AgentConversation.shared.completed(session, responseID: responseID, text: "", intent: "neutral", success: false)
             } catch {
                 // URL errors and local errors are safe; API errors never include bodies.
-                self.finish(session, store: store, success: false, error: error.localizedDescription)
+                self.finish(session, store: store, success: false, error: error.localizedDescription, kind: AgentRunFailure.classify(error))
                 AgentConversation.shared.completed(session, responseID: responseID, text: "", intent: "neutral", success: false)
             }
         }
@@ -353,7 +352,7 @@ enum AgentPolicy {
         }
         Self.recordResponse(publicReply + (research.sources.isEmpty ? "" : "\n\nSources: " + research.markdown), session: session, responseID: responseID, store: store)
         try discordRouter.complete(request.id, text: publicReply, store: store, image: image, sharedSessionInformation: shareSession)
-        session.agent?.lastRunAt = Date(); session.agent?.lastOutcome = "Discord reply completed"
+        session.agent?.lastRunAt = Date(); session.agent?.recordSuccess("Discord reply completed", attention: nil)
         finish(session, store: store, success: true)
     }
     static func recordResponse(_ text: String, session: Session, responseID: UUID, store: Store,
@@ -390,7 +389,7 @@ enum AgentPolicy {
         guard !model.hasPrefix("cli|") else { throw AgentFailure.message("Invalid provider selection. Choose a model again.") }
         return try await api.respond(model: model, instructions: instructions, input: input, key: key, images: images, webSearch: webSearch, cacheKey: cacheKey, research: research, observe: observe)
     }
-    private func finish(_ session: Session, store: Store, success: Bool, error: String? = nil) {
+    private func finish(_ session: Session, store: Store, success: Bool, error: String? = nil, kind: AgentRunFailure.Kind = .permanent, now: Date = Date()) {
         tasks.removeValue(forKey: session.id)
         guard !shuttingDown, store.sessions.contains(where: { $0 === session }) else { return }
         session.busy = false
@@ -403,8 +402,7 @@ enum AgentPolicy {
         }
         if publicTurn { session.agent?.discordActiveRequestID = nil }
         if let error {
-            if !publicTurn && !session.resumeAfterInterrupt { session.agent?.enabled = false }
-            session.agent?.attention = error; session.agent?.lastOutcome = "Stopped: " + error
+            session.agent?.recordFailure(error, kind: kind, countsForLoop: !publicTurn && !session.resumeAfterInterrupt, at: now)
             session.messages.append(Message(role: "notice", text: error))
         }
         session.messages.removeAll { $0.role == "assistant" && $0.text.isEmpty && $0.images.isEmpty }
@@ -434,9 +432,12 @@ extension Store {
         if !enabled { config.nextRunAt = nil }
         else if !previous.enabled || previous.intervalSeconds != interval || previous.scheduleText != scheduleText || previous.scheduleTimeZone != rule.zoneID || previous.nextRunAt == nil { config.nextRunAt = rule.next(after: now) }
         session.agent = config
-        if !enabled {
+        if enabled { session.agent?.clearPause() }
+        else if previous.enabled || previous.pauseReason == nil {
             // A human-switched loop is off by choice, not by failure: no
             // alarm, but the reason stays visible wherever paused shows.
+            // Saving other settings keeps a host pause reason visible.
+            session.agent?.clearPause()
             session.agent?.attention = ""
             session.agent?.lastOutcome = "Loop turned off in Agent Setup."
         }

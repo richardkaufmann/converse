@@ -48,6 +48,11 @@ struct AgentConfig: Codable, Equatable {
     var nextRunAt: Date? = nil
     var lastLoopAt: Date? = nil
     var attention = ""
+    // Consecutive transient run failures (nil = none); a success resets it.
+    var transientFailures: Int? = nil
+    // "Paused: <reason> (<time>)" when the host paused the loop. It stays
+    // visible through later manual runs until re-enabled or cleared.
+    var pauseReason: String? = nil
     var artDirection: String? = nil
     var lastArtDirection: String? = nil
     var generateArt = true
@@ -436,6 +441,7 @@ extension AgentConfig {
         let schedule = try AgentSchedule.compile(interval: wire.intervalSeconds, text: wire.scheduleText, zone: wire.scheduleTimeZone)
         guard !wire.enabled || schedule.next(after: Date()) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
         let keepDeadline = enabled && wire.enabled && (try? scheduleRule()) == schedule && nextRunAt != nil
+        if wire.enabled && !enabled { clearPause() }
         settingsChanged()
         if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
         objective = wire.objective; self.repository = repository; model = wire.model
