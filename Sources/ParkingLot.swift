@@ -220,6 +220,7 @@ struct ParkingLotSidebar: View {
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
+    @StateObject private var paneHover = SidebarHoverState()
     private func show(_ pane: Int? = nil) {
         lot.open()
         workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
@@ -232,11 +233,11 @@ struct ParkingLotSidebar: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
             ProviderLogo(engine: "parking").frame(width: 24)
-            PaneButtonGroup {
+            PaneButtonGroup(hover: paneHover) {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
                     .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane, available: workspace.paneIsAvailable(pane, for: lot.id, in: state.id)) { show(pane) }
+                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane, available: workspace.paneIsAvailable(pane, for: lot.id, in: state.id), stripHovered: paneHover.overButtons) { show(pane) }
                 }
                 PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")

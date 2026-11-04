@@ -196,10 +196,10 @@ struct RemoteSidebarRow: View {
                 ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.engine == "parking" ? "Parking Lot" : row.model)
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
-            PaneButtonGroup(onHover: { hover.setButtonsHovered($0) }) {
+            PaneButtonGroup(hover: hover) {
                 PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane)) { assign(pane) }
+                    PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane), stripHovered: hover.overButtons) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
                 if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
@@ -211,7 +211,6 @@ struct RemoteSidebarRow: View {
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background((row.status == "Waiting for approval" || !(row.attention ?? "").isEmpty) && localPane == nil ? Color(red: 1, green: 0.84, blue: 0.35) : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .background(SidebarHoverDetails(text: helpText, state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
-            .onHover { hover.setHovered($0) }
             .contextMenu {
                 if row.engine != "parking" {
                 Button("Rename…") { renameText = row.title; renaming = true }

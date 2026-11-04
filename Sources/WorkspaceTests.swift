@@ -1,4 +1,5 @@
-import Foundation
+import AppKit
+import SwiftUI
 
 func workspaceSelfTests(_ check: (Bool, String) -> Void) {
     let wide = PaneSizing.widths(available: 1200, weights: [2, 1, 1])
@@ -131,5 +132,120 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         hover.setButtonsHovered(false); let back = hover.wantsDetails
         hover.setHovered(false)
         check(row && !buttons && back && !hover.wantsDetails, "Sidebar row summary card is suppressed while the pointer is over the row's buttons")
+        let tested = Workspace(), window = WindowState(workspace: tested)
+        tested.assign(other, to: window.id, pane: 1)
+        check(!tested.paneIsAvailable(1, for: mine, in: window.id) && tested.paneIsAvailable(2, for: mine, in: window.id) && tested.paneIsAvailable(3, for: mine, in: window.id), "With one pane up, panes 2 and 3 are free for another session")
     }
+    sidebarHoverSelfTests(check)
+}
+
+// Hosts real sidebar rows offscreen and drives their AppKit trackers with
+// window-local events, as AppKit would for a pointer sweep. No global events.
+func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
+    _ = NSApplication.shared
+    func settle(_ seconds: TimeInterval = 0.1) { RunLoop.current.run(until: Date().addingTimeInterval(seconds)) }
+    final class Harness {
+        let window: NSWindow, host: NSView
+        var row: SidebarHoverView?, strip: SidebarTrackingView?
+        var inside: Set<ObjectIdentifier> = []
+        var tracked: [NSRect] { trackers.map { view in view.trackingAreas.map { view.convert($0.rect, to: nil) }.first ?? .zero } }
+        var cards: [String] = []
+        init<V: View>(_ view: V) {
+            window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 320, height: 30), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            host = NSHostingView(rootView: view.frame(width: 320, height: 30))
+            window.contentView = host; window.orderBack(nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            func walk(_ view: NSView) {
+                if let found = view as? SidebarHoverView { row = found } else if let found = view as? SidebarTrackingView { strip = found }
+                view.subviews.forEach(walk)
+            }
+            walk(host)
+            row?.presentDetails = { [unowned self] in self.cards.append($0) }
+        }
+        var trackers: [SidebarTrackingView] { [row, strip].compactMap { $0 } }
+        func rect(_ view: SidebarTrackingView) -> NSRect { view.convert(view.trackedRect, to: nil) }
+        // Pane button centers in window coordinates: P, 1, 2, 3, X across the 98-point strip.
+        func button(_ index: Int) -> NSPoint { let frame = rect(strip!); return NSPoint(x: frame.minX + 9 + CGFloat(index) * 20, y: frame.midY) }
+        var name: NSPoint { NSPoint(x: 40, y: rect(strip!).midY) }
+        var outside: NSPoint { NSPoint(x: 500, y: rect(strip!).midY) }
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+            type == .mouseMoved
+                ? NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+                : NSEvent.enterExitEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
+        }
+        // AppKit semantics: entered/exited on crossing a tracking area, moved while inside it.
+        func move(to point: NSPoint, dropping dropped: SidebarTrackingView? = nil) {
+            for view in trackers {
+                let id = ObjectIdentifier(view), now = rect(view).contains(point), was = inside.contains(id)
+                if now { inside.insert(id) } else { inside.remove(id) }
+                if view === dropped { continue }
+                if now && !was { view.mouseEntered(with: event(.mouseEntered, point)) }
+                else if now { view.mouseMoved(with: event(.mouseMoved, point)) }
+                else if was { view.mouseExited(with: event(.mouseExited, point)) }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        func color(_ point: NSPoint) -> NSColor? {
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let local = host.convert(point, from: nil), scale = CGFloat(bitmap.pixelsWide) / host.bounds.width
+            let y = host.isFlipped ? local.y : host.bounds.height - local.y
+            return bitmap.colorAt(x: Int(local.x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB)
+        }
+        // Sample the fill left of the label glyph. Orange and green read lighter here than their nominal fills; white is (1, 1, 1).
+        func fill(_ index: Int) -> NSColor? { color(NSPoint(x: button(index).x - 6, y: button(index).y)) }
+        func orange(_ index: Int) -> Bool { fill(index).map { $0.redComponent > 0.8 && $0.greenComponent > 0.45 && $0.greenComponent < 0.8 && $0.blueComponent < 0.5 } ?? false }
+        func green(_ index: Int) -> Bool { fill(index).map { $0.greenComponent - $0.redComponent > 0.1 && $0.greenComponent - $0.blueComponent > 0.1 } ?? false }
+        func orangePanes() -> Set<Int> { Set((1...3).filter { orange($0) }) }
+        func close() { row?.closeDetails(); window.orderOut(nil); window.close() }
+    }
+    let workspace = Workspace(), state = WindowState(workspace: workspace), other = UUID()
+    let session = Session(entry: Entry(name: "Hover", command: "claude", directory: "~", engine: "claude"))
+    session.accountStatus = "test"
+    // Only one pane is up, and another session holds it.
+    workspace.assign(other, to: state.id, pane: 1)
+    let local = Harness(SidebarSession(session: session, workspace: workspace, state: state, showsModel: false))
+    guard let hover = local.row?.hoverState, local.strip != nil else { check(false, "Sidebar row hosts its card anchor and pane strip tracker"); local.close(); return }
+    check(local.tracked == [local.rect(local.row!), local.rect(local.strip!)] && local.rect(local.strip!).width == 98, "The pane strip tracks only its own 98 points, not the whole row")
+    check(local.orangePanes().isEmpty, "No pane is orange before the strip is hovered")
+    local.move(to: local.name); settle(0.6)
+    check(hover.wantsDetails && local.cards.count == 1 && local.cards.last?.contains("Hover") == true, "Hovering a session's name opens its summary card")
+    local.row?.closeDetails(); local.cards = []
+    local.move(to: local.button(0))
+    check(hover.overButtons && !hover.wantsDetails, "Hovering P suppresses the summary card")
+    check(local.orangePanes() == [2, 3], "Hovering P with only pane 1 occupied shows panes 2 and 3 orange")
+    local.move(to: local.button(4)); settle(0.6)
+    check(local.orangePanes() == [2, 3] && local.cards.isEmpty, "Hovering X still shows the free panes and never stacks the card on the buttons")
+    local.move(to: local.name)
+    check(!hover.overButtons && local.orangePanes().isEmpty, "Leaving the strip clears the orange panes")
+    settle(0.6)
+    check(hover.wantsDetails && local.cards.count == 1, "Moving from the buttons back to the name brings the summary card back")
+    local.row?.closeDetails(); local.cards = []
+    local.move(to: local.button(2)); local.move(to: local.outside, dropping: local.strip)
+    check(!hover.inside && !hover.overButtons, "A dropped strip exit cannot strand the buttons-hovered state")
+    local.move(to: local.name); settle(0.6)
+    check(hover.wantsDetails && local.cards.count == 1, "After a dropped strip exit the name hover still opens the card")
+    local.row?.closeDetails(); local.cards = []
+    workspace.assign(session.id, to: state.id, pane: 2); settle()
+    local.move(to: local.button(1))
+    check(local.green(2) && local.orangePanes() == [3], "The session's own pane stays green while the other free pane turns orange")
+    workspace.assign(UUID(), to: state.id, pane: 3); workspace.assign(UUID(), to: state.id, pane: 2); settle()
+    local.move(to: local.button(2))
+    check(local.orangePanes().isEmpty, "Nothing turns orange when every pane holds another session")
+    local.move(to: local.outside)
+    check(!hover.inside && !hover.overButtons, "Leaving the row clears all hover state")
+    local.close()
+
+    let remoteRow = DeviceSidebarRow(globalID: "home/" + UUID().uuidString, sessionID: UUID(), title: "Remote Hover", assistant: "Claude", engine: "claude", model: "m", effort: "e", access: "a", status: "Ready", busy: false, queued: 0, queuePaused: false)
+    let remote = Harness(RemoteSidebarRow(row: remoteRow, homeName: "Studio", online: true, showsModel: false, localPane: nil, freePanes: [2, 3], park: {}, assign: { _ in }))
+    guard let remoteHover = remote.row?.hoverState, remote.strip != nil else { check(false, "Remote sidebar row hosts its card anchor and pane strip tracker"); remote.close(); return }
+    remote.move(to: remote.name); settle(0.6)
+    check(remoteHover.wantsDetails && remote.cards.last?.contains("Remote Hover") == true, "Hovering a remote session's name opens its summary card")
+    remote.row?.closeDetails(); remote.cards = []
+    remote.move(to: remote.button(3)); settle(0.6)
+    check(remote.orangePanes() == [2, 3] && remote.cards.isEmpty, "Hovering a remote row's strip shows its free panes orange without the card")
+    remote.move(to: remote.name); settle(0.6)
+    check(remote.orangePanes().isEmpty && remote.cards.count == 1, "Leaving a remote row's strip restores its name card")
+    remote.close()
 }
