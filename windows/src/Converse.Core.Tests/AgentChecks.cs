@@ -21,6 +21,23 @@ static class AgentChecks
         check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
             && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
             && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
+        check(AgentRunFailure.IsTransient(new AgentHttpStatusException(503, false)) && AgentRunFailure.IsTransient(new AgentHttpStatusException(429, false)) && AgentRunFailure.IsTransient(new HttpRequestException("lost"))
+            && AgentRunFailure.IsTransient(new TaskCanceledException("timeout", new TimeoutException())) && !AgentRunFailure.IsTransient(new AgentHttpStatusException(401, false))
+            && !AgentRunFailure.IsTransient(new InvalidOperationException("Add a Meta API key")) && !AgentRunFailure.IsTransient(new TaskCanceledException("stopped")), "Windows retry: timeouts, network loss and HTTP 429/5xx are transient; keys and Stop are not");
+        var retry = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900 } };
+        retry.RecordFailure("The request timed out.", true, artNow); retry.RecordFailure("The request timed out.", true, artNow);
+        check(retry.Settings.Enabled && retry.TransientFailures == 2 && retry.Attention == "Retrying: The request timed out. (2 of 3)", "Windows retry: transient failures keep the loop on with a retry count");
+        var reset = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(retry)); reset.Attention = ""; reset.RecordSuccess();
+        check(reset.TransientFailures is null && reset.Settings.Enabled, "Windows retry: a success resets the counter");
+        retry.RecordFailure("The request timed out.", true, artNow);
+        check(!retry.Settings.Enabled && retry.PauseReason?.StartsWith("Paused: The request timed out. — failed 3 times in a row (") == true && retry.Attention == retry.PauseReason, "Windows retry: the third transient failure pauses with a reason");
+        retry.Attention = ""; retry.RecordSuccess();
+        check(retry.Attention == retry.PauseReason, "Windows retry: a later manual run keeps the pause reason visible");
+        var permanent = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900 } };
+        permanent.RecordFailure("Add a Meta API key.", false, artNow);
+        check(!permanent.Settings.Enabled && permanent.PauseReason?.StartsWith("Paused: Add a Meta API key.") == true, "Windows retry: permanent failures pause at once");
+        var reenable = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(permanent.Settings)); reenable.Enabled = true; permanent.Apply(reenable);
+        check(permanent.PauseReason is null && permanent.Settings.Enabled, "Windows retry: re-enabling clears the pause reason");
         restoredLoop.RestoreSchedule(fired.AddDays(3));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Overdue deadline survives restart for catch-up on normal tick");
         restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddHours(2));

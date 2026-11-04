@@ -113,6 +113,8 @@ extension Store {
         config.objective = "Keep Converse up to date, especially when critical bugs are reported. Check richardkaufmann/converse daily for releases and serious open issues. Treat critical bugs as reasons for grave concern: explain their impact and the recommended next step with links and observed dates. Do not install updates or change settings without the user's request. Answer questions about this app's current health, Group and hosts from supplied live evidence."
         config.repository = "richardkaufmann/converse"; config.intervalSeconds = 86400
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
+        // A daily check: keep its cadence fixed rather than agent-paced.
+        config.autoPace = false
         config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
         config.nextRunAt = config.nextScheduledRun(after: Date())
         session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"
@@ -194,6 +196,7 @@ extension Store {
             let created = createAgent(title: title, persist: false)
             created.agent?.objective = objective; created.agent?.generateArt = false; created.agent?.webSearch = false
             do { try saveChecked() } catch { sessions.removeAll { $0.id == created.id }; throw error }
+            Task { @MainActor in AgentRuntime.shared.objectiveSaved(created, store: self, notice: nil) }
             return "Created paused agent \(created.id.uuidString). No loop or external integration was started. Open agents with title \(title) for keys and tests."
         case "configure-agent":
             guard let id = request.target.flatMap(UUID.init(uuidString:)), let target = sessions.first(where: { $0.id == id }), var config = target.agent, !target.busy else { throw AgentFailure.message("Select an idle local agent by its exact ID from inspect.") }
@@ -204,6 +207,7 @@ extension Store {
             if let jolly = request.jollyAllowed { config.jollyAllowed = jolly }
             let previous = target.agent; config.settingsChanged(); target.agent = config
             do { try saveChecked() } catch { target.agent = previous; throw error }
+            if request.objective != nil { Task { @MainActor in AgentRuntime.shared.objectiveSaved(target, store: self, notice: nil) } }
             return "Saved agent \(id.uuidString). Credentials and service connectivity have not been tested. Loop/speech settings were unchanged."
         case "report-bug":
             let report = try GitHubBugReport(title: request.title ?? "", body: request.body ?? "").validated()

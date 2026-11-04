@@ -76,10 +76,12 @@ import Foundation
 
     // 2. Auto pacing.
     let now = date("2026-11-04T15:00:00Z")
-    var paced = AgentConfig(); paced.enabled = true; paced.turnLimit = 2; paced.intervalSeconds = 900; paced.nextRunAt = now.addingTimeInterval(900)
+    // An agent saved before objective pacing: Auto off, 4 hour maximum.
+    var paced = AgentConfig(); paced.autoPace = nil; paced.pacingDefaults = nil
+    paced.enabled = true; paced.turnLimit = 2; paced.intervalSeconds = 900; paced.nextRunAt = now.addingTimeInterval(900)
     var off = paced; off.applyPace(suggestedMinutes: 30, reason: "busy", at: now)
     check(off == paced && paced.autoPaceInstruction == nil && !AgentInstructions.build(objective: "o", parkingLotRequiresReview: false, artDirection: nil, autoPace: paced.autoPaceInstruction, supportTeaching: nil, webSearchAvailable: true, voiceTurn: false, omittedAttachments: []).contains("nextRunInMinutes"),
-          "Auto pacing is off by default: suggestions are ignored and the instruction is absent")
+          "Auto pacing off (older agents): suggestions are ignored and the instruction is absent")
     paced.autoPace = true
     check(paced.autoPaceInstruction?.contains("nextRunInMinutes") == true && paced.autoPaceInstruction?.contains("between 5 and 240 minutes") == true, "Auto pacing instruction appears only when on, with the owner's bounds")
     var clamp = paced; clamp.applyPace(suggestedMinutes: 20, reason: "release in progress", at: now)
@@ -127,12 +129,12 @@ import Foundation
         check(setup.autoPaceOn && setup.paceMinMinutes == 10 && setup.paceMaxMinutes == 60 && setup.nextRunAt == now.addingTimeInterval(900), "Turning auto pacing on keeps the scheduled deadline")
         setup.nextRunAt = now.addingTimeInterval(240 * 60); setup.autoPaceReason = "quiet"
         try setup.setAutoPace(false, minMinutes: 5, maxMinutes: 240, now: now)
-        check(!setup.autoPaceOn && setup.autoPace == nil && setup.autoPaceMinMinutes == nil && setup.autoPaceReason == nil && setup.nextRunAt == now.addingTimeInterval(900), "Turning auto pacing off returns to the configured interval")
+        check(!setup.autoPaceOn && setup.autoPace == false && setup.autoPaceMinMinutes == nil && setup.autoPaceReason == nil && setup.nextRunAt == now.addingTimeInterval(900), "Turning auto pacing off returns to the configured interval")
         for (low, high) in [(0.0, 60.0), (30, 10), (5, 20000), (Double.nan, 60)] {
             do { try setup.setAutoPace(true, minMinutes: low, maxMinutes: high, now: now); check(false, "Invalid auto pacing bounds rejected") } catch { check(true, "Invalid auto pacing bounds rejected: \(low)–\(high)") }
         }
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentConfig())) as! [String: Any]
-        for field in ["autoPace", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason", "artMinIntervalMinutes", "artMaxStaleHours", "lastArtScoreboard"] { legacy.removeValue(forKey: field) }
+        for field in ["autoPace", "pacingDefaults", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason", "artMinIntervalMinutes", "artMaxStaleHours", "lastArtScoreboard"] { legacy.removeValue(forKey: field) }
         let decoded = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
         check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240 && decoded.artMinMinutes == 30 && decoded.artStaleHours == 6, "Older agent archives decode with auto pacing off and default art throttle")
         var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90; saved.artMinIntervalMinutes = 60; saved.lastArtScoreboard = AgentScoreboard(summary: "", metrics: [], sentiment: "up")

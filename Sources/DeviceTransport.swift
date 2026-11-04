@@ -2122,6 +2122,8 @@ extension DeviceSyncService {
         let oldModel = session?.toolStatus.model
         var runAfterCommit = false
         var widgetAfterCommit = false
+        var pacingAfterCommit = false
+        var migrationNotice: String? = nil
         do {
             let result: DeviceParticipantResponse
             switch request.action {
@@ -2154,7 +2156,7 @@ extension DeviceSyncService {
             case "agent.configure":
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
                 guard settings.watched.allSatisfy({ ref in DeviceGlobalID(ref).map { acceptsParticipant(home: $0.home, groupID: group) } == true }) else { reject("Scope includes a participant outside this group."); return true }
-                try session.agent?.apply(settings); session.toolStatus.model = AgentModels.label(settings.model)
+                migrationNotice = try session.agent?.apply(settings); pacingAfterCommit = true; session.toolStatus.model = AgentModels.label(settings.model)
                 if settings.enabled && session.pending.isEmpty { session.queuePaused = false }
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent settings saved on home.", target: request.target, settings: session.agent?.wire(home: identity!.deviceID))
             default: reject("Unsupported participant operation."); return true
@@ -2167,6 +2169,7 @@ extension DeviceSyncService {
             }
             if let session, runAfterCommit { DispatchQueue.main.async { store.runNext(session) } }
             if let session, widgetAfterCommit, !isTestEnvironment { MainActor.assumeIsolated { AgentWindows.shared.widget(session) } }
+            if let session, pacingAfterCommit { MainActor.assumeIsolated { AgentRuntime.shared.objectiveSaved(session, store: store, notice: migrationNotice) } }
         } catch {
             if request.action == "session.rename", let session, let oldTitle {
                 session.title = oldTitle; if let oldTitleDate { session.titleUpdatedAt = oldTitleDate }

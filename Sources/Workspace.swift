@@ -228,7 +228,8 @@ extension Session {
         if let agent {
             let loop = agent.loopStatus(at: Date(), busy: busy, queuePaused: queuePaused, pendingCount: pending.count)
             lines.insert(loop, at: 1)
-            if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 2) }
+            lines.insert("Timing: " + agent.pacingSummary(extracting: MainActor.assumeIsolated { AgentRuntime.shared.readingPacing(self) }), at: 2)
+            if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 3) }
             if !agent.attention.isEmpty { lines.insert("ATTENTION REQUIRED\n" + agent.attention + "\n", at: 0) }
         }
         return lines.joined(separator: "\n")
@@ -281,9 +282,8 @@ struct SidebarSession: View {
                     Button("Agent Setup…") { AgentWindows.shared.setup(session) }
                     Button("Show scoreboard") { AgentWindows.shared.widget(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.needsAgentSetup)
-                    Button("Clear attention") { session.agent?.attention = ""; session.status = session.busy ? "Working…" : "Ready"; Store.shared.save() }
+                    Button("Clear attention banner") { Store.shared.clearAgentAttention(session) }
                 } else { Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy) }
-                ForEach(1...3, id: \.self) { pane in Button("Move to pane \(pane) here") { AppDelegate.shared.assign(session, to: state, pane: pane) } }
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }
                 }
@@ -291,9 +291,6 @@ struct SidebarSession: View {
                 if session.supportTeachingVersion != nil { Button("Disable app control") { session.supportTeachingVersion = nil; Store.shared.save() } }
                 Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }
                 if session.switchboardEnabled { Button("Disable session messaging") { session.switchboardEnabled = false; Store.shared.save() } }
-                Button("Park conversation") { workspace.park(session.id) }
-                Divider()
-                Button("Close conversation…", role: .destructive) { state.closingSessionID = session.id }
             }
             .alert("Close ‘\(session.title)’?", isPresented: closeBinding) {
                 Button("Cancel", role: .cancel) {}

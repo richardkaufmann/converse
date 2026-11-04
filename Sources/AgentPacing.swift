@@ -1,11 +1,12 @@
 import Foundation
 
-// Auto pacing is opt-in. The agent may suggest when its next automatic check
-// runs; the host clamps the suggestion to the owner's bounds and the configured
-// schedule window. Budgets, Stop and pause behave exactly as without it.
+// Auto pacing is on for new agents. The agent may suggest when its next
+// automatic check runs; the host clamps the suggestion to the owner's bounds
+// and the objective's window. A cadence the owner states in the objective
+// wins over suggestions. Budgets, Stop and pause behave exactly as without it.
 enum AgentPacing {
     static let defaultMinMinutes = 5.0
-    static let defaultMaxMinutes = 240.0
+    static let defaultMaxMinutes = 4320.0
     static let reasonLimit = 60
     static func reason(_ text: String?) -> String? {
         let value = (text ?? "").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
@@ -25,9 +26,10 @@ enum AgentPacing {
 extension AgentConfig {
     var autoPaceOn: Bool { autoPace == true }
     var paceMinMinutes: Double { autoPaceMinMinutes ?? AgentPacing.defaultMinMinutes }
-    var paceMaxMinutes: Double { max(paceMinMinutes, autoPaceMaxMinutes ?? AgentPacing.defaultMaxMinutes) }
+    var defaultPaceMaxMinutes: Double { pacingDefaults == nil ? AgentPacing.legacyMaxMinutes : AgentPacing.defaultMaxMinutes }
+    var paceMaxMinutes: Double { max(paceMinMinutes, autoPaceMaxMinutes ?? defaultPaceMaxMinutes) }
     var autoPaceInstruction: String? {
-        guard autoPaceOn else { return nil }
+        guard pacesAutomatically else { return nil }
         return "Auto pacing is on: you choose when the next automatic check runs. Add nextRunInMinutes (a number) and paceReason (a short reason, at most 60 characters) to your JSON object. Suggest sooner when things are actively changing or a human is waiting; suggest later when it is quiet. The host keeps your choice between \(AgentPacing.minutesText(paceMinMinutes)) and \(AgentPacing.minutesText(paceMaxMinutes)) minutes and inside the configured schedule; if you omit it, the configured interval applies."
     }
     // Validated setter used by Agent Setup. Turning pacing on or off never
@@ -37,9 +39,9 @@ extension AgentConfig {
             throw AgentFailure.message("Auto pacing needs a minimum of 1–1440 minutes and a maximum between the minimum and 7 days.")
         }
         let changed = on != autoPaceOn
-        autoPace = on ? true : nil
+        autoPace = on
         autoPaceMinMinutes = minMinutes == AgentPacing.defaultMinMinutes ? nil : minMinutes
-        autoPaceMaxMinutes = maxMinutes == AgentPacing.defaultMaxMinutes ? nil : maxMinutes
+        autoPaceMaxMinutes = maxMinutes == defaultPaceMaxMinutes ? nil : maxMinutes
         if !on { autoPaceReason = nil }
         if changed, canSchedule, let scheduled = nextScheduledRun(after: now) { nextRunAt = min(nextRunAt ?? scheduled, scheduled) }
     }
@@ -47,6 +49,8 @@ extension AgentConfig {
     // configured schedule's deadline (already reserved for loop ticks).
     mutating func applyPace(suggestedMinutes: Double?, reason: String?, at now: Date) {
         guard autoPaceOn, canSchedule, let rule = try? scheduleRule() else { return }
+        // An owner-stated cadence keeps the deadline already reserved for it.
+        guard explicitCadenceMinutes == nil else { autoPaceReason = nil; return }
         guard let minutes = suggestedMinutes, minutes.isFinite, minutes > 0, rule.kind != .daily else {
             autoPaceReason = nil
             if nextRunAt == nil { nextRunAt = rule.next(after: now) }
@@ -94,6 +98,9 @@ enum AgentArtPolicy {
 extension AgentConfig {
     var artMinMinutes: Double { artMinIntervalMinutes ?? AgentArtPolicy.defaultMinMinutes }
     var artStaleHours: Double { max(artMinMinutes / 60, artMaxStaleHours ?? AgentArtPolicy.defaultMaxStaleHours) }
+    // Objective timing wins over the saved throttle, which wins over defaults.
+    var effectiveArtMinMinutes: Double { objectivePacing?.artMinIntervalMinutes ?? artMinMinutes }
+    var effectiveArtStaleHours: Double { max(effectiveArtMinMinutes / 60, objectivePacing?.artMaxAgeHours ?? artStaleHours) }
     mutating func setArtThrottle(minMinutes: Double, maxStaleHours: Double) throws {
         guard minMinutes.isFinite, maxStaleHours.isFinite, (5...1440).contains(minMinutes), (1...168).contains(maxStaleHours), maxStaleHours * 60 >= minMinutes else {
             throw AgentFailure.message("Art refresh needs a minimum of 5–1440 minutes and a maximum of 1–168 hours, no shorter than the minimum.")
@@ -101,10 +108,24 @@ extension AgentConfig {
         artMinIntervalMinutes = minMinutes == AgentArtPolicy.defaultMinMinutes ? nil : minMinutes
         artMaxStaleHours = maxStaleHours == AgentArtPolicy.defaultMaxStaleHours ? nil : maxStaleHours
     }
+    // With an objective percent trigger, only numeric metrics that moved by
+    // more than that percent since the last art count, and the mood counts
+    // only when the objective asks for it.
     func shouldRegenerateArt(mood: String, board: AgentScoreboard?, now: Date) -> Bool {
-        AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: (lastArtDirection ?? "") != (artDirection ?? ""),
-            moodChanged: lastArtMood != mood, scoreboardChanged: AgentArtPolicy.scoreboardChanged(from: lastArtScoreboard, to: AgentArtPolicy.signature(board)),
-            minInterval: artMinMinutes * 60, maxStale: artStaleHours * 3600)
+        let spec = objectivePacing
+        let moodChanged: Bool, scoreboardChanged: Bool
+        if let percent = spec?.artChangePercent {
+            let before = lastArtMetricValues ?? AgentMetricNumber.values(lastArtScoreboard)
+            scoreboardChanged = AgentMetricNumber.moved(from: before, to: AgentMetricNumber.values(board), percent: percent)
+            moodChanged = spec?.artOnSentimentChange == true && lastArtMood != mood
+        } else {
+            let sentiment = spec?.artOnSentimentChange ?? true
+            func strip(_ board: AgentScoreboard?) -> AgentScoreboard? { board.map { var copy = $0; if !sentiment { copy.sentiment = nil }; return copy } }
+            scoreboardChanged = AgentArtPolicy.scoreboardChanged(from: strip(lastArtScoreboard), to: strip(AgentArtPolicy.signature(board)))
+            moodChanged = sentiment && lastArtMood != mood
+        }
+        return AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: (lastArtDirection ?? "") != (artDirection ?? ""),
+            moodChanged: moodChanged, scoreboardChanged: scoreboardChanged, minInterval: effectiveArtMinMinutes * 60, maxStale: effectiveArtStaleHours * 3600)
     }
 }
 
