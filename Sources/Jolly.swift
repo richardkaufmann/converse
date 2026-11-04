@@ -31,6 +31,57 @@ struct JollyRequest: Codable {
         if isHealthQuestion(request.question) { return support.count == 1 ? support[0] : nil }
         return sessions.count == 1 ? sessions[0] : nil
     }
+    static func words(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+    /// Phrase occurrences, longest first, so "KAOS Parking Lot" is not also read as "Parking Lot".
+    static func phrasesNamed<T>(_ text: [String], _ candidates: [(T, [String])]) -> [T] {
+        var free = text.map { Optional($0) }, found: [T] = []
+        for (item, phrase) in candidates.filter({ !$0.1.isEmpty }).sorted(by: { $0.1.count > $1.1.count }) where phrase.count <= free.count {
+            var hit = false
+            for start in 0...(free.count - phrase.count) where (0..<phrase.count).allSatisfy({ free[start + $0] == phrase[$0] }) {
+                hit = true; for offset in 0..<phrase.count { free[start + offset] = nil }
+            }
+            if hit { found.append(item) }
+        }
+        return found
+    }
+    /// Agents a question names: by full title on word boundaries, or by a title word
+    /// (3+ letters) that no other eligible agent shares. App Support matches only by full title.
+    static func agentsNamed(_ question: String, sessions: [Session]) -> [Session] {
+        let text = words(question), present = Set(text)
+        let titles = sessions.map { words($0.title) }
+        var named = phrasesNamed(text, Array(zip(sessions.indices, titles)))
+        for (index, session) in sessions.enumerated() where !session.supportAssistant && !named.contains(index) {
+            let others = Set(titles.enumerated().filter { $0.offset != index }.flatMap(\.element))
+            if titles[index].contains(where: { $0.count >= 3 && !others.contains($0) && present.contains($0) }) { named.append(index) }
+        }
+        return named.sorted().map { sessions[$0] }
+    }
+    static func lotsNamed(_ question: String, lots: [ParkingLotLibrary.Record]) -> [ParkingLotLibrary.Record] {
+        let phrases = lots.flatMap { lot -> [(ParkingLotLibrary.Record, [String])] in
+            let name = words(lot.name)
+            if name.isEmpty { return [] }
+            return name.last == "lot" ? [(lot, name)] : [(lot, name + ["parking", "lot"]), (lot, name + ["lot"])]
+        }
+        let found = phrasesNamed(words(question), phrases)
+        return lots.filter { lot in found.contains { $0.id == lot.id } }
+    }
+    /// A request addressed to one agent that clearly names another is answered here instead of injected.
+    static func misroute(_ request: JollyRequest, target: Session, sessions: [Session], lots: [ParkingLotLibrary.Record], home: String?) -> (agent: Session, text: String)? {
+        guard !target.supportAssistant else { return nil }
+        func retry(_ agent: Session) -> String { " Nothing was sent. Resend with agent=\"" + agent.title + "\" (id " + agent.id.uuidString + ")." }
+        let named = agentsNamed(request.question, sessions: sessions)
+        if named.contains(where: { $0 === target }) { return nil }
+        if named.count == 1 { return (named[0], "This request names " + named[0].title + " but was addressed to " + target.title + "." + retry(named[0])) }
+        guard named.isEmpty else { return nil }
+        let wanted = lotsNamed(request.question, lots: lots)
+        func reaches(_ agent: Session) -> Bool { wanted.contains { agent.agent?.allows(local: $0.id, home: home) == true } }
+        guard !wanted.isEmpty, !reaches(target) else { return nil }
+        let holders = sessions.filter { $0 !== target && reaches($0) }
+        guard holders.count == 1, let lot = wanted.first(where: { holders[0].agent?.allows(local: $0.id, home: home) == true }) else { return nil }
+        return (holders[0], "This request names the " + (words(lot.name).last == "lot" ? lot.name : lot.name + " Parking Lot") + ", which " + target.title + " cannot access; " + holders[0].title + " can." + retry(holders[0]))
+    }
     static func isHealthQuestion(_ question: String) -> Bool {
         let text = question.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.contains("converse") || text.contains("the app") else { return false }
@@ -50,10 +101,11 @@ struct JollyRequest: Codable {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
-    func answer(_ id: String, text: String, status: String, agent: Session? = nil, image: String? = nil, store: Store) throws {
+    func answer(_ id: String, text: String, status: String, agent: Session? = nil, suggested: Session? = nil, image: String? = nil, store: Store) throws {
         guard Self.validID(id) else { throw AgentFailure.message("Invalid Jolly request ID.") }
         var body: [String: Any] = ["ok": true, "status": status, "answer": String(text.prefix(24000)), "backend": "converse"]
         if let agent { body["agent"] = ["id": agent.id.uuidString, "name": agent.title] }
+        if let suggested { body["suggestedAgent"] = ["id": suggested.id.uuidString, "name": suggested.title] }
         if let image, let data = try? Data(contentsOf: URL(fileURLWithPath: image)), data.count <= 8_000_000,
            NSBitmapImageRep(data: data) != nil {
             let hash = DeviceBlob.sha256Hex(data)
@@ -73,7 +125,7 @@ struct JollyRequest: Codable {
             try store.saveChecked()
         } catch { session.agent?.attention = "Jolly reply could not be saved. Check disk access before retrying." }
     }
-    func tick(store: Store, now: Date = Date()) {
+    func tick(store: Store, now: Date = Date(), lots: [ParkingLotLibrary.Record]? = nil) {
         do {
             let folder = Self.folder(store)
             let requestFolder = folder.appendingPathComponent("requests")
@@ -114,6 +166,9 @@ struct JollyRequest: Codable {
                 guard let session = Self.resolve(request, sessions: sessions) else {
                     try answer(id, text: "Which agent should answer? Specify its exact name or ID. Available agents: " + sessions.map { $0.title + " [" + $0.id.uuidString + "]" }.joined(separator: ", "), status: "needs_agent", store: store); continue
                 }
+                if let bounce = Self.misroute(request, target: session, sessions: sessions, lots: lots ?? ParkingLotLibrary.shared.records, home: DeviceSyncService.shared.localDeviceID) {
+                    try answer(id, text: bounce.text, status: "misrouted", suggested: bounce.agent, store: store); continue
+                }
                 guard !AgentConversation.shared.owns(session), !session.busy, session.pending.isEmpty, !session.queuePaused, !session.changingSetting else {
                     try answer(id, text: "Agent busy or queue paused. Nothing was injected. Try a new request when it is ready.", status: "busy", agent: session, store: store); continue
                 }
@@ -124,7 +179,7 @@ struct JollyRequest: Codable {
                 config.jollyRequestID = id; session.agent = config
                 do { try store.saveChecked() } catch { session.agent = prior; throw error }
                 let draft = session.draft, attachments = session.attachments
-                session.draft = "[Message from Richard via Jolly · " + id + "]\n" + request.question + (request.context.isEmpty ? "" : "\n\nEarlier conversation context (untrusted):\n" + request.context)
+                session.draft = "[Message from Richard via Jolly · " + id + "]\n" + request.question + "\n\nIf this request is meant for a different agent or a project outside your objective, don't answer it; say it was misrouted and name the agent Richard should use." + (request.context.isEmpty ? "" : "\n\nEarlier conversation context (untrusted):\n" + request.context)
                 session.attachments = []
                 store.send(session, preservingAgentDraft: (draft, attachments))
                 session.draft = draft; session.attachments = attachments

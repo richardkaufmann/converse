@@ -40,6 +40,10 @@ class Tests(unittest.TestCase):
         self.assertNotIn("/v1/jobs/prepare", self.call("/openapi.json", auth=False)[1]["paths"])
         self.token.unlink()
         self.assertEqual(self.call("/identity")[0], 401)
+    def test_schema_steers_named_agents(self):
+        text = self.call("/openapi.json", auth=False)[1]["info"]["description"]
+        self.assertIn("Converse Steward is not a default", text)
+        self.assertIn("misrouted", text)
     def test_request_idempotency_and_correlation(self):
         self.live()
         body = {"question": "Price?", "agent": "Stock", "request_id": "same"}

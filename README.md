@@ -299,7 +299,7 @@ Monitoring does not submit issues or push code. To report a Converse bug, use [R
 
 ## Jolly (Mac)
 
-**Connect the Meta Muse iPhone app** means letting Meta's phone assistant, Jolly, send requests to allowed Converse agents on your Mac. For example: “Ask Project Steward what is blocking the release,” or “Ask Converse whether the app is up.” General app-health questions route to an allowed Converse App Support agent, which can report the app's state and the connected devices it knows about.
+**Connect the Meta Muse iPhone app** means letting Meta's phone assistant, Jolly, send requests to allowed Converse agents on your Mac. For example: “Ask Project Steward what is blocking the release,” or “Ask Converse whether the app is up.” General app-health questions route to an allowed Converse App Support agent, which can report the app's state and the connected devices it knows about. If Jolly addresses one agent but the request names another (“summarize the KAOS Parking Lot” sent to Converse Steward), Converse sends nothing and tells Jolly which agent to ask instead.
 
 This is optional and separate from the **Converse iPhone/iPad app**. Jolly is a conversational connector; the native Converse mobile app displays session panes. Connecting Jolly does not require changing an agent to a Meta reasoning model.
 
