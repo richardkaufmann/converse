@@ -90,6 +90,61 @@ static class SwitchboardSupervisionChecks
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }
+    // Mac parity: prose then a trailing converse fence runs; a fence that
+    // cannot run (text after it, several fences) explains why exactly once.
+    static async Task TrailingFence(Action<bool, string> check)
+    {
+        var root = Directory.CreateTempSubdirectory("converse-trailing-fence-").FullName;
+        try
+        {
+            var store = new SessionStore(root, new FakeRunner());
+            using var home = new DeviceSyncService(root, store, "Trailing fence");
+            var source = store.Create(new AgentEntry { Name = "Build A Video", Engine = "claude" });
+            var target = store.Create(new AgentEntry { Name = "Reviewer", Engine = "codex" });
+            foreach (var s in new[] { source, target }) { s.MessagingEnabled = true; s.QueuePaused = true; }
+            string Tell(string text) => "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "tell", to = target.Id.ToString(), text }) + "\n```";
+            int Notices() => source.Messages.Count(m => m.Role == "notice");
+            string LastNotice() => source.Messages.LastOrDefault(m => m.Role == "notice")?.Text ?? "";
+            bool Delivered(string text) => target.Pending.Any(p => p.Text.Contains(text));
+
+            var parsed = DeviceSyncService.ParseTrailingSwitchboardReply("Sending now.\nIt covers the intro.\n\n" + Tell("x") + "\n  \n");
+            check(parsed.Command?["command"]?.GetValue<string>() == "tell" && parsed.Rejection is null, "Prose followed by a trailing converse fence parses as a command");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply(Tell("x")).Command is not null, "A whole-reply fence still parses");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Sending.\r\n" + Tell("x").Replace("\n", "\r\n")).Command is not null, "CRLF trailing fences parse");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Here:\n" + Tell("x") + "\nThanks").Rejection == "text follows it", "Text after a fence rejects it");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("A:\n" + Tell("x") + "\nB:\n" + Tell("y")).Rejection == "the reply contains several command blocks", "Several fences reject the reply");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Sending:\n" + Tell("x") + "\n```bash\nls\n```").Rejection == "text follows it", "A later code block counts as text after the command");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Sending:\n```converse\n{\"command\":").Rejection == "its fence is not closed", "An unclosed fence rejects");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Sending:\n```converse\n{not json}\n```").Rejection == "its JSON is not a valid command", "Invalid command JSON rejects");
+            var quiet = new[] { "Example:\n> " + Tell("x").Replace("\n", "\n> "), "Example:\n    " + Tell("x").Replace("\n", "\n    "), "Example:\n```json\n{\"command\":\"tell\"}\n```", "Plain prose" };
+            check(quiet.All(q => DeviceSyncService.ParseTrailingSwitchboardReply(q) is { Command: null, Rejection: null }), "Quoted, indented and non-converse blocks are silent discussion");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("See:\n```swift\nlet x = 1\n```\nSending.\n" + Tell("x")).Command is not null, "An earlier non-command code block does not block a trailing command");
+            check(DeviceSyncService.ParseTrailingSwitchboardReply("Opening.\n```converse\n{\"command\":\"app-control\",\"action\":\"inspect\"}\n```") is { Command: null, Rejection: null }, "Trailing app-control keeps the whole-reply App Support rule");
+
+            store.FinalParticipantReply!(source, "Sending this to Reviewer now.\n\n" + Tell("Trailing hello"));
+            check(await Eventually(() => Delivered("Trailing hello")), "Windows/Linux session delivers a tell that follows a line of prose");
+            store.FinalParticipantReply!(source, Tell("Whole hello"));
+            check(await Eventually(() => Delivered("Whole hello")), "Windows/Linux whole-reply fences still deliver");
+            var pending = target.Pending.Count; var before = Notices();
+            store.FinalParticipantReply!(source, "Here it is:\n" + Tell("Followed") + "\nLet me know.");
+            check(await Eventually(() => Notices() == before + 1) && target.Pending.Count == pending &&
+                LastNotice() == "Switchboard: a converse command in this reply was not run because text follows it. Nothing was sent. Ask the session to resend the command as the last thing in its reply.",
+                "Windows/Linux fence followed by prose is not run and adds one notice");
+            store.FinalParticipantReply!(source, "A:\n" + Tell("One") + "\nB:\n" + Tell("Two"));
+            check(await Eventually(() => Notices() == before + 2) && target.Pending.Count == pending && LastNotice().Contains("several command blocks"),
+                "Windows/Linux reply with several fences is not run and adds one notice");
+            source.MessagingEnabled = false;
+            store.FinalParticipantReply!(source, "Sending:\n" + Tell("Untaught") + "\nmore");
+            store.FinalParticipantReply!(source, "Sending:\n" + Tell("Untaught"));
+            await Task.Delay(200);
+            check(target.Pending.Count == pending && Notices() == before + 2, "Windows/Linux untaught sessions ignore non-whole fences silently");
+            check(SwitchboardInstructions.ConversationPolicy.Contains("last thing in your reply (one per reply)") && !SwitchboardInstructions.ConversationPolicy.Contains("ENTIRE"), "Windows/Linux conversation policy teaches the trailing command rule");
+            source.MessagingEnabled = true; source.Pending.Clear();
+            home.TeachSwitchboard(source);
+            check(source.Pending.LastOrDefault()?.Text.Contains("LAST thing in your reply") == true && source.Pending.Last().Text.Contains("one command block per reply"), "Windows/Linux teaching says the command block must be last, one per reply");
+        }
+        finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+    }
     // Inject all must not launder peer or agent prompts into a foreground
     // hop-0 human turn, and must still apply Group admission per part.
     static void InjectAllFlags(Action<bool, string> check)
@@ -138,6 +193,7 @@ static class SwitchboardSupervisionChecks
     {
         InjectAllFlags(check);
         await ReplyTolerance(check);
+        await TrailingFence(check);
         var root = Directory.CreateTempSubdirectory("converse-supervision-").FullName;
         try
         {

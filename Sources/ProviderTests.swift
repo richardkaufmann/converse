@@ -11,6 +11,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     switchboardSelfTests(check)
     switchboardSupervisionSelfTests(check)
     switchboardReplyToleranceSelfTests(check)
+    switchboardTrailingFenceSelfTests(check)
     groupSwitchboardSelfTests(check)
     transcriptExportSelfTests(check)
     setupSelfTests(check)
@@ -195,9 +196,13 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
             session.draft = "switchboard-commentary-only:" + command; store.submit(session)
             pump { !session.busy }
             check(session.pending.isEmpty, "Codex command in commentary cannot execute when final answer is ordinary prose")
-            session.draft = "switchboard-output:Example:\n" + command; store.submit(session)
+            session.draft = "switchboard-output:Example:\n" + command + "\nThat is the format."; store.submit(session)
             pump { !session.busy }
-            check(session.pending.isEmpty, "Codex quoted final-answer command remains non-executable")
+            check(session.pending.isEmpty && session.messages.last { $0.role == "notice" }?.text.contains("text follows it") == true, "Codex final-answer command followed by prose is not run and explains why")
+            session.draft = "switchboard-output:Looking up sessions.\n" + command; store.submit(session)
+            pump { !session.busy }
+            check(session.pending.count == 1 && session.pending.first?.text.hasPrefix("[Converse switchboard directory") == true, "Codex final answer ending with a command fence after prose dispatches")
+            session.pending = []
             session.draft = "switchboard-missing-final:" + command; store.submit(session)
             pump { !session.busy }
             check(session.pending.isEmpty && session.messages.contains { $0.role == "notice" && $0.text.contains("final-answer capture was unavailable") }, "Missing Codex final-answer capture fails closed with a visible delivery notice")
