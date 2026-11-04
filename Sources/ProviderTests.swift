@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 func providerSelfTests(_ check: (Bool, String) -> Void) {
     museToolFailureSelfTests(check)
@@ -524,4 +525,16 @@ func claudeLiveInputSelfTests(_ store: Store, entry: Entry, pump: (() -> Bool, D
     pump({ !classic.busy }, 8)
     check(reply(classic) == "answer: classic", "Claude: the prompt-argument launch still completes")
     ClaudeLiveProcess.forcedOff = false
+    let tinted = Session(entry: entry)
+    check(StatusTint.status(tinted) == .primary, "Status text keeps the default color without background tasks")
+    tinted.claudeBackgroundTasks = ["t": "Audit"]
+    check(StatusTint.status(tinted) == StatusTint.task, "Task progress status uses the task color")
+    func resolved(_ color: Color, _ name: NSAppearance.Name) -> NSColor? {
+        var result: NSColor?
+        NSAppearance(named: name)?.performAsCurrentDrawingAppearance { result = NSColor(color).usingColorSpace(.sRGB) }
+        return result
+    }
+    let hues = [StatusTint.alert, StatusTint.queue, StatusTint.task].compactMap { resolved($0, .aqua)?.hueComponent }
+    check(hues.count == 3 && Set(hues.map { Int($0 * 12) }).count == 3, "Alert, queue and task colors are distinct hues")
+    check([StatusTint.queue, StatusTint.task].allSatisfy { resolved($0, .aqua) != resolved($0, .darkAqua) }, "Queue and task colors adapt to light and dark mode")
 }

@@ -473,6 +473,21 @@ struct SwitchboardStatusView: View {
     }
 }
 
+// One color per meaning, readable in light and dark: warm for trouble and
+// alerts, blue-gray for the queue, teal for background task progress.
+enum StatusTint {
+    static let alert = Color.orange
+    static let queue = Color(nsColor: dynamic(light: (0.36, 0.43, 0.53, 0.13), dark: (0.58, 0.66, 0.78, 0.17)))
+    static let task = Color(nsColor: dynamic(light: (0.05, 0.46, 0.43, 1), dark: (0.37, 0.83, 0.77, 1)))
+    static func status(_ s: Session) -> Color { s.claudeBackgroundTasks.isEmpty ? .primary : task }
+    private static func dynamic(light: (CGFloat, CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat, CGFloat)) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let c = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: c.3)
+        }
+    }
+}
+
 struct PendingMessagesView: View {
     @ObservedObject var session: Session
     var body: some View {
@@ -505,7 +520,7 @@ struct PendingMessagesView: View {
                     Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
                 }
             }
-        }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
+        }.font(.caption).padding(8).background(StatusTint.queue)
     }
 }
 

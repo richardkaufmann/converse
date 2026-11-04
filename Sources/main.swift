@@ -2461,7 +2461,7 @@ struct Conversation: View {
                 HStack {
                     Text(session.injectionNotice).fontWeight(.semibold); Spacer()
                     if !session.interrupted { Button("Dismiss") { session.injectionNotice = "" } }
-                }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.22))
+                }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(StatusTint.alert.opacity(0.22))
             }
             SwitchboardStatusView(session: session)
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
@@ -2484,7 +2484,7 @@ struct Conversation: View {
                 ViewThatFits(in: .horizontal) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 10) {
-                            Text(session.status).help(session.status)
+                            Text(session.status).foregroundStyle(StatusTint.status(session)).help(session.status)
                             Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary)
                             loginButton
                             Text("Last turn: " + session.toolStatus.usage).help("Last turn: " + session.toolStatus.usage)
@@ -2494,7 +2494,7 @@ struct Conversation: View {
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.fixedSize(horizontal: true, vertical: false)
                     HStack(spacing: 8) {
-                        Text(session.status).lineLimit(1).truncationMode(.tail).help(session.status)
+                        Text(session.status).foregroundStyle(StatusTint.status(session)).lineLimit(1).truncationMode(.tail).help(session.status)
                         Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary).fixedSize()
                         Spacer(minLength: 0)
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus, compact: true) { store.refreshStatus(session, quota: true) }
