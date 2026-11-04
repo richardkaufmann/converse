@@ -418,9 +418,11 @@ final class Store: ObservableObject {
         if handleLocalCommand(s) { return }
         let hasInput = !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty
         guard hasInput else { if interrupt { stop(s) }; return }
-        firstRun.teachIfNeeded(s)
-        if s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
-            let prompt = PendingPrompt(text: s.draft, images: s.attachments)
+        // A first-run teaching rides with this message; the queue keeps it if the turn cannot start.
+        let preamble = firstRun.teachIfNeeded(s)
+        if preamble != nil || s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
+            var prompt = PendingPrompt(text: s.draft, images: s.attachments)
+            prompt.hiddenPreamble = preamble
             if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
             s.draft = ""; s.attachments = []; s.queuePaused = false
             if interrupt && s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
@@ -456,6 +458,7 @@ final class Store: ObservableObject {
         } else {
             let prompts = s.pending
             s.pending = [PendingPrompt(switchboardHop: prompts.compactMap(\.switchboardHop).max(), components: prompts.flatMap { $0.components ?? [$0] }, originParticipants: prompts.flatMap { $0.groupOrigins }, agentRunReserved: prompts.contains { $0.agentRunReserved == true }, autonomous: prompts.contains { $0.autonomous == true || $0.agentRunReserved == true }, text: prompts.map(\.text).joined(separator: "\n\n"), images: prompts.flatMap(\.images))]
+            s.pending[0].hiddenPreamble = prompts.lazy.compactMap(\.hiddenPreamble).first
         }
         s.queuePaused = false
         s.injectionTargetID = s.pending.first?.id
@@ -535,7 +538,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -570,7 +573,7 @@ final class Store: ObservableObject {
         save()
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil) {
         guard s.entry.engine != "support" else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -596,7 +599,10 @@ final class Store: ObservableObject {
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
-        if clearDisplayBeforeReply { clearSessionDisplay(s) }
+        if clearDisplayBeforeReply {
+            clearSessionDisplay(s)
+            if let displayNotice { s.messages.append(Message(role: "notice", text: displayNotice)) }
+        }
         if s.title == "New conversation", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s.title = String(text.prefix(45)) }
         s.draft = ""; s.attachments = []; s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false; s.claudeStreamSeparators = []; s.claudeNoticedDenials = []; s.status = "Working…"
         // A live process's background tasks keep running into this turn.
@@ -612,7 +618,7 @@ final class Store: ObservableObject {
         }
         var args: [String] = []
         updateExplicitStatus(s)
-        var prompt = text
+        var prompt = hiddenPreamble.map { $0 + "\n\n" + text } ?? text
         if s.supportTeachingVersion != nil { prompt += "\n\n" + AppSupport.instructions(agent: false) }
         if includesLocalContext {
             prompt += "\n\n" + localContext(s, directory: directory)
@@ -3816,6 +3822,7 @@ if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == tr
     let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
     setenv("CONVERSE_DATA_DIR", isolated.path, 1)
     do {
+        try DemoReset.wipeSetupPreview(folder: isolated)
         if try DemoReset.consume(folder: isolated, enabled: DemoReset.enabled, clearCredentials: DemoReset.clearCredentials) != nil,
            let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
     } catch {

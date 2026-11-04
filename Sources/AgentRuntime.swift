@@ -51,7 +51,7 @@ enum AgentPolicy {
             }
         }
         for session in store.sessions where !session.busy && !session.queuePaused && session.pending.isEmpty {
-            guard !AgentConversation.shared.owns(session), var config = session.agent, config.reserveRun(at: now) else { continue }
+            guard !AgentConversation.shared.owns(session), !store.firstRun.holdsAgent(session), var config = session.agent, config.reserveRun(at: now) else { continue }
             session.agent = config
             do { try store.saveChecked() } catch { session.agent?.enabled = false; session.agent?.attention = "Could not save the run budget. Loop paused."; session.agent?.lastOutcome = "Paused: run budget could not be saved."; continue }
             store.enqueueSwitchboard(session, text: "[Agent loop tick] Work on your configured objective using current evidence and web research when needed. Report progress against our success criteria, update your scoreboard, and ask for attention only when needed.", reservedAgentRun: true, agentLoopTick: true)

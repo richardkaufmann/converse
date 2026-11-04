@@ -104,6 +104,8 @@ final class SupportNUXController: ObservableObject {
         session.supportProbeCompletion = { [weak self, weak session] connected in
             guard let self, self.generation == token, let session else { return }
             self.checking = false
+            // The check is plumbing, not conversation: keep it out of the transcript.
+            session.messages.removeAll { ($0.role == "user" && $0.text.hasPrefix(FirstRunGuide.connectionCheckPrefix)) || ($0.role == "assistant" && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == AppSupport.connectionReply) }
             if connected {
                 self.store.configureSupportAgent(session)
                 self.status = "Connected. Converse App Support is ready."
@@ -111,7 +113,7 @@ final class SupportNUXController: ObservableObject {
                 self.store.enqueueSwitchboard(session, text: "The user has completed provider login. Introduce yourself briefly as Converse App Support. Offer Security and privacy at converse-help://security, the README, Discord and Connect the Meta Muse iPhone app as Markdown links using converse-help://readme, converse-help://discord and converse-help://muse-iphone. Also include these getting-started links: \(AppSupport.guideLinks). Do not ask for another provider, start configuration, or claim any integration is connected. Wait for the user's setup request. End your welcome with exactly: \(AppSupport.closingInvitation)" + "\n\n" + self.store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true)
             } else { self.status = self.onConnected != nil ? "The model didn’t answer yet. Click Log in again, or I’m already signed in to check once more." : "The model did not confirm a working connection. Setup remains locked. Retry login or check the connection again." }
         }
-        session.draft = "Connection check only: reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
+        session.draft = FirstRunGuide.connectionCheckPrefix + " reply with exactly " + AppSupport.connectionReply + ". Do not call tools, change files, or add any other text."
         store.send(session)
         if !session.busy { session.supportProbeCompletion = nil; checking = false; status = "Could not start the connection check. Retry the provider login." }
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self, weak session] in
@@ -194,17 +196,13 @@ struct FirstRunRecord: Codable, Equatable {
 enum FirstRunText {
     static let providers = ["muse", "codex", "claude"]
     static func product(_ engine: String) -> String { ["muse": "Meta Muse", "codex": "OpenAI Codex", "claude": "Anthropic Claude"][engine] ?? AssistantFamily.name(engine) }
-    static func codingTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Coding Session" }
+    static func codingTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Coding" }
     static func agentTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Agent" }
     static let title = "Welcome to Converse!"
     static let question = "What provider would you like to have lead this app? (Pick one below.)"
     static func loginPrompt(_ engine: String) -> String { "Please press Return to log into \(AssistantFamily.name(engine)) using its normal process." }
     static let loginCommand = "/login"
-    static let codingWelcome = """
-    Welcome to your coding session. You're good to go. Try typing:
-
-    Add a new heading called Things To Do to the Parking Lot, with a first item "Get with Converse"
-    """
+    static let codingWelcome = "What shall we build today? You can also ask me to read the Parking Lot and react to it and update it."
     static func agentWelcome(_ title: String) -> String {
         "Welcome to your agent. You're good to go. It can read your Parking Lot and coding session. Try typing: What's in the Parking Lot, and what should I do first?\n\nRight-click \(title) in the left panel for Agent Setup, Run once, Show scoreboard and more."
     }
@@ -216,8 +214,13 @@ enum FirstRunText {
     /// README section bundled as Help: per-provider install commands for Mac.
     static let installTopic = "install-a-provider-cli"
     static let metaKeyURL = URL(string: "https://dev.meta.ai/docs/models")!
-    static let lotWelcome = "This is your Parking Lot: an outline for ideas, bugs and future prompts. Your coding session and agent are linked to it and can read it and suggest changes."
-    static let agentObjective = "Help me get started with Converse. Read the Parking Lot and my coding session, suggest the next small step, and keep the Parking Lot's Things To Do current when I ask. Distinguish verified results from claims."
+    /// Shown by App Support after sign-in; a notice, so it is never sent to the model.
+    static let supportHelp = "You can ask me to set up your agent, change options in the app, or just ask me about the weather! Seriously, I've read the manual for the app 🙂 and can answer any questions you have about it. I'm showing you now your coding session. Those \"1 2 3\" icons on the left can be used to assign these sessions (including me) to the first, second and third panes."
+    static let lotHeading = "What Are We Building"
+    static let lotFirstItem = "An app that pulls data from wherever and figures out how to do whatever"
+    static func agentObjective(_ codingTitle: String) -> String { "Monitor the health of the \(codingTitle) session." }
+    static let agentArtDirection = "Show me a picture that matches the sentiment of the app's progress."
+    static let agentInterval: Double = 3600
 }
 
 // The Converse shoe, kept small. Saved once into the data folder so the
@@ -254,6 +257,7 @@ enum ConverseShoe {
 enum FirstRunCLI: Equatable { case checking, installed, missing(String) }
 
 final class FirstRunGuide: ObservableObject {
+    static let connectionCheckPrefix = "Connection check only:"
     @Published private(set) var record: FirstRunRecord?
     @Published var cli: [String: FirstRunCLI] = [:]
     @Published var metaKey = ""
@@ -276,6 +280,20 @@ final class FirstRunGuide: ObservableObject {
         change(&next); record = next
         do { try JSONEncoder().encode(next).write(to: file, options: .atomic) } catch { NSLog("Converse could not save first-run progress.") }
     }
+    /// The starter agent: on, hourly, Auto pacing, mood art only with a saved Meta key.
+    func starterDefaults(_ agent: Session, codingTitle: String) {
+        agent.agent?.objective = FirstRunText.agentObjective(codingTitle)
+        agent.agent?.artDirection = FirstRunText.agentArtDirection
+        agent.agent?.generateArt = metaKeySaved()
+        agent.agent?.intervalSeconds = FirstRunText.agentInterval; agent.agent?.scheduleText = nil
+        agent.agent?.autoPace = true; agent.agent?.pacingDefaults = 1
+        agent.agent?.enabled = true; agent.agent?.attention = ""; agent.agent?.clearPause()
+    }
+    /// The starter agent's loop waits for a provider and a finished sign-in.
+    func holdsAgent(_ s: Session) -> Bool {
+        guard let record, s.id == record.agentID else { return false }
+        return ["choose", "later", "login"].contains(record.stage)
+    }
     func session(_ id: UUID?) -> Session? { id.flatMap { id in store.sessions.first { $0.id == id } } }
     var support: Session? { session(record?.supportID) }
     var coding: Session? { session(record?.codingID) }
@@ -292,20 +310,21 @@ final class FirstRunGuide: ObservableObject {
         support.messages = []
         let lotID = library.records.first?.id ?? ParkingLotStore.id
         if let lot = library.lot(lotID) {
-            var welcome = ParkingLotRow(heading: false, text: FirstRunText.lotWelcome)
-            if let image = shoe.flatMap(NSImage.init(contentsOfFile:)), let path = try? lot.saveImage(image) { welcome.images = [path] }
-            lot.openStarter([ParkingLotRow(heading: true, text: "Welcome to Converse"), welcome,
-                             ParkingLotRow(heading: true, text: "New features"), ParkingLotRow(heading: false, text: ""),
-                             ParkingLotRow(heading: true, text: "Bugs"), ParkingLotRow(heading: false, text: "")])
+            var first = ParkingLotRow(heading: false, text: FirstRunText.lotFirstItem)
+            if let image = shoe.flatMap(NSImage.init(contentsOfFile:)), let path = try? lot.saveImage(image) { first.images = [path] }
+            // No blank items: each section already offers its own New item… input.
+            lot.openStarter([ParkingLotRow(heading: true, text: FirstRunText.lotHeading), first,
+                             ParkingLotRow(heading: true, text: "New features"), ParkingLotRow(heading: true, text: "Bugs")])
         }
         let coding = store.create(store.defaultEntry(engine: "claude"), persist: false)
-        coding.title = "Coding Session"
+        coding.title = "Coding"
         coding.messages = [Message(role: "notice", text: FirstRunText.placeholder)]
         let agent = store.createAgent(title: "Agent", persist: false)
         agent.messages = [Message(role: "notice", text: FirstRunText.placeholder)]
-        agent.agent?.objective = FirstRunText.agentObjective
         agent.agent?.watchedSessions = [lotID, coding.id]
-        agent.agent?.enabled = false
+        starterDefaults(agent, codingTitle: coding.title)
+        // On from the start (never red), but held by holdsAgent until sign-in finishes.
+        agent.agent?.nextRunAt = Date().addingTimeInterval(FirstRunText.agentInterval)
         // Write the first-run record before marking setup complete, so a crash
         // between the two writes leaves a state the next launch can recover.
         record = FirstRunRecord(stage: "choose", supportID: support.id, codingID: coding.id, agentID: agent.id, lotID: lotID)
@@ -353,6 +372,13 @@ final class FirstRunGuide: ObservableObject {
         var supportEntry = entry; supportEntry.directory = workspace.path
         if support.entry.engine != engine { support.remoteID = nil; support.started = false }
         support.entry = supportEntry
+        // App Support also runs as an agent: bind its agent model to the same login,
+        // or a Muse subscription sign-in would still be checked through the Meta API.
+        if support.agent != nil {
+            let model = agentModel(engine, account: profile.id)
+            support.agent?.model = model; support.toolStatus.model = AgentModels.label(model)
+            support.agent?.attention = ""
+        }
         if let coding, !coding.busy, !coding.messages.contains(where: { $0.role == "user" }) {
             if coding.entry.engine != engine || coding.entry.accountID != profile.id {
                 coding.remoteID = nil; coding.started = false; coding.choices = SessionChoices(); coding.toolStatus = ToolStatus()
@@ -365,6 +391,7 @@ final class FirstRunGuide: ObservableObject {
             let model = agentModel(engine, account: profile.id)
             agent.agent?.model = model; agent.toolStatus.model = AgentModels.label(model)
             agent.title = FirstRunText.agentTitle(engine)
+            starterDefaults(agent, codingTitle: coding?.title ?? FirstRunText.codingTitle(engine))
             agent.messages = [Message(role: "notice", text: FirstRunText.agentWelcome(agent.title))]
         }
         let shoe = ConverseShoe.save(in: store.folder)
@@ -410,19 +437,30 @@ final class FirstRunGuide: ObservableObject {
         if support.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == FirstRunText.loginCommand { support.draft = "" }
         login.attach(support); login.verify()
     }
+    /// Puts a session in a pane of the first window, as the sidebar's 1 2 3 do. Injectable for tests.
+    var place: (Session, Int) -> Void = { session, pane in
+        guard let app = AppDelegate.shared, let state = app.windows.first?.1 else { return }
+        app.assign(session, to: state, pane: pane)
+    }
     func connected(_ session: Session) {
         guard let engine = record?.provider else { return }
         update { $0.stage = "done" }
+        // The first automatic check comes an hour after sign-in, not at once.
+        if let agent, agent.agent?.canSchedule == true, let next = agent.agent?.nextScheduledRun(after: Date()) { agent.agent?.nextRunAt = next; store.save() }
         let coding = coding?.title ?? FirstRunText.codingTitle(engine), agent = agent?.title ?? FirstRunText.agentTitle(engine)
-        store.enqueueSwitchboard(session, text: "The user picked \(FirstRunText.product(engine)) and finished login. Introduce yourself in two or three short sentences as Converse App Support. Say their \(coding) and \(agent) are ready in the left panel, linked to the Parking Lot, and suggest clicking \(coding) to start. Mention [Security and privacy](converse-help://security) and [README](converse-help://readme). Do not ask for another provider or claim any integration is connected. End with exactly: \(AppSupport.closingInvitation)" + "\n\n" + store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true)
+        // The help notice is posted after the hidden teaching request is cleared from view.
+        store.enqueueSwitchboard(session, text: "The user picked \(FirstRunText.product(engine)) and finished login. Converse has just shown them a short help message from you about what you can do and the 1 2 3 pane icons, with their \(coding) session open beside you and their \(agent) in the left panel, both linked to the Parking Lot. Do not repeat it or introduce yourself again. Do not ask for another provider or claim any integration is connected. Reply with exactly: \(AppSupport.closingInvitation)" + "\n\n" + store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true, displayNotice: FirstRunText.supportHelp)
+        place(session, 1)
+        if let coding = self.coding { place(coding, 2) }
     }
-    /// The coding session learns the switchboard with its first human request.
-    func teachIfNeeded(_ s: Session) {
-        guard let record, s.id == record.codingID, record.teachCoding == true, !s.isAgentSession else { return }
+    /// The coding session learns the switchboard with its first human request:
+    /// returns the teaching to send ahead of that request in the same turn.
+    /// Only the typed text is shown, and there is no acknowledgement turn.
+    func teachIfNeeded(_ s: Session) -> String? {
+        guard let record, s.id == record.codingID, record.teachCoding == true, !s.isAgentSession else { return nil }
         update { $0.teachCoding = false }
         s.switchboardEnabled = true
-        // Hidden like the support hand-off: the reply and the request stay visible.
-        store.enqueueSwitchboard(s, text: store.switchboardTeaching(s), clearDisplayBeforeReply: true)
+        return store.switchboardTeaching(s, answering: true)
     }
     func loginAgain() {
         guard let support, record?.stage == "login", !login.checking, !login.waitingForLogin, !support.busy else { return }
@@ -437,7 +475,9 @@ final class FirstRunGuide: ObservableObject {
             try metaKeyWriter(value); metaKey = ""
             metaStatus = "Saved in your Mac’s Keychain. Muse Spark agents and image tools can use it."
             if record?.provider == "muse", let agent, !agent.busy, AgentModels.parse(agent.agent?.model ?? "") != nil {
-                agent.agent?.model = "muse-spark-1.3"; agent.toolStatus.model = AgentModels.label("muse-spark-1.3"); store.save()
+                agent.agent?.model = "muse-spark-1.3"; agent.toolStatus.model = AgentModels.label("muse-spark-1.3")
+                if !agent.messages.contains(where: { $0.role == "user" }) { agent.agent?.generateArt = true }
+                store.save()
             }
             objectWillChange.send()
         } catch { metaStatus = error.localizedDescription }

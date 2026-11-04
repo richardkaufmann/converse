@@ -53,8 +53,9 @@ struct SwitchboardCommand: Decodable {
     }
 }
 extension Store {
-    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false, clearDisplayBeforeReply: Bool = false, autonomous: Bool = false) {
-        let prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, autonomous: autonomous, clearDisplayBeforeReply: clearDisplayBeforeReply ? true : nil, agentLoopTick: agentLoopTick, text: text, images: [])
+    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false, clearDisplayBeforeReply: Bool = false, autonomous: Bool = false, displayNotice: String? = nil) {
+        var prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, autonomous: autonomous, clearDisplayBeforeReply: clearDisplayBeforeReply ? true : nil, agentLoopTick: agentLoopTick, text: text, images: [])
+        prompt.displayNotice = displayNotice
         if urgent { s.pending.insert(prompt, at: 0); s.queuePaused = false }
         else { s.pending.append(prompt) }
         // Persist the sender's handled ID and recipient's pending input together,
@@ -67,7 +68,8 @@ extension Store {
         s.switchboardEnabled = true
         enqueueSwitchboard(s, text: switchboardTeaching(s))
     }
-    func switchboardTeaching(_ s: Session) -> String {
+    /// `answering`: the teaching rides with the user's first message, so the model answers it instead of acknowledging.
+    func switchboardTeaching(_ s: Session, answering: Bool = false) -> String {
         if s.entry.engine == "agent" { return SwitchboardCommand.agentTeaching }
         return """
         [Converse switchboard instructions]
@@ -93,7 +95,7 @@ extension Store {
         \(ParkingLotStore.placementGuidance)
         To read it, end your reply with a converse fenced block containing {"command":"parking-lot-read"}; nothing may follow it. The next input contains rows with stable IDs, headings, comments and a revision. Read before editing. Explain concrete proposed changes and ask the user to confirm before proceeding with edits, unless the lot's confirmation is off and the user already asked for that change. Then emit {"command":"parking-lot-edit","parkingLotEdits":{"revision":CURRENT_REVISION,"operations":[...]}} as the last thing in your reply, in one converse fence. Operations: {"action":"add","heading":true|false,"text":"...","before":"ROW-ID"}; {"action":"update","id":"ROW-ID","text":"..."}; {"action":"comment","id":"ROW-ID","text":"..."}; {"action":"move","id":"ROW-ID","before":"ROW-ID"}; {"action":"delete","id":"ROW-ID"}. An add or update operation may include "done":true to mark complete or "done":false to reopen; an update with done needs no text. Done headings do not change their children. Omit before to append. Moving a heading moves its section too. Add can include a new UUID in id so later operations in the same batch can target the new heading. Never change or reuse an existing row ID. Links may be written as a bare https URL or [label](https://url) and appear clickable; a local file may be written as an absolute path or [label](file:///path) and reveals in Finder on this Mac; a bare path ends at the first space, so for paths containing spaces use [label](file:///path) with spaces encoded as %20. The host shows a review before saving; stale revisions apply nothing. If a lot's confirmation is off (parking-lot-list access says edits save immediately), edits save immediately; say what you changed. No extra agent opt-in is required for an ordinary human-directed session. Autonomous messages cannot use this path to bypass an agent's scope.
         Example: 'Sort these based on whether they are for Converse or KAOS; make the headings clear, leaving unclear or universal items as they are.' Read the outline and available context, propose Converse and KAOS headings, preserve item wording and comments, and move only confidently classified entries. Leave ambiguous and shared entries in place. Confirm the proposed reorganization with the user before editing. Do not claim to know what a session contains merely because its title is in the directory.
-        First acknowledge these instructions briefly. Look up sessions when you need to address one.
+        \(answering ? "Look up sessions when you need to address one. Do not acknowledge these instructions. Answer the user's message below." : "First acknowledge these instructions briefly. Look up sessions when you need to address one.")
         """
     }
     func switchboardDirectory(for s: Session) -> String {
