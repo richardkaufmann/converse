@@ -96,9 +96,21 @@ enum AgentModels {
         entry.accountID = account.id; entry.accountName = account.name; entry.accountDirectory = account.directory; entry.useDefaultAccountStore = account.useDefaultStore
         return entry
     }
+    static let missingMetaKey = "Add a Meta API key in Agent Setup, or choose Claude/Codex as this agent's model."
+    static func installed(_ account: AccountProfile, store: Store) -> Bool {
+        store.entries.first(where: { $0.engine == account.engine }).map(store.agentCommandAvailable) == true
+    }
+    // Preferred CLI for a new agent without a Meta key: Claude, then Codex, then Muse.
+    static func defaultCLI(store: Store) -> String? {
+        for engine in ["claude", "codex", "muse"] {
+            if let account = store.accounts.first(where: { $0.engine == engine && installed($0, store: store) }) { return reference(engine: engine, account: account.id) }
+        }
+        return nil
+    }
     static func options(store: Store) -> [DeviceChoiceDTO] {
         var choices: [DeviceChoiceDTO] = []
-        for account in store.accounts where store.entries.contains(where: { $0.engine == account.engine }) {
+        // Omit providers whose CLI is not installed; Agent Setup still shows the saved choice.
+        for account in store.accounts where installed(account, store: store) {
             let sessions = store.sessions.filter { $0.entry.accountID == account.id && !$0.isAgentSession }
             let prefix = account.engine.capitalized + " · " + account.name + " · "
             choices.append(DeviceChoiceDTO(id: reference(engine: account.engine, account: account.id), label: prefix + "CLI default"))
@@ -110,7 +122,7 @@ enum AgentModels {
         return choices
     }
     @MainActor static func catalog(store: Store) async -> [DeviceChoiceDTO] {
-        let entries = store.entries, accounts = store.accounts
+        let entries = store.entries, accounts = store.accounts.filter { installed($0, store: store) }
         var result = options(store: store)
         let discovered = await Task.detached { discover(entries: entries, accounts: accounts) }.value
         for option in discovered where !result.contains(where: { $0.id == option.id }) { result.append(option) }

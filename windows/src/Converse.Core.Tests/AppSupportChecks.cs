@@ -126,6 +126,49 @@ internal static class AppSupportChecks
                 explicitAction = true; session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 1, "Native agents dispatch only the explicit appControl operation");
             }
+            {
+                // Judges with only Claude Code or Codex: no Meta key must not block or pause a completed reply.
+                var store = new SessionStore(Path.Combine(root, "art-optional"));
+                using var devices = new DeviceSyncService(store.Folder, store);
+                var bin = Path.Combine(root, "fake-path"); Directory.CreateDirectory(bin);
+                foreach (var name in new[] { "claude", "codex" }) File.WriteAllText(Path.Combine(bin, name), "");
+                store.AgentCommandAvailable = entry => CommandResolution.Resolve(entry.Command, false, new[] { bin }) is not null;
+                store.AgentSecret = _ => null;
+                var cliAgent = store.CreateAgent("CLI judge", false);
+                check(AgentModels.Parse(cliAgent.Agent!.Settings.Model)?.Engine == "claude" && !cliAgent.Agent.Settings.GenerateArt, "Without a Meta key a new agent defaults to the installed Claude CLI with mood art off");
+                check(AgentModels.Options(store).Select(o => AgentModels.Parse(o.Id)?.Engine).SequenceEqual(new[] { "claude", "codex" }), "Agent model options omit a provider whose CLI is not on PATH");
+                File.Delete(Path.Combine(bin, "claude"));
+                check(AgentModels.Parse(store.CreateAgent("Codex judge", false).Agent!.Settings.Model)?.Engine == "codex", "Codex is the default when it is the only installed CLI");
+                File.Delete(Path.Combine(bin, "codex"));
+                var none = store.CreateAgent("No CLI", false).Agent!.Settings;
+                check(none.Model == "muse-spark-1.3" && !none.GenerateArt, "With no installed CLI the Meta API model remains, without mood art");
+                store.AgentSecret = name => name == "meta" ? "fixture-key" : null;
+                File.WriteAllText(Path.Combine(bin, "claude"), "");
+                var meta = store.CreateAgent("Meta judge", false).Agent!.Settings;
+                check(meta.Model == "muse-spark-1.3" && meta.GenerateArt, "A saved Meta key keeps the Meta API model and mood art defaults");
+
+                var session = store.CreateAgent("Art fallback", false);
+                session.Agent!.Settings.Model = "muse-spark-1.3"; session.Agent.Settings.GenerateArt = true; session.Agent.Settings.Enabled = true; session.Agent.Settings.ArtDirection = "Watercolor";
+                var keyReads = 0;
+                devices.Agents.ReadSecret = name => name == "meta" && keyReads++ == 0 ? "fixture-key" : null;
+                devices.Agents.Request = async (request, token) =>
+                {
+                    if (request.RequestUri!.AbsolutePath.EndsWith("/images/generations")) throw new HttpRequestException("image service down");
+                    await Task.Yield();
+                    var reply = new JsonObject { ["reply"] = "Completed CLI-style reply", ["attention"] = "", ["memory"] = "", ["tell"] = new JsonArray(), ["artPrompt"] = "A cheerful lighthouse", ["scoreboard"] = new JsonObject { ["summary"] = "Steady progress", ["sentiment"] = "up", ["metrics"] = new JsonArray() } };
+                    return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
+                };
+                bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.Last().Role == "notice" && session.Messages.Last().Text == AgentArtPolicy.Unavailable
+                    && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget?.Summary == "Steady progress";
+                session.Draft = "Check progress"; store.Submit(session); await WaitIdle(session);
+                check(KeptReply(), "A missing Meta key for mood art keeps the completed reply and the loop, with a quiet notice");
+                keyReads = 0; devices.Agents.ReadSecret = name => name == "meta" ? "fixture-key" : null; session.Agent.Widget = null; session.Agent.ArtAtUtc = null; session.Agent.ArtMood = null;
+                session.Draft = "Check again"; store.Submit(session); await WaitIdle(session);
+                check(KeptReply(), "An image API failure keeps the completed reply and the loop, with a quiet notice");
+                devices.Agents.ReadSecret = _ => null; session.Agent.Settings.Enabled = false;
+                session.Draft = "Run once"; store.Submit(session); await WaitIdle(session);
+                check(session.Agent.Attention.Contains(AgentPolicy.MissingMetaKey), "Run once without a Meta key says how to fix it");
+            }
             foreach (var engine in new[] { "claude", "codex", "muse" })
             {
                 var profile = Path.Combine(root, "profiles", engine);

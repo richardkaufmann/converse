@@ -41,8 +41,22 @@ struct PendingPrompt: Codable, Identifiable {
 // Credentials stay in CLI stores; Converse only retains a label and directory.
 struct ProviderCommand {
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    static var preferredDirectories: [String] { [NSHomeDirectory() + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"] }
+    // Prompt-free check that a command's executable exists in the directories
+    // `script` searches (its preferred folders, then the app's PATH). A login
+    // shell may add more, so callers use this to rank or hide choices, never
+    // to reject a saved selection.
+    static func resolve(_ command: String, directories: [String]? = nil) -> String? {
+        guard let name = command.split(whereSeparator: \.isWhitespace).first.map(String.init) else { return nil }
+        if name.contains("/") {
+            let path = NSString(string: name).expandingTildeInPath
+            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        }
+        let search = directories ?? preferredDirectories + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        return search.lazy.map { ($0 as NSString).appendingPathComponent(name) }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
     static func script(entry: Entry, arguments: [String], effort: String? = nil) -> String {
-        var setup = "export PATH=\(quote(NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS")):\"$PATH\"; "
+        var setup = "export PATH=\(quote(preferredDirectories.joined(separator: ":"))):\"$PATH\"; "
         if entry.engine == "claude", entry.useDefaultAccountStore == true { setup += "unset CLAUDE_CONFIG_DIR; " }
         if let directory = entry.accountDirectory, !directory.isEmpty {
             let path = NSString(string: directory).expandingTildeInPath

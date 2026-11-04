@@ -11,7 +11,7 @@ import Foundation
         AgentFailure.message("The model is overloaded. Please retry.")]
     check(transient.allSatisfy { AgentRunFailure.classify($0) == .transient }, "Timeouts, lost networks, HTTP 429/5xx and overloaded providers are transient")
     let permanent: [Error] = [AgentFailure.message("Meta rejected the API key (HTTP 401). Check or replace it in Agent Setup."),
-        AgentFailure.message("Add a Meta API key or choose a logged-in provider in Agent Setup."), AgentFailure.message("This activation reached its turn limit. The next scheduled loop gets a fresh limit."),
+        AgentFailure.message(AgentModels.missingMetaKey), AgentFailure.message("This activation reached its turn limit. The next scheduled loop gets a fresh limit."),
         AgentFailure.message("No future run is available. Review the schedule/calendar."), AgentFailure.message("Invalid agent settings. Check scope, interval and run budget."),
         AgentFailure.message("GitHub denied access or reached its rate limit (HTTP 403). Check token permissions or try again later."),
         AgentFailure.message("Agent returned an invalid action format. No actions applied; loop paused."), AgentFailure.message("api.meta.ai returned HTTP 400."),
