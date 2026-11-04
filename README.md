@@ -49,9 +49,9 @@ Please file bugs and suggestions through the support agent. Your agent will talk
 
 **On Windows:** use a Windows preview supplied by the project, or build the Windows app from source. There is not yet a general-purpose Windows installer. The [Windows build instructions](windows/README.md#build-and-test-on-the-windows-box) are for developers, not a required step for someone who already has a preview.
 
-**On iPhone or iPad:** install an invited Converse build through Apple's TestFlight app. There is no public testing link at present. These apps display and control work running on a computer; get your first desktop session working, then follow the Group setup section below to connect the phone or tablet. Developers can also [build the iOS app](iPad/README.md#install-wirelessly).
+**On iPhone or iPad:** There is no public testing link at present. If you have an Apple Developer account, you can build from the source with a Mac coding session. I haven't figured out a real distribution channel for those not willing to cough up $100/year for a developer account.
 
-If you would like a TestFlight invitation, ask Richard Kaufmann, the project owner. No accounts, keys or conversations are included in a download.
+Coding sessions have scrubbed this repo for security issues, but please do read those [security posture notes](#security-and-privacy) in this README. Better yet, have your agent pound away on it and have it reach out with issues...
 
 ## First launch
 
