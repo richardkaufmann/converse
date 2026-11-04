@@ -206,7 +206,7 @@ enum AgentPolicy {
                 let visual = try AgentPromptContext.imageContext(session.messages, excluding: responseID)
                 var research = AgentResearch()
                 let instructions = AgentInstructions.build(objective: current.objective, parkingLotRequiresReview: current.parkingLotRequiresReview == true,
-                    artDirection: current.artDirection,
+                    artDirection: current.artDirection, autoPace: current.autoPaceInstruction,
                     supportTeaching: session.supportTeachingVersion != nil ? AppSupport.instructions(agent: true) : nil,
                     webSearchAvailable: AgentModels.parse(current.model) == nil && current.webSearch != false,
                     voiceTurn: AgentConversation.shared.isVoiceTurn(session, responseID: responseID), omittedAttachments: visual.omitted)
@@ -254,6 +254,7 @@ enum AgentPolicy {
                 if let memory = decoded.memory { session.agent?.workingMemory = String(memory.prefix(4000)) }
                 if let attention = reply?.attention { session.agent?.attention = String(attention.prefix(1000)) }
                 session.agent?.lastRunAt = Date(); session.agent?.lastOutcome = "Completed"
+                session.agent?.applyPace(suggestedMinutes: decoded.nextRunInMinutes?.value, reason: decoded.paceReason?.value, at: Date())
                 if let reply {
                     self.deliver(reply, from: session, store: store)
                     let oldMood = session.agent?.lastArtMood

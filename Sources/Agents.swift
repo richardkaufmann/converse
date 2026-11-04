@@ -40,6 +40,11 @@ struct AgentConfig: Codable, Equatable {
     var scoreboardEveryLoops: Int? = nil
     var loopsSinceScoreboard: Int? = nil
     var enabled = false
+    // Opt-in auto pacing (nil = off, the configured schedule alone decides).
+    var autoPace: Bool? = nil
+    var autoPaceMinMinutes: Double? = nil
+    var autoPaceMaxMinutes: Double? = nil
+    var autoPaceReason: String? = nil
     var nextRunAt: Date? = nil
     var lastLoopAt: Date? = nil
     var attention = ""
@@ -85,6 +90,7 @@ struct AgentConfig: Codable, Equatable {
         guard let rule = try? scheduleRule(), let future = rule.next(after: now) else { return "Loop blocked · review schedule/calendar" }
         let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "") : "Loop on · every " + intervalLabel
         let next = max(nextRunAt ?? future, rule.permits(now) ? (nextRunAt ?? future) : future)
+        if autoPaceOn { return next > now ? autoPaceStatus(next: next, now: now, rule: rule) : "Auto · " + (busy ? "next check after this run" : "check due") }
         guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
         return schedule + " · next " + rule.nextRunLabel(next)
     }
@@ -216,6 +222,8 @@ struct AgentReply: Decodable {
     var discordImage: String?
     var notifyDiscord: String?
     var scoreboard: AgentScoreboard?
+    var nextRunInMinutes: AgentLenientNumber?
+    var paceReason: AgentLenientText?
     static func decode(_ text: String) -> AgentReply? {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("```json\n"), value.hasSuffix("\n```") { value = String(value.dropFirst(8).dropLast(4)) }

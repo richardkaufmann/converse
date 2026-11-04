@@ -1,6 +1,6 @@
 import Foundation
 
-// Prompt caching and token usage.
+// Prompt caching, auto loop pacing, art throttle and API-key footer label.
 // Fixtures only: no network, no credentials.
 @MainActor func agentPaceSelfTests(_ check: (Bool, String) -> Void) {
     func settle<T>(_ operation: @escaping @MainActor () async throws -> T) -> Result<T, Error>? {
@@ -12,6 +12,7 @@ import Foundation
         while result == nil && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         return result
     }
+    func date(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
 
     // 1. Prompt caching: a byte-identical static prefix across activations.
     let attachmentID = UUID().uuidString
@@ -72,4 +73,76 @@ import Foundation
     if case .failure(let error)? = failed {
         check(strictCount == 1 && error.localizedDescription.contains("400") && !error.localizedDescription.contains("private-canary") && strict.sendsPromptCache, "Other 400 errors are not retried and never expose the response body")
     } else { check(false, "Other 400 errors are not retried and never expose the response body") }
+
+    // 2. Auto pacing.
+    let now = date("2026-11-04T15:00:00Z")
+    var paced = AgentConfig(); paced.enabled = true; paced.turnLimit = 2; paced.intervalSeconds = 900; paced.nextRunAt = now.addingTimeInterval(900)
+    var off = paced; off.applyPace(suggestedMinutes: 30, reason: "busy", at: now)
+    check(off == paced && paced.autoPaceInstruction == nil && !AgentInstructions.build(objective: "o", parkingLotRequiresReview: false, artDirection: nil, autoPace: paced.autoPaceInstruction, supportTeaching: nil, webSearchAvailable: true, voiceTurn: false, omittedAttachments: []).contains("nextRunInMinutes"),
+          "Auto pacing is off by default: suggestions are ignored and the instruction is absent")
+    paced.autoPace = true
+    check(paced.autoPaceInstruction?.contains("nextRunInMinutes") == true && paced.autoPaceInstruction?.contains("between 5 and 240 minutes") == true, "Auto pacing instruction appears only when on, with the owner's bounds")
+    var clamp = paced; clamp.applyPace(suggestedMinutes: 20, reason: "release in progress", at: now)
+    check(clamp.nextRunAt == now.addingTimeInterval(1200) && clamp.autoPaceReason == "release in progress", "Auto pacing applies an in-bounds suggestion")
+    clamp.applyPace(suggestedMinutes: 1, reason: nil, at: now)
+    let low = clamp.nextRunAt
+    clamp.applyPace(suggestedMinutes: 10000, reason: String(repeating: "x", count: 90), at: now)
+    check(low == now.addingTimeInterval(300) && clamp.nextRunAt == now.addingTimeInterval(240 * 60) && clamp.autoPaceReason?.count == 60, "Auto pacing clamps to the minimum and maximum and bounds the reason")
+    var custom = paced; custom.autoPaceMinMinutes = 15; custom.autoPaceMaxMinutes = 60
+    custom.applyPace(suggestedMinutes: 5, reason: "x", at: now)
+    check(custom.nextRunAt == now.addingTimeInterval(900), "Auto pacing honors owner-set bounds")
+    for invalid in [nil, 0, -5, Double.nan, Double.infinity] as [Double?] {
+        var fallback = paced; fallback.autoPaceReason = "stale"
+        fallback.applyPace(suggestedMinutes: invalid, reason: "ignored", at: now)
+        check(fallback.nextRunAt == now.addingTimeInterval(900) && fallback.autoPaceReason == nil, "Missing or invalid suggestion keeps the configured interval: \(String(describing: invalid))")
+    }
+    var window = paced; window.scheduleText = "every 30 minutes on weekdays between 9am and 5pm"; window.scheduleTimeZone = "America/New_York"
+    let lateFriday = date("2026-11-06T21:30:00Z") // 16:30 New York, Friday
+    window.applyPace(suggestedMinutes: 120, reason: "quiet", at: lateFriday)
+    check(window.nextRunAt == date("2026-11-09T14:00:00Z"), "Auto pacing never runs outside the schedule window; it waits for the next window open")
+    window.applyPace(suggestedMinutes: 10, reason: "busy", at: date("2026-11-06T15:00:00Z"))
+    check(window.nextRunAt == date("2026-11-06T15:10:00Z"), "Auto pacing chooses a time inside an open schedule window")
+    var daily = paced; daily.scheduleText = "daily at 09:00"; daily.scheduleTimeZone = "UTC"; daily.nextRunAt = date("2026-11-05T09:00:00Z")
+    daily.applyPace(suggestedMinutes: 10, reason: "x", at: now)
+    check(daily.nextRunAt == date("2026-11-05T09:00:00Z"), "Daily schedules keep their fixed time")
+    var paused = paced; paused.enabled = false; paused.applyPace(suggestedMinutes: 10, reason: "x", at: now)
+    var exhausted = paced; exhausted.turnLimit = 0; exhausted.applyPace(suggestedMinutes: 10, reason: "x", at: now)
+    check(paused.nextRunAt == paced.nextRunAt && exhausted.nextRunAt == paced.nextRunAt && !paused.due(at: now.addingTimeInterval(600)) && !exhausted.due(at: now.addingTimeInterval(600)),
+          "Auto pacing never schedules a paused loop or one without a turn budget")
+    var reserved = clamp; reserved.nextRunAt = now.addingTimeInterval(300)
+    check(!reserved.reserveRun(at: now.addingTimeInterval(299)) && reserved.reserveRun(at: now.addingTimeInterval(300)) && !reserved.reserveRun(at: now.addingTimeInterval(300)),
+          "An auto-paced deadline is reserved exactly once like a scheduled one")
+    clamp.applyPace(suggestedMinutes: 20, reason: "release in progress", at: now)
+    check(clamp.loopStatus(at: now, busy: false, queuePaused: false, pendingCount: 0) == "Auto · next in 20 min (release in progress)", "Footer shows auto pacing with the agent's reason")
+    clamp.autoPaceReason = nil; clamp.nextRunAt = now.addingTimeInterval(125 * 60)
+    check(clamp.loopStatus(at: now, busy: false, queuePaused: false, pendingCount: 0) == "Auto · next in 2 hr 5 min" && clamp.loopStatus(at: now, busy: false, queuePaused: true, pendingCount: 0) == "Loop on · queue paused"
+          && clamp.loopStatus(at: now.addingTimeInterval(125 * 60), busy: true, queuePaused: false, pendingCount: 0) == "Auto · next check after this run", "Auto status covers fallback, queue pause and running states")
+    var stopped = clamp; stopped.enabled = false
+    check(stopped.loopStatus(at: now, busy: false, queuePaused: false, pendingCount: 0) == "Loop paused · automatic checks off", "Paused loop status is unchanged by auto pacing")
+    let fixed = AgentConfig()
+    check(fixed.loopStatus(at: now, busy: false, queuePaused: false, pendingCount: 0) == "Loop paused · automatic checks off", "Default agent status is unchanged")
+    do {
+        var setup = paced; setup.autoPace = nil; setup.nextRunAt = now.addingTimeInterval(900)
+        try setup.setAutoPace(true, minMinutes: 10, maxMinutes: 60, now: now)
+        check(setup.autoPaceOn && setup.paceMinMinutes == 10 && setup.paceMaxMinutes == 60 && setup.nextRunAt == now.addingTimeInterval(900), "Turning auto pacing on keeps the scheduled deadline")
+        setup.nextRunAt = now.addingTimeInterval(240 * 60); setup.autoPaceReason = "quiet"
+        try setup.setAutoPace(false, minMinutes: 5, maxMinutes: 240, now: now)
+        check(!setup.autoPaceOn && setup.autoPace == nil && setup.autoPaceMinMinutes == nil && setup.autoPaceReason == nil && setup.nextRunAt == now.addingTimeInterval(900), "Turning auto pacing off returns to the configured interval")
+        for (low, high) in [(0.0, 60.0), (30, 10), (5, 20000), (Double.nan, 60)] {
+            do { try setup.setAutoPace(true, minMinutes: low, maxMinutes: high, now: now); check(false, "Invalid auto pacing bounds rejected") } catch { check(true, "Invalid auto pacing bounds rejected: \(low)–\(high)") }
+        }
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentConfig())) as! [String: Any]
+        for field in ["autoPace", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason"] { legacy.removeValue(forKey: field) }
+        let decoded = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
+        check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240, "Older agent archives decode with auto pacing off")
+        var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90
+        check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(saved)) == saved, "Auto pacing settings survive persistence")
+        var remote = saved.wire(home: "local"); remote.objective = "Edited elsewhere"
+        try saved.apply(remote)
+        check(saved.autoPaceOn && saved.paceMaxMinutes == 90, "Older remote editors preserve auto pacing settings")
+    } catch { check(false, "Auto pacing settings: " + error.localizedDescription) }
+    let lenient = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"soon\",\"paceReason\":7}")
+    let numeric = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"45\",\"paceReason\":\"CI running\"}")
+    check(lenient?.reply == "r" && lenient?.nextRunInMinutes?.value == nil && lenient?.paceReason?.value == nil && numeric?.nextRunInMinutes?.value == 45 && numeric?.paceReason?.value == "CI running"
+          && AgentReply.decode("{\"reply\":\"r\"}")?.nextRunInMinutes == nil, "Malformed pacing fields never invalidate an agent reply")
 }
