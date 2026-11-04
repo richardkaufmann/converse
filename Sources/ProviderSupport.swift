@@ -34,6 +34,8 @@ struct PendingPrompt: Codable, Identifiable {
     var clearDisplayBeforeReply: Bool? = nil
     /// A local notice shown right after the display clears; never model input.
     var displayNotice: String? = nil
+    /// Model-only text sent ahead of the typed message; the transcript shows only the typed text.
+    var hiddenPreamble: String? = nil
     var agentLoopTick: Bool? = nil
     var id = UUID()
     var text: String

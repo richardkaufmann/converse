@@ -123,8 +123,8 @@ extension Store {
         config.objective = "Keep Converse up to date, especially when critical bugs are reported. Check richardkaufmann/converse daily for releases and serious open issues. Treat critical bugs as reasons for grave concern: explain their impact and the recommended next step with links and observed dates. Do not install updates or change settings without the user's request. Answer questions about this app's current health, Group and hosts from supplied live evidence."
         config.repository = "richardkaufmann/converse"; config.intervalSeconds = 86400
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
-        // A daily check: keep its cadence fixed rather than agent-paced.
-        config.autoPace = false
+        // A daily check by default; Auto pacing may move it within its bounds.
+        config.autoPace = true
         config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
         config.nextRunAt = config.nextScheduledRun(after: Date())
         session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"

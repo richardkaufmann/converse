@@ -169,7 +169,7 @@ import SwiftUI
     while !journey.setupCompleted && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     check(journey.setupCompleted && journey.sessions.count == 1 && journey.sessions[0].supportTeachingVersion == AppSupport.version && journey.sessions[0].switchboardEnabled, "NUX journey: provider selection, isolated native login, model subprocess response and automatic support handoff")
     let taught = journey.sessions[0]
-    check(taught.agent?.enabled == true && taught.agent?.intervalSeconds == 86400 && taught.agent?.repository == "richardkaufmann/converse" && taught.agent?.generateArt == false && taught.agent?.watchedSessions.isEmpty == true, "App Support becomes a daily repository agent with no art or watched sessions")
+    check(taught.agent?.enabled == true && taught.agent?.intervalSeconds == 86400 && taught.agent?.repository == "richardkaufmann/converse" && taught.agent?.generateArt == false && taught.agent?.watchedSessions.isEmpty == true && taught.agent?.autoPaceOn == true, "App Support becomes a daily repository agent with Auto pacing on and no art or watched sessions")
     check(AgentModels.parse(taught.agent?.model ?? "")?.engine == "claude", "Support agent keeps the verified provider instead of switching to Meta")
     taught.agent?.enabled = false; journey.configureSupportAgent(taught)
     check(taught.agent?.enabled == false, "Default migration never re-enables a loop the user paused")
@@ -261,7 +261,16 @@ import SwiftUI
     check(shoeRow?.text == "An app that pulls data from wherever and figures out how to do whatever" && shoeRow.flatMap { $0.images?.first }.map { FileManager.default.fileExists(atPath: $0) } == true, "Starter Parking Lot's first item carries the shoe picture")
     check(lot.document.rows.map(\.text) == ["What Are We Building", FirstRunText.lotFirstItem, "New features", "Bugs"] && lot.document.rows.map(\.heading) == [true, false, true, true], "Starter Parking Lot: What Are We Building with one item, then New features and Bugs headings")
     check(!lot.document.rows.contains { !$0.heading && $0.text.isEmpty } && !lot.document.rows.contains { $0.text.contains("Welcome to Converse") }, "Starter Parking Lot has no empty items and no old welcome section")
-    check(agent.agent?.watchedSessions.contains(record.lotID) == true && agent.agent?.watchedSessions.contains(coding.id) == true && agent.agent?.enabled == false, "Agent may read the starter lot and coding session and starts paused")
+    check(agent.agent?.watchedSessions.contains(record.lotID) == true && agent.agent?.watchedSessions.contains(coding.id) == true, "Agent may read the starter lot and coding session")
+    check(agent.agent?.enabled == true && agent.agent?.intervalSeconds == 3600 && agent.agent?.autoPaceOn == true && agent.agent?.paceMinMinutes == 5 && agent.agent?.paceMaxMinutes == 4320
+          && agent.agent?.objective == "Monitor the health of the Coding session." && agent.agent?.artDirection == "Show me a picture that matches the sentiment of the app's progress." && agent.agent?.generateArt == false,
+          "Starter agent starts on, hourly, Auto pacing 5 min–72 h, watching the Coding session, mood art off without a Meta key")
+    check(!agent.agentLoopPaused && agent.pausedLoopReason == nil && agent.agent?.attention.isEmpty == true && agent.agent?.pauseReason == nil, "Starter agent is never shown red or paused before a provider is chosen")
+    // Held until sign-in: even an overdue deadline starts no run while the provider is unchosen.
+    agent.agent?.nextRunAt = .distantPast
+    AgentRuntime().tick(store: store)
+    check(guide.holdsAgent(agent) && agent.pending.isEmpty && !agent.busy && agent.agent?.lastLoopAt == nil, "Starter agent never runs before a provider is chosen and signed in")
+    agent.agent?.nextRunAt = Date().addingTimeInterval(3600)
     let shoe = ConverseShoe.save(in: store.folder).flatMap { NSImage(contentsOfFile: $0) }
     check(shoe.map { $0.size.width <= 160 && $0.size.width >= 100 } == true, "Shoe picture is small (≤ 160 pt)")
     guide.linkLot(home: "home-mac", library: library)
@@ -321,9 +330,24 @@ import SwiftUI
                 if engine == "muse" && key { check(supportModel == "muse-spark-1.3", "App Support uses Muse Spark when a Meta key is saved") }
                 else { check(AgentModels.parse(supportModel)?.engine == engine && AgentModels.parse(supportModel)?.account == profile.id, "App Support's agent model follows the chosen sign-in (no Meta key needed): " + engine) }
             }
+            check(a.agent?.enabled == true && a.agent?.intervalSeconds == 3600 && a.agent?.autoPaceOn == true && a.agent?.objective == "Monitor the health of the \(name) Coding session." && a.agent?.artDirection == FirstRunText.agentArtDirection, "Starter agent stays on, hourly, Auto, monitoring \(name) Coding: " + engine + (key ? " with key" : ""))
+            check(a.agent?.generateArt == key, "Starter agent's mood art is on only with a saved Meta key: " + engine + (key ? " with key" : ""))
+            check(!a.agentLoopPaused && a.pausedLoopReason == nil && a.agent?.attention.isEmpty == true, "Starter agent shows normally (not red or paused) after the provider choice: " + engine)
+            a.agent?.nextRunAt = .distantPast
+            AgentRuntime().tick(store: s)
+            check(a.pending.isEmpty && !a.busy && a.agent?.lastLoopAt == nil, "Starter agent does not run while sign-in is pending: " + engine)
             check(sup.draft == "/login" && sup.messages.filter { $0.text == FirstRunText.loginPrompt(engine) }.count == 1, "App Support asks to press Return with /login prefilled: " + engine)
             check(sup.messages.filter { $0.text.hasPrefix("# " + FirstRunText.title) && !$0.images.isEmpty }.count == 1, "Welcome with the shoe appears once: " + engine)
             check(g.record?.stage == "login" && g.record?.provider == engine && g.record?.teachCoding == true, "First run waits for login and remembers to teach the coding session: " + engine)
+            // Sign-in completes: the hand-off is queued for App Support but never started here (no provider call).
+            g.place = { _, _ in }
+            let signedIn = Date()
+            g.connected(sup)
+            sup.pending.removeAll(); sup.queuePaused = true
+            let first = a.agent?.nextRunAt ?? .distantPast
+            check(!g.holdsAgent(a) && first.timeIntervalSince(signedIn) >= 3600 - 1 && first.timeIntervalSince(signedIn) < 3600 + 60 && !a.agentLoopPaused && a.pausedLoopReason == nil, "Starter agent's first check comes an hour after sign-in completes, shown normally: " + engine)
+            AgentRuntime().tick(store: s)
+            check(a.pending.isEmpty && a.agent?.lastLoopAt == nil, "Sign-in completing does not fire an immediate agent run: " + engine)
         }
     }
     // Changing provider before login replaces, never duplicates.
@@ -335,11 +359,44 @@ import SwiftUI
     held.draft = "What can you do?"; switching.submit(held)
     check(held.draft == "What can you do?" && !held.busy && held.messages.last?.role == "notice", "Text other than /login waits until sign-in")
 
-    // The coding session learns the switchboard with its first request, once.
+    // Richard's Pascal test: the coding session learns the switchboard in the same
+    // turn as its first request. One turn, no "Got it", only the typed text shown.
+    do {
+        let (teachStore, teachGuide, _, _) = fresh("teach-first-request")
+        teachGuide.choose("muse")
+        let c = teachGuide.coding!
+        // The local echo provider replies "echo: <prompt>", exposing exactly what the model received.
+        c.entry.command = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse"; c.entry.directory = NSTemporaryDirectory()
+        let typed = "show me hello world in pascal"
+        c.draft = typed; teachStore.submit(c)
+        check(teachGuide.record?.teachCoding == false && c.switchboardEnabled && c.pending.isEmpty && c.busy, "First request starts at once as a single turn")
+        spin { !c.busy && c.pending.isEmpty }
+        // Echo repeats the teaching's example converse blocks, so the switchboard may add its own
+        // "Converse: …" correction turn afterwards; only the first turn is the user's.
+        let typedIndex = c.messages.firstIndex { $0.role == "user" } ?? 0
+        let ownUsers = c.messages.filter { $0.role == "user" && !$0.text.hasPrefix("Converse: ") }
+        check(c.messages[..<typedIndex].map(\.text) == [FirstRunText.codingWelcome] && ownUsers.map(\.text) == [typed] && c.displayedMessages.filter { $0.role == "user" && !$0.text.hasPrefix("Converse: ") }.map(\.text) == [typed], "The transcript shows exactly the typed text as the user message, with no acknowledgement before it")
+        let reply = c.messages[(typedIndex + 1)...].first { $0.role == "assistant" }?.text ?? ""
+        let teachingAt = reply.range(of: "[Converse switchboard instructions]"), typedAt = reply.range(of: "\n\n" + typed)
+        check(reply.hasPrefix("echo: [Converse switchboard instructions]") && teachingAt != nil && typedAt != nil && teachingAt!.lowerBound < typedAt!.lowerBound, "First request is one turn whose prompt carries the teaching, then the typed text")
+        check(reply.contains("Do not acknowledge these instructions. Answer the user's message below.") && !reply.contains("First acknowledge these instructions"), "First-run teaching asks for an answer, not an acknowledgement")
+        check(!c.messages.contains { $0.role == "user" && $0.text.contains("[Converse switchboard instructions]") } && c.displayedMessages.first?.text == FirstRunText.codingWelcome && c.clearedThroughMessageID == nil, "Teaching never shows as a user message and the welcome stays visible")
+        c.draft = "second"; teachStore.submit(c)
+        spin { !c.busy && c.pending.isEmpty }
+        let later = c.messages.filter { $0.role == "assistant" }.last?.text ?? ""
+        check(later.contains("echo: second") && !later.contains("[Converse switchboard instructions]") && c.messages.filter { $0.role == "user" && !$0.text.hasPrefix("Converse: ") }.map(\.text) == [typed, "second"], "Later requests are sent unchanged and teaching is not repeated")
+        check(teachGuide.teachIfNeeded(c) == nil, "Teaching happens exactly once")
+        // Ordinary sessions: Teach Session keeps its own acknowledgement turn.
+        check(teachStore.switchboardTeaching(c).contains("First acknowledge these instructions briefly."), "Teach Session menu teaching is unchanged")
+    }
+    // Queued behind other work, the teaching travels with that same request.
     let codingSession = switchGuide.coding!
-    codingSession.queuePaused = true
-    switchGuide.teachIfNeeded(codingSession); switchGuide.teachIfNeeded(codingSession)
-    check(codingSession.pending.filter { $0.text.contains("[Converse switchboard instructions]") }.count == 1 && switchGuide.record?.teachCoding == false && codingSession.switchboardEnabled && codingSession.pending.first?.clearDisplayBeforeReply == true, "Coding session is taught the switchboard once, before its first request")
+    codingSession.queuePaused = true; codingSession.busy = true
+    codingSession.draft = "hi"; switching.submit(codingSession)
+    check(codingSession.pending.count == 1 && codingSession.pending[0].text == "hi" && codingSession.pending[0].hiddenPreamble?.contains("[Converse switchboard instructions]") == true && codingSession.pending[0].clearDisplayBeforeReply == nil, "A queued first request keeps its teaching in the same prompt")
+    codingSession.draft = "again"; switching.submit(codingSession)
+    check(codingSession.pending.count == 2 && codingSession.pending[1].hiddenPreamble == nil && switchGuide.record?.teachCoding == false, "Coding session is taught once")
+    codingSession.pending = []; codingSession.busy = false
 
     // A crash after the first-run record is written but before the sessions are saved
     // leaves a record with no sessions; the next launch must seed again.
@@ -502,5 +559,14 @@ import SwiftUI
         if save(panes, "10-signed-in-two-panes", width: 1400, height: 640) { saved += 1 }
         if let lot = done.3.lot(done.1.record!.lotID), save(ParkingLotView(lot: lot, workspace: Workspace(), pane: 3), "11-starter-lot", height: 520) { saved += 1 }
     }
-    check(saved == states.count + 4, "Saved \(saved) offscreen first-run renders to " + output.path)
+    // Sidebar rows for App Support, Coding and the starter agent: before a choice, after it, after sign-in.
+    for (name, index) in [("12-sidebar-before-choice", 0), ("13-sidebar-after-choice", 2), ("14-sidebar-signed-in", states.count - 1)] where states.indices.contains(index) {
+        let guide = states[index].1, workspace = Workspace(), window = WindowState(workspace: workspace)
+        let rows = VStack(alignment: .leading, spacing: 4) {
+            ForEach([guide.support, guide.coding, guide.agent].compactMap { $0 }, id: \.id) { SidebarSession(session: $0, workspace: workspace, state: window) }
+            Spacer(minLength: 0)
+        }.padding(10).background(Color(nsColor: .windowBackgroundColor))
+        if save(rows, name, width: 300, height: 130) { saved += 1 }
+    }
+    check(saved == states.count + 7, "Saved \(saved) offscreen first-run renders to " + output.path)
 }
