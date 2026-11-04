@@ -20,6 +20,7 @@ cp Resources/ThirdParty/* "$app/Contents/Resources/ThirdParty/"
 cp LICENSE LICENSING.md "$app/Contents/Resources/"
 mkdir -p "$app/Contents/Resources/ProviderLogos"
 cp Resources/ProviderLogos/* "$app/Contents/Resources/ProviderLogos/"
+cp Resources/Branding/Converse.png "$app/Contents/Resources/Converse.png"
 mkdir -p .build
 architectures=(${=CONVERSE_ARCHS:-$(uname -m)})
 binaries=()

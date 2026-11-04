@@ -273,6 +273,7 @@ final class Store: ObservableObject {
     var parkingLotReviewConfirm: ((String) -> Bool)?
     var participantService: DeviceSyncService { switchboardService ?? .shared }
     var pendingSave: DispatchWorkItem?
+    lazy var firstRun = FirstRunGuide(store: self)
     init(folder: URL? = nil) {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
         identityFolder = (folder != nil || ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil) ? self.folder.appendingPathComponent("SessionIdentity") : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".converse/sessions")
@@ -413,6 +414,7 @@ final class Store: ObservableObject {
         if handleLocalCommand(s) { return }
         let hasInput = !s.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !s.attachments.isEmpty
         guard hasInput else { if interrupt { stop(s) }; return }
+        firstRun.teachIfNeeded(s)
         if s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
             let prompt = PendingPrompt(text: s.draft, images: s.attachments)
             if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
@@ -1046,6 +1048,7 @@ final class Store: ObservableObject {
         save()
     }
     func handleLocalCommand(_ s: Session) -> Bool {
+        if firstRun.intercept(s) { return true }
         let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login", "/clear", "/unclear"].contains(command) else { return false }
         if command == "/clear" || command == "/unclear" {
@@ -2466,6 +2469,7 @@ struct Conversation: View {
                 }.font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(StatusTint.alert.opacity(0.22))
             }
             SwitchboardStatusView(session: session)
+            if session.supportAssistant && store.firstRun.record?.supportID == session.id { FirstRunPanel(guide: store.firstRun, login: store.firstRun.login, session: session) }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
             ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
                 .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: session.substitutionFeedback).padding(.trailing, 12).padding(.bottom, 80) }
@@ -2760,11 +2764,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             preview.status = "Waiting for your approval"
         }
         buildMenu()
+        // A brand-new data folder gets the four starter sessions before any
+        // window exists, so no setup sheet appears; App Support takes pane 1.
+        let firstRunSupport = Store.shared.firstRun.seedIfNeeded(library: .shared, order: .shared)
         let savedWindows = Workspace.shared.restore(folder: Store.shared.folder)
         if savedWindows.isEmpty { newWindow() }
         else { for id in savedWindows { makeWindow(WindowState(id: id)) } }
+        if let support = firstRunSupport, let state = windows.first?.1 { select(support, state: state) }
         NSApp.activate(ignoringOtherApps: true)
         DeviceSyncService.shared.startIfNeeded()
+        Store.shared.firstRun.linkLot(home: DeviceSyncService.shared.localDeviceID, library: .shared)
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
         if ProcessInfo.processInfo.environment["CONVERSE_QA_GROUPS"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
@@ -3224,6 +3233,7 @@ func selfTest() {
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
     MainActor.assumeIsolated { appSupportSelfTests(check) }
+    MainActor.assumeIsolated { firstRunSelfTests(check) }
     providerSelfTests(check)
     MainActor.assumeIsolated { textSubstitutionSelfTests(check) }
     conversationLayoutSelfTests(check)
