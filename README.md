@@ -71,7 +71,7 @@ Not ready to choose? Click **Decide later**. Everything else keeps working, and 
 
 For a problem involving another Group system, App Support can find its support agent and ask for a scoped, read-only health report. It uses live session IDs, reports unavailable peers, and does not turn a peer message into permission to change settings.
 
-Ask App Support to “open another Muse coding session” and it creates and displays one, using your saved login. Ask how to do it and it explains the steps. It can also read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
+Ask App Support to “open another coding session with my selected provider” and it creates and displays one, using your saved login. Ask how to do it and it explains the steps. It can also read installed Help, inspect safe settings, and open setup controls. It can perform supported setup actions you request and report their result. You still complete provider sign-in and enter secrets yourself. A saved setting is not proof that an external service is connected.
 
 **Existing installations:** upgrading preserves your sessions and does not rerun onboarding. On Windows, choose **Help → Converse App Support…** to open or set up your support agent. Existing sessions keep their logins. New sessions and agents default to the provider login verified during setup; you can choose another login in setup. Demo and the normal app keep separate credentials. On either desktop, App Support can use any enabled provider; it does not require Meta or Discord.
 
@@ -481,7 +481,7 @@ sudo ufw allow 48721/tcp
 sudo ufw allow 5353/udp
 ```
 
-### Step 3: Install and sign in to Claude Code, Codex, and Muse
+### Step 3: Install and sign in to at least one: Claude Code, Codex or Muse
 
 Install the ones you want to use, at least one. Converse starts them itself, and **it only looks for them in these folders**:
 
@@ -510,17 +510,18 @@ Log in from your Mac with `ssh mylinux`, then on the Linux computer:
    ```sh
    PATH="$HOME/.local/bin:$PATH"
    ```
-5. Sign in to each one. You're in SSH with no browser on the Linux side, so each tool gives you a link to open on your Mac:
+5. Sign in to each one you installed. You're in SSH with no browser on the Linux side, so each tool gives you a link to open on your Mac:
    - **Claude Code:** run `claude`, choose your account type, and open the link it prints on your Mac. After you approve, copy the code from the browser and paste it back into the terminal. Type `/exit` when you're done.
    - **Codex:** run `codex login --device-auth`. Open the link on your Mac and enter the code it shows. (Plain `codex login` waits for a browser on the Linux computer, so it doesn't work over SSH.)
    - **Muse:** run `muse`. It shows a meta.com link and a code. Approve it on your Mac, and Muse finishes downloading. Exit when it's ready.
-6. Check that everything is in place:
+6. Check the ones you installed (skip lines for tools you don't use):
    ```sh
    ls ~/.local/bin
    claude auth status
    codex login status
    muse usage
    ```
+   You only need one provider; `muse usage` applies only if you installed Muse.
 
 ### Step 4: Build Converse for Linux (on your Mac)
 
