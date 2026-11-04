@@ -132,17 +132,48 @@ import Foundation
             do { try setup.setAutoPace(true, minMinutes: low, maxMinutes: high, now: now); check(false, "Invalid auto pacing bounds rejected") } catch { check(true, "Invalid auto pacing bounds rejected: \(low)–\(high)") }
         }
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentConfig())) as! [String: Any]
-        for field in ["autoPace", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason"] { legacy.removeValue(forKey: field) }
+        for field in ["autoPace", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason", "artMinIntervalMinutes", "artMaxStaleHours", "lastArtScoreboard"] { legacy.removeValue(forKey: field) }
         let decoded = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
-        check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240, "Older agent archives decode with auto pacing off")
-        var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90
-        check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(saved)) == saved, "Auto pacing settings survive persistence")
+        check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240 && decoded.artMinMinutes == 30 && decoded.artStaleHours == 6, "Older agent archives decode with auto pacing off and default art throttle")
+        var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90; saved.artMinIntervalMinutes = 60; saved.lastArtScoreboard = AgentScoreboard(summary: "", metrics: [], sentiment: "up")
+        check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(saved)) == saved, "Auto pacing and art throttle settings survive persistence")
         var remote = saved.wire(home: "local"); remote.objective = "Edited elsewhere"
         try saved.apply(remote)
-        check(saved.autoPaceOn && saved.paceMaxMinutes == 90, "Older remote editors preserve auto pacing settings")
+        check(saved.autoPaceOn && saved.paceMaxMinutes == 90 && saved.artMinMinutes == 60, "Older remote editors preserve auto pacing and art throttle settings")
     } catch { check(false, "Auto pacing settings: " + error.localizedDescription) }
     let lenient = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"soon\",\"paceReason\":7}")
     let numeric = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"45\",\"paceReason\":\"CI running\"}")
     check(lenient?.reply == "r" && lenient?.nextRunInMinutes?.value == nil && lenient?.paceReason?.value == nil && numeric?.nextRunInMinutes?.value == 45 && numeric?.paceReason?.value == "CI running"
           && AgentReply.decode("{\"reply\":\"r\"}")?.nextRunInMinutes == nil, "Malformed pacing fields never invalidate an agent reply")
+
+    // 3. Art throttle.
+    func board(_ metrics: [(String, String)], sentiment: String = "up", asOf: String = "10:00 ET", url: String = "https://example.invalid/a") -> AgentScoreboard {
+        AgentScoreboard(title: "T", summary: "s", metrics: metrics.map { .init(label: $0.0, value: $0.1, sourceURL: url, asOf: asOf) }, sentiment: sentiment)
+    }
+    let base = board([("Price", "$10"), ("Bugs", "3")])
+    check(!AgentArtPolicy.scoreboardChanged(from: AgentArtPolicy.signature(base), to: board([("Price", "$10"), ("Bugs", "3")], asOf: "11:00 ET", url: "https://example.invalid/b")),
+          "Art ignores asOf and source URL changes")
+    check(AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$11"), ("Bugs", "3")])) && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10")]))
+          && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10"), ("Bugs", "3"), ("Stars", "4")])) && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10"), ("Bugs", "3")], sentiment: "down"))
+          && AgentArtPolicy.scoreboardChanged(from: nil, to: base) && !AgentArtPolicy.scoreboardChanged(from: nil, to: nil) && !AgentArtPolicy.scoreboardChanged(from: base, to: board([("Bugs", "3"), ("Price", "$10")])),
+          "Art treats changed values, added/removed metrics and sentiment as meaningful; metric order is not")
+    let last = now.addingTimeInterval(-600)
+    func decide(age: TimeInterval, direction: Bool = false, mood: Bool = false, board: Bool = false, lastArt: Date?? = nil) -> Bool {
+        AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArt ?? now.addingTimeInterval(-age), directionChanged: direction, moodChanged: mood, scoreboardChanged: board, minInterval: 1800, maxStale: 21600)
+    }
+    check(decide(age: 0, lastArt: .some(nil)), "First art is generated immediately")
+    check(decide(age: 60, direction: true), "Edited art direction regenerates immediately")
+    check(!decide(age: 600, mood: true) && !decide(age: 600, board: true) && decide(age: 1800, mood: true) && decide(age: 1800, board: true), "Mood or scoreboard changes wait for the minimum interval")
+    check(!decide(age: 1800) && !decide(age: 21599) && decide(age: 21600), "Unchanged art refreshes only at the maximum staleness")
+    var throttled = AgentConfig(); throttled.lastArtAt = last; throttled.lastArtMood = "up"; throttled.lastArtScoreboard = AgentArtPolicy.signature(base)
+    check(!throttled.shouldRegenerateArt(mood: "down", board: base, now: now) && throttled.shouldRegenerateArt(mood: "down", board: base, now: now.addingTimeInterval(1200)), "Agent art uses the default 30 minute minimum")
+    throttled.artDirection = "Moonbase"
+    check(throttled.shouldRegenerateArt(mood: "up", board: base, now: now), "Agent art regenerates for an art direction edit inside the minimum")
+    do {
+        try throttled.setArtThrottle(minMinutes: 60, maxStaleHours: 12)
+        check(throttled.artMinMinutes == 60 && throttled.artStaleHours == 12, "Art throttle settings are configurable")
+        for (low, high) in [(1.0, 6.0), (60, 0.5), (600, 2), (30, 500)] {
+            do { try throttled.setArtThrottle(minMinutes: low, maxStaleHours: high); check(false, "Invalid art throttle rejected") } catch { check(true, "Invalid art throttle rejected: \(low) min / \(high) hr") }
+        }
+    } catch { check(false, "Art throttle settings: " + error.localizedDescription) }
 }

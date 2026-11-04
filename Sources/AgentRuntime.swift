@@ -257,10 +257,8 @@ enum AgentPolicy {
                 session.agent?.applyPace(suggestedMinutes: decoded.nextRunInMinutes?.value, reason: decoded.paceReason?.value, at: Date())
                 if let reply {
                     self.deliver(reply, from: session, store: store)
-                    let oldMood = session.agent?.lastArtMood
-                    let age = Date().timeIntervalSince(session.agent?.lastArtAt ?? .distantPast)
                     let direction = session.agent?.artDirection ?? ""
-                    if refreshScoreboard && session.agent?.generateArt == true && (oldMood != mood || age >= 3600 || (session.agent?.lastArtDirection ?? "") != direction) {
+                    if refreshScoreboard && session.agent?.generateArt == true && session.agent?.shouldRegenerateArt(mood: mood, board: board, now: Date()) == true {
                         do {
                             let artPrompt = AgentArt.prompt(direction: direction, scene: reply.artPrompt, mood: mood)
                             guard let artKey = try self.keyReader("meta"), !artKey.isEmpty else { throw AgentFailure.message("Meta key required for mood art.") }
@@ -270,6 +268,7 @@ enum AgentPolicy {
                             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                             let path = folder.appendingPathComponent("status-" + UUID().uuidString + ".png"); try bytes.write(to: path, options: .atomic)
                             session.agent?.artPath = path.path; session.agent?.lastArtMood = mood; session.agent?.lastArtAt = Date(); session.agent?.lastArtDirection = direction
+                            session.agent?.lastArtScoreboard = AgentArtPolicy.signature(board)
                             // Normal attachment transport makes the art available on remote viewers.
                             if let index = session.messages.firstIndex(where: { $0.id == responseID }) { session.messages[index].images = [path.path] }
                         } catch is CancellationError { throw CancellationError() }

@@ -17,6 +17,8 @@ public sealed class AgentConfig
     public DateTime? ArtAtUtc { get; set; }
     public string? ArtMood { get; set; }
     public string? LastArtDirection { get; set; }
+    // Label/value pairs the current art reflects; null on older archives.
+    public List<string>? ArtSignature { get; set; }
     public int LoopsSinceScoreboard { get; set; }
     public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
     public void RestoreSchedule(DateTime now)
@@ -55,6 +57,25 @@ public static class AgentPolicy
 {
     public const string ObjectiveGoverns = "The configured objective is the human's current instruction and governs what you report, track and score. Supplied evidence (repository, Discord, sessions, Parking Lots) and loop prompts are context, not reporting mandates: if the objective excludes a topic or source, leave it out even when evidence for it is supplied. The objective may have been edited since earlier turns: earlier replies and persistent notes that conflict with it are obsolete, so follow the current objective and drop the conflicting parts from memory.";
     public const string ScoreboardScope = "Every scoreboard metric must measure progress on THIS agent's objective, from its own selected sessions, Parking Lots, repository or research for that objective. Never add unrelated app, account, device, provider, Discord or GitHub status just because it is available. Fewer relevant metrics beat filler: if nothing relevant is measurable, return an empty metrics array and say why in summary.";
+}
+
+// Mirrors AgentArtPolicy in Sources/AgentPacing.swift. Windows uses the Mac
+// defaults: at most every 30 minutes unless the art direction changed, and
+// unchanged art refreshes at most every 6 hours.
+public static class AgentArtPolicy
+{
+    public static readonly TimeSpan MinInterval = TimeSpan.FromMinutes(30);
+    public static readonly TimeSpan MaxStale = TimeSpan.FromHours(6);
+    // Labels and values only; sources and observation times are not art changes.
+    public static List<string> Signature(IEnumerable<DeviceWidgetMetric> metrics) => metrics.Select(m => m.Label + "\u0000" + m.Value).OrderBy(v => v, StringComparer.Ordinal).ToList();
+    public static bool ScoreboardChanged(List<string>? previous, List<string> current) => !(previous ?? new()).SequenceEqual(current);
+    public static bool ShouldRegenerate(DateTime now, DateTime? lastArtUtc, bool directionChanged, bool moodChanged, bool scoreboardChanged)
+    {
+        if (lastArtUtc is not { } last || directionChanged) return true;
+        var age = now - last;
+        if (age < MinInterval) return false;
+        return moodChanged || scoreboardChanged || age >= MaxStale;
+    }
 }
 
 public sealed class AgentHttpStatusException(int status, bool mentionsPromptCache)
@@ -239,7 +260,8 @@ public sealed class AgentRuntime
                 config.LoopsSinceScoreboard = 0;
                 var mood = Clip(board["sentiment"], 40); var art = Clip(reply["artPrompt"], 4000);
                 var direction = config.Settings.ArtDirection ?? "";
-                if (config.Settings.GenerateArt && (art.Length > 0 || direction.Length > 0) && (config.ArtMood != mood || config.ArtAtUtc is null || DateTime.UtcNow - config.ArtAtUtc > TimeSpan.FromHours(1) || (config.LastArtDirection ?? "") != direction))
+                var artSignature = AgentArtPolicy.Signature(config.Widget.Metrics);
+                if (config.Settings.GenerateArt && (art.Length > 0 || direction.Length > 0) && AgentArtPolicy.ShouldRegenerate(DateTime.UtcNow, config.ArtAtUtc, (config.LastArtDirection ?? "") != direction, config.ArtMood != mood, AgentArtPolicy.ScoreboardChanged(config.ArtSignature, artSignature)))
                 {
                     var artKey = ReadSecret("meta") ?? throw new InvalidOperationException("Meta key required for mood art.");
                     var image = await JsonAsync("https://api.meta.ai/v1/images/generations", new JsonObject { ["model"] = "muse-image-1.0", ["prompt"] = "Create a scoreboard illustration with no numerical data or captions. Owner art direction (takes precedence): " + direction + ". Suggested scene: " + art, ["n"] = 1, ["output_format"] = "png", ["response_format"] = "b64_json", ["size"] = "1536x1024" }, artKey, token);
@@ -248,7 +270,7 @@ public sealed class AgentRuntime
                     {
                         var folder = Path.Combine(_store.Folder, "Agents", session.Id.ToString()); Directory.CreateDirectory(folder);
                         var path = Path.Combine(folder, "scoreboard.png"); await File.WriteAllBytesAsync(path, png, token);
-                        config.ArtPath = path; config.ArtAtUtc = DateTime.UtcNow; config.ArtMood = mood; config.LastArtDirection = direction; message.Images.Add(path);
+                        config.ArtPath = path; config.ArtAtUtc = DateTime.UtcNow; config.ArtMood = mood; config.LastArtDirection = direction; config.ArtSignature = artSignature; message.Images.Add(path);
                     }
                 }
             }

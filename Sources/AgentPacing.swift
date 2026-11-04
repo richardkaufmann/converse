@@ -65,6 +65,49 @@ extension AgentConfig {
     }
 }
 
+// Mood art costs an image generation. Regenerate only for a meaningful change,
+// never more often than the minimum interval unless the owner edited the art
+// direction, and refresh unchanged art at most once per maximum staleness.
+enum AgentArtPolicy {
+    static let defaultMinMinutes = 30.0
+    static let defaultMaxStaleHours = 6.0
+    // Labels, values and sentiment matter; title, summary, asOf and source URLs do not.
+    static func signature(_ board: AgentScoreboard?) -> AgentScoreboard? {
+        board.map { AgentScoreboard(title: nil, summary: "", metrics: $0.metrics.map { .init(label: $0.label, value: $0.value) }, sentiment: $0.sentiment) }
+    }
+    static func scoreboardChanged(from old: AgentScoreboard?, to new: AgentScoreboard?) -> Bool {
+        let before = old?.metrics ?? [], after = new?.metrics ?? []
+        if old?.sentiment != new?.sentiment { return true }
+        func values(_ metrics: [AgentScoreboard.Metric]) -> [String: [String]] { Dictionary(grouping: metrics, by: \.label).mapValues { $0.map(\.value) } }
+        return values(before) != values(after)
+    }
+    static func shouldRegenerate(now: Date, lastArtAt: Date?, directionChanged: Bool, moodChanged: Bool, scoreboardChanged: Bool,
+                                 minInterval: TimeInterval, maxStale: TimeInterval) -> Bool {
+        guard let lastArtAt else { return true }
+        if directionChanged { return true }
+        let age = now.timeIntervalSince(lastArtAt)
+        guard age >= minInterval else { return false }
+        return moodChanged || scoreboardChanged || age >= maxStale
+    }
+}
+
+extension AgentConfig {
+    var artMinMinutes: Double { artMinIntervalMinutes ?? AgentArtPolicy.defaultMinMinutes }
+    var artStaleHours: Double { max(artMinMinutes / 60, artMaxStaleHours ?? AgentArtPolicy.defaultMaxStaleHours) }
+    mutating func setArtThrottle(minMinutes: Double, maxStaleHours: Double) throws {
+        guard minMinutes.isFinite, maxStaleHours.isFinite, (5...1440).contains(minMinutes), (1...168).contains(maxStaleHours), maxStaleHours * 60 >= minMinutes else {
+            throw AgentFailure.message("Art refresh needs a minimum of 5–1440 minutes and a maximum of 1–168 hours, no shorter than the minimum.")
+        }
+        artMinIntervalMinutes = minMinutes == AgentArtPolicy.defaultMinMinutes ? nil : minMinutes
+        artMaxStaleHours = maxStaleHours == AgentArtPolicy.defaultMaxStaleHours ? nil : maxStaleHours
+    }
+    func shouldRegenerateArt(mood: String, board: AgentScoreboard?, now: Date) -> Bool {
+        AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: (lastArtDirection ?? "") != (artDirection ?? ""),
+            moodChanged: lastArtMood != mood, scoreboardChanged: AgentArtPolicy.scoreboardChanged(from: lastArtScoreboard, to: AgentArtPolicy.signature(board)),
+            minInterval: artMinMinutes * 60, maxStale: artStaleHours * 3600)
+    }
+}
+
 // Model replies are untrusted. A malformed optional pacing field must never
 // make the whole action object undecodable, so these decode leniently.
 struct AgentLenientNumber: Decodable, Equatable {

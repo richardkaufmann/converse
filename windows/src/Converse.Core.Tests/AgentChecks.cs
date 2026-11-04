@@ -13,6 +13,14 @@ static class AgentChecks
         var restoredLoop = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(dailyLoop));
         restoredLoop.RestoreSchedule(fired.AddHours(1));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Restart one hour after a daily check preserves the remaining 23 hours");
+        var artNow = D("2026-11-04T15:00:00Z");
+        var artBoard = AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } });
+        check(AgentArtPolicy.ShouldRegenerate(artNow, null, false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-1), true, false, false), "Windows art: first art and edited direction regenerate immediately");
+        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-10), false, true, true) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, true, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, false, true), "Windows art: mood or scoreboard changes wait for the 30 minute minimum");
+        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-5.9), false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-6), false, false, false), "Windows art: unchanged art refreshes at 6 hours");
+        check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
+            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
+            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
         restoredLoop.RestoreSchedule(fired.AddDays(3));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Overdue deadline survives restart for catch-up on normal tick");
         restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddHours(2));

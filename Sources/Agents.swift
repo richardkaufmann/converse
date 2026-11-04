@@ -67,6 +67,10 @@ struct AgentConfig: Codable, Equatable {
     var discordActiveRequestID: String? = nil
     var lastArtMood: String? = nil
     var lastArtAt: Date? = nil
+    // Art throttle (nil = defaults) and the scoreboard the current art reflects.
+    var artMinIntervalMinutes: Double? = nil
+    var artMaxStaleHours: Double? = nil
+    var lastArtScoreboard: AgentScoreboard? = nil
     var snapshot: AgentRepoSnapshot? = nil
     var workingMemory: String? = nil
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
