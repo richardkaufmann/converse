@@ -289,6 +289,9 @@ func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
         talk.busy = false
         talk.pending = [PendingPrompt(text: "held", images: [])]
         check(!talk.isIdleTalkSession, "A Talk helper with queued work stays listed")
+        let lotID = talk.agent!.parkingLotTalkID!, other = Session(entry: talk.entry)
+        check(ParkingLotTalkBar.talkSession(for: lotID, sessionID: talk.id, sessions: [other, talk]) === talk, "The lot pane finds its own running Talk session to show Stop talking")
+        check(ParkingLotTalkBar.talkSession(for: UUID(), sessionID: talk.id, sessions: [talk]) == nil && ParkingLotTalkBar.talkSession(for: lotID, sessionID: nil, sessions: [talk]) == nil && ParkingLotTalkBar.talkSession(for: lotID, sessionID: other.id, sessions: [other, talk]) == nil, "Another lot's or another session's conversation shows no talk bar here")
     }
     // Undo belongs to the document, so it survives replacing the editor with Reorder.
     do {
