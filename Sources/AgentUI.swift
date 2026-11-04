@@ -64,15 +64,18 @@ struct AgentSetupView: View {
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
-                        AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
+                        Text(settings.objective != session.agent?.objective ? "Timing is read from the objective when you save. Say how often to run and refresh art, e.g. “run every five minutes, new art at least every twelve hours or when any price moves more than 0.5%”."
+                             : settings.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                            .help("Describe how often to run and when to refresh art in the objective. Converse reads it once per edit with this agent’s model; Stop, budgets, a 1 minute floor and a 72 hour ceiling always apply.")
                         Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
-                        Toggle("Auto pacing · the agent picks each next check", isOn: Binding(get: { settings.autoPaceOn }, set: { settings.autoPace = $0 ? true : nil }))
-                            .help("Each run may suggest when to check next, with a short reason. Sooner while things change or someone waits, later when quiet. Kept within the bounds below and the schedule above; otherwise the configured interval applies.")
+                        Toggle("Auto pacing · the agent picks each next check", isOn: Binding(get: { settings.autoPaceOn }, set: { settings.autoPace = $0 }))
+                            .help("Each run may suggest when to check next, with a short reason. Sooner while things change or someone waits, later when quiet. Kept within the bounds below and any window in the objective. A cadence stated in the objective always wins.")
                         if settings.autoPaceOn {
                             HStack(spacing: 16) {
-                                Stepper("No sooner than \(AgentPacing.minutesText(settings.paceMinMinutes)) min", value: Binding(get: { settings.paceMinMinutes }, set: { settings.autoPaceMinMinutes = $0; if settings.paceMaxMinutes < $0 { settings.autoPaceMaxMinutes = $0 } }), in: 1...1440, step: 1)
-                                Stepper("no later than \(AgentPacing.minutesText(settings.paceMaxMinutes)) min", value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: 5)
+                                Stepper("No sooner than " + AgentPacing.durationText(minutes: settings.paceMinMinutes), value: Binding(get: { settings.paceMinMinutes }, set: { settings.autoPaceMinMinutes = $0; if settings.paceMaxMinutes < $0 { settings.autoPaceMaxMinutes = $0 } }), in: 1...1440, step: 1)
+                                Stepper("no later than " + AgentPacing.durationText(minutes: settings.paceMaxMinutes), value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: settings.paceMaxMinutes >= 120 ? 60 : 5)
                             }.font(.caption)
                         }
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
@@ -85,7 +88,7 @@ struct AgentSetupView: View {
                         }
                         Text("Scoreboard art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
-                        Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. A changed prompt updates the art on the next scoreboard refresh. Otherwise art changes with the mood or scoreboard, no more often than the minimum above, and refreshes at least once per the maximum.").font(.caption).foregroundStyle(.secondary)
+                        Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. A changed prompt updates the art on the next scoreboard refresh. Otherwise art changes with the mood or scoreboard, no more often than the minimum above, and refreshes at least once per the maximum. Art timing stated in the objective takes precedence.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
                         Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
                         Text("Speech starts only with Start talking in the session. Scheduled runs stay silent.").font(.caption).foregroundStyle(.secondary)
@@ -192,7 +195,7 @@ struct AgentSetupView: View {
         guard settings.intervalSeconds.isFinite else { error = "Enter a valid interval."; return }
         do {
             var current = session.agent ?? AgentConfig()
-            try current.apply(settings.wire(home: DeviceSyncService.shared.localDeviceID ?? "local"))
+            let migrationNotice = try current.apply(settings.wire(home: DeviceSyncService.shared.localDeviceID ?? "local"))
             guard ![("meta", metaKey), ("github", githubKey), ("discordBot", discordToken)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
             let channel = (settings.discordChannelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !channel.isEmpty || settings.discordRead == true || settings.discord || settings.discordMentions == true { _ = try AgentDiscord.channelID(channel) }
@@ -214,13 +217,16 @@ struct AgentSetupView: View {
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
+            let notice = migrationNotice
             try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())
             try current.setArtThrottle(minMinutes: settings.artMinMinutes, maxStaleHours: settings.artStaleHours)
             session.agent = current; session.toolStatus.model = AgentModels.label(current.model)
             session.probeError = ""; session.needsSignIn = false
             if !session.busy { session.status = "Ready" }
             if current.enabled && session.pending.isEmpty { session.queuePaused = false }
-            Store.shared.save(); close()
+            Store.shared.save()
+            AgentRuntime.shared.objectiveSaved(session, store: .shared, notice: notice, retryFailed: true)
+            close()
         } catch { self.error = error.localizedDescription }
     }
 }
@@ -239,13 +245,18 @@ struct AgentControls: View {
                     Text(session.busy ? "Thinking now" : "Idle").fontWeight(.semibold)
                     Text(session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
                         .foregroundStyle(.secondary).lineLimit(1)
-                        .help(session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
+                        .help((session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
+                              + (session.agent.map { "\n" + $0.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) } ?? ""))
                     Spacer(minLength: 0)
                 }.font(.caption)
             }
             HStack(spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
                     Text(session.agent.map { AgentModels.label($0.model) } ?? "Agent").font(.caption).foregroundStyle(.secondary)
+                    if let agent = session.agent {
+                        let timing = agent.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session))
+                        Text(timing).font(.caption).foregroundStyle(.secondary).lineLimit(1).help("Timing from the objective: " + timing)
+                    }
                     Text("\(session.agent?.turnLimit ?? 0) maximum turns per loop").font(.caption).foregroundStyle(.secondary)
                     if session.agent?.discordMentions == true {
                         TimelineView(.periodic(from: .now, by: 5)) { _ in
@@ -300,52 +311,10 @@ struct AgentControls: View {
     }
 }
 
-struct AgentScheduleEditor: View {
-    @Binding var seconds: Double
-    @Binding var text: String?
-    @Binding var zone: String?
-    private var isText: Bool { !(text ?? "").isEmpty }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Picker("Frequency", selection: Binding(get: { isText }, set: { text = $0 ? "every 20 minutes while the US stock market is open" : ""; if zone == nil { zone = TimeZone.current.identifier } })) {
-                Text("Fixed interval").tag(false)
-                Text("Text schedule").tag(true)
-            }.pickerStyle(.segmented)
-            if isText {
-                TextField("Describe when to run", text: Binding(get: { text ?? "" }, set: { text = $0.isEmpty ? " " : $0 }), axis: .vertical).lineLimit(2...4)
-                TextField("Time zone", text: Binding(get: { zone ?? TimeZone.current.identifier }, set: { zone = $0 }))
-                    .help("IANA time zone. Market schedules always use America/New_York. Explicit ‘in America/New_York’ in the text overrides this field.")
-            } else {
-                HStack { Text("Check every"); TextField("Minutes", value: Binding(get: { seconds / 60 }, set: { seconds = $0 * 60 }), format: .number).frame(width: 80); Text("minutes (minimum 1)") }
-            }
-            TimelineView(.periodic(from: .now, by: 60)) { timeline in preview(at: timeline.date) }
-            Text("No overlapping runs or backlog bursts. A missed check may run once within its allowed window. Run once, messages and external events can still run outside this schedule.").font(.caption).foregroundStyle(.secondary)
-        }
-    }
-    @ViewBuilder private func preview(at now: Date) -> some View {
-        switch Result(catching: { try AgentSchedule.compile(interval: seconds, text: text, zone: zone) }) {
-        case .failure(let error): Text(error.localizedDescription).font(.caption).foregroundStyle(.red)
-        case .success(let rule):
-            let dates = rule.preview(after: now)
-            Text(rule.description).font(.caption).foregroundStyle(.secondary)
-            if dates.isEmpty { Text("No future run in the supported calendar. Update the calendar or choose another schedule.").font(.caption).foregroundStyle(.red) }
-            else {
-                Text("Next slots: " + dates.map { date in
-                    let formatter = DateFormatter(); formatter.timeZone = TimeZone(identifier: rule.zoneID); formatter.dateFormat = "EEE MMM d, HH:mm z"
-                    return formatter.string(from: date)
-                }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
-            }
-            if rule.kind == .market { Text("Published NYSE calendar through 2028; emergency closures and trading halts are not detected.").font(.caption).foregroundStyle(.secondary) }
-        }
-    }
-}
-
 struct AgentLoopOptions: View {
     @ObservedObject var session: Session
     @State private var enabled = false
     @State private var minutes: Double = 15
-    @State private var scheduleText: String?
-    @State private var scheduleTimeZone: String?
     @State private var turns = 20
     @State private var scoreboardEvery = 1
     @State private var revision: UInt64 = 0
@@ -358,11 +327,12 @@ struct AgentLoopOptions: View {
             Text("Agent loop").font(.headline)
             Text(session.busy ? "Thinking now. Changing the loop does not stop this run." : "Idle. You can still talk to this agent while its loop is off.").font(.callout).foregroundStyle(.secondary)
             Toggle("Automatic loop", isOn: $enabled)
-            AgentScheduleEditor(seconds: Binding(get: { minutes * 60 }, set: { minutes = $0 / 60 }), text: $scheduleText, zone: $scheduleTimeZone)
+            Text(session.agent?.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) ?? "").font(.caption).foregroundStyle(.secondary)
+                .help("Timing comes from the objective. Edit it in Agent Setup to change how often this agent runs.")
             Stepper("Maximum turns per loop: \(turns)", value: $turns, in: 1...1000)
             Text("A fresh ceiling for each activation. Checks currently use one model response; future scheduled checks are not spent.").font(.caption).foregroundStyle(.secondary)
             Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
-            Text("Run once refreshes the scoreboard immediately. Artwork keeps its mood-change / hourly limit. Loops run while Converse is open on this agent’s home. Errors pause the loop.").font(.caption).foregroundStyle(.secondary)
+            Text("Run once refreshes the scoreboard immediately. Artwork keeps its objective or Setup limits. Loops run while Converse is open on this agent’s home. Network hiccups retry; repeated or setup errors pause the loop.").font(.caption).foregroundStyle(.secondary)
             if session.queuePaused && !session.pending.isEmpty { Text("Held messages require Resume queue before the loop can continue.").font(.caption).foregroundStyle(.orange) }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
@@ -375,10 +345,10 @@ struct AgentLoopOptions: View {
     }
     private func reload() {
         let config = session.agent ?? AgentConfig()
-        enabled = config.enabled; minutes = config.intervalSeconds / 60; scheduleText = config.scheduleText; scheduleTimeZone = config.scheduleTimeZone; turns = config.turnLimit; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
+        enabled = config.enabled; minutes = config.intervalSeconds / 60; turns = config.turnLimit; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
     }
     private func save() -> Bool {
-        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, scheduleText: scheduleText, scheduleTimeZone: scheduleTimeZone, expectedRevision: revision); return true }
+        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, expectedRevision: revision); return true }
         catch { self.error = error.localizedDescription; return false }
     }
 }
@@ -598,7 +568,8 @@ struct RemoteAgentSetupView: View {
                 TextField("Objective and success criteria", text: $settings.objective, axis: .vertical).lineLimit(3...6)
                 TextField("Optional repository · owner/name", text: $settings.repository)
                 TextField("Model", text: $settings.model)
-                AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
+                HStack { Text("Check every"); TextField("Minutes", value: Binding(get: { settings.intervalSeconds / 60 }, set: { settings.intervalSeconds = $0 * 60 }), format: .number).frame(width: 80); Text("minutes") }
+                Text("Homes that read timing from the objective use it instead; describe how often to run there.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
                 Toggle("Generate status art", isOn: $settings.generateArt)

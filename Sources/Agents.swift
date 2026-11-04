@@ -40,8 +40,16 @@ struct AgentConfig: Codable, Equatable {
     var scoreboardEveryLoops: Int? = nil
     var loopsSinceScoreboard: Int? = nil
     var enabled = false
-    // Opt-in auto pacing (nil = off, the configured schedule alone decides).
-    var autoPace: Bool? = nil
+    // Auto pacing: on for new agents; older archives decode nil (off).
+    var autoPace: Bool? = true
+    // Set on agents created with objective pacing defaults (Auto on, 72 h
+    // maximum). Older archives decode nil and keep the 4 h maximum.
+    var pacingDefaults: Int? = 1
+    // Timing read from the objective, the objective hash it came from, and a
+    // migrated schedule still waiting to be read.
+    var pacingSpec: AgentPacingSpec? = nil
+    var pacingObjectiveHash: String? = nil
+    var pacingPending: Bool? = nil
     var autoPaceMinMinutes: Double? = nil
     var autoPaceMaxMinutes: Double? = nil
     var autoPaceReason: String? = nil
@@ -76,6 +84,8 @@ struct AgentConfig: Codable, Equatable {
     var artMinIntervalMinutes: Double? = nil
     var artMaxStaleHours: Double? = nil
     var lastArtScoreboard: AgentScoreboard? = nil
+    // Numeric scoreboard values the current art reflects (percent trigger).
+    var lastArtMetricValues: [String: Double]? = nil
     var snapshot: AgentRepoSnapshot? = nil
     var workingMemory: String? = nil
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
@@ -87,7 +97,7 @@ struct AgentConfig: Codable, Equatable {
         !loopTick || snapshot == nil || snapshot?.repository != repository || (loopsSinceScoreboard ?? 0) >= scoreboardCadence - 1
     }
     var intervalLabel: String {
-        let seconds = Int(min(31536000, max(60, intervalSeconds.isFinite ? intervalSeconds : 900)))
+        let seconds = Int(min(31536000, max(60, effectiveIntervalSeconds.isFinite ? effectiveIntervalSeconds : 900)))
         if seconds % 3600 == 0 { return "\(seconds / 3600) hr" }
         if seconds % 60 == 0 { return "\(seconds / 60) min" }
         return "\(seconds) sec"
@@ -97,14 +107,19 @@ struct AgentConfig: Codable, Equatable {
         if queuePaused { return "Loop on · queue paused" }
         if pendingCount > 0 && !busy { return "Loop on · waiting for \(pendingCount) queued message\(pendingCount == 1 ? "" : "s")" }
         guard let rule = try? scheduleRule(), let future = rule.next(after: now) else { return "Loop blocked · review schedule/calendar" }
-        let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "") : "Loop on · every " + intervalLabel
+        let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "")
+            : rule.kind == .interval ? "Loop on · every " + intervalLabel : "Loop on · " + pacingSummary().components(separatedBy: " · ")[0].replacingOccurrences(of: "Runs ", with: "runs ")
         let next = max(nextRunAt ?? future, rule.permits(now) ? (nextRunAt ?? future) : future)
-        if autoPaceOn { return next > now ? autoPaceStatus(next: next, now: now, rule: rule) : "Auto · " + (busy ? "next check after this run" : "check due") }
+        if pacesAutomatically { return next > now ? autoPaceStatus(next: next, now: now, rule: rule) : "Auto · " + (busy ? "next check after this run" : "check due") }
         guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
         return schedule + " · next " + rule.nextRunLabel(next)
     }
     var canSchedule: Bool { enabled && turnLimit > 0 }
-    func scheduleRule() throws -> AgentSchedule { try AgentSchedule.compile(interval: intervalSeconds, text: scheduleText, zone: scheduleTimeZone) }
+    // A not-yet-migrated text schedule still governs; otherwise the objective's.
+    func scheduleRule() throws -> AgentSchedule {
+        if let text = scheduleText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return try AgentSchedule.compile(interval: intervalSeconds, text: text, zone: scheduleTimeZone) }
+        return try objectiveRule()
+    }
     func nextScheduledRun(after date: Date) -> Date? { (try? scheduleRule())?.next(after: date) }
     mutating func restoreSchedule(at now: Date) throws {
         guard canSchedule else { return }
@@ -425,7 +440,8 @@ extension AgentConfig {
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
             generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "")
     }
-    mutating func apply(_ wire: DeviceAgentSettings) throws {
+    // Returns the transcript notice when a text schedule moved into the objective.
+    @discardableResult mutating func apply(_ wire: DeviceAgentSettings) throws -> String? {
         guard (wire.revision ?? 0) == (settingsRevision ?? 0), (settingsRevision ?? 0) < UInt64.max else {
             throw AgentFailure.message("Agent settings or run budget changed. Reload settings before saving.")
         }
@@ -438,21 +454,28 @@ extension AgentConfig {
         if !(scheduleText ?? "").isEmpty && wire.scheduleText == nil {
             throw AgentFailure.message("This editor cannot preserve the text schedule. Update the viewing app before changing agent settings.")
         }
-        let schedule = try AgentSchedule.compile(interval: wire.intervalSeconds, text: wire.scheduleText, zone: wire.scheduleTimeZone)
+        // Validates the interval and zone; a text schedule becomes part of the objective.
+        let zoneID = try AgentSchedule.compile(interval: wire.intervalSeconds, text: nil, zone: wire.scheduleTimeZone).zoneID
+        let oldRule = try? scheduleRule()
+        var next = self
+        if wire.enabled && !enabled { next.clearPause() }
+        next.settingsChanged()
+        if next.repository != repository { next.snapshot = nil; next.loopsSinceScoreboard = 0 }
+        next.objective = wire.objective; next.repository = repository; next.model = wire.model
+        next.watchedParticipants = Array(Set(wire.watched)).sorted(); next.watchedSessions = []
+        next.intervalSeconds = wire.intervalSeconds; next.scheduleText = wire.scheduleText; next.scheduleTimeZone = zoneID; next.turnLimit = wire.turnLimit; next.enabled = wire.enabled
+        let notice = next.migrateScheduleText()
+        if let cadence = wire.scoreboardEveryLoops { next.scoreboardEveryLoops = cadence }
+        if let share = wire.discordShareScoreboard { next.discordShareScoreboard = share }
+        if let share = wire.discordShareSessionInformation { next.discordShareSessionInformation = share }
+        if let direction = wire.artDirection { next.artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }
+        next.generateArt = wire.generateArt; next.speak = wire.speak; next.discord = wire.discord; next.fileTriggers = wire.fileTriggers
+        let schedule = try next.scheduleRule()
         guard !wire.enabled || schedule.next(after: Date()) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
-        let keepDeadline = enabled && wire.enabled && (try? scheduleRule()) == schedule && nextRunAt != nil
-        if wire.enabled && !enabled { clearPause() }
-        settingsChanged()
-        if self.repository != repository { snapshot = nil; loopsSinceScoreboard = 0 }
-        objective = wire.objective; self.repository = repository; model = wire.model
-        watchedParticipants = Array(Set(wire.watched)).sorted(); watchedSessions = []
-        intervalSeconds = wire.intervalSeconds; scheduleText = wire.scheduleText; scheduleTimeZone = schedule.zoneID; turnLimit = wire.turnLimit; enabled = wire.enabled
-        if let cadence = wire.scoreboardEveryLoops { scoreboardEveryLoops = cadence }
-        if let share = wire.discordShareScoreboard { discordShareScoreboard = share }
-        if let share = wire.discordShareSessionInformation { discordShareSessionInformation = share }
-        if let direction = wire.artDirection { artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }
-        generateArt = wire.generateArt; speak = wire.speak; discord = wire.discord; fileTriggers = wire.fileTriggers
-        if !keepDeadline { nextRunAt = enabled ? schedule.next(after: Date()) : nil }
+        let keepDeadline = enabled && wire.enabled && oldRule == schedule && nextRunAt != nil
+        if !keepDeadline { next.nextRunAt = next.enabled ? schedule.next(after: Date()) : nil }
+        self = next
+        return notice
     }
 }
 

@@ -228,7 +228,8 @@ extension Session {
         if let agent {
             let loop = agent.loopStatus(at: Date(), busy: busy, queuePaused: queuePaused, pendingCount: pending.count)
             lines.insert(loop, at: 1)
-            if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 2) }
+            lines.insert("Timing: " + agent.pacingSummary(extracting: MainActor.assumeIsolated { AgentRuntime.shared.readingPacing(self) }), at: 2)
+            if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 3) }
             if !agent.attention.isEmpty { lines.insert("ATTENTION REQUIRED\n" + agent.attention + "\n", at: 0) }
         }
         return lines.joined(separator: "\n")

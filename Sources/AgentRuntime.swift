@@ -14,6 +14,10 @@ enum AgentPolicy {
     let discordRouter = AgentDiscordRouter()
     var keyReader: (String) throws -> String? = AgentSecrets.read
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var pacingTasks: [UUID: Task<Void, Never>] = [:]
+    // Reading timing from objectives calls the agent's model; self-tests opt in
+    // on their own runtime with a fixture transport.
+    var readsObjectivePacing = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     private var timer: Timer?
     private var shuttingDown = false
     func start() {
@@ -28,6 +32,8 @@ enum AgentPolicy {
             catch { session.agent?.enabled = false; session.agent?.attention = "Review the saved schedule."; session.agent?.lastOutcome = "Paused: schedule could not be restored at startup." }
         }
         for session in Store.shared.sessions { Store.shared.refreshSwitchboardReceipts(session) }
+        // Schedules migrated into objectives at load are read once.
+        for session in Store.shared.sessions where session.agent?.pacingPending == true { refreshPacing(session, store: .shared) }
         Store.shared.save()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }
     }
@@ -84,6 +90,8 @@ enum AgentPolicy {
         timer?.invalidate(); timer = nil
         for task in tasks.values { task.cancel() }
         tasks.removeAll()
+        for task in pacingTasks.values { task.cancel() }
+        pacingTasks.removeAll()
         // Keep saved loop settings intact. Late cancellation callbacks must not
         // pause configured loops, clear attention, or drain another queued prompt.
     }
@@ -268,6 +276,7 @@ enum AgentPolicy {
                             let path = folder.appendingPathComponent("status-" + UUID().uuidString + ".png"); try bytes.write(to: path, options: .atomic)
                             session.agent?.artPath = path.path; session.agent?.lastArtMood = mood; session.agent?.lastArtAt = Date(); session.agent?.lastArtDirection = direction
                             session.agent?.lastArtScoreboard = AgentArtPolicy.signature(board)
+                            session.agent?.lastArtMetricValues = AgentMetricNumber.values(board)
                             // Normal attachment transport makes the art available on remote viewers.
                             if let index = session.messages.firstIndex(where: { $0.id == responseID }) { session.messages[index].images = [path.path] }
                         } catch is CancellationError { throw CancellationError() }
@@ -299,6 +308,38 @@ enum AgentPolicy {
                 AgentConversation.shared.completed(session, responseID: responseID, text: "", intent: "neutral", success: false)
             }
         }
+    }
+    func readingPacing(_ session: Session) -> Bool { pacingTasks[session.id] != nil }
+    // Called whenever an objective is saved. Asks the agent's own model once
+    // per objective text; a failure falls back to Auto defaults. A result for
+    // an objective that changed meanwhile is discarded.
+    func refreshPacing(_ session: Session, store: Store, retryFailed: Bool = false) {
+        guard readsObjectivePacing, !shuttingDown, let config = session.agent, config.needsPacingExtraction(retryFailed: retryFailed) || config.pacingPending == true else { return }
+        let hash = AgentPacingSpec.hash(config.objective)
+        pacingTasks.removeValue(forKey: session.id)?.cancel()
+        pacingTasks[session.id] = Task { @MainActor [weak self, weak session] in
+            guard let self, let session else { return }
+            var spec = AgentPacingSpec.failure
+            do {
+                let key = AgentModels.parse(config.model) == nil ? (try self.keyReader("meta") ?? "") : ""
+                guard AgentModels.parse(config.model) != nil || !key.isEmpty else { throw AgentFailure.message("No Meta API key for objective pacing.") }
+                let text = try await self.respond(store: store, model: config.model, instructions: AgentPacingSpec.instructions,
+                    input: AgentPacingSpec.input(objective: config.objective, timeZone: config.scheduleTimeZone), key: key)
+                if let parsed = AgentPacingSpec.parse(text) { spec = parsed }
+            } catch { if Task.isCancelled { return } }
+            guard !Task.isCancelled, !self.shuttingDown else { return }
+            self.pacingTasks.removeValue(forKey: session.id)
+            guard store.sessions.contains(where: { $0 === session }), let current = session.agent, AgentPacingSpec.hash(current.objective) == hash else { return }
+            session.agent?.adoptPacing(spec, hash: hash, now: Date())
+            store.save(); store.objectWillChange.send()
+        }
+        store.objectWillChange.send()
+    }
+    // The single path after any objective or settings save: show a schedule
+    // migration notice once, then read the objective's timing if it changed.
+    func objectiveSaved(_ session: Session, store: Store, notice: String?, retryFailed: Bool = false) {
+        if let notice { session.messages.append(Message(role: "notice", text: notice)); store.save() }
+        refreshPacing(session, store: store, retryFailed: retryFailed)
     }
     static func discordSessionInformation(_ session: Session, config: AgentConfig) -> [String: Any] {
         var value: [String: Any] = ["objective": String(config.objective.prefix(2000)),
@@ -424,13 +465,17 @@ extension Store {
             throw AgentFailure.message("Use an interval of at least one minute, 1–1000 turns per loop, and a scoreboard interval of 1–1000 loops.")
         }
         guard !enabled || turns > 0 else { throw AgentFailure.message("Add at least one automatic turn before enabling the loop.") }
-        let rule = try AgentSchedule.compile(interval: interval, text: scheduleText, zone: scheduleTimeZone)
-        guard !enabled || rule.next(after: now) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
+        let zoneID = try AgentSchedule.compile(interval: interval, text: nil, zone: scheduleTimeZone ?? config.scheduleTimeZone).zoneID
         let previous = config, paused = session.queuePaused
         config.settingsChanged(); config.enabled = enabled; config.intervalSeconds = interval; config.turnLimit = turns; config.scoreboardEveryLoops = scoreboardEvery
-        config.scheduleText = scheduleText; config.scheduleTimeZone = rule.zoneID
+        // A text schedule from an older caller moves into the objective.
+        if scheduleText != nil { config.scheduleText = scheduleText }
+        config.scheduleTimeZone = zoneID
+        let notice = config.migrateScheduleText()
+        let rule = try config.scheduleRule()
+        guard !enabled || rule.next(after: now) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }
         if !enabled { config.nextRunAt = nil }
-        else if !previous.enabled || previous.intervalSeconds != interval || previous.scheduleText != scheduleText || previous.scheduleTimeZone != rule.zoneID || previous.nextRunAt == nil { config.nextRunAt = rule.next(after: now) }
+        else if !previous.enabled || (try? previous.scheduleRule()) != rule || previous.nextRunAt == nil { config.nextRunAt = rule.next(after: now) }
         session.agent = config
         if enabled { session.agent?.clearPause() }
         else if previous.enabled || previous.pauseReason == nil {
@@ -444,6 +489,7 @@ extension Store {
         if enabled && session.pending.isEmpty { session.queuePaused = false }
         do { try saveChecked() }
         catch { session.agent = previous; session.queuePaused = paused; throw AgentFailure.message("Could not save loop settings. Try again.") }
+        if notice != nil { MainActor.assumeIsolated { AgentRuntime.shared.objectiveSaved(session, store: self, notice: notice) } }
     }
     func queueAgentRun(_ session: Session) {
         guard session.agent != nil, (session.agent?.turnLimit ?? 0) > 0 else {

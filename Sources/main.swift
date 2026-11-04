@@ -231,6 +231,8 @@ final class Session: ObservableObject, Identifiable {
             queuePaused = true
             messages.append(Message(role: "notice", text: "Compaction was interrupted when Converse closed. Its completion is unknown; it will not be retried automatically. Your transcript and draft are retained."))
         }
+        // Text schedules now live in the objective; move one once, with a notice.
+        if let notice = agent?.migrateScheduleText() { messages.append(Message(role: "notice", text: notice)) }
     }
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
