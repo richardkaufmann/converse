@@ -136,6 +136,7 @@ internal static class AppSupportChecks
                 store.AgentSecret = _ => null;
                 var cliAgent = store.CreateAgent("CLI judge", false);
                 check(AgentModels.Parse(cliAgent.Agent!.Settings.Model)?.Engine == "claude" && !cliAgent.Agent.Settings.GenerateArt, "Without a Meta key a new agent defaults to the installed Claude CLI with mood art off");
+                check(AgentModels.Options(store).Select(o => AgentModels.Parse(o.Id)?.Engine).SequenceEqual(new[] { "claude", "codex" }), "Agent model options omit a provider whose CLI is not on PATH");
                 File.Delete(Path.Combine(bin, "claude"));
                 check(AgentModels.Parse(store.CreateAgent("Codex judge", false).Agent!.Settings.Model)?.Engine == "codex", "Codex is the default when it is the only installed CLI");
                 File.Delete(Path.Combine(bin, "codex"));

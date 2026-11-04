@@ -713,6 +713,7 @@ import Foundation
     check(claudeJudge.agent?.generateArt == false, "Saving a Meta key later does not silently turn on art for existing agents")
     judge.agentSecret = nil
     check(judge.createAgent(title: "Fixture judge", persist: false).agent?.model == "muse-spark-1.3", "Fixtures without a credential reader keep the legacy defaults")
+    check(AgentModels.options(store: judge).compactMap { AgentModels.parse($0.id)?.engine } == ["claude"], "Agent model options omit providers whose CLI is not on the searched path")
     check(ProviderCommand.resolve("claude", directories: [fakePath.path]) == fakePath.appendingPathComponent("claude").path && ProviderCommand.resolve("muse", directories: [fakePath.path]) == nil, "Command resolution finds only executables in the searched directories")
     let keyless = AgentRuntime(); keyless.keyReader = { _ in nil }
     let metaAgent = judge.createAgent(title: "Keyless Meta agent", persist: false)

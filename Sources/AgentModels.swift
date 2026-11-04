@@ -109,7 +109,8 @@ enum AgentModels {
     }
     static func options(store: Store) -> [DeviceChoiceDTO] {
         var choices: [DeviceChoiceDTO] = []
-        for account in store.accounts where store.entries.contains(where: { $0.engine == account.engine }) {
+        // Omit providers whose CLI is not installed; Agent Setup still shows the saved choice.
+        for account in store.accounts where installed(account, store: store) {
             let sessions = store.sessions.filter { $0.entry.accountID == account.id && !$0.isAgentSession }
             let prefix = account.engine.capitalized + " · " + account.name + " · "
             choices.append(DeviceChoiceDTO(id: reference(engine: account.engine, account: account.id), label: prefix + "CLI default"))
@@ -121,7 +122,7 @@ enum AgentModels {
         return choices
     }
     @MainActor static func catalog(store: Store) async -> [DeviceChoiceDTO] {
-        let entries = store.entries, accounts = store.accounts
+        let entries = store.entries, accounts = store.accounts.filter { installed($0, store: store) }
         var result = options(store: store)
         let discovered = await Task.detached { discover(entries: entries, accounts: accounts) }.value
         for option in discovered where !result.contains(where: { $0.id == option.id }) { result.append(option) }
