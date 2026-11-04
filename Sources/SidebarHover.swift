@@ -5,18 +5,61 @@ import SwiftUI
 // SwiftUI's inherited help text is unreliable over rows of independent buttons.
 final class SidebarHoverState: ObservableObject {
     weak var anchor: SidebarHoverView?
+    weak var strip: SidebarTrackingView?
     var inside = false
     // The P/1/2/3/X buttons carry their own tooltips; never stack the row card on top.
-    var overButtons = false
+    // Published so the strip can show every free pane orange while it is hovered.
+    @Published private(set) var overButtons = false
     var wantsDetails: Bool { inside && !overButtons }
     func setHovered(_ inside: Bool) {
         self.inside = inside
         anchor?.setHovered(wantsDetails)
     }
     func setButtonsHovered(_ over: Bool) {
-        overButtons = over
+        if over != overButtons { overButtons = over }
         if over { anchor?.closeDetails() } else { anchor?.setHovered(wantsDetails) }
     }
+    // AppKit tracking reports the pointer's window location; both flags are derived
+    // from it, so a dropped or out-of-order exit event can never strand either one.
+    func pointer(at point: NSPoint) {
+        func contains(_ view: SidebarTrackingView?) -> Bool {
+            guard let view, view.window != nil else { return false }
+            return view.trackedRect.contains(view.convert(point, from: nil))
+        }
+        let over = contains(strip), row = contains(anchor)
+        if over != overButtons { setButtonsHovered(over) }
+        if row != inside { setHovered(row) }
+    }
+}
+// Tracks the pointer without taking clicks; the row card and the pane strip both use it.
+class SidebarTrackingView: NSView {
+    // Nothing clips inside SwiftUI's host, so visibleRect alone spills past these bounds
+    // (a strip's covers the whole row); never track by visibleRect or .inVisibleRect.
+    weak var hoverState: SidebarHoverState?
+    var trackedRect: NSRect { bounds.intersection(visibleRect) }
+    private var area: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let next = NSTrackingArea(rect: trackedRect, options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved], owner: self)
+        addTrackingArea(next); area = next
+    }
+    // AppKit refreshes areas lazily on pointer motion; install them as soon as the geometry is known.
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateTrackingAreas() }
+    override func setFrameSize(_ size: NSSize) { super.setFrameSize(size); updateTrackingAreas() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func mouseEntered(with event: NSEvent) { hoverState?.pointer(at: event.locationInWindow) }
+    override func mouseMoved(with event: NSEvent) { hoverState?.pointer(at: event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { hoverState?.pointer(at: event.locationInWindow) }
+}
+struct PaneStripTracker: NSViewRepresentable {
+    let state: SidebarHoverState
+    func makeNSView(context: Context) -> SidebarTrackingView {
+        let view = SidebarTrackingView(); view.hoverState = state; state.strip = view
+        return view
+    }
+    func updateNSView(_ view: SidebarTrackingView, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: SidebarTrackingView, context: Context) -> CGSize? { CGSize(width: proposal.width ?? 1, height: proposal.height ?? 1) }
 }
 struct SidebarHoverDetails: NSViewRepresentable {
     let text: String
@@ -29,14 +72,14 @@ struct SidebarHoverDetails: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: SidebarHoverView, context: Context) -> CGSize? { CGSize(width: proposal.width ?? 1, height: proposal.height ?? 1) }
     static func dismantleNSView(_ view: SidebarHoverView, coordinator: ()) { view.closeDetails() }
 }
-final class SidebarHoverView: NSView {
+final class SidebarHoverView: SidebarTrackingView {
     var details = "" { didSet { if details != oldValue { updateDetails() } } }
-    weak var hoverState: SidebarHoverState?
+    // Tests observe the card here instead of opening a popover.
+    var presentDetails: ((String) -> Void)?
     private var opening: DispatchWorkItem?
     private var watchdog: Timer?
     private var popover: NSPopover?
     private var textView: NSTextView?
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     func setHovered(_ inside: Bool) {
         opening?.cancel()
         guard inside else { return }
@@ -50,9 +93,10 @@ final class SidebarHoverView: NSView {
     private var pointerInRow: Bool {
         guard let window else { return false }
         let point = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        return visibleRect.contains(point)
+        return trackedRect.contains(point)
     }
     func showDetails() {
+        if let presentDetails { presentDetails(details); return }
         guard popover == nil, window != nil else { return }
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 450, height: 500))
         text.isEditable = false; text.isSelectable = true; text.isRichText = false; text.drawsBackground = false

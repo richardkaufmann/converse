@@ -176,14 +176,15 @@ struct PaneButton: View {
     let label: String
     let selected: Bool
     var destructive = false
-    // Orange on hover means taking this pane will not evict another session.
+    // Orange means taking this pane will not evict another session.
     var available = false
+    // The row's whole P 1 2 3 X strip is hovered, so every free pane shows at once.
+    var stripHovered = false
     let action: () -> Void
-    @State private var hovered = false
-    @Environment(\.paneGroupHovered) private var groupHovered
+    // The current pane stays green.
+    static func showsOpen(available: Bool, selected: Bool, stripHovered: Bool) -> Bool { available && !selected && stripHovered }
     var body: some View {
-        // Hovering anywhere over P 1 2 3 X shows every free pane at once; the current pane stays green.
-        let open = available && !selected && (hovered || groupHovered)
+        let open = Self.showsOpen(available: available, selected: selected, stripHovered: stripHovered)
         Button(action: action) {
             Text(label).font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(selected && !open ? Color.white : Color.black)
@@ -191,23 +192,18 @@ struct PaneButton: View {
                 .background(open ? Color.orange : selected ? (destructive ? Color(red: 0.55, green: 0.06, blue: 0.08) : Color(red: 0.12, green: 0.52, blue: 0.28)) : .white)
                 .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(selected ? 0 : 0.18), lineWidth: 0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 2))
-        }.buttonStyle(.plain).onHover { hovered = $0 }
+        }.buttonStyle(.plain)
     }
 }
-private struct PaneGroupHoveredKey: EnvironmentKey { static let defaultValue = false }
-extension EnvironmentValues {
-    var paneGroupHovered: Bool { get { self[PaneGroupHoveredKey.self] } set { self[PaneGroupHoveredKey.self] = newValue } }
-}
-/// The P 1 2 3 X strip in a sidebar row. Hovering any part of it highlights every free pane.
+/// The P 1 2 3 X strip in a sidebar row. AppKit tracking sets hover.overButtons from the pointer;
+/// the row passes it to each PaneButton as stripHovered.
 struct PaneButtonGroup<Content: View>: View {
-    var onHover: (Bool) -> Void = { _ in }
+    let hover: SidebarHoverState
     @ViewBuilder let content: Content
-    @State private var hovered = false
     var body: some View {
         HStack(spacing: 2) { content }
-            .environment(\.paneGroupHovered, hovered)
-            .frame(width: 98).fixedSize(horizontal: true, vertical: false).contentShape(Rectangle())
-            .onHover { hovered = $0; onHover($0) }
+            .frame(width: 98).fixedSize(horizontal: true, vertical: false)
+            .background(PaneStripTracker(state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
     }
 }
 extension Session {
@@ -264,10 +260,10 @@ struct SidebarSession: View {
             if showsModel {
                 ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
             }
-            PaneButtonGroup(onHover: { hover.setButtonsHovered($0) }) {
+            PaneButtonGroup(hover: hover) {
                 PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane, available: workspace.paneIsAvailable(pane, for: session.id, in: state.id)) { AppDelegate.shared.assign(session, to: state, pane: pane) }
+                    PaneButton(label: String(pane), selected: localPane == pane, available: workspace.paneIsAvailable(pane, for: session.id, in: state.id), stripHovered: hover.overButtons) { AppDelegate.shared.assign(session, to: state, pane: pane) }
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)").help("Move this session to pane \(pane) here, taking it back from any other display.")
                 }
                 PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored.")
@@ -278,7 +274,7 @@ struct SidebarSession: View {
             .contentShape(Rectangle())
             .background(SidebarHoverDetails(text: session.sidebarSummary(workspace: workspace, windowID: state.id), state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onAppear { if session.accountStatus.isEmpty { Store.shared.refreshSidebarStatus(session) } }
-            .onHover { inside in hover.setHovered(inside); if inside { Store.shared.refreshSidebarStatus(session) } }
+            .onHover { if $0 { Store.shared.refreshSidebarStatus(session) } }
             .contextMenu {
                 Button("Rename…") { AppDelegate.shared.renameSession(session) }
                 if session.isAgentSession {
