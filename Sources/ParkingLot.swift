@@ -343,6 +343,7 @@ struct ParkingLotView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            ParkingLotTalkBar(lot: lot)
             HStack(spacing: 8) {
                 Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color.paneNumberBadge).clipShape(RoundedRectangle(cornerRadius: 3))
                 ProviderLogo(engine: "parking")
@@ -454,4 +455,33 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     try? Data("broken".utf8).write(to: corrupt.appendingPathComponent("parking-lot.json"))
     let broken = ParkingLotStore(folder: corrupt); broken.open()
     check(!broken.error.isEmpty && (try? String(contentsOf: corrupt.appendingPathComponent("parking-lot.json"))) == "broken", "Unreadable Parking Lot data is reported and never silently replaced")
+}
+
+/// While a voice conversation about this lot is running, its controls live in the
+/// lot's own pane: the talk session itself is usually not shown in any pane.
+struct ParkingLotTalkBar: View {
+    @ObservedObject var lot: ParkingLotStore
+    @ObservedObject var conversation = AgentConversation.shared
+    @ObservedObject var store = Store.shared
+    static func talkSession(for lot: UUID, sessionID: UUID?, sessions: [Session]) -> Session? {
+        guard let sessionID else { return nil }
+        return sessions.first { $0.id == sessionID && $0.agent?.parkingLotTalkID == lot }
+    }
+    var body: some View {
+        if conversation.active, let session = Self.talkSession(for: lot.id, sessionID: conversation.sessionID, sessions: store.sessions) {
+            HStack(spacing: 8) {
+                Image(systemName: conversation.phase == .listening ? "mic.fill" : "speaker.wave.2.fill").foregroundStyle(.orange)
+                Text(conversation.status.isEmpty ? "Talking about \u{201C}" + lot.name + "\u{201D}" : conversation.status)
+                    .font(.callout).lineLimit(2)
+                    .help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)
+                Spacer(minLength: 0)
+                Button("Stop talking") { conversation.stop() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .accessibilityLabel("Stop talking about " + lot.name)
+                    .help("End the voice conversation and turn the microphone off. " + session.title + " keeps its transcript.")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.orange.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
 }
