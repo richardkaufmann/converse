@@ -412,6 +412,21 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceTranscriptRequest(beforeOffset: 10))))
         let earlier = try capturedEnvelopes().compactMap { frame in frame.kind == DeviceMessageKind.transcriptSnapshot.rawValue ? frame.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } : nil }.first
         check(earlier?.prepend == true && earlier?.offset == 0 && earlier?.messages.compactMap(\.messageNumber) == [1, 2, 3], "Earlier home page keeps original message ordinals and omits hidden activity ordinals")
+        // Streaming a transcript to a viewer never fetches (or resolves) a
+        // web image; the reader loads it on the home with a click.
+        var imageValidations = 0
+        let savedValidate = Store.shared.responseImageLoader.validate
+        Store.shared.responseImageLoader.validate = { _ in imageValidations += 1; return false }
+        let webImage = Message(role: "assistant", text: "![Leak](https://secret.images.example.invalid/secret.png)")
+        session.messages.append(webImage)
+        captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceTranscriptRequest(beforeOffset: session.messages.count))))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        let streamed = try capturedEnvelopes().compactMap { frame in frame.kind == DeviceMessageKind.transcriptSnapshot.rawValue ? frame.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } : nil }.first
+        check(streamed?.messages.last?.text.contains("![Leak](") == true && imageValidations == 0 && session.messages.last?.images.isEmpty == true, "Sending a transcript to a viewer never fetches or resolves a web image")
+        session.messages.removeAll { $0.id == webImage.id }
+        Store.shared.responseImageLoader.validate = savedValidate
+        captured = []
         captured = []
         let renameID = UUID()
         let renamePayload = try JSONEncoder().encode(DeviceCommandPayload(action: "rename", text: "Renamed remotely"))

@@ -158,7 +158,7 @@ Drag the dividers to resize panes. Changing the number of visible session panes 
 
 ### Add images and filenames
 
-Paste a screenshot or image, or use **Attach** to choose one. Its preview appears in the draft; **×** removes it. Sending supplies the image to the selected provider along with your prompt. You can ask “What is wrong with this layout?” or “Explain this diagram.” Images returned by an assistant appear in the conversation too.
+Paste a screenshot or image, or use **Attach** to choose one. Its preview appears in the draft; **×** removes it. Sending supplies the image to the selected provider along with your prompt. You can ask “What is wrong with this layout?” or “Explain this diagram.” Images returned by an assistant appear in the conversation too. A web image in a reply stays a link until you hover it and click **Load image** on the computer running that session; a suspicious-looking link shows a warning and asks before loading.
 
 On **Mac and Windows**, dragging a file or folder from Finder or Explorer into a pane inserts its **fully qualified filename**, quoted when needed. It does not upload the file. This is useful for “Review this file: …” when the assistant works on the same computer. To send image content, use Paste or Attach instead. iPhone/iPad do not insert desktop file paths.
 

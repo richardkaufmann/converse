@@ -56,7 +56,7 @@ public static class ResponseImages
         return found;
     }
 
-    // Pure parser twin for https refs (downloaded, never read from disk).
+    // Pure parser twin for https refs (downloaded on click, never read from disk).
     public static List<(int Start, int Length, string Caption, string Url)> ParseWebRefs(string text)
     {
         var found = new List<(int, int, string, string)>();
@@ -211,8 +211,10 @@ public static class ResponseImages
         return addresses.Length > 0 && addresses.All(IsPublicAddress);
     }
 
-    // Converts an assistant reply's image refs into managed attachments:
-    // file refs inside the roots, plus bounded public-HTTPS downloads.
+    // Converts an assistant reply's local file image refs into managed
+    // attachments. Web refs are never fetched here: fetching unasked would
+    // let a prompt-injected link leak conversation details through its
+    // hostname or path. LoadWebImageAsync runs only on the reader's click.
     // The markdown collapses to its caption; validated bytes store as
     // Response-<hash>.png beside the session's attachments. Returns true
     // when the message changed.
@@ -242,14 +244,13 @@ public static class ResponseImages
             if (!IsSupportedImage(bytes)) continue;
             takes.Add((start, length, caption, bytes));
         }
-        foreach (var (start, length, caption, url) in ParseWebRefs(message.Text))
-        {
-            if (takes.Count >= budget) break;
-            var bytes = await DownloadWebImageAsync(url);
-            if (bytes is null) continue;
-            takes.Add((start, length, caption, bytes));
-        }
         if (takes.Count == 0) return false;
+        await StoreTakesAsync(output, message, takes);
+        return true;
+    }
+
+    private static async Task StoreTakesAsync(string output, ChatMessage message, List<(int Start, int Length, string Caption, byte[] Bytes)> takes)
+    {
         Directory.CreateDirectory(output);
         var text = message.Text;
         foreach (var (start, length, caption, bytes) in takes.OrderByDescending(t => t.Start))
@@ -262,8 +263,41 @@ public static class ResponseImages
             if (!message.Images.Contains(stored)) message.Images.Add(stored);
         }
         message.Text = text;
-        return true;
     }
+
+    // Swappable for offline tests; production is the bounded client below.
+    public static Func<string, Task<byte[]?>> WebDownloader { get; set; } = DownloadWebImageAsync;
+    private static readonly HashSet<string> Loading = new();
+
+    // The reader clicked Load image under one web image link. Fetches that
+    // image once and keeps it as a transcript attachment, so it survives
+    // relaunch and reaches viewers as a blob. A ref already loaded, or a
+    // load already in flight, never fetches again. Returns null when
+    // nothing was attempted, else whether the image loaded.
+    public static async Task<bool?> LoadWebImageAsync(string dataFolder, ChatSession session, ChatMessage message, string url)
+    {
+        if (message.Role != "assistant" || message.Images.Count >= MaxImages) return null;
+        if (!ParseWebRefs(message.Text).Any(r => r.Url == url)) return null;
+        var key = session.Id.ToString("D") + "/" + message.Id + "/" + url;
+        lock (Loading) { if (!Loading.Add(key)) return null; }
+        try
+        {
+            var bytes = await WebDownloader(url);
+            if (bytes is null) return false;
+            var refs = ParseWebRefs(message.Text).Where(r => r.Url == url)
+                .Select(r => (r.Start, r.Length, r.Caption, bytes)).ToList();
+            if (refs.Count == 0 || message.Images.Count >= MaxImages) return null;
+            await StoreTakesAsync(Path.Combine(dataFolder, "Attachments", session.Id.ToString("D")), message, refs);
+            return true;
+        }
+        finally { lock (Loading) Loading.Remove(key); }
+    }
+
+    // The host leads the notice so a prompt-injected link is identifiable
+    // before its full attacker-chosen text (Mac unreachableNotice parity).
+    public static string UnreachableNotice(string url) =>
+        "Image could not be loaded from " + (Uri.TryCreate(url, UriKind.Absolute, out var parsed) ? parsed.Host : "an unknown host")
+        + ": " + url + "\nOpen the image link to view it in a browser.";
 
     // Bounded public-HTTPS download: canonical form, public destination,
     // no credentials or cookies, 8 MB cap enforced while reading,
@@ -308,4 +342,74 @@ public static class ResponseImages
         }
         catch { return null; }
     }
+}
+
+// Pure and offline (no DNS), Mac ImageLinkSuspicion parity: reasons a
+// reply's image link deserves a second look before the reader loads it.
+// Injected links exfiltrate through hostnames and paths, so
+// random-looking tokens weigh most.
+public static class ImageLinkSuspicion
+{
+    private static readonly HashSet<string> PrivateSuffixes = new() { "localhost", "local", "lan", "internal", "intranet", "home", "corp", "localdomain", "arpa" };
+    private static readonly HashSet<string> ImageExtensions = new() { "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic", "tif", "tiff" };
+    private static readonly Regex HostLike = new(@"^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(?=/|$)", RegexOptions.Compiled);
+
+    public static List<string> Reasons(string url, string caption = "")
+    {
+        var found = new List<string>();
+        void Flag(string reason) { if (!found.Contains(reason)) found.Add(reason); }
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed)) { Flag("not a valid link"); return found; }
+        var scheme = parsed.Scheme.ToLowerInvariant();
+        if (scheme != "https") Flag("not HTTPS");
+        if (!string.IsNullOrEmpty(parsed.UserInfo)) Flag("user name in link");
+        if (!parsed.IsDefaultPort) Flag("unusual port " + parsed.Port);
+        var host = parsed.Host.ToLowerInvariant().Trim('[', ']', '.');
+        if (host.Length == 0) { Flag("no hostname"); return found; }
+        var labels = host.Split('.');
+        if (parsed.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6 || host.All(c => char.IsDigit(c) || c == '.'))
+            Flag("IP address instead of a name");
+        else if (labels.Length < 2 || PrivateSuffixes.Contains(labels[^1])) Flag("private network name");
+        if (host.Contains("xn--", StringComparison.Ordinal) || parsed.IdnHost.Contains("xn--", StringComparison.Ordinal)) Flag("punycode (lookalike) hostname");
+        if (labels.Length > 4) Flag("many subdomains");
+        if (labels.Any(l => l.Length > 24)) Flag("long hostname label");
+        if (labels.Any(RandomLooking)) Flag("long random-looking hostname");
+        if (parsed.AbsolutePath.Split('/').Any(p => RandomLooking(Uri.UnescapeDataString(p)))) Flag("long random-looking path");
+        var named = caption.Trim().ToLowerInvariant();
+        string? claimed = null;
+        if (Uri.TryCreate(named, UriKind.Absolute, out var link) && link.Host.Length > 0 && named.Contains("://", StringComparison.Ordinal)) claimed = link.Host;
+        else if (HostLike.Match(named) is { Success: true } match && !ImageExtensions.Contains(match.Value.Split('.')[^1])) claimed = match.Value;
+        if (claimed is not null)
+        {
+            static string Bare(string value) => value.StartsWith("www.", StringComparison.Ordinal) ? value[4..] : value;
+            if (Bare(claimed) != Bare(host) && !host.EndsWith("." + Bare(claimed), StringComparison.Ordinal)) Flag("link text names " + claimed);
+        }
+        return found;
+    }
+
+    // A 20+ character run of letters and digits that reads as a hash, a
+    // number, base64 or consonant noise rather than words.
+    public static bool RandomLooking(string part)
+    {
+        foreach (var token in Regex.Split(part, "[^A-Za-z0-9]+"))
+        {
+            if (token.Length < 20) continue;
+            var digits = token.Count(char.IsDigit);
+            var letters = token.Length - digits;
+            if (digits > 0 && (letters == 0 || token.All(Uri.IsHexDigit) || digits >= 2)) return true;
+            var changes = 0; bool? previous = null;
+            foreach (var character in token.Where(char.IsLetter))
+            {
+                var upper = char.IsUpper(character);
+                if (previous is { } was && was != upper) changes++;
+                previous = upper;
+            }
+            if (changes >= 6) return true;
+            var vowels = token.ToLowerInvariant().Count(c => "aeiouy".Contains(c));
+            if (letters > 0 && (double)vowels / letters < 0.2) return true;
+        }
+        return false;
+    }
+
+    public static string Warning(IReadOnlyList<string> reasons) =>
+        reasons.Count == 0 ? "" : "⚠︎ Looks suspicious: " + string.Join(", ", reasons);
 }

@@ -135,13 +135,14 @@ extension TranscriptStyle {
         }
         return result
     }
-    // Markdown image runs often expose only alt text. Until an attachment is
-    // available, render an ordinary link so the destination never disappears.
+    // Web images are never fetched unasked. Until the reader loads one, show
+    // its caption and full URL as an ordinary link so the destination is plain.
     static func imageLinks(_ text: String) -> String {
         let result = NSMutableString(string: text)
         for ref in imageReferences(text).reversed() {
-            let label = ref.caption.isEmpty ? "Open image" : ref.caption
-            result.replaceCharacters(in: ref.range, with: "[" + label + "](" + ref.url.absoluteString + ")")
+            var label = ""
+            for character in ref.url.absoluteString { if "\\`*_[]<>~".contains(character) { label.append("\\") }; label.append(character) }
+            result.replaceCharacters(in: ref.range, with: (ref.caption.isEmpty ? "" : ref.caption + ": ") + "[" + label + "](" + ref.url.absoluteString + ")")
         }
         return result as String
     }

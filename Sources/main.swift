@@ -304,7 +304,7 @@ final class Store: ObservableObject {
             setupCompleted = FileManager.default.fileExists(atPath: self.folder.appendingPathComponent("sessions.json").path)
             entries = SetupCatalog.entries
         }
-        for session in sessions { attachIdentity(session); importResponseImages(session, allowRemote: false) }
+        for session in sessions { attachIdentity(session); importResponseImages(session) }
         // Replace a sender's stale "failed"/"processing" receipt for replies reclassified on load.
         for session in sessions where session.switchboardObligations.contains(where: { $0.state == "interrupted" }) { refreshSwitchboardReceipts(session) }
         if !sessions.isEmpty { save() }
@@ -1626,6 +1626,24 @@ final class ConversationTextView: NSTextView {
         (enclosingScrollView as? ConversationScrollView)?.interaction()
     }
 
+    var loadImage: ((ResponseImageLink) -> Void)? { didSet { if loadImage == nil { hideImageHover() } } }
+    var imageHover: ResponseImageLoadControl?
+    private var imageHoverTracking: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let imageHoverTracking { removeTrackingArea(imageHoverTracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(area); imageHoverTracking = area
+    }
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateImageHover(convert(event.locationInWindow, from: nil))
+    }
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if event.trackingArea === imageHoverTracking { hideImageHover() }
+    }
+
     var draftImages: [(location: Int, path: String)] = []
     private(set) var draftImageButtons: [DraftImageRemoveButton] = []
     var imageRemove: ((String) -> Void)?
@@ -2050,6 +2068,7 @@ struct ScrollingConversation: NSViewRepresentable {
         text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
+        text.loadImage = Self.imageLoader(session)
         text.isEditable = inputEnabled
         text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
@@ -2085,8 +2104,15 @@ struct ScrollingConversation: NSViewRepresentable {
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
             text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
+            if (text.loadImage == nil) != (Self.imageLoader(session) == nil) { text.loadImage = Self.imageLoader(session) }
             context.coordinator.render(text); text.refreshDecorations()
         }
+    }
+    // Only the home fetches. Viewers show the link; load it on the home.
+    static func imageLoader(_ session: Session) -> ((ResponseImageLink) -> Void)? {
+        Store.shared.sessions.contains(where: { $0 === session }) ? { [weak session] link in
+            if let session { Store.shared.loadResponseImage(session, messageID: link.messageID, url: link.url) }
+        } : nil
     }
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         coordinator.session.textScrollOrigin = scroll.contentView.bounds.origin
@@ -2258,7 +2284,17 @@ struct ScrollingConversation: NSViewRepresentable {
                     markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base))
                 } else if message.role == "assistant" {
                     if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
-                    else { body = MarkdownText.render(visible); markdownCache[message.id] = (visible, NSAttributedString(attributedString: body)) }
+                    else {
+                        body = MarkdownText.render(visible)
+                        let refs = TranscriptStyle.imageReferences(visible)
+                        if !refs.isEmpty {
+                            body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                                guard let url = value as? URL, let ref = refs.first(where: { $0.url == url }) else { return }
+                                body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
+                            }
+                        }
+                        markdownCache[message.id] = (visible, NSAttributedString(attributedString: body))
+                    }
                 } else { body = NSMutableAttributedString(string: visible, attributes: base) }
                 for mark in (trafficSummary == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
@@ -2356,7 +2392,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
-            text.refreshDecorations()
+            text.refreshDecorations(); text.refreshImageHover()
             rendering = false
         }
     }

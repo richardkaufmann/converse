@@ -2196,6 +2196,73 @@ MdnsChecks.RunGroupDevices(Check);
     finally { Cleanup(dataDir); Cleanup(workDir); }
 }
 
+// Web images in replies load only on the reader's click: no fetch (and so
+// no DNS) at turn end or import; one fetch per click, persisted.
+{
+    var root = Directory.CreateTempSubdirectory("converse-webimg-").FullName;
+    var original = ResponseImages.WebDownloader;
+    var fetches = new List<string>();
+    var png = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, (byte)'I', (byte)'H', (byte)'D', (byte)'R', 0, 0, 0, 4, 0, 0, 0, 4, 8, 2, 0, 0, 0, 0, 0, 0, 0 };
+    ResponseImages.WebDownloader = url => { lock (fetches) fetches.Add(url); return Task.FromResult<byte[]?>(url.EndsWith("/missing", StringComparison.Ordinal) ? null : png); };
+    try
+    {
+        const string link = "https://images.example.invalid/cat.png";
+        var runner = new FakeRunner { Reply = "A cat ![Cat](" + link + ") here." };
+        var store = new SessionStore(root, runner);
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        session.Draft = "show a cat";
+        store.Submit(session);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (session.Busy && DateTime.UtcNow < deadline) await Task.Delay(20);
+        var reply = session.Messages.LastOrDefault(m => m.Role == "assistant");
+        Check(reply is not null && reply.Text.Contains("![Cat](" + link + ")") && reply.Images.Count == 0 && fetches.Count == 0,
+            "Finishing a turn never fetches a web image in the reply");
+        var plain = new ChatMessage { Role = "assistant", Text = "![Cat](" + link + ")" };
+        Check(!await ResponseImages.ImportAsync(root, session, plain) && fetches.Count == 0 && plain.Text.Contains("!["),
+            "Import leaves web image refs untouched without fetching");
+        var first = store.LoadResponseImageAsync(session, reply!, link);
+        var second = store.LoadResponseImageAsync(session, reply!, link);
+        await Task.WhenAll(first, second);
+        Check(fetches.Count == 1 && reply!.Images.Count == 1 && File.Exists(reply.Images[0]) && reply.Text == "A cat Cat here.",
+            "Load image fetches the clicked web image exactly once into attachments");
+        await store.LoadResponseImageAsync(session, reply!, link);
+        Check(fetches.Count == 1, "A loaded web image is never fetched again");
+        Check(new SessionStore(root, new FakeRunner()).Sessions.First(s => s.Id == session.Id).Messages.First(m => m.Id == reply!.Id).Images.Count == 1,
+            "Loaded web image survives a restart");
+        var gone = new ChatMessage { Role = "assistant", Text = "![Gone](https://images.example.invalid/missing)" };
+        session.Messages.Add(gone);
+        await store.LoadResponseImageAsync(session, gone, "https://images.example.invalid/missing");
+        Check(session.Messages.Last().Role == "notice" && session.Messages.Last().Text.StartsWith("Image could not be loaded from images.example.invalid", StringComparison.Ordinal)
+            && gone.Text.Contains("!["), "A failed Load image reports the host and keeps the link");
+    }
+    finally { ResponseImages.WebDownloader = original; Cleanup(root); }
+
+    foreach (var clean in new[] { "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/320px-Example.jpg",
+        "https://raw.githubusercontent.com/apple/swift/main/docs/swift-logo.png",
+        "https://github.com/user-attachments/assets/1c6f4f4e-8f43-4a0e-9b8e-2b0c3e8d7a11",
+        "https://avatars.githubusercontent.com/u/9919?s=200&v=4" })
+        Check(ImageLinkSuspicion.Reasons(clean, "Example diagram").Count == 0, "Clean image link passes the suspicion check: " + clean);
+    Check(ImageLinkSuspicion.Reasons("https://www.github.com/a.png", "github.com").Count == 0, "Link text naming the same site passes");
+    foreach (var (url, caption, reason) in new[] {
+        ("http://example.com/a.png", "", "not HTTPS"),
+        ("https://93.184.216.34/a.png", "", "IP address instead of a name"),
+        ("https://[2606:4700::1111]/a.png", "", "IP address instead of a name"),
+        ("https://localhost/a.png", "", "private network name"),
+        ("https://printer.local/a.png", "", "private network name"),
+        ("https://xn--gthub-n4a.com/a.png", "", "punycode (lookalike) hostname"),
+        ("https://a.b.c.example.com/a.png", "", "many subdomains"),
+        ("https://averyveryverylonghostnamelabel.example.com/a.png", "", "long hostname label"),
+        ("https://a1b2c3d4e5f6a7b8c9d0e1f2.attacker.com/a.png", "", "long random-looking hostname"),
+        ("https://attacker.com/c2VjcmV0LWtleS0xMjM0NTY3ODkw.png", "", "long random-looking path"),
+        ("https://attacker.com/kqzjxvbwmpltrfhgdnsyxc.png", "", "long random-looking path"),
+        ("https://user@example.com/a.png", "", "user name in link"),
+        ("https://example.com:8443/a.png", "", "unusual port 8443"),
+        ("https://evil.example/a.png", "github.com", "link text names github.com"),
+        ("https://evil.example/a.png", "https://github.com/logo.png", "link text names github.com") })
+        Check(ImageLinkSuspicion.Reasons(url, caption).Contains(reason), "Suspicion check flags " + reason + ": " + url);
+    Check(ImageLinkSuspicion.Warning(new[] { "not HTTPS" }) == "⚠︎ Looks suspicious: not HTTPS", "Suspicion warning reads as one short line");
+}
+
 // Picture requests earn agent delivery guidance (raw CLIs otherwise save
 // SVGs and shell open a browser); ordinary prompts pass through untouched.
 {
@@ -2568,15 +2635,16 @@ sealed class FakeRunner : Converse.Core.IAgentRunner
 {
     public readonly List<string> Prompts = new();
     public TaskCompletionSource<bool>? Gate;
+    public string Reply = "fake reply";
     public async Task<int> RunAsync(Converse.Core.ChatSession session, IReadOnlyList<string> arguments, string prompt,
         Action<string> onLine, CancellationToken cancellationToken)
     {
         Prompts.Add(prompt);
         if (Gate is not null) await Gate.Task;
         onLine("{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}");
-        onLine("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fake reply\"}}");
+        onLine(System.Text.Json.JsonSerializer.Serialize(new { type = "item.completed", item = new { type = "agent_message", text = Reply } }));
         var finalIndex = arguments.ToList().IndexOf("--output-last-message");
-        if (finalIndex >= 0) File.WriteAllText(arguments[finalIndex + 1], "fake reply\n");
+        if (finalIndex >= 0) File.WriteAllText(arguments[finalIndex + 1], Reply + "\n");
         onLine("{\"type\":\"turn.completed\"}");
         return 0;
     }
