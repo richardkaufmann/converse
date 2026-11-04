@@ -194,17 +194,13 @@ struct FirstRunRecord: Codable, Equatable {
 enum FirstRunText {
     static let providers = ["muse", "codex", "claude"]
     static func product(_ engine: String) -> String { ["muse": "Meta Muse", "codex": "OpenAI Codex", "claude": "Anthropic Claude"][engine] ?? AssistantFamily.name(engine) }
-    static func codingTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Coding Session" }
+    static func codingTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Coding" }
     static func agentTitle(_ engine: String) -> String { AssistantFamily.name(engine) + " Agent" }
     static let title = "Welcome to Converse!"
     static let question = "What provider would you like to have lead this app? (Pick one below.)"
     static func loginPrompt(_ engine: String) -> String { "Please press Return to log into \(AssistantFamily.name(engine)) using its normal process." }
     static let loginCommand = "/login"
-    static let codingWelcome = """
-    Welcome to your coding session. You're good to go. Try typing:
-
-    Add a new heading called Things To Do to the Parking Lot, with a first item "Get with Converse"
-    """
+    static let codingWelcome = "What shall we build today? You can also ask me to read the Parking Lot and react to it and update it."
     static func agentWelcome(_ title: String) -> String {
         "Welcome to your agent. You're good to go. It can read your Parking Lot and coding session. Try typing: What's in the Parking Lot, and what should I do first?\n\nRight-click \(title) in the left panel for Agent Setup, Run once, Show scoreboard and more."
     }
@@ -216,8 +212,11 @@ enum FirstRunText {
     /// README section bundled as Help: per-provider install commands for Mac.
     static let installTopic = "install-a-provider-cli"
     static let metaKeyURL = URL(string: "https://dev.meta.ai/docs/models")!
-    static let lotWelcome = "This is your Parking Lot: an outline for ideas, bugs and future prompts. Your coding session and agent are linked to it and can read it and suggest changes."
-    static let agentObjective = "Help me get started with Converse. Read the Parking Lot and my coding session, suggest the next small step, and keep the Parking Lot's Things To Do current when I ask. Distinguish verified results from claims."
+    /// Shown by App Support after sign-in; a notice, so it is never sent to the model.
+    static let supportHelp = "You can ask me to set up your agent, change options in the app, or just ask me about the weather! Seriously, I've read the manual for the app 🙂 and can answer any questions you have about it. I'm showing you now your coding session. Those \"1 2 3\" icons on the left can be used to assign these sessions (including me) to the first, second and third panes."
+    static let lotHeading = "What Are We Building"
+    static let lotFirstItem = "An app that pulls data from wherever and figures out how to do whatever"
+    static let agentObjective = "Help me get started with Converse. Read the Parking Lot and my coding session, suggest the next small step, and keep the Parking Lot current when I ask. Distinguish verified results from claims."
 }
 
 // The Converse shoe, kept small. Saved once into the data folder so the
@@ -292,14 +291,14 @@ final class FirstRunGuide: ObservableObject {
         support.messages = []
         let lotID = library.records.first?.id ?? ParkingLotStore.id
         if let lot = library.lot(lotID) {
-            var welcome = ParkingLotRow(heading: false, text: FirstRunText.lotWelcome)
-            if let image = shoe.flatMap(NSImage.init(contentsOfFile:)), let path = try? lot.saveImage(image) { welcome.images = [path] }
-            lot.openStarter([ParkingLotRow(heading: true, text: "Welcome to Converse"), welcome,
-                             ParkingLotRow(heading: true, text: "New features"), ParkingLotRow(heading: false, text: ""),
-                             ParkingLotRow(heading: true, text: "Bugs"), ParkingLotRow(heading: false, text: "")])
+            var first = ParkingLotRow(heading: false, text: FirstRunText.lotFirstItem)
+            if let image = shoe.flatMap(NSImage.init(contentsOfFile:)), let path = try? lot.saveImage(image) { first.images = [path] }
+            // No blank items: each section already offers its own New item… input.
+            lot.openStarter([ParkingLotRow(heading: true, text: FirstRunText.lotHeading), first,
+                             ParkingLotRow(heading: true, text: "New features"), ParkingLotRow(heading: true, text: "Bugs")])
         }
         let coding = store.create(store.defaultEntry(engine: "claude"), persist: false)
-        coding.title = "Coding Session"
+        coding.title = "Coding"
         coding.messages = [Message(role: "notice", text: FirstRunText.placeholder)]
         let agent = store.createAgent(title: "Agent", persist: false)
         agent.messages = [Message(role: "notice", text: FirstRunText.placeholder)]
@@ -410,11 +409,19 @@ final class FirstRunGuide: ObservableObject {
         if support.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == FirstRunText.loginCommand { support.draft = "" }
         login.attach(support); login.verify()
     }
+    /// Puts a session in a pane of the first window, as the sidebar's 1 2 3 do. Injectable for tests.
+    var place: (Session, Int) -> Void = { session, pane in
+        guard let app = AppDelegate.shared, let state = app.windows.first?.1 else { return }
+        app.assign(session, to: state, pane: pane)
+    }
     func connected(_ session: Session) {
         guard let engine = record?.provider else { return }
         update { $0.stage = "done" }
         let coding = coding?.title ?? FirstRunText.codingTitle(engine), agent = agent?.title ?? FirstRunText.agentTitle(engine)
-        store.enqueueSwitchboard(session, text: "The user picked \(FirstRunText.product(engine)) and finished login. Introduce yourself in two or three short sentences as Converse App Support. Say their \(coding) and \(agent) are ready in the left panel, linked to the Parking Lot, and suggest clicking \(coding) to start. Mention [Security and privacy](converse-help://security) and [README](converse-help://readme). Do not ask for another provider or claim any integration is connected. End with exactly: \(AppSupport.closingInvitation)" + "\n\n" + store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true)
+        // The help notice is posted after the hidden teaching request is cleared from view.
+        store.enqueueSwitchboard(session, text: "The user picked \(FirstRunText.product(engine)) and finished login. Converse has just shown them a short help message from you about what you can do and the 1 2 3 pane icons, with their \(coding) session open beside you and their \(agent) in the left panel, both linked to the Parking Lot. Do not repeat it or introduce yourself again. Do not ask for another provider or claim any integration is connected. Reply with exactly: \(AppSupport.closingInvitation)" + "\n\n" + store.switchboardTeaching(session) + "\n\n" + AppSupport.instructions(agent: true), clearDisplayBeforeReply: true, displayNotice: FirstRunText.supportHelp)
+        place(session, 1)
+        if let coding = self.coding { place(coding, 2) }
     }
     /// The coding session learns the switchboard with its first human request.
     func teachIfNeeded(_ s: Session) {

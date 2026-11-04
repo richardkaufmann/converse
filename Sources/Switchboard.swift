@@ -53,8 +53,9 @@ struct SwitchboardCommand: Decodable {
     }
 }
 extension Store {
-    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false, clearDisplayBeforeReply: Bool = false, autonomous: Bool = false) {
-        let prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, autonomous: autonomous, clearDisplayBeforeReply: clearDisplayBeforeReply ? true : nil, agentLoopTick: agentLoopTick, text: text, images: [])
+    func enqueueSwitchboard(_ s: Session, text: String, hop: Int = 0, urgent: Bool = false, reservedAgentRun: Bool = false, agentLoopTick: Bool = false, clearDisplayBeforeReply: Bool = false, autonomous: Bool = false, displayNotice: String? = nil) {
+        var prompt = PendingPrompt(switchboardHop: hop, agentRunReserved: reservedAgentRun, autonomous: autonomous, clearDisplayBeforeReply: clearDisplayBeforeReply ? true : nil, agentLoopTick: agentLoopTick, text: text, images: [])
+        prompt.displayNotice = displayNotice
         if urgent { s.pending.insert(prompt, at: 0); s.queuePaused = false }
         else { s.pending.append(prompt) }
         // Persist the sender's handled ID and recipient's pending input together,
