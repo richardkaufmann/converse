@@ -6,7 +6,7 @@
 
 Converse is one app for multiple, simultaneous conversations with the providers **Muse, Claude Code, and Codex**. From one pane of glass you can orchestrate projects across multiple systems (Mac, Linux, Windows) with a set of agents overseeing progress.
 
-**Watch the 3-minute demo:** [Converse-hackathon-demo.mp4](https://github.com/richardkaufmann/converse/releases/download/v0.6.3/Converse-hackathon-demo.mp4)
+**Watch the 3-minute demo:** [on YouTube](https://youtu.be/bSWs7vsioNI) (or [download the MP4](https://github.com/richardkaufmann/converse/releases/download/v0.6.3/Converse-hackathon-demo.mp4))
 
 **Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** when App Support asks. After that provider's own sign-in you have a coding session, an agent and a Parking Lot ready to go. No Meta API key is needed to start; it only adds Muse Spark API agents, scoreboard art, voice and the image tools. [First launch](#first-launch) walks through it.
 
