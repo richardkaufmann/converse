@@ -362,7 +362,7 @@ extension Store {
     }
     @discardableResult
     func chooseAccount(_ s: Session, profile: AccountProfile) -> Session {
-        guard !s.busy, !s.changingSetting, profile.engine == s.entry.engine else { return s }
+        guard !s.busy, !s.changingSetting, s.claudeLive == nil, profile.engine == s.entry.engine else { return s }
         guard s.entry.accountID != profile.id || AccountLogin.directoryKey(s.entry.accountDirectory ?? "") != AccountLogin.directoryKey(profile.directory) || (s.entry.useDefaultAccountStore == true) != (profile.useDefaultStore == true) else { return s }
         do {
             if let source = loginAccount(for: s) { try SessionLoginContext.copy(s, from: source, to: profile) }
@@ -377,7 +377,7 @@ extension Store {
         accounts.append(AccountProfile(id: id, name: engine.capitalized + " account \(accounts.filter { $0.engine == engine }.count + 1)", engine: engine, directory: folder.appendingPathComponent("Accounts/" + id).path)); save()
     }
     func accountIsBusy(_ profile: AccountProfile) -> Bool {
-        sessionsUsingLogin(profile).contains { $0.busy || $0.changingSetting }
+        sessionsUsingLogin(profile).contains { $0.busy || $0.changingSetting || $0.claudeLive != nil }
     }
     @discardableResult
     func signIn(_ profile: AccountProfile, command: String? = nil, sessionID: UUID? = nil) -> Bool {
@@ -473,6 +473,21 @@ struct SwitchboardStatusView: View {
     }
 }
 
+// One color per meaning, readable in light and dark: warm for trouble and
+// alerts, blue-gray for the queue, teal for background task progress.
+enum StatusTint {
+    static let alert = Color.orange
+    static let queue = Color(nsColor: dynamic(light: (0.36, 0.43, 0.53, 0.13), dark: (0.58, 0.66, 0.78, 0.17)))
+    static let task = Color(nsColor: dynamic(light: (0.05, 0.46, 0.43, 1), dark: (0.37, 0.83, 0.77, 1)))
+    static func status(_ s: Session) -> Color { s.claudeBackgroundTasks.isEmpty ? .primary : task }
+    private static func dynamic(light: (CGFloat, CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat, CGFloat)) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let c = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: c.3)
+        }
+    }
+}
+
 struct PendingMessagesView: View {
     @ObservedObject var session: Session
     var body: some View {
@@ -505,7 +520,7 @@ struct PendingMessagesView: View {
                     Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
                 }
             }
-        }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06))
+        }.font(.caption).padding(8).background(StatusTint.queue)
     }
 }
 
@@ -592,11 +607,11 @@ extension Store {
         guard !s.compacting, !s.compactionRequested else { return nil } // duplicate intent
         guard !s.changingSetting, !s.interrupted else { return "Wait for the current settings change or interruption to finish." }
         s.compactionRequested = true
-        if !s.busy { startCompaction(s) }
+        if !s.busy { if s.claudeLive != nil { runNext(s) } else { startCompaction(s) } }
         return nil
     }
     func startCompaction(_ s: Session) {
-        guard !applicationQuitting, !s.busy, !s.changingSetting, s.compactionRequested,
+        guard !applicationQuitting, !s.busy, !s.changingSetting, s.compactionRequested, s.claudeLive == nil,
               ["codex", "claude"].contains(s.entry.engine), let threadID = s.remoteID else { return }
         s.compactionRequested = false; s.compacting = true; s.busy = true; s.interrupted = false
         s.status = "Compacting…"
@@ -705,5 +720,182 @@ extension ProviderProbeConnection {
         DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: stop)
         DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: killTask)
         p.waitUntilExit(); stop.cancel(); killTask.cancel()
+    }
+}
+
+// Claude print mode keeps its process alive after a turn's result while
+// background tasks run. With stream-json input the same process also takes
+// the next prompt as a new turn, so a subagent keeps working while the
+// session reads as Ready. Anything this process cannot take (other settings,
+// images outside its directories, compaction) waits for it to exit and then
+// uses the ordinary --resume launch.
+final class ClaudeLiveProcess {
+    // CONVERSE_CLAUDE_LIVE_INPUT=0 or the claudeLiveInput default restores prompt-argument launches.
+    static var forcedOff = false
+    static var enabled: Bool {
+        !forcedOff && ProcessInfo.processInfo.environment["CONVERSE_CLAUDE_LIVE_INPUT"] != "0" && UserDefaults.standard.object(forKey: "claudeLiveInput") as? Bool != false
+    }
+    static func eligible(_ s: Session) -> Bool {
+        enabled && s.entry.engine == "claude" && s.agent == nil && !s.supportAssistant && s.supportProbeCompletion == nil
+    }
+    static var idleLimit: TimeInterval = 20 * 60
+    static var settleDelay: TimeInterval = 15
+    static func directories(_ images: [String]) -> Set<String> { Set(images.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path }) }
+    static func fingerprint(_ choices: SessionChoices) -> Data? {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys; return try? encoder.encode(choices)
+    }
+    let process: Process
+    let input = Pipe()
+    let entry: Entry
+    let choices: Data?
+    let directories: Set<String>
+    var responseID: UUID
+    var inputOpen = true
+    // A turn is open from its prompt (or Claude's own notification turn) to
+    // its result; outside it the session is not busy.
+    var turnOpen = true
+    var stopped = false
+    var idleClose: DispatchWorkItem?
+    private let writer = DispatchQueue(label: "converse.claude-live-input")
+    init(process: Process, session s: Session, images: [String], responseID: UUID) {
+        self.process = process; entry = s.entry; choices = Self.fingerprint(s.choices)
+        directories = Self.directories(images); self.responseID = responseID
+        _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    }
+    func accepts(_ s: Session, images: [String]) -> Bool {
+        inputOpen && !turnOpen && !stopped && process.isRunning && !s.compactionRequested &&
+        s.entry == entry && Self.fingerprint(s.choices) == choices && Self.directories(images).isSubset(of: directories)
+    }
+    // Writes off the main thread: a large prompt must never block the UI on
+    // a full pipe. A failed write means the process is exiting; its exit
+    // finishes the open turn.
+    func write(_ text: String) {
+        guard inputOpen else { return }
+        let object: [String: Any] = ["type": "user", "message": ["role": "user", "content": text], "parent_tool_use_id": NSNull(), "session_id": ""]
+        guard var data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        data.append(10)
+        let handle = input.fileHandleForWriting
+        writer.async { try? handle.write(contentsOf: data) }
+    }
+    func closeInput() {
+        idleClose?.cancel(); idleClose = nil
+        guard inputOpen else { return }
+        inputOpen = false
+        let handle = input.fileHandleForWriting
+        writer.async { try? handle.close() }
+    }
+}
+
+extension Store {
+    static func claudeTaskSuffix(_ s: Session) -> String {
+        let tasks = s.claudeBackgroundTasks.values.sorted()
+        guard let first = tasks.first else { return "" }
+        return " · " + (tasks.count == 1 ? "task: " : "\(tasks.count) tasks: ") + String(first.prefix(60)) + (tasks.count > 1 ? " +\(tasks.count - 1)" : "")
+    }
+    static func claudeReadyStatus(_ s: Session) -> String {
+        (s.claudeLive?.inputOpen == true ? "Ready" : "Ready after background task") + claudeTaskSuffix(s)
+    }
+    // A live process holds this session but cannot take this prompt.
+    func claudeLiveBlocks(_ s: Session, images: [String]) -> Bool {
+        guard let live = s.claudeLive else { return false }
+        return !live.accepts(s, images: images)
+    }
+    func trackClaudeTask(_ obj: [String: Any], session s: Session) {
+        guard obj["type"] as? String == "system", let task = obj["task_id"] as? String, let subtype = obj["subtype"] as? String, ["task_started", "task_notification"].contains(subtype) else { return }
+        if subtype == "task_started" { s.claudeBackgroundTasks[task] = (obj["description"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unnamed task" }
+        else { s.claudeBackgroundTasks[task] = nil }
+        if s.busy && s.status.hasPrefix("Working") { s.status = Store.claudeWorkingStatus(s) }
+        else if !s.busy && s.claudeLive != nil { s.status = Store.claudeReadyStatus(s) }
+    }
+    // Close input once idle with nothing left to wait for, or after a long
+    // silence. Closing never stops a task: Claude finishes it, then exits.
+    func scheduleClaudeIdleClose(_ s: Session, live: ClaudeLiveProcess) {
+        live.idleClose?.cancel(); live.idleClose = nil
+        guard live.inputOpen, !live.turnOpen else { return }
+        let task = DispatchWorkItem { [weak self, weak s] in
+            guard let self, let s, s.claudeLive === live, !live.turnOpen else { return }
+            live.closeInput(); if !s.busy { s.status = Store.claudeReadyStatus(s) }; self.objectWillChange.send()
+        }
+        live.idleClose = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + (s.claudeBackgroundTasks.isEmpty ? ClaudeLiveProcess.settleDelay : ClaudeLiveProcess.idleLimit), execute: task)
+    }
+    func consumeClaudeLive(_ line: String, session s: Session, live: ClaudeLiveProcess) {
+        guard !line.isEmpty else { return }
+        let obj = line.data(using: .utf8).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let type = obj?["type"] as? String ?? ""
+        // Claude starts its own turn to report a finished background task.
+        if !live.turnOpen, type == "assistant" || type == "stream_event" || (type == "system" && obj?["subtype"] as? String == "init") {
+            beginClaudeNotificationTurn(s, live: live)
+        }
+        if live.turnOpen {
+            consume(line, session: s, responseID: live.responseID)
+        } else if let obj {
+            if let sid = obj["session_id"] as? String { s.remoteID = sid }
+            trackClaudeTask(obj, session: s)
+            scheduleClaudeIdleClose(s, live: live)
+            saveSoon()
+        } else { activity(line, session: s); saveSoon() }
+        guard type == "result", live.turnOpen else { return }
+        // Interrupts and turns with nothing left running end at process exit,
+        // exactly as a prompt passed as an argument does.
+        if s.interrupted || s.claudeBackgroundTasks.isEmpty { live.closeInput() }
+        else { finishClaudeLiveTurn(s, live: live) }
+    }
+    func deliverClaudeLive(_ s: Session, live: ClaudeLiveProcess, prompt: String, responseID: UUID) {
+        live.idleClose?.cancel(); live.idleClose = nil
+        live.turnOpen = true; live.responseID = responseID
+        s.process = live.process; s.status = Store.claudeWorkingStatus(s)
+        live.write(prompt)
+    }
+    func beginClaudeNotificationTurn(_ s: Session, live: ClaudeLiveProcess) {
+        live.idleClose?.cancel(); live.idleClose = nil
+        let responseID = UUID()
+        live.turnOpen = true; live.responseID = responseID
+        s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.retryDetail = nil
+        // Not human-initiated: App Support treats it as background activation.
+        s.supportContinuation = false; s.supportAutonomous = true; s.supportPendingCommand = nil
+        s.switchboardTurnStart = s.messages.count; s.switchboardHop = 0
+        s.messages.append(Message(id: responseID, role: "assistant", text: ""))
+        s.busy = true; s.lastOutputAt = ProcessInfo.processInfo.systemUptime; s.streamedText = false; s.claudeTextBlockPending = false
+        s.claudeStreamSeparators = []; s.claudeNoticedDenials = []; s.claudeLastContext = nil
+        s.status = Store.claudeWorkingStatus(s)
+        objectWillChange.send()
+    }
+    // The turn ended but background tasks still run: finish it here, as
+    // process exit would, and keep the process for the next prompt.
+    func finishClaudeLiveTurn(_ s: Session, live: ClaudeLiveProcess) {
+        live.turnOpen = false
+        s.retryDetail = nil; s.busy = false; s.started = true
+        s.status = s.turnFailed ? "Failed" + Store.claudeTaskSuffix(s) : Store.claudeReadyStatus(s)
+        if let i = s.messages.firstIndex(where: { $0.id == live.responseID }), s.messages[i].text.isEmpty { s.messages.remove(at: i) }
+        if s.turnFailed {
+            let output = s.messages.dropFirst(s.switchboardTurnStart ?? s.messages.count).filter { $0.role != "user" }.map(\.text).joined(separator: "\n")
+            if AccountLogin.requiresSignIn(output) { s.needsSignIn = true }
+        }
+        scheduleClaudeIdleClose(s, live: live)
+        save(); if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil { refreshStatus(s) }; objectWillChange.send()
+        finishQueue(s, success: !s.turnFailed)
+    }
+    // The process exited between turns: its turns are already finished.
+    func claudeLiveExited(_ s: Session, live: ClaudeLiveProcess, status: Int32) {
+        if s.process === live.process { s.process = nil }
+        if !s.claudeBackgroundTasks.isEmpty {
+            if !live.stopped { s.messages.append(Message(role: "notice", text: "Claude stopped while still reporting work in progress: " + s.claudeBackgroundTasks.values.sorted().joined(separator: "; ") + ". No completion was reported; ask the session for its status before assuming that work finished.")) }
+            s.claudeBackgroundTasks = [:]
+        }
+        if status != 0 && !live.stopped { s.messages.append(Message(role: "notice", text: "Claude’s background process exited with status \(status) after its last turn finished. The conversation is saved; the next prompt resumes it.")) }
+        if !s.busy { s.status = live.stopped ? "Stopped" : "Ready" }
+        save(); objectWillChange.send()
+        runNext(s)
+    }
+    // Stop, Quit, or Inject now on a held prompt: this ends the background task.
+    func stopClaudeLive(_ s: Session) {
+        guard let live = s.claudeLive, !s.busy else { return }
+        // Input closes at exit; closing it now would let Claude finish the task instead.
+        live.stopped = true; live.idleClose?.cancel(); live.idleClose = nil
+        let p = live.process
+        guard p.isRunning else { return }
+        s.status = "Stopping…"; p.terminate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { kill(p.processIdentifier, SIGKILL) } }
     }
 }
