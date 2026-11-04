@@ -18,6 +18,7 @@ import Foundation
     imageAssistSelfTests(check)
     photoShareSelfTests(check)
     agentScheduleSelfTests(check)
+    agentPaceSelfTests(check)
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
     agentDiscordRouterSelfTests(check)
@@ -579,6 +580,8 @@ import Foundation
     check((requestBody?["instructions"] as? String)?.contains(AgentPolicy.scoreboardScope) == true, "Agent scoreboard instructions limit metrics to that agent's own objective and scope")
     check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
+    check(requestBody?["prompt_cache_key"] as? String == AgentInstructions.cacheKey(agent.id) && requestBody?["prompt_cache_retention"] as? String == "24h" && (requestBody?["instructions"] as? String)?.hasPrefix(AgentInstructions.staticRules) == true,
+          "Real agent runtime sends its static instructions first with a per-agent prompt cache key")
 
     // Clearing GitHub must not make an unrelated saved credential a runtime dependency.
     var noRepoSettings = agent.agent!.wire(home: localHome); noRepoSettings.repository = ""

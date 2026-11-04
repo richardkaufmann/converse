@@ -236,6 +236,9 @@ struct AgentControls: View {
                             Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    if session.toolStatus.usage != "not reported" {
+                        Text("Last turn: " + session.toolStatus.usage).font(.caption).foregroundStyle(.secondary).help("Last turn: " + session.toolStatus.usage + ". Cached input is billed at a lower rate.")
+                    }
                     AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
                 } }.frame(maxWidth: .infinity)
                 Menu {
