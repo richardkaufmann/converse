@@ -250,6 +250,9 @@ public sealed class SessionStore
     public Func<PendingPrompt, bool>? AcceptGroupPrompt { get; set; }
     public Action<ChatSession, string>? FinalParticipantReply { get; set; }
     public Func<ChatSession, System.Text.Json.Nodes.JsonObject, Task>? AppSupportRequest { get; set; }
+    // New-agent defaults. The app wires the credential reader; null keeps the
+    // Meta API defaults (fixtures, headless hosts without a key store).
+    public Func<string, string?>? AgentSecret { get; set; }
     internal void NotifyTranscript(ChatSession session) => TranscriptAdvanced?.Invoke(session);
 
     // Fires when the transcript holds new turn content: throttled stream
@@ -323,6 +326,8 @@ public sealed class SessionStore
         if (string.IsNullOrWhiteSpace(title) || System.Text.Encoding.UTF8.GetByteCount(title) > 200) throw new ArgumentException("Choose a name of 1–200 bytes.");
         var session = new ChatSession { Title = title.Trim(), Agent = new(), MessagingEnabled = true, Entry = new AgentEntry { Name = "Agent", Engine = "agent" } };
         if (Sessions.FirstOrDefault(s => s.SupportAssistant && s.SupportSetupCompleted)?.Agent is { } support) session.Agent.Settings.Model = support.Settings.Model;
+        // No Meta key: mood art is off.
+        if (AgentSecret is { } secret && string.IsNullOrEmpty(secret("meta"))) session.Agent.Settings.GenerateArt = false;
         session.Messages.Add(new ChatMessage { Role = "assistant", Text = "Open Agent Setup to choose a provider/model and select the sessions I may read. Review the editable objective, including its search-scope guidance. Automatic loops start paused." });
         Sessions.Add(session); if (persist) Save(); return session;
     }

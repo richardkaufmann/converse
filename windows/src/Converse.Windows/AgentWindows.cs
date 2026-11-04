@@ -19,6 +19,7 @@ public sealed partial class MainWindow
     private void InitializeAgents()
     {
         _devices.Agents.ReadSecret = ReadAgentKey;
+        _store.AgentSecret = ReadAgentKey;
         _agentTimer = DispatcherQueue.CreateTimer(); _agentTimer.Interval = TimeSpan.FromSeconds(5);
         _agentTimer.Tick += (_, _) => _devices.Agents.Tick(DateTime.UtcNow); _agentTimer.Start();
         _devices.AgentWidgetRequested += session => DispatcherQueue.TryEnqueue(() => ShowAgentScoreboard(session));

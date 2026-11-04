@@ -94,6 +94,7 @@ public static class AgentArtPolicy
 {
     public static readonly TimeSpan MinInterval = TimeSpan.FromMinutes(30);
     public static readonly TimeSpan MaxStale = TimeSpan.FromHours(6);
+    public const string Unavailable = "Status art unavailable; the measured scoreboard is still current.";
     // Labels and values only; sources and observation times are not art changes.
     public static List<string> Signature(IEnumerable<DeviceWidgetMetric> metrics) => metrics.Select(m => m.Label + "\u0000" + m.Value).OrderBy(v => v, StringComparer.Ordinal).ToList();
     public static bool ScoreboardChanged(List<string>? previous, List<string> current) => !(previous ?? new()).SequenceEqual(current);
@@ -313,7 +314,10 @@ public sealed class AgentRuntime
                 var artSignature = AgentArtPolicy.Signature(config.Widget.Metrics);
                 if (config.Settings.GenerateArt && (art.Length > 0 || direction.Length > 0) && AgentArtPolicy.ShouldRegenerate(DateTime.UtcNow, config.ArtAtUtc, (config.LastArtDirection ?? "") != direction, config.ArtMood != mood, AgentArtPolicy.ScoreboardChanged(config.ArtSignature, artSignature)))
                 {
-                    var artKey = ReadSecret("meta") ?? throw new InvalidOperationException("Meta key required for mood art.");
+                    // Art is optional: a missing key or image failure keeps the completed reply and the loop.
+                    try
+                    {
+                    var artKey = ReadSecret("meta"); if (string.IsNullOrEmpty(artKey)) throw new InvalidOperationException("Meta key required for mood art.");
                     var image = await JsonAsync("https://api.meta.ai/v1/images/generations", new JsonObject { ["model"] = "muse-image-1.0", ["prompt"] = "Create a scoreboard illustration with no numerical data or captions. Owner art direction (takes precedence): " + direction + ". Suggested scene: " + art, ["n"] = 1, ["output_format"] = "png", ["response_format"] = "b64_json", ["size"] = "1536x1024" }, artKey, token);
                     var png = Convert.FromBase64String(image["data"]?[0]?["b64_json"]?.GetValue<string>() ?? "");
                     if (png.Length is > 8 and <= 8000000 && png.AsSpan(0,8).SequenceEqual(new byte[] {137,80,78,71,13,10,26,10}))
@@ -322,6 +326,10 @@ public sealed class AgentRuntime
                         var path = Path.Combine(folder, "scoreboard.png"); await File.WriteAllBytesAsync(path, png, token);
                         config.ArtPath = path; config.ArtAtUtc = DateTime.UtcNow; config.ArtMood = mood; config.LastArtDirection = direction; config.ArtSignature = artSignature; message.Images.Add(path);
                     }
+                    else throw new InvalidOperationException("Invalid art image.");
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                    catch { session.Messages.Add(new ChatMessage { Role = "notice", Text = AgentArtPolicy.Unavailable, CreatedAt = DateTime.UtcNow }); }
                 }
             }
             else if (session.ActiveAgentLoopTick) config.LoopsSinceScoreboard++;
