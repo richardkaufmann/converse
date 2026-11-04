@@ -198,7 +198,8 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
             check(session.pending.isEmpty, "Codex command in commentary cannot execute when final answer is ordinary prose")
             session.draft = "switchboard-output:Example:\n" + command + "\nThat is the format."; store.submit(session)
             pump { !session.busy }
-            check(session.pending.isEmpty && session.messages.last { $0.role == "notice" }?.text.contains("text follows it") == true, "Codex final-answer command followed by prose is not run and explains why")
+            check(session.pending.count == 1 && session.pending[0].text.contains(SwitchboardCommand.resendReminder) && session.messages.last { $0.role == "notice" }?.text.contains("text follows it") == true, "Codex final-answer command followed by prose is not run, explains why and queues one resend reminder")
+            session.pending = []
             session.draft = "switchboard-output:Looking up sessions.\n" + command; store.submit(session)
             pump { !session.busy }
             check(session.pending.count == 1 && session.pending.first?.text.hasPrefix("[Converse switchboard directory") == true, "Codex final answer ending with a command fence after prose dispatches")

@@ -28,6 +28,7 @@ struct SwitchboardCommand: Decodable {
     /// A command is the reply's only column-0 converse fence, with nothing but
     /// whitespace after it. Indented or quoted fences are discussion. A fence
     /// that cannot run reports why instead of being dropped silently.
+    static let resendReminder = "Converse: your last reply's converse command was not run."
     static func trailing(_ text: String) -> Fence {
         if let whole = parse(text) { return .command(whole) }
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
@@ -181,7 +182,13 @@ extension Store {
                 case .command(let command): fenced = command
                 case .rejected(let reason):
                     s.switchboardHandled.append(reply.id)
-                    note("a converse command in this reply was not run because " + reason + ". Nothing was sent. Ask the session to resend the command as the last thing in its reply.")
+                    note("a converse command in this reply was not run because " + reason + ". Nothing was sent. Converse asked the session to resend it.")
+                    // Self-correct once: tell the session why, unless this turn was itself that reminder.
+                    let turnInput = s.messages.last(where: { $0.role == "user" })?.text ?? ""
+                    if !turnInput.contains(SwitchboardCommand.resendReminder), !s.pending.contains(where: { $0.text.contains(SwitchboardCommand.resendReminder) }),
+                       s.switchboardHop + 1 < SwitchboardPolicy.maxHops {
+                        enqueueSwitchboard(s, text: SwitchboardCommand.resendReminder + " Reason: " + reason + ". If you meant to run it, resend only the command block as the last thing in your reply. If it was just an example, ignore this and do not resend.", hop: s.switchboardHop + 1, autonomous: s.supportAutonomous)
+                    }
                     save(); continue
                 case .none: break
                 }

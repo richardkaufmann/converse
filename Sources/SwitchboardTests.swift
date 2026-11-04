@@ -633,15 +633,22 @@ func switchboardTrailingFenceSelfTests(_ check: (Bool, String) -> Void) {
             let before = notices().count
             reply(text)
             let added = notices().dropFirst(before)
-            check(target.pending.count == count && added.count == 1 && added.first?.contains("was not run because " + reason) == true && added.first?.contains("Nothing was sent. Ask the session to resend the command as the last thing in its reply.") == true, engine + ": " + label)
+            check(target.pending.count == count && added.count == 1 && added.first?.contains("was not run because " + reason) == true && added.first?.contains("Nothing was sent. Converse asked the session to resend it.") == true, engine + ": " + label)
             store.processSwitchboard(source)
             check(notices().count == before + 1 && target.pending.count == count, engine + ": " + label + " — the notice appears once and cannot replay")
         }
         rejected("Here it is:\n" + tell + "\nLet me know if that works.", "text follows it", "a fence followed by prose is not run and explains why")
+        func reminders() -> Int { source.pending.filter { $0.text.contains(SwitchboardCommand.resendReminder) }.count }
+        check(reminders() == 1 && source.pending.last?.text.contains("text follows it") == true && source.pending.last?.text.contains("If it was just an example, ignore this") == true, engine + ": a rejected command sends the session one resend reminder with the reason")
         rejected("First:\n" + tell + "\nSecond:\n" + tell, "the reply contains several command blocks", "two command fences are not run and explain why")
         rejected("Sending:\n" + tell + "\n```bash\nls\n```", "text follows it", "a later code block counts as text after the command")
         rejected("Sending:\n```converse\n{\"command\":\"tell\",", "its fence is not closed", "an unclosed command fence explains why")
         rejected("Sending:\n```converse\n{not json}\n```", "its JSON is not a valid command", "invalid command JSON explains why")
+        check(reminders() == 1, engine + ": further rejections while a reminder is pending add no more reminders")
+        source.pending.removeAll { $0.text.contains(SwitchboardCommand.resendReminder) }
+        source.messages.append(Message(role: "user", text: SwitchboardCommand.resendReminder + " Reason: text follows it."))
+        rejected("Again:\n" + tell + "\nThanks.", "text follows it", "a rejection in the reminder's own turn still explains why")
+        check(reminders() == 0, engine + ": a turn started by the reminder never triggers another reminder")
         let quiet = notices().count
         reply("Example:\n> " + tell.replacingOccurrences(of: "\n", with: "\n> "))
         reply("Example:\n    " + tell.replacingOccurrences(of: "\n", with: "\n    "))
