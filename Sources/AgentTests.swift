@@ -159,6 +159,18 @@ import Foundation
     check(board.metrics[0].value == "$123" && board.metrics[1].value == "Unavailable" && board.metrics[1].sourceURL == nil && board.observedAt == now, "Scoreboard keeps source time distinct from retrieval and refuses metrics whose source was not retrieved")
     check(AgentScoreboardCards.html(board).contains("https://example.com/quote") && !AgentScoreboardCards.html(board).contains("999"), "Exported flexible scoreboard has clickable sources and omits unsupported values")
     check(AgentScoreboardCards.html(board).contains(">example.com</a>"), "Exported scoreboard links read as domains")
+    do {
+        var many = AgentResearch(); many.searched = true
+        many.sources = (1...30).map { AgentWebSource(title: "Story \($0)", url: "https://news.example/\($0)") }
+        check(many.appendix(for: "Weather is sunny. Sources: [Forecast](https://wx.example/94028) · [AI](https://ai.example/a)") == "", "Host adds no search-source list when the agent's reply already cites its own links")
+        let capped = many.appendix(for: "Weather is sunny.")
+        check(capped.hasPrefix("\n\nSources: ") && capped.components(separatedBy: "https://news.example/").count - 1 == 3, "Host-added search sources are capped at three when the reply has no links")
+        check(AgentResearch().appendix(for: "No search ran.") == "", "No search sources means no Sources line")
+        let fixed = Date(timeIntervalSince1970: 1793805780) // Wed Nov 4 2026 15:23 UTC
+        check(AgentPromptContext.localNow(fixed, zone: TimeZone(identifier: "America/Los_Angeles")!) == "Wednesday, November 4, 2026 at 7:23 AM PST (America/Los_Angeles)", "Agents receive the current local date and time with zone")
+        check(AgentInstructions.staticRules.contains("never report the absence of watched sessions") && AgentInstructions.staticRules.contains("use it for any date or time-of-day wording") && AgentInstructions.staticRules.contains("If you have nothing new or relevant to say, say nothing") && AgentInstructions.staticRules.contains("answer in one short line"), "Agents use the supplied local time, skip unconfigured sources, and stay silent when there is nothing to say")
+        check(AgentReply.decode("{\"reply\":\"\",\"attention\":\"\"}")?.reply == "", "A silent agent reply is a valid reply, not an error that could pause the loop")
+    }
     check(!AgentResearch.parse(["output": []]).searched && board.validated(research: AgentResearch()).metrics.allSatisfy { $0.value == "Unavailable" }, "Enabling search is not treated as evidence that a search ran")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-agents-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

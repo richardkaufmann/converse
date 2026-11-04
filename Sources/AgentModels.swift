@@ -4,6 +4,12 @@ import AppKit
 // Bound historical excerpts, but never cut the request this activation must answer.
 // Teaching and onboarding requests can be longer than an ordinary chat message.
 enum AgentPromptContext {
+    /// Current local date and time for agents, e.g. "Wednesday, November 4, 2026 at 7:23 AM PST (America/Los_Angeles)".
+    static func localNow(_ date: Date = Date(), zone: TimeZone = .current) -> String {
+        let format = DateFormatter(); format.locale = Locale(identifier: "en_US_POSIX"); format.timeZone = zone
+        format.dateFormat = "EEEE, MMMM d, yyyy 'at' h:mm a zzz"
+        return format.string(from: date) + " (" + zone.identifier + ")"
+    }
     static func conversation(_ messages: [Message], excluding responseID: UUID) -> [[String: String]] {
         let recent = Array(messages.filter { ["user", "assistant"].contains($0.role) && $0.id != responseID }.suffix(24))
         let request = recent.lastIndex { $0.role == "user" }
