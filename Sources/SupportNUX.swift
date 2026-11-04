@@ -498,14 +498,13 @@ struct FirstRunPanel: View {
             case "choose": chooser
             case "later": strip { Text("No provider chosen yet. App Support starts once you pick one.").foregroundStyle(.secondary); Spacer(); Button("Choose a provider…") { guide.reopen() } }
             case "login": loginStrip
-            case "done": strip {
+            // Once connected, the coding session is already open beside App Support and
+            // the help message explains the panes, so only the brief "getting ready" shows.
+            case "done": if login.checking { strip {
                 if let engine = guide.record?.provider { ProviderLogo(engine: engine) }
-                Text(login.checking ? "Connected. App Support is getting ready…" : "Connected. Your \(guide.coding?.title ?? "coding session") and \(guide.agent?.title ?? "agent") are ready.")
+                Text("Connected. App Support is getting ready…")
                 Spacer()
-                Button("Open \(guide.coding?.title ?? "coding session")") { guide.show(guide.coding) }.disabled(guide.coding == nil)
-                Button("Open \(guide.agent?.title ?? "agent")") { guide.show(guide.agent) }.disabled(guide.agent == nil)
-                Button { guide.dismiss() } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Hide this bar")
-            }
+            } }
             default: EmptyView()
             }
         }.onAppear { if guide.stage == "choose" { guide.checkCLIs() } }
