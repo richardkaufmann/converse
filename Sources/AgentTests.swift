@@ -688,6 +688,37 @@ import Foundation
     let diagnosticDecoder = JSONDecoder(); diagnosticDecoder.dateDecodingStrategy = .iso8601
     let diagnostic = try! diagnosticDecoder.decode(AgentResponseDiagnostic.self, from: diagnosticBytes)
     check(diagnostic.incompleteReason == "max_output_tokens" && diagnostic.reasoningTokens == 8192 && !String(decoding: diagnosticBytes, as: UTF8.self).contains("private-api-canary"), "Response diagnostics preserve safe termination and usage metadata without raw API bodies")
+
+    // Judges with only Claude Code or Codex: new agents use an installed CLI, not the Meta API.
+    let judge = Store(folder: root.appendingPathComponent("judge-defaults"))
+    judge.entries = ["claude", "codex", "muse"].map { Entry(name: $0.capitalized, command: $0, directory: NSTemporaryDirectory(), engine: $0) }
+    let fakePath = root.appendingPathComponent("judge-path")
+    try? FileManager.default.createDirectory(at: fakePath, withIntermediateDirectories: true)
+    func install(_ name: String, _ present: Bool) {
+        let file = fakePath.appendingPathComponent(name)
+        if present { FileManager.default.createFile(atPath: file.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755]) } else { try? FileManager.default.removeItem(at: file) }
+    }
+    judge.agentCommandAvailable = { ProviderCommand.resolve($0.command, directories: [fakePath.path]) != nil }
+    judge.agentSecret = { _ in nil }
+    install("claude", true); install("codex", true)
+    let claudeJudge = judge.createAgent(title: "CLI judge", persist: false)
+    check(AgentModels.parse(claudeJudge.agent?.model ?? "")?.engine == "claude", "Without a Meta key a new agent defaults to the installed Claude CLI")
+    install("claude", false)
+    check(AgentModels.parse(judge.createAgent(title: "Codex judge", persist: false).agent?.model ?? "")?.engine == "codex", "Codex is the default when it is the only installed CLI")
+    install("codex", false)
+    check(judge.createAgent(title: "No CLI", persist: false).agent?.model == "muse-spark-1.3", "With no installed CLI the Meta API model remains")
+    install("claude", true); judge.agentSecret = { $0 == "meta" ? "isolated-test-key" : nil }
+    check(judge.createAgent(title: "Meta judge", persist: false).agent?.model == "muse-spark-1.3", "A saved Meta key keeps the Meta API model default")
+    judge.agentSecret = nil
+    check(judge.createAgent(title: "Fixture judge", persist: false).agent?.model == "muse-spark-1.3", "Fixtures without a credential reader keep the legacy defaults")
+    check(ProviderCommand.resolve("claude", directories: [fakePath.path]) == fakePath.appendingPathComponent("claude").path && ProviderCommand.resolve("muse", directories: [fakePath.path]) == nil, "Command resolution finds only executables in the searched directories")
+    let keyless = AgentRuntime(); keyless.keyReader = { _ in nil }
+    let metaAgent = judge.createAgent(title: "Keyless Meta agent", persist: false)
+    let keylessID = UUID(); metaAgent.messages.append(Message(id: keylessID, role: "assistant", text: "")); metaAgent.busy = true
+    keyless.run(metaAgent, store: judge, responseID: keylessID)
+    let keylessDeadline = Date().addingTimeInterval(8)
+    while metaAgent.busy && Date() < keylessDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(metaAgent.agent?.attention.contains(AgentModels.missingMetaKey) == true, "Run once without a Meta key says how to fix it")
 }
 
 

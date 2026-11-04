@@ -129,7 +129,7 @@ enum AgentPolicy {
             do {
                 try Task.checkCancellation()
                 let key = AgentModels.parse(config.model) == nil ? (try self.keyReader("meta") ?? "") : ""
-                if AgentModels.parse(config.model) == nil && key.isEmpty { throw AgentFailure.message("Add a Meta API key or choose a logged-in provider in Agent Setup.") }
+                if AgentModels.parse(config.model) == nil && key.isEmpty { throw AgentFailure.message(AgentModels.missingMetaKey) }
                 if let request = self.discordRouter.active(session) {
                     try await self.runDiscord(request, session: session, store: store, responseID: responseID, key: key)
                     return
@@ -511,8 +511,11 @@ extension Store {
     @discardableResult func createAgent(title: String = "Converse Steward", persist: Bool = true) -> Session {
         let session = create(Entry(name: "Agent", command: "", directory: NSTemporaryDirectory(), engine: "agent"), persist: false)
         session.title = title; session.agent = AgentConfig()
-        if setupCompleted, let support = sessions.first(where: { $0.supportAssistant }), let model = support.agent?.model {
-            session.agent?.model = model
+        let supportModel = setupCompleted ? sessions.first(where: { $0.supportAssistant })?.agent?.model : nil
+        if let supportModel { session.agent?.model = supportModel }
+        if let agentSecret, agentSecret("meta")?.isEmpty != false {
+            // No Meta key: an installed CLI replaces the Meta API model.
+            if supportModel == nil, let cli = AgentModels.defaultCLI(store: self) { session.agent?.model = cli }
         }
         session.switchboardEnabled = true
         session.toolStatus.model = AgentModels.label(session.agent!.model); session.toolStatus.access = "Monitor selected sessions"

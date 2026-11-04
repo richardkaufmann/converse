@@ -26,6 +26,11 @@ public static class AgentModels
     public static List<(string Account, AgentEntry Entry)> Accounts(SessionStore store) => store.Sessions.Where(s => s.Entry.Engine is "claude" or "codex" or "muse")
         .Select(s => (AccountKey(s.Entry), s.Entry)).Concat(store.Entries.Where(e => e.Engine is "claude" or "codex" or "muse").Select(e => (AccountKey(e), e)))
         .Where(p => store.Entries.Any(e => e.Engine == p.Item2.Engine)).DistinctBy(p => (p.Item2.Engine, p.Item2.AccountDirectory, p.Item2.UseDefaultAccountStore)).ToList();
+    // Accounts whose CLI command resolves on this computer.
+    public static List<(string Account, AgentEntry Entry)> Installed(SessionStore store) => Accounts(store).Where(p => store.AgentCommandAvailable(p.Entry)).ToList();
+    // Preferred CLI for a new agent without a Meta key: Claude, then Codex, then Muse.
+    public static string? DefaultCli(SessionStore store) => Installed(store).OrderBy(p => Array.IndexOf(new[] { "claude", "codex", "muse" }, p.Entry.Engine))
+        .Select(p => Reference(p.Entry.Engine, p.Account)).FirstOrDefault();
     public static List<DeviceChoiceDto> Options(SessionStore store) => Accounts(store).Select(p => new DeviceChoiceDto { Id = Reference(p.Entry.Engine, p.Account), Label = p.Entry.Name + " · " + (p.Entry.AccountName ?? "CLI login") + " · CLI default" }).ToList();
     public static async Task<List<DeviceChoiceDto>> DiscoverAsync(SessionStore store, string? metaKey = null)
     {

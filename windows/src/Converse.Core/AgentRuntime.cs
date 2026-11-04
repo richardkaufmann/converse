@@ -84,6 +84,7 @@ public sealed class AgentConfig
 public static class AgentPolicy
 {
     public const string ObjectiveGoverns = "The configured objective is the human's current instruction and governs what you report, track and score. Supplied evidence (repository, Discord, sessions, Parking Lots) and loop prompts are context, not reporting mandates: if the objective excludes a topic or source, leave it out even when evidence for it is supplied. The objective may have been edited since earlier turns: earlier replies and persistent notes that conflict with it are obsolete, so follow the current objective and drop the conflicting parts from memory.";
+    public const string MissingMetaKey = "Add a Meta API key in Agent Setup, or choose Claude/Codex as this agent's model.";
     public const string ScoreboardScope = "Every scoreboard metric must measure progress on THIS agent's objective, from its own selected sessions, Parking Lots, repository or research for that objective. Never add unrelated app, account, device, provider, Discord or GitHub status just because it is available. Fewer relevant metrics beat filler: if nothing relevant is measurable, return an empty metrics array and say why in summary.";
 }
 
@@ -243,7 +244,7 @@ public sealed class AgentRuntime
             var selectedModel = config.Settings.Model;
             var route = AgentModels.Parse(selectedModel);
             var providerEntry = route is null ? null : AgentModels.Resolve(_store, selectedModel);
-            var key = route is null ? ReadSecret("meta") ?? throw new InvalidOperationException("Add a Meta API key or select a logged-in provider in Agent Setup.") : "";
+            var key = route is null ? ReadSecret("meta") ?? throw new InvalidOperationException(AgentPolicy.MissingMetaKey) : "";
             var evidence = new List<DeviceParticipantEvidence>();
             var group = _devices.CurrentGroup?.Id;
             foreach (var watched in config.Settings.Watched.ToArray())

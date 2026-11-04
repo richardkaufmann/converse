@@ -96,6 +96,17 @@ enum AgentModels {
         entry.accountID = account.id; entry.accountName = account.name; entry.accountDirectory = account.directory; entry.useDefaultAccountStore = account.useDefaultStore
         return entry
     }
+    static let missingMetaKey = "Add a Meta API key in Agent Setup, or choose Claude/Codex as this agent's model."
+    static func installed(_ account: AccountProfile, store: Store) -> Bool {
+        store.entries.first(where: { $0.engine == account.engine }).map(store.agentCommandAvailable) == true
+    }
+    // Preferred CLI for a new agent without a Meta key: Claude, then Codex, then Muse.
+    static func defaultCLI(store: Store) -> String? {
+        for engine in ["claude", "codex", "muse"] {
+            if let account = store.accounts.first(where: { $0.engine == engine && installed($0, store: store) }) { return reference(engine: engine, account: account.id) }
+        }
+        return nil
+    }
     static func options(store: Store) -> [DeviceChoiceDTO] {
         var choices: [DeviceChoiceDTO] = []
         for account in store.accounts where store.entries.contains(where: { $0.engine == account.engine }) {

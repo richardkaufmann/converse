@@ -261,6 +261,10 @@ final class Store: ObservableObject {
     let configurationAudit: ConfigurationAudit
     var includesLocalContext = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     var startAgentRun: ((Session, UUID) -> Void)?
+    // New-agent defaults. The app wires the Keychain reader at launch; nil
+    // keeps the Meta API defaults (self-tests, isolated fixtures).
+    var agentSecret: ((String) -> String?)?
+    var agentCommandAvailable: (Entry) -> Bool = { ProviderCommand.resolve($0.command) != nil }
     let responseImageLoader = ResponseImageLoader()
     private(set) var applicationQuitting = false
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
@@ -2750,6 +2754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }
         NSApp.appearance = nil
         paneObserver = Workspace.shared.$placements.sink { [weak self] placements in self?.updatePaneWidths(placements) }
         if ProcessInfo.processInfo.environment["CONVERSE_QA_APPROVAL"] == "1",
