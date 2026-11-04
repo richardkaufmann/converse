@@ -40,6 +40,11 @@ struct AgentConfig: Codable, Equatable {
     var scoreboardEveryLoops: Int? = nil
     var loopsSinceScoreboard: Int? = nil
     var enabled = false
+    // Opt-in auto pacing (nil = off, the configured schedule alone decides).
+    var autoPace: Bool? = nil
+    var autoPaceMinMinutes: Double? = nil
+    var autoPaceMaxMinutes: Double? = nil
+    var autoPaceReason: String? = nil
     var nextRunAt: Date? = nil
     var lastLoopAt: Date? = nil
     var attention = ""
@@ -62,6 +67,10 @@ struct AgentConfig: Codable, Equatable {
     var discordActiveRequestID: String? = nil
     var lastArtMood: String? = nil
     var lastArtAt: Date? = nil
+    // Art throttle (nil = defaults) and the scoreboard the current art reflects.
+    var artMinIntervalMinutes: Double? = nil
+    var artMaxStaleHours: Double? = nil
+    var lastArtScoreboard: AgentScoreboard? = nil
     var snapshot: AgentRepoSnapshot? = nil
     var workingMemory: String? = nil
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
@@ -85,6 +94,7 @@ struct AgentConfig: Codable, Equatable {
         guard let rule = try? scheduleRule(), let future = rule.next(after: now) else { return "Loop blocked · review schedule/calendar" }
         let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "") : "Loop on · every " + intervalLabel
         let next = max(nextRunAt ?? future, rule.permits(now) ? (nextRunAt ?? future) : future)
+        if autoPaceOn { return next > now ? autoPaceStatus(next: next, now: now, rule: rule) : "Auto · " + (busy ? "next check after this run" : "check due") }
         guard next > now else { return schedule + (busy ? " · next check after this run" : " · check due") }
         return schedule + " · next " + rule.nextRunLabel(next)
     }
@@ -216,6 +226,8 @@ struct AgentReply: Decodable {
     var discordImage: String?
     var notifyDiscord: String?
     var scoreboard: AgentScoreboard?
+    var nextRunInMinutes: AgentLenientNumber?
+    var paceReason: AgentLenientText?
     static func decode(_ text: String) -> AgentReply? {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("```json\n"), value.hasSuffix("\n```") { value = String(value.dropFirst(8).dropLast(4)) }
@@ -231,7 +243,9 @@ struct AgentResponseDiagnostic: Codable {
     var inputTokens: Int?
     var outputTokens: Int?
     var reasoningTokens: Int?
+    var cachedTokens: Int? = nil
     var observedAt = Date()
+    var usage: AgentUsage { AgentUsage(input: inputTokens, cached: cachedTokens, output: outputTokens) }
 }
 
 // Shared fixed-host HTTPS client; errors deliberately omit response bodies,
@@ -243,11 +257,17 @@ final class AgentAPI {
         return (data, http)
     }
     func json(_ url: URL, body: [String: Any]? = nil, key: String? = nil) async throws -> (Any, HTTPURLResponse) {
+        let (bytes, response) = try await send(url, body: body, key: key)
+        return try checked(url, bytes: bytes, response: response)
+    }
+    private func send(_ url: URL, body: [String: Any]?, key: String?) async throws -> (Data, HTTPURLResponse) {
         var req = URLRequest(url: url); req.timeoutInterval = 180
         req.setValue("Converse", forHTTPHeaderField: "User-Agent")
         if let key, !key.isEmpty { req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
         if let body { req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type"); req.httpBody = try JSONSerialization.data(withJSONObject: body) }
-        let (bytes, response) = try await request(req)
+        return try await request(req)
+    }
+    private func checked(_ url: URL, bytes: Data, response: HTTPURLResponse) throws -> (Any, HTTPURLResponse) {
         guard (200..<300).contains(response.statusCode) else {
             if url.host == "api.meta.ai", response.statusCode == 401 { throw AgentFailure.message("Meta rejected the API key (HTTP 401). Check or replace it in Agent Setup.") }
             if url.host == "api.meta.ai", response.statusCode == 403 { throw AgentFailure.message("Meta denied access (HTTP 403). Check this key’s model/account permissions.") }
@@ -285,20 +305,40 @@ final class AgentAPI {
         catch { throw AgentFailure.message("Could not complete the GitHub test. Check the network and try again.") }
     }
     static let outputTokenLimit = 8192
-    func respond(model: String, instructions: String, input: String, key: String, images: [AgentInputImage] = [], webSearch: Bool = false, research: ((AgentResearch) -> Void)? = nil, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
+    static let promptCacheFields = ["prompt_cache_key", "prompt_cache_retention"]
+    // Prompt-cache hints are additive. If the service rejects them once, this
+    // client stops sending them instead of failing every later activation.
+    private let cacheLock = NSLock()
+    private var promptCacheRejected = false
+    var sendsPromptCache: Bool { cacheLock.lock(); defer { cacheLock.unlock() }; return !promptCacheRejected }
+    private func rejectPromptCache() { cacheLock.lock(); promptCacheRejected = true; cacheLock.unlock() }
+    static func rejectsPromptCache(status: Int, body: Data) -> Bool {
+        status == 400 && String(decoding: body.prefix(16384), as: UTF8.self).lowercased().contains("prompt_cache")
+    }
+    private func responses(_ body: [String: Any], key: String) async throws -> Any {
+        let url = URL(string: "https://api.meta.ai/v1/responses")!
+        guard body["prompt_cache_key"] != nil else { return try await json(url, body: body, key: key).0 }
+        let (bytes, response) = try await send(url, body: body, key: key)
+        guard Self.rejectsPromptCache(status: response.statusCode, body: bytes) else { return try checked(url, bytes: bytes, response: response).0 }
+        rejectPromptCache()
+        var plain = body; for field in Self.promptCacheFields { plain.removeValue(forKey: field) }
+        return try await json(url, body: plain, key: key).0
+    }
+    func respond(model: String, instructions: String, input: String, key: String, images: [AgentInputImage] = [], webSearch: Bool = false, cacheKey: String? = nil, research: ((AgentResearch) -> Void)? = nil, observe: ((AgentResponseDiagnostic) -> Void)? = nil) async throws -> String {
         var body: [String: Any] = ["model": model, "instructions": instructions, "input": AgentPromptContext.visualInput(input, images: images), "max_output_tokens": Self.outputTokenLimit, "reasoning": ["effort": "low"], "store": false]
         if webSearch { body["tools"] = [["type": "web_search"]]; body["include"] = ["web_search_call.results"]; body["max_tool_calls"] = 4 }
-        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/responses")!, body: body, key: key)
+        if let cacheKey, sendsPromptCache { body["prompt_cache_key"] = cacheKey; body["prompt_cache_retention"] = "24h" }
+        let raw = try await responses(body, key: key)
         guard let response = raw as? [String: Any] else { throw AgentFailure.message("Agent service returned an invalid response. No actions applied.") }
         research?(AgentResearch.parse(response))
         let rawStatus = response["status"] as? String ?? "unknown"
         let status = ["completed", "incomplete", "failed", "cancelled", "queued", "in_progress"].contains(rawStatus) ? rawStatus : "unknown"
         let rawReason = (response["incomplete_details"] as? [String: Any])?["reason"] as? String
         let reason = ["max_output_tokens", "content_filter"].contains(rawReason ?? "") ? rawReason : nil
-        let usage = response["usage"] as? [String: Any]
+        let usage = response["usage"] as? [String: Any], tokens = AgentUsage(response: response)
         observe?(AgentResponseDiagnostic(model: model, status: status, incompleteReason: reason, outputTokenLimit: Self.outputTokenLimit,
-            inputTokens: usage?["input_tokens"] as? Int, outputTokens: usage?["output_tokens"] as? Int,
-            reasoningTokens: (usage?["output_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int))
+            inputTokens: tokens.input, outputTokens: tokens.output,
+            reasoningTokens: (usage?["output_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int, cachedTokens: tokens.cached))
         guard status == "completed" else {
             if reason == "max_output_tokens" { throw AgentFailure.message("Agent hit its response limit (\(Self.outputTokenLimit) tokens including reasoning). No actions applied. Try fewer watched sessions or a shorter request, then Run once.") }
             if reason == "content_filter" { throw AgentFailure.message("The model service stopped this response under its content policy. No actions applied.") }

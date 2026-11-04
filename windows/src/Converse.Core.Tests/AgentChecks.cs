@@ -13,6 +13,14 @@ static class AgentChecks
         var restoredLoop = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(dailyLoop));
         restoredLoop.RestoreSchedule(fired.AddHours(1));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Restart one hour after a daily check preserves the remaining 23 hours");
+        var artNow = D("2026-11-04T15:00:00Z");
+        var artBoard = AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } });
+        check(AgentArtPolicy.ShouldRegenerate(artNow, null, false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-1), true, false, false), "Windows art: first art and edited direction regenerate immediately");
+        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-10), false, true, true) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, true, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, false, true), "Windows art: mood or scoreboard changes wait for the 30 minute minimum");
+        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-5.9), false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-6), false, false, false), "Windows art: unchanged art refreshes at 6 hours");
+        check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
+            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
+            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
         restoredLoop.RestoreSchedule(fired.AddDays(3));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Overdue deadline survives restart for catch-up on normal tick");
         restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddHours(2));
@@ -106,6 +114,8 @@ static class AgentChecks
             agent.Draft = "A human asks for progress"; store.Submit(agent);
             var deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
             check(calls == 1 && agent.Messages.Any(m => m.Text == "Synthetic verified reply"), "Agent human turn runs through injected API and writes a reply");
+            var sentBody = JsonNode.Parse(input) as JsonObject;
+            check(sentBody?["prompt_cache_key"]?.GetValue<string>() == AgentRuntime.PromptCacheKey(agent.Id) && sentBody?["prompt_cache_retention"]?.GetValue<string>() == "24h", "Windows agent sends a per-agent prompt cache key and 24h retention");
             check(agent.Agent.Widget?.Metrics.Single().Value == "Unavailable", "Agent scoreboard rejects metrics without an exact real search source");
             var before = agent.Agent.Settings.RemainingRuns;
             agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.IntervalSeconds = 60; agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1);
@@ -140,6 +150,17 @@ static class AgentChecks
             await viewer.LeaveGroupAsync();
             var refused = await viewer.RequestParticipantAsync(home.DeviceId, "agent.run", target);
             check(refused.Outcome == "rejected" && calls == 2, "Leaving group immediately fences remote agent control");
+            var originalRequest = home.Agents.Request; var cacheBodies = new List<string>();
+            home.Agents.Request = async (request, token) =>
+            {
+                var sent = request.Content is null ? "" : await request.Content.ReadAsStringAsync(token); cacheBodies.Add(sent);
+                if (sent.Contains("prompt_cache_key")) throw new AgentHttpStatusException(400, true);
+                return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Cache fallback reply\\\"}\"}]}]}");
+            };
+            agent.Draft = "Fallback probe"; store.Submit(agent);
+            deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
+            check(cacheBodies.Count == 2 && cacheBodies[0].Contains("prompt_cache_retention") && !cacheBodies[1].Contains("prompt_cache") && agent.Messages.Any(m => m.Text == "Cache fallback reply"), "Windows agent retries once without prompt cache fields after a 400 naming them");
+            home.Agents.Request = originalRequest;
             home.Agents.Shutdown(); agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1); home.Agents.Tick(DateTime.UtcNow);
             check(calls == 2, "Shutdown prevents agent loop restart");
         }

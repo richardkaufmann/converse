@@ -67,11 +67,25 @@ struct AgentSetupView: View {
                         AgentScheduleEditor(seconds: $settings.intervalSeconds, text: $settings.scheduleText, zone: $settings.scheduleTimeZone)
                         Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
+                        Toggle("Auto pacing · the agent picks each next check", isOn: Binding(get: { settings.autoPaceOn }, set: { settings.autoPace = $0 ? true : nil }))
+                            .help("Each run may suggest when to check next, with a short reason. Sooner while things change or someone waits, later when quiet. Kept within the bounds below and the schedule above; otherwise the configured interval applies.")
+                        if settings.autoPaceOn {
+                            HStack(spacing: 16) {
+                                Stepper("No sooner than \(AgentPacing.minutesText(settings.paceMinMinutes)) min", value: Binding(get: { settings.paceMinMinutes }, set: { settings.autoPaceMinMinutes = $0; if settings.paceMaxMinutes < $0 { settings.autoPaceMaxMinutes = $0 } }), in: 1...1440, step: 1)
+                                Stepper("no later than \(AgentPacing.minutesText(settings.paceMaxMinutes)) min", value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: 5)
+                            }.font(.caption)
+                        }
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
                         Toggle("Generate mood art with Muse Image", isOn: $settings.generateArt)
+                        if settings.generateArt {
+                            HStack(spacing: 16) {
+                                Stepper("New art at most every \(AgentPacing.minutesText(settings.artMinMinutes)) min", value: Binding(get: { settings.artMinMinutes }, set: { settings.artMinIntervalMinutes = $0; if settings.artStaleHours * 60 < $0 { settings.artMaxStaleHours = ($0 / 60).rounded(.up) } }), in: 5...1440, step: 5)
+                                Stepper("refresh unchanged art every \(AgentPacing.minutesText(settings.artStaleHours)) hr", value: Binding(get: { settings.artStaleHours }, set: { settings.artMaxStaleHours = max($0, (settings.artMinMinutes / 60).rounded(.up)) }), in: 1...168, step: 1)
+                            }.font(.caption)
+                        }
                         Text("Scoreboard art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
-                        Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. Updated on the next scoreboard refresh when this prompt or the mood changes, otherwise at most hourly.").font(.caption).foregroundStyle(.secondary)
+                        Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. A changed prompt updates the art on the next scoreboard refresh. Otherwise art changes with the mood or scoreboard, no more often than the minimum above, and refreshes at least once per the maximum.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
                         Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
                         Text("Speech starts only with Start talking in the session. Scheduled runs stay silent.").font(.caption).foregroundStyle(.secondary)
@@ -200,6 +214,8 @@ struct AgentSetupView: View {
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
+            try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())
+            try current.setArtThrottle(minMinutes: settings.artMinMinutes, maxStaleHours: settings.artStaleHours)
             session.agent = current; session.toolStatus.model = AgentModels.label(current.model)
             session.probeError = ""; session.needsSignIn = false
             if !session.busy { session.status = "Ready" }
@@ -236,7 +252,14 @@ struct AgentControls: View {
                             Text(AgentRuntime.shared.discordRouter.status(for: session)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
+                    if session.toolStatus.usage != "not reported" {
+                        Text("Last turn: " + session.toolStatus.usage).font(.caption).foregroundStyle(.secondary).help("Last turn: " + session.toolStatus.usage + ". Cached input is billed at a lower rate.")
+                    }
+                    if let account = AgentModels.apiKeyAccount(session.agent?.model) {
+                        Text(account.label).font(.caption).foregroundStyle(.secondary).help(account.help)
+                    } else {
+                        AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
+                    }
                 } }.frame(maxWidth: .infinity)
                 Menu {
                     Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }
