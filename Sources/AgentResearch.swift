@@ -47,6 +47,13 @@ struct AgentResearch {
               !sources.contains(where: { $0.url == url }) else { return }
         sources.append(AgentWebSource(title: String((source["title"] as? String ?? URL(string: url)?.host ?? "Source").prefix(200)), url: url))
     }
+    /// Search sources the host appends after a reply. The agent's own citations
+    /// follow its objective (e.g. "max two links"), so when the reply already
+    /// links anything, add nothing; otherwise show at most three.
+    func appendix(for reply: String) -> String {
+        guard !sources.isEmpty, !reply.contains("http://"), !reply.contains("https://") else { return "" }
+        return "\n\nSources: " + AgentResearch(searched: searched, sources: Array(sources.prefix(3))).markdown
+    }
     var markdown: String {
         sources.map { source in
             "[\(AgentWebSource.shortLabel(title: source.title, url: source.url))](<\(source.url.replacingOccurrences(of: ">", with: "%3E").replacingOccurrences(of: "<", with: "%3C"))>)"

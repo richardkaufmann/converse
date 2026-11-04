@@ -190,7 +190,7 @@ enum AgentPolicy {
                 let allowedLots = ParkingLotLibrary.shared.lots.filter { current.allows(local: $0.id, home: service.localDeviceID) }
                 let parkingEvidence: Any = allowedLots.count == 1 ? try allowedLots[0].evidence() : NSNull()
                 let parkingLotsEvidence: [[String: Any]] = try allowedLots.map { ["id": $0.id.uuidString, "name": $0.name, "document": try $0.evidence()] }
-                let evidence: [String: Any] = ["repository": repositoryEvidence, "watchedSessions": transcripts,
+                let evidence: [String: Any] = ["now": AgentPromptContext.localNow(), "repository": repositoryEvidence, "watchedSessions": transcripts,
                     "parkingLot": parkingEvidence, "parkingLots": parkingLotsEvidence,
                     "parkingLotDirectory": try JSONSerialization.jsonObject(with: encoder.encode(service.parkingLotDirectory(for: session.id, agent: current))),
                     "switchboardDeliveries": store.switchboardRecoveryEvidence(for: session),
@@ -243,7 +243,7 @@ enum AgentPolicy {
                 }
                 session.supportPendingCommand = decoded.appControl
                 let reply: AgentReply? = decoded
-                let display = decoded.reply + (parkingOutcome.isEmpty ? "" : "\n\n" + parkingOutcome) + (research.sources.isEmpty ? "" : "\n\nSources: " + research.markdown)
+                let display = decoded.reply + (parkingOutcome.isEmpty ? "" : "\n\n" + parkingOutcome) + research.appendix(for: decoded.reply)
                 Self.recordResponse(display, session: session, responseID: responseID, store: store)
                 let board = decoded.scoreboard?.validated(research: research)
                 let mood = config.hasRepository ? snapshot.mood(previous: session.agent?.snapshot) : (board?.sentiment ?? "neutral")
@@ -351,7 +351,7 @@ enum AgentPolicy {
             do { image = try AgentDiscordImage.render(session: session, store: store, kind: kind) }
             catch { publicReply = "Image unavailable: " + error.localizedDescription }
         }
-        Self.recordResponse(publicReply + (research.sources.isEmpty ? "" : "\n\nSources: " + research.markdown), session: session, responseID: responseID, store: store)
+        Self.recordResponse(publicReply + research.appendix(for: publicReply), session: session, responseID: responseID, store: store)
         try discordRouter.complete(request.id, text: publicReply, store: store, image: image, sharedSessionInformation: shareSession)
         session.agent?.lastRunAt = Date(); session.agent?.lastOutcome = "Discord reply completed"
         finish(session, store: store, success: true)
