@@ -176,12 +176,14 @@ struct ParkingLotEditor: NSViewRepresentable {
             if let anchor, let entry = projection.entries.first(where: { $0.row.id == anchor.0 }) {
                 text.setSelectedRange(NSRange(location: entry.range.location + min(anchor.1, entry.range.length), length: caret == nil ? min(oldSelection.length, max(0, body.length - entry.range.location - min(anchor.1, entry.range.length))) : 0))
             } else { text.setSelectedRange(NSRange(location: min(oldSelection.location, body.length), length: 0)) }
+            let selection = text.selectedRange(), allowed = snapped(selection, from: selection, mouse: false)
+            if allowed != selection { text.setSelectedRange(allowed) }
             text.updateCommentButtons()
             text.needsDisplay = true
             if caret != nil { text.scrollRangeToVisible(text.selectedRange()) }
         }
-        // The row holding the caret shows raw Markdown, and a link being typed
-        // stays plain until a space or other boundary follows it.
+        // A bare link being typed stays plain until a space or other boundary
+        // follows it. Markdown links always show only their label.
         var linkEditing: (UUID, Int)?
         // Pasted or dropped text arrives complete, so its row renders finished
         // links at once and keeps them until the caret moves.
@@ -195,16 +197,93 @@ struct ParkingLotEditor: NSViewRepresentable {
             storage.removeAttribute(.link, range: entry.range); storage.removeAttribute(.toolTip, range: entry.range)
             let caret = settled?.0 == entry.row.id ? nil : linkEditing.flatMap { $0.0 == entry.row.id ? $0.1 : nil }
             for link in links {
-                if let caret, caret >= link.range.location, caret <= LotLinks.tokenEnd(link, in: entry.row.text) { continue }
+                if !link.isMarkdown, let caret, caret >= link.range.location, caret <= LotLinks.tokenEnd(link, in: entry.row.text) { continue }
                 let label = NSRange(location: entry.range.location + link.label.location, length: link.label.length)
                 storage.addAttributes([.link: link.url, .toolTip: link.isFile ? link.url.path : link.url.absoluteString], range: label)
                 guard link.isMarkdown else { continue }
                 let opening = NSRange(location: entry.range.location + link.range.location, length: 1)
                 let closing = NSRange(location: NSMaxRange(label), length: NSMaxRange(link.range) - link.label.location - link.label.length)
-                for syntax in [opening, closing] {
-                    storage.addAttributes(caret == nil ? [.font: Self.hiddenFont, .foregroundColor: NSColor.clear] : [.foregroundColor: NSColor.secondaryLabelColor], range: syntax)
+                for syntax in [opening, closing] { storage.addAttributes([.font: Self.hiddenFont, .foregroundColor: NSColor.clear], range: syntax) }
+            }
+        }
+        /// A Markdown link in the display: `whole` spans "[label](url)", `label` the visible part.
+        struct HiddenLink { var row: UUID; var link: LotLinks.Link; var whole: NSRange; var label: NSRange }
+        func hiddenLinks(touching range: NSRange) -> [HiddenLink] {
+            projection.entries.filter { $0.range.location <= NSMaxRange(range) && NSMaxRange($0.range) >= range.location }.flatMap { entry in
+                LotLinks.find(in: entry.row.text).filter(\.isMarkdown).map { link in
+                    HiddenLink(row: entry.row.id, link: link, whole: NSRange(location: entry.range.location + link.range.location, length: link.range.length),
+                               label: NSRange(location: entry.range.location + link.label.location, length: link.label.length))
                 }
             }
+        }
+        // Option-click opens one link's label for editing in place: (row, link start in row).
+        var labelEditing: (UUID, Int)?
+        func editedLabel() -> HiddenLink? {
+            guard let labelEditing, let entry = projection.entries.first(where: { $0.row.id == labelEditing.0 }) else { return nil }
+            return hiddenLinks(touching: entry.range).first { $0.row == labelEditing.0 && $0.link.range.location == labelEditing.1 }
+        }
+        func openLabel(at index: Int, caret: Int) -> Bool {
+            guard let text, let link = hiddenLinks(touching: NSRange(location: index, length: 0)).first(where: { NSLocationInRange(index, $0.label) }) else { return false }
+            labelEditing = (link.row, link.link.range.location)
+            text.window?.makeFirstResponder(text)
+            text.setSelectedRange(NSRange(location: min(max(caret, link.label.location), NSMaxRange(link.label)), length: 0))
+            return true
+        }
+        /// The edge a position inside hidden syntax belongs to: the nearer end of the label.
+        static func nearestEdge(_ p: Int, _ link: HiddenLink) -> Int {
+            p >= NSMaxRange(link.label) || p - link.label.location >= NSMaxRange(link.label) - p ? NSMaxRange(link.whole) : link.whole.location
+        }
+        /// Hidden Markdown syntax is never a caret stop. A caret moving into a link
+        /// crosses it; selections grow to whole links, except within an opened label.
+        func snapped(_ proposed: NSRange, from old: NSRange, mouse: Bool) -> NSRange {
+            if let open = editedLabel(), proposed.location >= open.label.location, NSMaxRange(proposed) <= NSMaxRange(open.label) { return proposed }
+            labelEditing = nil
+            var start = proposed.location, end = NSMaxRange(proposed)
+            for link in hiddenLinks(touching: proposed) {
+                let a = link.whole.location, b = NSMaxRange(link.whole)
+                func edge(_ p: Int, was: Int, otherwise: Int) -> Int {
+                    guard p > a && p < b else { return p }
+                    if !mouse && p > was { return b }
+                    if !mouse && p < was { return a }
+                    return otherwise
+                }
+                if start == end { start = edge(start, was: old.location, otherwise: Self.nearestEdge(start, link)); end = start }
+                else { start = edge(start, was: old.location, otherwise: a); end = edge(end, was: NSMaxRange(old), otherwise: b) }
+            }
+            return NSRange(location: start, length: max(0, end - start))
+        }
+        func textView(_ textView: NSTextView, willChangeSelectionFromCharacterRange old: NSRange, toCharacterRange proposed: NSRange) -> NSRange {
+            guard !rendering, textView.string.utf16.count == (projection.string as NSString).length else { return proposed }
+            let mouse = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown].contains(NSApp.currentEvent?.type)
+            return snapped(proposed, from: old, mouse: mouse)
+        }
+        /// Edits treat a Markdown link as one piece: Backspace after it or Delete
+        /// before it removes the whole link, and typing never lands in its syntax.
+        func atomic(_ range: NSRange, _ replacement: String) -> NSRange? {
+            if let open = editedLabel(), range.location >= open.label.location, NSMaxRange(range) <= NSMaxRange(open.label) {
+                if replacement.rangeOfCharacter(from: CharacterSet(charactersIn: "[]\n\r\u{2028}")) == nil { return replacement.isEmpty && range == open.label ? open.whole : range }
+                // Brackets and line breaks would split the link, so they go after it.
+                guard range.length == 0 else { NSSound.beep(); return nil }
+                labelEditing = nil
+                return NSRange(location: NSMaxRange(open.whole), length: 0)
+            }
+            // Backspace at the start of an opened label, or Delete at its end, reaches past the link.
+            if let open = editedLabel(), replacement.isEmpty, range.length == 1, let text {
+                let source = text.string as NSString
+                if range.location == open.whole.location && range.location > 0 { labelEditing = nil; return source.rangeOfComposedCharacterSequence(at: range.location - 1) }
+                if range.location == NSMaxRange(open.label) && NSMaxRange(open.whole) < source.length { labelEditing = nil; return source.rangeOfComposedCharacterSequence(at: NSMaxRange(open.whole)) }
+            }
+            var start = range.location, end = NSMaxRange(range)
+            for link in hiddenLinks(touching: range) {
+                // Selections never sit inside a link, so this is autocorrect or Find replacing part of it.
+                if range.length > 0 && range.location > link.whole.location && NSMaxRange(range) < NSMaxRange(link.whole) { return nil }
+                if range.length == 0 {
+                    if start > link.whole.location && start < NSMaxRange(link.whole) { start = Self.nearestEdge(start, link); end = start }
+                } else if NSIntersectionRange(range, link.whole).length > 0 {
+                    start = min(start, link.whole.location); end = max(end, NSMaxRange(link.whole))
+                }
+            }
+            return NSRange(location: start, length: end - start)
         }
         /// Restyle only the rows whose caret state changed; text and selection are untouched.
         func refreshLinks(settle: Bool = false) {
@@ -220,6 +299,10 @@ struct ParkingLotEditor: NSViewRepresentable {
             storage.endEditing()
         }
         func textViewDidChangeSelection(_ notification: Notification) {
+            // Next to hidden link syntax the caret would take its tiny font.
+            if let text, let font = text.typingAttributes[.font] as? NSFont, font.pointSize < 1 {
+                text.typingAttributes[.font] = NSFont.systemFont(ofSize: 13); text.typingAttributes[.foregroundColor] = NSColor.textColor
+            }
             // A click restyles after mouse tracking ends, so text never shifts under a drag.
             if let type = NSApp.currentEvent?.type, [.leftMouseDown, .leftMouseDragged].contains(type), text?.window != nil { return }
             refreshLinks()
@@ -229,7 +312,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             return true
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
-            guard !rendering, let replacementString, let displayed,
+            guard !rendering, let replacementString, let displayed, let affectedCharRange = atomic(affectedCharRange, replacementString),
                   let edit = projection.replacing(affectedCharRange, with: replacementString, rows: displayed.rows) else { return false }
             if replacementString.contains("\n"), let index = projection.index(at: affectedCharRange.location) {
                 parent.collapsed.remove(projection.entries[index].row.id)
@@ -245,6 +328,43 @@ struct ParkingLotEditor: NSViewRepresentable {
         func restore(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
             guard parent.lot.document.rows == expected else { parent.lot.error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
             save(rows, expected: parent.lot.document)
+        }
+        /// The link (bare or Markdown) at a display index, located by its row and start.
+        func link(containing index: Int) -> (row: UUID, link: LotLinks.Link, source: String)? {
+            guard let i = projection.index(at: index) else { return nil }
+            let entry = projection.entries[i], offset = index - entry.range.location
+            guard let link = LotLinks.find(in: entry.row.text).first(where: { NSLocationInRange(offset, $0.range) }) else { return nil }
+            return (entry.row.id, link, (entry.row.text as NSString).substring(with: link.range))
+        }
+        /// Rewrite the link that still reads `source` at `location`; returns a problem to show, or nil once saved.
+        func setLink(_ id: UUID, at location: Int, source: String, label: String, address: String) -> String? {
+            let label = label.replacingOccurrences(of: "[", with: "(").replacingOccurrences(of: "]", with: ")")
+                .components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            let target = address.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "%20")
+                .replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+            guard !label.isEmpty else { return "Enter a label for the link." }
+            let markdown = "[" + label + "](" + target + ")"
+            guard ["http://", "https://", "mailto:", "file://"].contains(where: { target.lowercased().hasPrefix($0) }), LotLinks.url(target) != nil,
+                  LotLinks.find(in: markdown).map(\.range) == [NSRange(location: 0, length: (markdown as NSString).length)] else {
+                return "Use a web (https://…), email (mailto:…) or file (file:///…) link."
+            }
+            return replaceLink(id, at: location, source: source, with: markdown)
+        }
+        /// Keep a Markdown link's label as plain text.
+        func removeLink(_ id: UUID, at location: Int, source: String) {
+            guard let link = LotLinks.find(in: source).first, link.isMarkdown else { return }
+            _ = replaceLink(id, at: location, source: source, with: (source as NSString).substring(with: link.label))
+        }
+        private func replaceLink(_ id: UUID, at location: Int, source: String, with replacement: String) -> String? {
+            let document = parent.lot.document
+            var rows = document.rows
+            guard let index = rows.firstIndex(where: { $0.id == id }) else { return "That item no longer exists." }
+            let current = rows[index].text as NSString, range = NSRange(location: location, length: (source as NSString).length)
+            guard NSMaxRange(range) <= current.length, current.substring(with: range) == source else { return "That link changed while you were editing it." }
+            rows[index].text = current.replacingCharacters(in: range, with: replacement); rows[index].editedBy = nil
+            labelEditing = nil
+            save(rows, expected: document, caret: (id, location + (replacement as NSString).length))
+            return nil
         }
         func select(_ id: UUID) {
             guard let text, let entry = projection.entries.first(where: { $0.row.id == id }) else { return }
@@ -417,9 +537,21 @@ final class ParkingOutlineText: NSTextView {
         }
         super.keyDown(with: event)
     }
-    override func copy(_ sender: Any?) {
+    override func copy(_ sender: Any?) { copySelection(to: .general) }
+    /// Other apps get link labels as plain text; a Parking Lot paste gets the Markdown back.
+    func copySelection(to board: NSPasteboard) {
         guard let owner, selectedRange().length > 0 else { return }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(owner.projection.markdown(selectedRange()), forType: .string)
+        let markdown = owner.projection.markdown(selectedRange()), plain = Self.labels(markdown)
+        board.clearContents(); board.setString(plain, forType: .string)
+        if plain != markdown { board.setString(markdown, forType: Self.markdownType) }
+    }
+    static let markdownType = NSPasteboard.PasteboardType("app.converse.parking-markdown")
+    static func labels(_ text: String) -> String {
+        let source = NSMutableString(string: text)
+        for link in LotLinks.find(in: text).reversed() where link.isMarkdown {
+            source.replaceCharacters(in: link.range, with: source.substring(with: link.label))
+        }
+        return source as String
     }
     override func cut(_ sender: Any?) { guard selectedRange().length > 0 else { return }; copy(sender); insertText("", replacementRange: selectedRange()) }
     override func paste(_ sender: Any?) { paste(from: .general) }
@@ -453,7 +585,7 @@ final class ParkingOutlineText: NSTextView {
             } catch { owner.parent.lot.error = error.localizedDescription }
             return
         }
-        if let value = board.string(forType: .string) {
+        if let value = board.string(forType: Self.markdownType) ?? board.string(forType: .string) {
             insertText(value, replacementRange: selectedRange())
             if !LotLinks.find(in: value).isEmpty { owner.refreshLinks(settle: true) }
         }
@@ -488,7 +620,8 @@ final class ParkingOutlineText: NSTextView {
         window?.makeFirstResponder(self)
         let plain = urls.map(\.path).joined(separator: ", ")
         let linked = urls.map(LotLinks.markdown(file:)).joined(separator: ", ")
-        setSelectedRange(NSRange(location: min(location, (string as NSString).length), length: 0))
+        let proposed = NSRange(location: min(location, (string as NSString).length), length: 0)
+        setSelectedRange(owner.snapped(proposed, from: proposed, mouse: true))
         let start = selectedRange().location
         var revision = owner.parent.lot.document.revision
         insertText(plain, replacementRange: selectedRange())
@@ -553,10 +686,12 @@ final class ParkingOutlineText: NSTextView {
         if point.x < 32, let entry = owner?.projection.entries.first(where: { $0.row.heading && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }), !entry.placeholder {
             owner?.toggle(entry.row.id); return
         }
-        // Clicking a link follows it instead of placing the caret for editing.
-        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
-           let (url, index) = link(at: point) {
-            clicked(onLink: url, at: index); return
+        // Clicking a link follows it instead of placing the caret for editing;
+        // Option-click places the caret in a Markdown link's label instead.
+        let modifiers = event.modifierFlags.intersection([.shift, .command, .option, .control])
+        if event.clickCount == 1, modifiers.isEmpty || modifiers == .option, let (url, index) = link(at: point) {
+            if modifiers.isEmpty { clicked(onLink: url, at: index); return }
+            if owner?.openLabel(at: index, caret: characterIndexForInsertion(at: point)) == true { owner?.refreshLinks(); return }
         }
         super.mouseDown(with: event)
         owner?.refreshLinks()
@@ -611,7 +746,15 @@ final class ParkingOutlineText: NSTextView {
             return menu
         }
         let entry = owner.projection.entries[i]
+        let clickedLink = link(at: point).flatMap { owner.link(containing: $0.1) }
         if selectedRange().length == 0 || !NSLocationInRange(index, selectedRange()) { setSelectedRange(NSRange(location: index, length: 0)) }
+        if let clickedLink {
+            let (row, link, source) = clickedLink
+            item("Edit Link…") { self.editLink(row, at: link.range.location, source: source) }
+            if link.isMarkdown { item("Remove Link") { owner.removeLink(row, at: link.range.location, source: source) } }
+            item("Copy Link Address") { Self.copyLinkAddress(link.url) }
+            menu.addItem(.separator())
+        }
         if entry.row.heading { item("Rename heading") { owner.select(entry.row.id) } }
         item("New heading below", key: "\r", modifiers: .shift) { owner.add(heading: true, after: entry) }
         item("New item below", key: "\r") { owner.add(heading: false, after: entry) }
@@ -640,6 +783,39 @@ final class ParkingOutlineText: NSTextView {
             }
         }
         return menu
+    }
+}
+extension ParkingOutlineText {
+    static func copyLinkAddress(_ url: URL, to board: NSPasteboard = .general) {
+        board.clearContents(); board.setString(url.absoluteString, forType: .string)
+    }
+    /// Label and address for a link's source text; a Markdown address is shown as written.
+    static func linkFields(_ source: String) -> (label: String, address: String)? {
+        guard let link = LotLinks.find(in: source).first, link.range.location == 0 else { return nil }
+        let text = source as NSString
+        guard link.isMarkdown else { return (text.substring(with: link.label), link.url.absoluteString) }
+        return (text.substring(with: link.label), text.substring(with: NSRange(location: NSMaxRange(link.label) + 2, length: link.range.length - link.label.length - 4)))
+    }
+    static let linkHelp = "Links show only their label. Click a link to open it (file links reveal in Finder). To edit the label text in place, Option-click it."
+    func editLink(_ row: UUID, at location: Int, source: String, fields: (label: String, address: String)? = nil, problem: String? = nil) {
+        guard let owner, let initial = fields ?? Self.linkFields(source) else { return }
+        let alert = NSAlert(); alert.messageText = "Edit Link"
+        alert.informativeText = problem ?? Self.linkHelp
+        if problem != nil { alert.alertStyle = .warning }
+        let label = NSTextField(string: initial.label), address = NSTextField(string: initial.address)
+        for field in [label, address] { field.widthAnchor.constraint(equalToConstant: 300).isActive = true }
+        let grid = NSGridView(views: [[NSTextField(labelWithString: "Label"), label], [NSTextField(labelWithString: "Link"), address]])
+        grid.rowSpacing = 8; grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = label
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            if let problem = owner.setLink(row, at: location, source: source, label: label.stringValue, address: address.stringValue) {
+                DispatchQueue.main.async { self.editLink(row, at: location, source: source, fields: (label.stringValue, address.stringValue), problem: problem) }
+            }
+        }
+        if let window { alert.beginSheetModal(for: window, completionHandler: finish) } else { finish(alert.runModal()) }
     }
 }
 private final class ParkingMenuAction: NSObject {
@@ -887,7 +1063,7 @@ func parkingLinkEditorSelfTests(_ check: (Bool, String) -> Void) {
     check(attribute(.link, 25) as? URL == URL(string: "https://d.com/b") && (attribute(.font, 24) as? NSFont)?.pointSize ?? 13 < 1 && (attribute(.font, 31) as? NSFont)?.pointSize ?? 13 < 1, "A Markdown link outside the edited row shows only its clickable label")
     check(lot.document.rows[1].text == stored, "Link styling leaves the stored item text plain")
     text.setSelectedRange(NSRange(location: entry().range.location + 1, length: 0))
-    check((attribute(.font, 24) as? NSFont)?.pointSize == 13 && attribute(.link, 25) != nil, "Moving the caret into a row reveals its Markdown for editing")
+    check((attribute(.font, 24) as? NSFont)?.pointSize ?? 13 < 1 && attribute(.link, 25) != nil, "Moving the caret into a row keeps its Markdown hidden and the label clickable")
     text.setSelectedRange(NSRange(location: 0, length: 0))
     check((attribute(.font, 24) as? NSFont)?.pointSize ?? 13 < 1, "Leaving the row hides Markdown syntax again")
     text.layoutManager?.ensureLayout(for: text.textContainer!)
@@ -918,6 +1094,7 @@ func parkingLinkEditorSelfTests(_ check: (Bool, String) -> Void) {
     check(teaching.contains("[label](https://url) and appear clickable") && teaching.contains("reveals in Finder"), "Session teaching explains how to write clickable lot links")
     check(ParkingOutlineText.action(for: folder) == .reveal(folder) && ParkingOutlineText.action(for: folder.appendingPathComponent("missing.txt")) == .unavailable, "File links reveal existing items in Finder and never launch them")
     parkingDropSelfTests(check)
+    parkingAtomicLinkSelfTests(check)
 }
 
 // Drives the drop path NSTextView uses for Finder drags, in a real window.
@@ -1004,10 +1181,140 @@ func parkingDropSelfTests(_ check: (Bool, String) -> Void) {
     check(row() == "Logo is with /Users/me/Desktop/converse.jpeg", "Backspace right after a drop restores the plain path")
     text.deleteBackward(nil)
     check(row() == "Logo is with /Users/me/Desktop/converse.jpe", "A second Backspace deletes normally")
+    // The revert only applies straight after the drop; later, Backspace removes the whole link.
+    lot.update(item, text: "Logo is with "); coordinator.render(caret: (item, 13))
+    check(drop([plain as NSURL]), "Dropping a file again inserts its link")
+    text.insertText("x", replacementRange: text.selectedRange()); text.deleteBackward(nil); text.deleteBackward(nil)
+    check(row() == "Logo is with ", "After typing, Backspace after a dropped link deletes the whole link instead of reverting it")
     // Text dragged in from another app still uses NSTextView's drop, inside an Undo group.
     lot.update(item, text: "Dragged "); coordinator.render(caret: (item, 8))
     check(drop(["https://y.com/z" as NSString]) && row() == "Dragged https://y.com/z" && linked(9) == URL(string: "https://y.com/z") && cleanDisplay(), "Dropped text is inserted and its links style immediately")
     text.undo(nil)
     check(row() == "Dragged ", "Undo removes dropped text")
+    window.close()
+}
+
+// Markdown links edit as one piece in a real window: never raw, never entered by accident.
+func parkingAtomicLinkSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-atomic-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder); lot.open()
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+    text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    window.contentView = text; coordinator.render(); window.makeFirstResponder(text)
+    let heading = lot.document.rows[0].id, item = lot.document.rows[1].id
+    func entry() -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == item }! }
+    func row() -> String { lot.document.rows.first { $0.id == item }!.text }
+    // What is drawn: the row without characters set in the hidden font.
+    func visible() -> String {
+        guard let storage = text.textStorage else { return "" }
+        var shown = ""
+        storage.enumerateAttribute(.font, in: entry().range) { value, run, _ in
+            if ((value as? NSFont)?.pointSize ?? 13) >= 1 { shown += (storage.string as NSString).substring(with: run) }
+        }
+        return shown
+    }
+    func linkRuns() -> [NSRange] {
+        var runs: [NSRange] = []
+        text.textStorage?.enumerateAttribute(.link, in: entry().range) { value, run, _ in
+            if value != nil { runs.append(NSRange(location: run.location - entry().range.location, length: run.length)) }
+        }
+        return runs
+    }
+    func caret() -> Int { text.selectedRange().location - entry().range.location }
+    func place(_ offset: Int, _ length: Int = 0) { text.setSelectedRange(NSRange(location: entry().range.location + offset, length: length)) }
+    func point(_ offset: Int) -> NSPoint {
+        text.layoutManager!.ensureLayout(for: text.textContainer!)
+        let glyphs = text.layoutManager!.glyphRange(forCharacterRange: NSRange(location: entry().range.location + offset, length: 1), actualCharacterRange: nil)
+        let rect = text.layoutManager!.boundingRect(forGlyphRange: glyphs, in: text.textContainer!)
+        return NSPoint(x: rect.midX + text.textContainerOrigin.x, y: rect.midY + text.textContainerOrigin.y)
+    }
+    let address = "file:///Users/x/KAOS%20Labs%20Logo.png"
+    let source = "[KAOS Labs Logo.png](" + address + ")"
+    let stored = "see " + source
+    let a = 4, b = 4 + (source as NSString).length
+    lot.update(item, text: stored); coordinator.render(caret: (heading, 0))
+    check(visible() == "see KAOS Labs Logo.png" && linkRuns() == [NSRange(location: 5, length: 18)], "A row without the caret shows only the link label")
+    // Richard's scenario: click to the right of the line's end, then type a space.
+    text.layoutManager!.ensureLayout(for: text.textContainer!)
+    let line = text.layoutManager!.lineFragmentUsedRect(forGlyphAt: text.layoutManager!.glyphIndexForCharacter(at: entry().range.location), effectiveRange: nil)
+    place(text.characterIndexForInsertion(at: NSPoint(x: text.textContainerOrigin.x + line.maxX + 40, y: text.textContainerOrigin.y + line.midY)) - entry().range.location)
+    coordinator.refreshLinks()
+    check(caret() == b && visible() == "see KAOS Labs Logo.png" && linkRuns() == [NSRange(location: 5, length: 18)], "The row holding the caret shows only link labels")
+    check(((text.typingAttributes[.font] as? NSFont)?.pointSize ?? 0) == 13, "The caret after a link keeps the normal text size")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    check(row() == stored + " " && visible() == "see KAOS Labs Logo.png " && linkRuns() == [NSRange(location: 5, length: 18)] && caret() == b + 1,
+          "Clicking right of a line ending in a link and typing a space neither reveals nor restyles its Markdown")
+    // The caret never stops inside hidden syntax or the label without Option-click.
+    var stops = Set<Int>()
+    for offset in a + 1 ..< b { place(0); place(offset); stops.insert(caret()) }
+    check(stops.isSubset(of: [a, b]), "A caret placed inside a link moves to the link's edge")
+    place(b); text.moveLeft(nil)
+    check(caret() == a, "Left arrow after a link crosses the whole link")
+    text.moveRight(nil)
+    check(caret() == b, "Right arrow before a link crosses the whole link")
+    place(a); text.moveRightAndModifySelection(nil)
+    check(text.selectedRange() == NSRange(location: entry().range.location + a, length: b - a), "Extending a selection into a link selects the whole link")
+    place(0); place(2, 6)
+    check(text.selectedRange() == NSRange(location: entry().range.location + 2, length: b - 2), "A selection that ends inside a link grows to cover it")
+    // Backspace and Delete remove the link in one step; Undo restores it.
+    place(b); text.deleteBackward(nil)
+    check(row() == "see  " && caret() == a, "Backspace right after a link deletes the whole link")
+    text.undo(nil)
+    check(row() == stored + " " && visible() == "see KAOS Labs Logo.png ", "Undo restores a link deleted with Backspace")
+    place(a); text.deleteForward(nil)
+    check(row() == "see  ", "Delete right before a link deletes the whole link")
+    text.undo(nil)
+    place(b); text.insertText("!", replacementRange: text.selectedRange())
+    check(row() == stored + "! " && linkRuns() == [NSRange(location: 5, length: 18)], "Typing straight after a link does not extend it")
+    text.undo(nil)
+    // Copy gives other apps the label; a Parking Lot paste keeps the link.
+    let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+    place(0, (stored as NSString).length)
+    text.copySelection(to: board)
+    check(board.string(forType: .string) == "see KAOS Labs Logo.png" && board.string(forType: ParkingOutlineText.markdownType) == stored, "Copying a link copies its label as plain text and keeps the Markdown for Parking Lots")
+    place(0, 0); text.paste(from: board)
+    check(row() == stored + stored + " ", "Pasting a copied link back into a Parking Lot keeps the link")
+    text.undo(nil)
+    // Option-click opens the label for editing in place.
+    let optionClick = NSEvent.mouseEvent(with: .leftMouseDown, location: text.convert(point(a + 3), to: nil), modifierFlags: .option, timestamp: 0,
+                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    text.mouseDown(with: optionClick)
+    let opened = caret()
+    check(opened > a && opened <= a + 1 + 18 && coordinator.labelEditing != nil, "Option-click places the caret inside a link's label")
+    text.insertText("X", replacementRange: text.selectedRange())
+    let renamed = "see [" + (("KAOS Labs Logo.png" as NSString).replacingCharacters(in: NSRange(location: opened - a - 1, length: 0), with: "X")) + "](" + address + ") "
+    check(row() == renamed && caret() == opened + 1 && linkRuns() == [NSRange(location: 5, length: 19)], "Typing in an opened label edits the label and keeps the link")
+    text.undo(nil); place(0)
+    check(coordinator.labelEditing == nil, "Moving the caret away closes the opened label")
+    // Right-click offers link editing.
+    func menu(at offset: Int) -> [String] {
+        let event = NSEvent.mouseEvent(with: .rightMouseDown, location: text.convert(point(offset), to: nil), modifierFlags: [], timestamp: 0,
+                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        return text.menu(for: event)?.items.map(\.title) ?? []
+    }
+    let titles = menu(at: a + 3)
+    check(titles.prefix(3) == ["Edit Link…", "Remove Link", "Copy Link Address"] && !menu(at: 1).contains("Edit Link…"), "Right-clicking a link offers Edit Link, Remove Link and Copy Link Address")
+    check(ParkingOutlineText.linkFields(source).map { [$0.label, $0.address] } == ["KAOS Labs Logo.png", address] && ParkingOutlineText.linkHelp.contains("Option-click"),
+          "Edit Link shows the label and address and explains Option-click")
+    check(coordinator.setLink(item, at: a, source: source, label: "javascript:alert(1)", address: "javascript:alert(1)") != nil && row() == stored + " ", "Edit Link refuses other schemes")
+    check(coordinator.setLink(item, at: a, source: source, label: "Logo", address: "https://example.com/a b") == nil && row() == "see [Logo](https://example.com/a%20b) "
+          && visible() == "see Logo ", "Edit Link changes the label and address")
+    text.undo(nil)
+    check(row() == stored + " ", "Undo restores a link changed with Edit Link")
+    coordinator.removeLink(item, at: a, source: source)
+    check(row() == "see KAOS Labs Logo.png " && linkRuns().isEmpty, "Remove Link keeps the label as plain text")
+    text.undo(nil)
+    ParkingOutlineText.copyLinkAddress(LotLinks.find(in: stored)[0].url, to: board)
+    check(board.string(forType: .string) == address, "Copy Link Address copies the link's URL")
+    // Bare URLs are their own label and stay ordinary text.
+    lot.update(item, text: "go https://x.com/a"); coordinator.render(caret: (item, 6))
+    check(caret() == 6 && visible() == "go https://x.com/a" && linkRuns().isEmpty, "A caret can sit inside a bare URL being edited")
+    place(0)
+    check(linkRuns() == [NSRange(location: 3, length: 15)] && visible() == "go https://x.com/a", "Bare URLs style as before once the caret leaves them")
+    let bareMenu = menu(at: 5)
+    check(!bareMenu.contains("Remove Link") && bareMenu.contains("Edit Link…") && bareMenu.contains("Copy Link Address"), "Bare URLs offer Edit Link and Copy Link Address without Remove Link")
     window.close()
 }
