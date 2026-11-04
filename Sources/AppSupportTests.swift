@@ -320,13 +320,25 @@ import SwiftUI
     switchGuide.teachIfNeeded(codingSession); switchGuide.teachIfNeeded(codingSession)
     check(codingSession.pending.filter { $0.text.contains("[Converse switchboard instructions]") }.count == 1 && switchGuide.record?.teachCoding == false && codingSession.switchboardEnabled && codingSession.pending.first?.clearDisplayBeforeReply == true, "Coding session is taught the switchboard once, before its first request")
 
+    // A crash after the first-run record is written but before the sessions are saved
+    // leaves a record with no sessions; the next launch must seed again.
+    do {
+        let (stale, staleGuide, staleLibrary, staleOrder) = fresh("stale")
+        stale.sessions = []; stale.setupCompleted = false
+        check(staleGuide.seedIfNeeded(library: staleLibrary, order: staleOrder) != nil && stale.sessions.count >= 3 && stale.setupCompleted, "A first-run record whose sessions were never saved is recovered by seeding again")
+    }
+
     // Decide later
     let (later, laterGuide, _, _) = fresh("later")
     laterGuide.decideLater()
     let laterSupport = laterGuide.support!
     laterSupport.draft = "hi"; later.submit(laterSupport)
     check(laterGuide.stage == "later" && later.setupCompleted && laterSupport.draft == "hi" && !laterSupport.busy && later.sessions.count == 3, "Decide later leaves a usable app and keeps App Support waiting")
-    laterGuide.reopen(); laterGuide.choose("claude")
+    laterGuide.cli = [:] // a restart at stage "later" starts with no CLI check results
+    laterGuide.reopen()
+    check(FirstRunText.providers.allSatisfy { laterGuide.cli[$0] != nil }, "Choose a provider after Decide later re-checks provider CLIs instead of leaving the buttons stuck")
+    spin { !laterGuide.cli.values.contains(.checking) }
+    laterGuide.choose("claude")
     check(laterGuide.stage == "login" && laterGuide.coding?.title == "Claude Coding Session", "Choose a provider works after Decide later")
 
     // Meta key: secure field only, saved via Keychain writer, never in chat.

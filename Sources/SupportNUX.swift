@@ -285,7 +285,8 @@ final class FirstRunGuide: ObservableObject {
     /// agent. Only for a store that has never had a session.
     @discardableResult
     func seedIfNeeded(library: ParkingLotLibrary, order: SidebarOrder) -> Session? {
-        guard !store.setupCompleted, store.sessions.isEmpty, record == nil else { return nil }
+        // A record whose sessions were never saved (crash between the two writes) is stale: seed again.
+        guard !store.setupCompleted, store.sessions.isEmpty, record == nil || session(record?.supportID) == nil else { return nil }
         let shoe = ConverseShoe.save(in: store.folder)
         let support = store.supportSession()
         support.messages = []
@@ -305,12 +306,14 @@ final class FirstRunGuide: ObservableObject {
         agent.agent?.objective = FirstRunText.agentObjective
         agent.agent?.watchedSessions = [lotID, coding.id]
         agent.agent?.enabled = false
+        // Write the first-run record before marking setup complete, so a crash
+        // between the two writes leaves a state the next launch can recover.
+        record = FirstRunRecord(stage: "choose", supportID: support.id, codingID: coding.id, agentID: agent.id, lotID: lotID)
+        update { _ in }
         store.setupCompleted = true
         store.save()
         let ids = [support.id.uuidString, lotID.uuidString, coding.id.uuidString, agent.id.uuidString]
         for id in ids { order.move(id, before: nil, scope: "local", available: ids) }
-        record = FirstRunRecord(stage: "choose", supportID: support.id, codingID: coding.id, agentID: agent.id, lotID: lotID)
-        update { _ in }
         return support
     }
     /// Links need this Mac's device identity, available once sync starts.
@@ -379,7 +382,7 @@ final class FirstRunGuide: ObservableObject {
         support?.messages.append(Message(role: "notice", text: "No problem. Click Choose a provider above when you’re ready. Until then, you can still open Parking Lots, Groups and Settings."))
         update { $0.stage = "later" }; store.save()
     }
-    func reopen() { guard active, let support, support.supportProbeCompletion == nil, !support.busy else { return }; update { $0.stage = "choose" } }
+    func reopen() { guard active, let support, support.supportProbeCompletion == nil, !support.busy else { return }; update { $0.stage = "choose" }; checkCLIs() }
     func dismiss() { update { $0.stage = "dismissed" } }
     /// Return on the prefilled /login runs the chosen provider's own login in
     /// Terminal for the shared login, then checks one model response.
