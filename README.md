@@ -246,6 +246,10 @@ Restarting keeps the saved deadline. Several missed intervals produce at most on
 
 A green loop indicator means scheduled checks are enabled and waiting; a rainbow spinner means work is underway; yellow attention means there is something to review. The footer shows the next check. **Reload settings** refreshes a form if another edit made it stale.
 
+Turn on **Auto pacing** if you'd rather the agent pick its own rhythm: check again in 5 minutes while a release is going out, or wait a few hours when nothing is moving. Each run suggests its next check with a short reason, and the footer shows it, for example *Auto · next in 20 min (release in progress)*. You set the bounds (5 to 240 minutes by default). A calendar schedule still decides which hours are allowed, and a missing suggestion falls back to your interval. Auto pacing starts off; **Stop** and pausing work as before.
+
+For Meta API agents the footer also shows the last turn's tokens, including how much of the input was served from the provider's prompt cache (for example *cached 80% of input*). Cached input costs much less, so repeat checks get cheaper. The account column shows **API Key**, since an API key has no account details to report.
+
 ### Read the scoreboard and optionally add art
 
 **Show scoreboard** presents the agent's status and available measurements in **cards** (small labeled panels). With a repository, these can include issues, bugs, pull requests, stars and release downloads. Repository visitors require authorized GitHub access. None of these counts measures actual app users.
@@ -253,6 +257,8 @@ A green loop indicator means scheduled checks are enabled and waiting; a rainbow
 For search-backed cards, source links and **observation times** (when the source measured the value) matter: a delayed quote or prior close is not a live price. Unsupported values remain unavailable. **Export widget** saves a portable HTML snapshot with embedded art; it is a snapshot, not a live dashboard.
 
 Optional **mood art** uses Meta's image service independently of the agent's reasoning provider. Supply a Meta key, enable art, and write the desired subject and style in **Scoreboard art direction**. Save and **Run once** to try it. You do not need art for useful reports; App Support leaves it off.
+
+Art changes when the mood or the scoreboard numbers change, but no more often than every 30 minutes, and unchanged art refreshes about every 6 hours. Adjust both next to the art toggle. Editing the art direction always updates the picture on the next scoreboard refresh.
 
 ### Voice on Mac
 
