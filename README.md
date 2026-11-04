@@ -240,13 +240,17 @@ A saved Meta key does **not** automatically add web search to a Claude/Codex/Mus
 
 ### Set a useful rhythm
 
-Use **Enable automatic loop**, an interval or supported text schedule, and **Maximum turns per loop**. That limit applies to each activation; it is not a lifetime allowance. A new or deliberately re-enabled interval starts with one interval of waiting. **Run once** performs a check without enabling a paused loop or moving an already scheduled deadline.
+Say how often to run in the objective, in your own words. A stock tracker might say: “Run every five minutes, and generate new scoreboard art at least every twelve hours or when any stock changes value by more than 0.5%.” When you save, Converse asks the agent's own model once to read the timing, then shows what it understood under the objective, in the footer and when you hover the agent's name: *Runs every 5 min · art: at least every 12 h, or when any metric moves > 0.5%*. It reads the objective again only when you change it. Days and hours work too: “only while the US stock market is open”, “weekdays between 9am and 5pm New York time” or “once a day at 09:00”.
 
-Restarting keeps the saved deadline. Several missed intervals produce at most one catch-up check, followed by the next interval from that check. Calendar schedules still respect their days and time windows. Busy agents and paused queues wait; a failed run pauses the loop and raises attention. Turning a loop off stops future checks but leaves a current turn alone; use **Stop** to interrupt it.
+If the objective says nothing about timing, **Auto pacing** decides. It is on for new agents: each run suggests its next check with a short reason, sooner while a release is going out, hours later when nothing is moving, and the footer shows it, for example *Auto · next in 20 min (release in progress)*. It stays between 5 minutes and 72 hours by default, so a quiet agent can sleep through a three-day weekend; change both bounds in Agent Setup. A cadence you state in the objective always wins over the agent's suggestions. If Converse can't read the objective (for example, a Meta model without a Meta key), the summary says so and Auto pacing's defaults apply; save again to retry.
+
+Use **Enable automatic loop** and **Maximum turns per loop**. That limit applies to each activation; it is not a lifetime allowance. A newly enabled loop waits one interval before its first check. **Run once** performs a check without enabling a paused loop or moving an already scheduled deadline.
+
+Restarting keeps the saved deadline. Several missed checks produce at most one catch-up check. Days and hours from the objective are still respected, and busy agents and paused queues wait. A network hiccup, such as a timeout, a dropped connection or a busy provider, does not pause the loop: the footer shows *Retrying: The request timed out. (1 of 3)* and the next scheduled check tries again. Three failures in a row, or a problem only you can fix (a missing or rejected key, an invalid setting, a spent turn limit), pause the loop with the reason and time. That reason stays visible even if you **Run once** or Discord asks the agent something in the meantime, until you re-enable the loop or right-click the agent and choose **Clear attention banner**. Turning a loop off stops future checks but leaves a current turn alone; use **Stop** to interrupt it.
+
+Agents that already had a text schedule keep it: Converse moved it into the objective as a last line, such as “Schedule: every 20 minutes while the US stock market is open”, and left a note in the agent's transcript. Edit it there like any other instruction. However the objective is worded, **Stop**, pausing, the turn limit and a one-minute minimum always apply.
 
 A green loop indicator means scheduled checks are enabled and waiting; a rainbow spinner means work is underway; yellow attention means there is something to review. The footer shows the next check. **Reload settings** refreshes a form if another edit made it stale.
-
-Turn on **Auto pacing** if you'd rather the agent pick its own rhythm: check again in 5 minutes while a release is going out, or wait a few hours when nothing is moving. Each run suggests its next check with a short reason, and the footer shows it, for example *Auto · next in 20 min (release in progress)*. You set the bounds (5 to 240 minutes by default). A calendar schedule still decides which hours are allowed, and a missing suggestion falls back to your interval. Auto pacing starts off; **Stop** and pausing work as before.
 
 For Meta API agents the footer also shows the last turn's tokens, including how much of the input was served from the provider's prompt cache (for example *cached 80% of input*). Cached input costs much less, so repeat checks get cheaper. The account column shows **API Key**, since an API key has no account details to report.
 
@@ -258,7 +262,7 @@ For search-backed cards, source links and **observation times** (when the source
 
 Optional **mood art** uses Meta's image service independently of the agent's reasoning provider. Supply a Meta key, enable art, and write the desired subject and style in **Scoreboard art direction**. Save and **Run once** to try it. You do not need art for useful reports; App Support leaves it off.
 
-Art changes when the mood or the scoreboard numbers change, but no more often than every 30 minutes, and unchanged art refreshes about every 6 hours. Adjust both next to the art toggle. Editing the art direction always updates the picture on the next scoreboard refresh.
+Art changes when the mood or the scoreboard numbers change, but no more often than every 30 minutes, and unchanged art refreshes about every 6 hours. Adjust both next to the art toggle, or say it in the objective, which takes precedence. “New art when any price moves more than 0.5%” compares each number on the scoreboard with its value in the current picture, so the jump at the market open redraws it and small wiggles don't; words such as “Open” or “Halted” don't count. Editing the art direction always updates the picture on the next scoreboard refresh.
 
 ### Voice on Mac
 
