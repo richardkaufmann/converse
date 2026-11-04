@@ -218,7 +218,6 @@ struct RemoteSidebarRow: View {
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
                 }
-                Button("Park conversation") { park() }
             }
             .alert("Rename session", isPresented: $renaming) {
                 TextField("Session name", text: $renameText)
