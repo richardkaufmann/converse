@@ -176,4 +176,12 @@ import Foundation
             do { try throttled.setArtThrottle(minMinutes: low, maxStaleHours: high); check(false, "Invalid art throttle rejected") } catch { check(true, "Invalid art throttle rejected: \(low) min / \(high) hr") }
         }
     } catch { check(false, "Art throttle settings: " + error.localizedDescription) }
+
+    // 4. API-key footer label.
+    check(AgentModels.apiKeyAccount("muse-spark-1.3")?.label == "API Key" && AgentModels.apiKeyAccount("muse-spark-1.3")?.help == "API key — no account info available"
+          && AgentModels.apiKeyAccount(AgentModels.reference(engine: "claude", account: "a")) == nil && AgentModels.apiKeyAccount(nil) == nil,
+          "API-key agents show API Key in the footer; CLI-login agents keep account status")
+    let footerStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-footer-" + UUID().uuidString))
+    let footerAgent = footerStore.createAgent(title: "Footer fixture", persist: false)
+    check(footerStore.sessionLoginLabel(footerAgent) == "API Key", "Session login label names the API key for Meta API agents")
 }

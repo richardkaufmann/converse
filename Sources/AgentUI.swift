@@ -255,7 +255,11 @@ struct AgentControls: View {
                     if session.toolStatus.usage != "not reported" {
                         Text("Last turn: " + session.toolStatus.usage).font(.caption).foregroundStyle(.secondary).help("Last turn: " + session.toolStatus.usage + ". Cached input is billed at a lower rate.")
                     }
-                    AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
+                    if let account = AgentModels.apiKeyAccount(session.agent?.model) {
+                        Text(account.label).font(.caption).foregroundStyle(.secondary).help(account.help)
+                    } else {
+                        AccountStatusView(status: session.toolStatus, refreshing: false) { Store.shared.refreshStatus(session) }.font(.caption)
+                    }
                 } }.frame(maxWidth: .infinity)
                 Menu {
                     Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }

@@ -35,6 +35,7 @@ extension Store {
         return identity.map { $0 == profile.name ? $0 : "\($0) · \(profile.name)" } ?? profile.name
     }
     func sessionLoginLabel(_ session: Session) -> String {
+        if session.isAgentSession, let account = AgentModels.apiKeyAccount(session.agent?.model) { return account.label }
         if session.accountStatus.contains("@") { return session.accountStatus }
         return loginAccount(for: session).map(loginLabel) ?? session.entry.accountName ?? "CLI login"
     }

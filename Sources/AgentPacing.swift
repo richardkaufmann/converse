@@ -124,3 +124,12 @@ struct AgentLenientText: Decodable, Equatable {
     var value: String?
     init(from decoder: Decoder) { value = try? decoder.singleValueContainer().decode(String.self) }
 }
+
+extension AgentModels {
+    // API-key agents have no provider account to report. The footer column
+    // is narrow, so show a short label and explain it on hover.
+    static func apiKeyAccount(_ model: String?) -> (label: String, help: String)? {
+        guard let model, parse(model) == nil else { return nil }
+        return ("API Key", "API key — no account info available")
+    }
+}
