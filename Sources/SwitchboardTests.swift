@@ -42,8 +42,10 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     let textView = ConversationTextView(frame: .zero); textView.teachSession = { store.teachSwitchboard(source) }
     let menu = NSMenu(); textView.addTeachingItem(to: menu)
     check(menu.items.contains { $0.title == "Teach Session To Talk To Other Sessions" }, "Transcript right-click offers teaching even with no text or pane placement")
-    reply("Example:\n" + block("tell", to: target.id.uuidString, text: "quoted"))
-    check(target.pending.isEmpty, "JSON embedded in explanatory prose never sends")
+    reply("Example:\n" + block("tell", to: target.id.uuidString, text: "quoted") + "\nThat is the format.")
+    check(target.pending.isEmpty && source.messages.last?.text.contains("text follows it") == true, "A command followed by explanatory prose never sends and explains why")
+    reply("Example:\n  " + block("tell", to: target.id.uuidString, text: "indented").replacingOccurrences(of: "\n", with: "\n  "))
+    check(target.pending.isEmpty, "An indented command block is discussion and never sends")
     reply(block("list-sessions"))
     let directory = source.pending.last?.text ?? ""
     check(directory.contains(target.id.uuidString) && directory.contains("Reviewer") && source.queuePaused && !source.busy, "Directory lookup returns live IDs and names and respects paused input")
@@ -586,4 +588,108 @@ func switchboardReplyToleranceSelfTests(_ check: (Bool, String) -> Void) {
     check(Store.replyInstruction(id: real, expected: true, inReplyTo: nil).contains("\n" + real.uuidString + "\n") &&
           Store.replyInstruction(id: real, expected: true, inReplyTo: nil).contains("copied exactly"),
           "Reply instructions place the full request UUID on its own line and ask for an exact copy")
+}
+
+// Agents (Claude and Codex) routinely open with a line of prose before the
+// command. A trailing converse fence runs; anything ambiguous explains why not.
+func switchboardTrailingFenceSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("trailing-fence-" + UUID().uuidString)
+    let service = DeviceSyncService()
+    defer { service.suspendViewer(); try? FileManager.default.removeItem(at: folder) }
+    do { try service.configureForTesting(folder: folder.appendingPathComponent("device")) } catch { check(false, "Trailing fence device fixture configures: \(error)"); return }
+    let store = Store(folder: folder.appendingPathComponent("store"))
+    store.switchboardService = service; service.storeOverride = store
+    func json(_ value: Any) -> String { String(decoding: try! JSONSerialization.data(withJSONObject: value), as: UTF8.self) }
+    func block(_ value: [String: Any]) -> String { "```converse\n" + json(value) + "\n```" }
+    for engine in ["claude", "codex"] {
+        let entry = Entry(name: "Fence fixture", command: "unused", directory: NSTemporaryDirectory(), engine: engine)
+        let source = store.create(entry), target = store.create(entry)
+        source.title = "Build A Video"; target.title = "Reviewer"
+        for s in [source, target] { s.switchboardEnabled = true; s.queuePaused = true }
+        // Claude acts on its visible text; Codex on its final answer, which may differ from streamed text.
+        func reply(_ text: String) {
+            source.switchboardTurnStart = source.messages.count
+            source.messages.append(engine == "codex" ? Message(role: "assistant", text: "Streamed commentary", finalReply: text) : Message(role: "assistant", text: text))
+            store.processSwitchboard(source)
+        }
+        func notices() -> [String] { source.messages.filter { $0.role == "notice" }.map(\.text) }
+        let tell = block(["command": "tell", "to": target.id.uuidString, "text": "Trailing hello"])
+        reply("Sending this to Reviewer now.\nIt covers the opening shot.\n\n" + tell + "\n  \n")
+        check(target.pending.count == 1 && target.pending[0].text.hasSuffix("Trailing hello"), engine + ": prose followed by a trailing tell fence delivers")
+        let delivered = target.pending.count, noticeCount = notices().count
+        store.processSwitchboard(source)
+        check(target.pending.count == delivered && notices().count == noticeCount, engine + ": a trailing command cannot replay")
+        reply(tell)
+        check(target.pending.count == delivered + 1, engine + ": a whole-reply fence still delivers")
+        reply("Sending.\r\n" + tell.replacingOccurrences(of: "\n", with: "\r\n"))
+        check(target.pending.count == delivered + 2, engine + ": CRLF line endings are accepted")
+        let ask = block(["command": "ask", "to": target.id.uuidString, "text": "Trailing question"])
+        reply("Asking Reviewer.\n" + ask)
+        check(target.pending.last?.text.contains("Trailing question") == true && source.switchboardExpectations.contains { !$0.answered }, engine + ": a trailing ask requests a correlated answer")
+        reply("Looking up sessions.\n" + block(["command": "list-sessions"]))
+        check(source.pending.last?.text.contains("switchboard directory") == true && source.pending.last?.text.contains(target.id.uuidString) == true, engine + ": a trailing list-sessions returns the directory")
+        let count = target.pending.count
+        func rejected(_ text: String, _ reason: String, _ label: String) {
+            let before = notices().count
+            reply(text)
+            let added = notices().dropFirst(before)
+            check(target.pending.count == count && added.count == 1 && added.first?.contains("was not run because " + reason) == true && added.first?.contains("Nothing was sent. Ask the session to resend the command as the last thing in its reply.") == true, engine + ": " + label)
+            store.processSwitchboard(source)
+            check(notices().count == before + 1 && target.pending.count == count, engine + ": " + label + " — the notice appears once and cannot replay")
+        }
+        rejected("Here it is:\n" + tell + "\nLet me know if that works.", "text follows it", "a fence followed by prose is not run and explains why")
+        rejected("First:\n" + tell + "\nSecond:\n" + tell, "the reply contains several command blocks", "two command fences are not run and explain why")
+        rejected("Sending:\n" + tell + "\n```bash\nls\n```", "text follows it", "a later code block counts as text after the command")
+        rejected("Sending:\n```converse\n{\"command\":\"tell\",", "its fence is not closed", "an unclosed command fence explains why")
+        rejected("Sending:\n```converse\n{not json}\n```", "its JSON is not a valid command", "invalid command JSON explains why")
+        let quiet = notices().count
+        reply("Example:\n> " + tell.replacingOccurrences(of: "\n", with: "\n> "))
+        reply("Example:\n    " + tell.replacingOccurrences(of: "\n", with: "\n    "))
+        reply("Example:\n```json\n" + json(["command": "tell", "to": target.id.uuidString, "text": "x"]) + "\n```")
+        check(target.pending.count == count && notices().count == quiet, engine + ": quoted, indented and non-converse blocks stay silent discussion")
+        reply("Here is a reference:\n```swift\nlet x = 1\n```\nSending now.\n" + tell)
+        check(target.pending.count == count + 1, engine + ": an earlier non-command code block does not prevent a trailing command")
+        reply("Sending.\n{\"command\":\"tell\",\"to\":\"" + target.id.uuidString + "\",\"text\":\"bare\"}")
+        check(target.pending.count == count + 1, engine + ": bare JSON after prose never sends")
+        reply("{\"command\":\"tell\",\"to\":\"" + target.id.uuidString + "\",\"text\":\"bare\"}")
+        check(target.pending.count == count + 1 && notices().last?.contains("as the last thing in the reply") == true, engine + ": bare command JSON keeps its formatting notice")
+        reply("Opening the app.\n" + block(["command": "app-control", "action": "inspect"]))
+        check(notices().last?.contains("app-control") != true, engine + ": a trailing app-control fence keeps the whole-reply App Support rule")
+        // Untaught sessions keep the strict rule, so protocol discussion stays quiet.
+        source.switchboardEnabled = false
+        let untaught = notices().count
+        reply("Sending:\n" + tell + "\nmore")
+        reply("Sending:\n" + tell)
+        check(target.pending.count == count + 1 && notices().count == untaught, engine + ": untaught sessions ignore non-whole fences silently")
+        source.switchboardEnabled = true
+
+        // Parking Lot edit as the last thing in a reply: the Build A Video report.
+        guard let lot = try? service.parkingLibrary.create(name: "Video ideas " + engine) else { check(false, "Parking Lot fixture"); continue }
+        func edit(_ text: String) -> String {
+            block(["command": "parking-lot-edit", "lotID": lot.id.uuidString, "parkingLotEdits": ["revision": lot.document.revision, "operations": [["action": "add", "text": text]]]])
+        }
+        var reviewed: [String] = []
+        store.parkingLotReviewConfirm = { reviewed.append($0); return true }
+        reply("I'll add the storyboard idea.\nPlease approve the change.\n\n" + edit("Storyboard the intro"))
+        check(reviewed.count == 1 && reviewed[0].contains("Storyboard the intro") && lot.document.rows.contains { $0.text == "Storyboard the intro" } && source.pending.last?.text.contains("approved and saved") == true, engine + ": a trailing parking-lot-edit requests review and applies when approved")
+        store.processSwitchboard(source)
+        check(reviewed.count == 1, engine + ": an approved trailing edit cannot request review twice")
+        store.parkingLotReviewConfirm = { reviewed.append($0); return false }
+        reply("Adding another.\n" + edit("Declined idea"))
+        check(reviewed.count == 2 && !lot.document.rows.contains { $0.text == "Declined idea" } && source.pending.last?.text.contains("declined") == true, engine + ": a declined trailing edit saves nothing")
+        reply("Adding:\n" + edit("Followed by prose") + "\nDone!")
+        check(reviewed.count == 2 && !lot.document.rows.contains { $0.text == "Followed by prose" } && notices().last?.contains("text follows it") == true, engine + ": an edit followed by prose is not reviewed or applied and explains why")
+        store.parkingLotReviewConfirm = nil
+        // Confirmation off: the real asynchronous path saves without a sheet.
+        try? service.parkingLibrary.setConfirmsSessionEdits(lot.id, false)
+        reply("Saving directly.\n" + edit("Saved without review"))
+        let deadline = Date().addingTimeInterval(5)
+        while !lot.document.rows.contains(where: { $0.text == "Saved without review" }) && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        check(lot.document.rows.contains { $0.text == "Saved without review" } && notices().contains { $0.contains("Parking Lot review pending") }, engine + ": a trailing edit to a lot with confirmation off saves through the normal path")
+        try? service.parkingLibrary.delete(lot.id)
+        store.sessions.removeAll { $0 === source || $0 === target }
+    }
+    check(SwitchboardCommand.conversationPolicy.contains("last thing in your reply (one per reply)") && !SwitchboardCommand.conversationPolicy.contains("ENTIRE"), "Conversation policy teaches the trailing command rule")
+    let teaching = store.switchboardTeaching(store.create(Entry(name: "Teach", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")))
+    check(teaching.contains("LAST thing in your final reply") && teaching.contains("one command block per reply") && !teaching.contains("ENTIRE") && !teaching.contains("no delivery error"), "Session teaching says the command block must be last, one per reply")
 }

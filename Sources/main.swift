@@ -265,6 +265,8 @@ final class Store: ObservableObject {
     var participantReceipts: [ParticipantMutationReceipt] = []
     var groupTellReceipts: [GroupTellReceipt] = []
     var switchboardService: DeviceSyncService?
+    // Synchronous Parking Lot review for tests; nil uses the native review sheet.
+    var parkingLotReviewConfirm: ((String) -> Bool)?
     var participantService: DeviceSyncService { switchboardService ?? .shared }
     var pendingSave: DispatchWorkItem?
     init(folder: URL? = nil) {

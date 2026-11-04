@@ -18,6 +18,6 @@ This change is on canonical main, separate from feature/linux-home. When integra
 
 ## Tell versus ask
 
-Natural language “tell MuseConverse …” sends a one-way message. “Ask MuseConverse …” requests a correlated answer, blocker, or explicit decline. CLI sessions emit `command: "tell"` or `command: "ask"` in the existing whole-reply converse fence. Ask always enables `replyExpected`, even if false was supplied. Existing `tell` plus `replyExpected: true` remains supported. Agent JSON uses its existing `tell` array with `replyExpected: true` for asks.
+Natural language “tell MuseConverse …” sends a one-way message. “Ask MuseConverse …” requests a correlated answer, blocker, or explicit decline. CLI sessions emit `command: "tell"` or `command: "ask"` in a converse fence at the end of the reply. Ask always enables `replyExpected`, even if false was supplied. Existing `tell` plus `replyExpected: true` remains supported. Agent JSON uses its existing `tell` array with `replyExpected: true` for asks.
 
 Transport acknowledgements still report acceptance or failure; they never count as an answer and do not create an acknowledgement turn. A receiver answers using `tell` with `inReplyTo` set to the request UUID. Teaching instructions and subsequent CLI turns explain the distinction, so existing enabled sessions learn it without a separate teaching turn. Names are resolved from the live directory, never guessed.

@@ -350,10 +350,42 @@ public sealed partial class DeviceSyncService
         if (!text.StartsWith("```converse\n") || !text.EndsWith("\n```")) return null;
         try { return System.Text.Json.Nodes.JsonNode.Parse(text[12..^4]) as System.Text.Json.Nodes.JsonObject; } catch { return null; }
     }
+    // Mac SwitchboardCommand.trailing parity: a command is the reply's only
+    // column-0 converse fence, with nothing but whitespace after it. Indented
+    // or quoted fences are discussion; a fence that cannot run reports why.
+    public static (System.Text.Json.Nodes.JsonObject? Command, string? Rejection) ParseTrailingSwitchboardReply(string reply)
+    {
+        if (ParseSwitchboardReply(reply) is { } whole) return (whole, null);
+        var lines = reply.Replace("\r\n", "\n").Split('\n');
+        var blocks = new List<(int Open, int? Close)>();
+        int? open = null; var converse = false;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith("```")) continue;
+            var info = lines[i][3..].Trim();
+            if (open is { } start)
+            {
+                if (info.Length > 0) continue;
+                if (converse) blocks.Add((start, i));
+                open = null;
+            }
+            else { open = i; converse = info == "converse"; }
+        }
+        if (open is { } unclosed && converse) blocks.Add((unclosed, null));
+        if (blocks.Count == 0) return (null, null);
+        if (blocks.Count > 1) return (null, "the reply contains several command blocks");
+        if (blocks[0].Close is not { } close) return (null, "its fence is not closed");
+        if (lines.Skip(close + 1).Any(line => line.Trim().Length > 0)) return (null, "text follows it");
+        System.Text.Json.Nodes.JsonObject? command = null;
+        try { command = System.Text.Json.Nodes.JsonNode.Parse(string.Join("\n", lines[(blocks[0].Open + 1)..close])) as System.Text.Json.Nodes.JsonObject; } catch { }
+        if (command?["command"] is not System.Text.Json.Nodes.JsonValue value || !value.TryGetValue<string>(out var name)) return (null, "its JSON is not a valid command");
+        // App controls keep their whole-reply rule.
+        return name == "app-control" ? (null, null) : (command, null);
+    }
     public void TeachSwitchboard(ChatSession session)
     {
         session.MessagingEnabled = true;
-        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nYour entire final reply must be exactly one converse fenced JSON block, without prose before or after it. Otherwise it is discussion and sends nothing. Discover IDs using ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same whole-reply fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
+        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nA command runs only when one converse fenced JSON block is the LAST thing in your reply. A short line of prose before it is fine; put nothing after it, and use one command block per reply. Otherwise nothing is sent and Converse shows a notice. Discover IDs by ending your reply with ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same kind of trailing fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
         _store.Save(); _store.RunNext(session);
     }
     // Directory metadata is not content access. Windows remains a read-only lot viewer.
@@ -373,7 +405,20 @@ public sealed partial class DeviceSyncService
     private async Task ProcessParticipantReplyAsync(ChatSession source, string reply)
     {
         var command = ParseSwitchboardReply(reply);
-        if (command is null || source.Agent is not null) return;
+        if (source.Agent is not null) return;
+        // Untaught sessions keep the strict whole-reply rule, so their
+        // discussion of the protocol never produces notices.
+        if (command is null && source.MessagingEnabled)
+        {
+            var (trailing, rejection) = ParseTrailingSwitchboardReply(reply);
+            if (rejection is not null)
+            {
+                source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard: a converse command in this reply was not run because " + rejection + ". Nothing was sent. Ask the session to resend the command as the last thing in its reply." });
+                _store.Save(); return;
+            }
+            command = trailing;
+        }
+        if (command is null) return;
         try
         {
             if (command["command"]?.GetValue<string>() == "app-control")
