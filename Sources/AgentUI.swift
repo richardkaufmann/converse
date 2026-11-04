@@ -6,6 +6,8 @@ struct AgentSetupView: View {
     @ObservedObject var parkingLots = ParkingLotLibrary.shared
     @State private var settings: AgentConfig
     @State private var metaKey = ""
+    @State private var metaKeySaved = true
+    private var metaKeyAvailable: Bool { !removeSecrets.contains("meta") && (metaKeySaved || !metaKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
     @State private var testingServices: Set<String> = []
     @State private var testOutcomes: [String: String] = [:]
     @State private var githubKey = ""
@@ -79,7 +81,9 @@ struct AgentSetupView: View {
                             }.font(.caption)
                         }
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
-                        Toggle("Generate mood art with Muse Image", isOn: $settings.generateArt)
+                        Toggle("Generate mood art with Muse Image" + (metaKeyAvailable ? "" : " · needs a Meta API key"), isOn: $settings.generateArt)
+                            .disabled(!metaKeyAvailable && !settings.generateArt)
+                        if !metaKeyAvailable { Text("Add a Meta API key above to turn on mood art. Scoreboards work without it.").font(.caption).foregroundStyle(.secondary) }
                         if settings.generateArt {
                             HStack(spacing: 16) {
                                 Stepper("New art at most every \(AgentPacing.minutesText(settings.artMinMinutes)) min", value: Binding(get: { settings.artMinMinutes }, set: { settings.artMinIntervalMinutes = $0; if settings.artStaleHours * 60 < $0 { settings.artMaxStaleHours = ($0 / 60).rounded(.up) } }), in: 5...1440, step: 5)
@@ -144,6 +148,7 @@ struct AgentSetupView: View {
     }
     private func loadModels() {
         guard !loadingModels else { return }; loadingModels = true
+        metaKeySaved = ((try? AgentSecrets.read("meta")) ?? nil)?.isEmpty == false
         modelOptions = AgentModels.options(store: .shared)
         Task { @MainActor in
             modelOptions = await AgentModels.catalog(store: .shared)

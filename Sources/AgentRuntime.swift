@@ -514,7 +514,9 @@ extension Store {
         let supportModel = setupCompleted ? sessions.first(where: { $0.supportAssistant })?.agent?.model : nil
         if let supportModel { session.agent?.model = supportModel }
         if let agentSecret, agentSecret("meta")?.isEmpty != false {
-            // No Meta key: an installed CLI replaces the Meta API model.
+            // No Meta key: mood art is off, and an installed CLI replaces the Meta API model.
+            // A key saved later does not change existing agents.
+            session.agent?.generateArt = false
             if supportModel == nil, let cli = AgentModels.defaultCLI(store: self) { session.agent?.model = cli }
         }
         session.switchboardEnabled = true

@@ -702,13 +702,15 @@ import Foundation
     judge.agentSecret = { _ in nil }
     install("claude", true); install("codex", true)
     let claudeJudge = judge.createAgent(title: "CLI judge", persist: false)
-    check(AgentModels.parse(claudeJudge.agent?.model ?? "")?.engine == "claude", "Without a Meta key a new agent defaults to the installed Claude CLI")
+    check(AgentModels.parse(claudeJudge.agent?.model ?? "")?.engine == "claude" && claudeJudge.agent?.generateArt == false, "Without a Meta key a new agent defaults to the installed Claude CLI with mood art off")
     install("claude", false)
     check(AgentModels.parse(judge.createAgent(title: "Codex judge", persist: false).agent?.model ?? "")?.engine == "codex", "Codex is the default when it is the only installed CLI")
     install("codex", false)
     check(judge.createAgent(title: "No CLI", persist: false).agent?.model == "muse-spark-1.3", "With no installed CLI the Meta API model remains")
     install("claude", true); judge.agentSecret = { $0 == "meta" ? "isolated-test-key" : nil }
-    check(judge.createAgent(title: "Meta judge", persist: false).agent?.model == "muse-spark-1.3", "A saved Meta key keeps the Meta API model default")
+    let metaJudge = judge.createAgent(title: "Meta judge", persist: false).agent
+    check(metaJudge?.model == "muse-spark-1.3" && metaJudge?.generateArt == true, "A saved Meta key keeps the Meta API model and mood art defaults")
+    check(claudeJudge.agent?.generateArt == false, "Saving a Meta key later does not silently turn on art for existing agents")
     judge.agentSecret = nil
     check(judge.createAgent(title: "Fixture judge", persist: false).agent?.model == "muse-spark-1.3", "Fixtures without a credential reader keep the legacy defaults")
     check(ProviderCommand.resolve("claude", directories: [fakePath.path]) == fakePath.appendingPathComponent("claude").path && ProviderCommand.resolve("muse", directories: [fakePath.path]) == nil, "Command resolution finds only executables in the searched directories")
