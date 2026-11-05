@@ -66,8 +66,13 @@ struct SavedSession: Codable {
     var clearedThroughMessageID: UUID? = nil
     // The sidebar 👀 must survive relaunch (including installing an update).
     var unseenResponse: Bool? = nil
-    // An imported transcript not yet handed to the bound provider.
+    // An imported transcript not yet handed to the bound provider. Still
+    // written for older builds; `handoffPending` supersedes it.
     var importedTranscriptPending: Bool? = nil
+    // A provider change (or import) waiting for the new provider's first turn.
+    var handoffPending: HandoffPending? = nil
+    // A fresh provider conversation after a switch; nil means the session ID.
+    var freshConversationID: UUID? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -83,7 +88,17 @@ final class Session: ObservableObject, Identifiable {
     var agentChanged: ((AgentConfig?, AgentConfig?) -> Void)?
     var isAgentSession: Bool { entry.engine == "agent" || agent != nil }
     var isUnboundImport: Bool { entry.engine == ConverseExchange.unboundEngine }
-    var importedTranscriptPending = false
+    var handoffPending: HandoffPending?
+    var importedTranscriptPending: Bool {
+        get { handoffPending != nil }
+        set { handoffPending = newValue ? (handoffPending ?? HandoffPending(from: nil, note: false)) : nil }
+    }
+    // Claude and Muse name a new conversation with this ID. A switch picks a
+    // fresh one so returning to an earlier assistant never collides.
+    var freshConversationID: UUID?
+    var conversationID: UUID { freshConversationID ?? id }
+    // Called once when the current turn finishes (true on success).
+    var turnCompletion: ((Bool) -> Void)?
     var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
     static let missingAgentSettings = "Agent settings are missing. Open Agent Setup to review and save its configuration. No CLI sign-in is needed."
     @Published var title: String { didSet {
@@ -216,7 +231,8 @@ final class Session: ObservableObject, Identifiable {
         supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
         clearedThroughMessageID = saved.clearedThroughMessageID
         unseenResponse = saved.unseenResponse ?? false
-        importedTranscriptPending = saved.importedTranscriptPending ?? false
+        handoffPending = saved.handoffPending ?? (saved.importedTranscriptPending == true ? HandoffPending(from: nil, note: false) : nil)
+        freshConversationID = saved.freshConversationID
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -244,7 +260,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: importedTranscriptPending ? true : nil) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -564,13 +580,15 @@ final class Store: ObservableObject {
         if s.injectionNotice == "Injected prompt started." { s.injectionNotice = "" }
     }
     func finishQueue(_ s: Session, success: Bool) {
+        let completedTurn = success && !s.interrupted, turnCompletion = s.turnCompletion
+        s.turnCompletion = nil
         if Workspace.shared.flagsUnseenResponse(s, success: success, interrupted: s.interrupted) { s.unseenResponse = true }
         importResponseImages(s)
         finishSupportProbe(s, success: success)
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
         switchboardTurnFinished(s, success: success && !s.interrupted)
         s.switchboardTurnStart = nil
-        if success && !s.interrupted && s.importedTranscriptPending { s.importedTranscriptPending = false }
+        if completedTurn && s.handoffPending != nil { s.handoffPending = nil }
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
             shouldRun = false
@@ -580,6 +598,7 @@ final class Store: ObservableObject {
         if !shouldRun { s.queuePaused = !s.pending.isEmpty; s.compactionRequested = false }
         if !shouldRun && s.injectionTargetID != nil { s.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying." }
         save()
+        turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
     func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil) {
@@ -601,9 +620,9 @@ final class Store: ObservableObject {
             s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it with Configure and retry this conversation.")); return
         }
         var importPreface: String?
-        if s.importedTranscriptPending && s.agent == nil {
-            do { importPreface = try writeImportedTranscript(s) }
-            catch { s.messages.append(Message(role: "notice", text: "Could not save the imported transcript for the provider, so nothing was sent. Your draft is kept. " + error.localizedDescription)); save(); return }
+        if s.handoffPending != nil && s.agent == nil {
+            do { importPreface = try handoffPreface(s) }
+            catch { s.messages.append(Message(role: "notice", text: "Could not save the earlier transcript for the provider, so nothing was sent. Your draft is kept. " + error.localizedDescription)); save(); return }
         }
         s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.retryDetail = nil; s.settingNotice = ""
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
@@ -648,13 +667,13 @@ final class Store: ObservableObject {
         if let live = s.claudeLive { deliverClaudeLive(s, live: live, prompt: prompt, responseID: responseID); save(); return }
         switch s.entry.engine {
         case "muse":
-            args = ["exec", "--json", "--session-id", s.id.uuidString]
+            args = ["exec", "--json", "--session-id", s.conversationID.uuidString]
             if let model = s.choices.model { args += ["--model", model] }
             if let effort = s.choices.effort { args += ["--reasoning-effort", effort] }
             if let access = s.choices.access { args += ["--permission-profile", access] }
             for image in images { args += ["--image", image] }
         default:
-            args = ProviderCommand.turnArguments(entry: s.entry, choices: s.choices, id: s.id, remoteID: s.remoteID, started: s.started, images: images)
+            args = ProviderCommand.turnArguments(entry: s.entry, choices: s.choices, id: s.conversationID, remoteID: s.remoteID, started: s.started, images: images)
         }
         var finalOutputDirectory: URL?
         if s.entry.engine == "codex" {
@@ -742,7 +761,7 @@ final class Store: ObservableObject {
         }
     }
     func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = []) {
-        let connection = MuseConnection(sessionID: s.remoteID ?? s.id.uuidString)
+        let connection = MuseConnection(sessionID: s.remoteID ?? s.conversationID.uuidString)
         s.muse = connection; s.museItems = [:]; s.requests = []; s.requestError = ""; s.status = "Connecting…"
         connection.event = { [weak self, weak s] method, params in
             guard let self, let s, s.muse === connection else { return }
@@ -934,7 +953,7 @@ final class Store: ObservableObject {
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
-        let entry = s.entry; let id = s.remoteID ?? s.id.uuidString; let revision = s.settingRevision
+        let entry = s.entry; let id = s.remoteID ?? s.conversationID.uuidString; let revision = s.settingRevision
         let fetchQuota = quota || s.quotaRefreshedAt == nil || Date().timeIntervalSince(s.quotaRefreshedAt!) > 300
         DispatchQueue.global(qos: .utility).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id) }
@@ -1049,7 +1068,7 @@ final class Store: ObservableObject {
             return
         }
         s.changingSetting = true; s.settingNotice = "Waiting for Muse to confirm change… · you can keep typing"
-        let entry = s.entry, id = s.remoteID ?? s.id.uuidString
+        let entry = s.entry, id = s.remoteID ?? s.conversationID.uuidString
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try MuseStatusProbe.query(entry: entry, sessionID: id, change: change) }
             DispatchQueue.main.async {
@@ -2649,7 +2668,7 @@ struct RootView: View {
             WorkspacePanes(workspace: workspace, state: state).overlay(alignment: .topLeading) {
                 if state.sidebarCollapsed { sidebarPin.padding(.leading, 6).padding(.top, 3) }
             }
-        }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.deviceConnect) { DeviceConnectView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupView(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
+        }.sheet(isPresented: $state.settings) { SettingsView(state: state) }.sheet(isPresented: $state.deviceConnect) { DeviceConnectView() }.sheet(isPresented: $state.setup) { SetupView(state: state) }.sheet(item: $state.sessionSetup) { SessionSetupSheet(request: $0, state: state) }.frame(minWidth: 760, minHeight: 540)
     }
     private var sidebarPin: some View {
         Button {
@@ -2725,7 +2744,7 @@ struct SettingsView: View {
                 Button("Done") { store.save(); dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(24).frame(width: 600, height: 580).onDisappear { store.save() }
-            .sheet(item: $flow.request) { SessionSetupView(request: $0, state: state) }
+            .sheet(item: $flow.request) { SessionSetupSheet(request: $0, state: state) }
     }
 }
 final class SettingsFlow: ObservableObject { @Published var request: SessionSetupRequest? = nil }
@@ -3004,24 +3023,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.title = values[0]; Store.shared.save()
         }
     }
-    func configureSession(_ session: Session) {
-        guard !session.busy else { return }
-        configurationForm(title: "Configure conversation", values: [("Conversation name", session.title), ("Command", session.entry.command), ("Working directory", session.entry.directory)], explanation: "The title updates immediately. The working folder and command apply to the next turn; this conversation keeps its history and login.") { values in
-            do { try Store.shared.configure(session, title: values[0], command: values[1], directory: values[2]) }
-            catch { let alert = NSAlert(); alert.messageText = "Could not save conversation settings"; alert.informativeText = error.localizedDescription; alert.runModal() }
-        }
-    }
     func showSession(_ session: Session) {
         if windows.isEmpty { newWindow() }
         let target = windows.first { $0.0.isKeyWindow } ?? windows.last
         if let (window, state) = target { select(session, state: state); window.makeKeyAndOrderFront(nil) }
     }
     func newSession(_ entry: Entry, state: WindowState) { state.sessionSetup = SessionSetupRequest(engine: entry.engine) }
-    func chooseLogin(_ session: Session) {
-        if windows.isEmpty { newWindow() }
-        guard let (_, state) = windows.first(where: { $0.0.isKeyWindow }) ?? windows.last else { return }
-        state.sessionSetup = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id)
-    }
+    // Login settings, /login and Choose a provider… all open Configure conversation.
+    func chooseLogin(_ session: Session) { configureSession(session, focusPickers: true) }
     func select(_ session: Session, state: WindowState) {
         let pane = Workspace.shared.pane(for: session.id, in: state.id) ?? Workspace.shared.firstAvailablePane(in: state.id)
         assign(session, to: state, pane: pane)

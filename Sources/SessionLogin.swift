@@ -9,7 +9,7 @@ enum SessionLoginContext {
         let manager = FileManager.default
         let sourceRoot = URL(fileURLWithPath: AccountLogin.directoryKey(source.directory))
         let targetRoot = URL(fileURLWithPath: AccountLogin.directoryKey(target.directory))
-        let id = (session.remoteID ?? session.id.uuidString).lowercased()
+        let id = (session.remoteID ?? session.conversationID.uuidString).lowercased()
         let roots = source.engine == "claude" ? ["projects"] : ["sessions", "archived_sessions"]
         var matches: [URL] = []
         for root in roots {

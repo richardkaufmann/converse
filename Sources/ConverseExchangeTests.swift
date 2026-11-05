@@ -99,10 +99,10 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
             target.send(first)
             let deadline = Date().addingTimeInterval(20)
             while first.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-            let file = target.importedTranscriptURL(first)
+            let file = target.handoffTranscriptURL(first)
             let markdown = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
             let reply = first.messages.last { $0.role == "assistant" }?.text ?? ""
-            check(markdown.contains("How do we plan?") && markdown.contains("Use **headings**.") && markdown.contains("## Prompt") && file.path.hasPrefix(target.folder.appendingPathComponent("Imports").path), "First send writes the imported transcript to Imports/<session-id>.md")
+            check(markdown.contains("How do we plan?") && markdown.contains("Use **headings**.") && markdown.contains("## Prompt") && file.path == target.folder.appendingPathComponent("Handoffs/" + first.id.uuidString + "/transcript.md").path, "Binding an import writes the transcript to Handoffs/<session-id>/transcript.md")
             check(reply.contains(ConverseExchange.preface(path: file.path)) && reply.contains("Continue from here") && first.messages.contains { $0.role == "user" && $0.text == "Continue from here" }, "First prompt carries one preface line pointing at the transcript; the visible prompt is unchanged")
             check(!first.importedTranscriptPending, "The transcript preface is delivered once")
             first.draft = "Second prompt"; target.send(first)

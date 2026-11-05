@@ -5,6 +5,18 @@ struct SessionSetupRequest: Identifiable {
     let id = UUID()
     var engine: String
     var sessionID: UUID? = nil
+    var focusPickers = false
+}
+/// New sessions use the setup sheet; an existing session opens Configure
+/// conversation, where its assistant and login are chosen.
+struct SessionSetupSheet: View {
+    let request: SessionSetupRequest
+    @ObservedObject var state: WindowState
+    var body: some View {
+        if let id = request.sessionID, let session = Store.shared.sessions.first(where: { $0.id == id }) {
+            ConfigureConversationView(session: session, focusPickers: request.focusPickers)
+        } else { SessionSetupView(request: request, state: state) }
+    }
 }
 enum AssistantFamily {
     static func name(_ engine: String) -> String {
@@ -57,27 +69,15 @@ extension Store {
 final class SessionSetupProgress: ObservableObject {
     @Published var engine: String
     @Published var accountID: String
-    @Published var title: String
+    @Published var title = ""
     @Published var directory: String
     @Published var loginName = ""
     @Published var signIn = false
     init(request: SessionSetupRequest) {
-        let session = Store.shared.sessions.first { $0.id == request.sessionID }
-        if let session, session.isUnboundImport {
-            // An imported session picks its provider like a new one does.
-            let store = Store.shared
-            let preferred = store.sessions.first(where: { $0.supportAssistant }).flatMap { $0.agent.flatMap { AgentModels.parse($0.model)?.engine } ?? $0.entry.engine }
-            let families = store.assistantFamilies.filter { $0 != "support" }
-            let chosen = families.contains(preferred ?? "") ? preferred! : families.first ?? "claude"
-            engine = chosen
-            accountID = store.preferredLogin(engine: chosen)?.id ?? "new"
-            title = session.title; directory = store.defaultEntry(engine: chosen).directory
-            return
-        }
-        let entry = session?.entry ?? Store.shared.defaultEntry(engine: request.engine)
+        let entry = Store.shared.defaultEntry(engine: request.engine)
         engine = request.engine
-        accountID = session?.entry.accountID ?? Store.shared.preferredLogin(engine: request.engine)?.id ?? "new"
-        title = session?.title ?? ""; directory = entry.directory
+        accountID = Store.shared.preferredLogin(engine: request.engine)?.id ?? "new"
+        directory = entry.directory
     }
 }
 struct SessionSetupView: View {
@@ -96,39 +96,24 @@ struct SessionSetupView: View {
     private var directory: String { progress.directory }
     private var loginName: String { progress.loginName }
     private var signIn: Bool { progress.signIn }
-    private var session: Session? { store.sessions.first { $0.id == request.sessionID } }
-    private var profiles: [AccountProfile] {
-        var profiles = store.accounts.filter { $0.engine == engine }
-        if let session, let saved = store.loginAccount(for: session), !profiles.contains(where: { $0.id == saved.id }) { profiles.append(saved) }
-        return profiles
-    }
+    private var profiles: [AccountProfile] { store.accounts.filter { $0.engine == engine } }
     private var isNew: Bool { accountID == "new" }
-    // An imported session not yet bound: choose its provider, login and folder.
-    private var binding: Bool { session?.isUnboundImport == true }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(binding ? "Choose a provider" : session == nil ? "New session" : "Session login").font(.title2.bold())
-            if binding {
-                Text("“" + (session?.title ?? "") + "” keeps its imported history. Before your first prompt, the provider reads that history from a file for context.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("New session").font(.title2.bold())
+            Picker("Model / assistant", selection: $progress.engine) {
+                ForEach(store.assistantFamilies.filter { $0 != "support" }, id: \.self) { Text(AssistantFamily.name($0)).tag($0) }
+            }.onChange(of: engine) { _, value in
+                progress.accountID = store.preferredLogin(engine: value)?.id ?? "new"
+                progress.directory = store.defaultEntry(engine: value).directory
             }
-            if session == nil || binding {
-                Picker("Model / assistant", selection: $progress.engine) {
-                    ForEach(store.assistantFamilies.filter { $0 != "support" }, id: \.self) { Text(AssistantFamily.name($0)).tag($0) }
-                }.onChange(of: engine) { _, value in
-                    progress.accountID = store.preferredLogin(engine: value)?.id ?? "new"
-                    progress.directory = store.defaultEntry(engine: value).directory
+            TextField("Session name (optional)", text: $progress.title)
+            HStack {
+                TextField("Working folder", text: $progress.directory)
+                Button("Choose…") {
+                    let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+                    if panel.runModal() == .OK, let url = panel.url { progress.directory = url.path }
                 }
-                if !binding { TextField("Session name (optional)", text: $progress.title) }
-                HStack {
-                    TextField("Working folder", text: $progress.directory)
-                    Button("Choose…") {
-                        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-                        if panel.runModal() == .OK, let url = panel.url { progress.directory = url.path }
-                    }
-                }
-            } else {
-                Text(AssistantFamily.name(engine) + " → " + (session?.title ?? "")).font(.headline)
             }
             Picker("Login", selection: $progress.accountID) {
                 ForEach(profiles) { profile in
@@ -151,44 +136,21 @@ struct SessionSetupView: View {
             } else {
                 Text("Muse uses the selected saved login and permission profiles. Your setup login can be reused by other sessions in this app.").font(.callout).foregroundStyle(.secondary)
             }
-            if let session, !binding, session.started || session.remoteID != nil || !session.messages.isEmpty || !session.pending.isEmpty {
-                Text("Changing the login preserves this session’s history, draft and retained CLI context. Other sessions are unchanged.").font(.callout).foregroundStyle(.secondary)
-            }
             HStack {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button(isNew ? "Create & sign in…" : (binding ? "Use provider" : session == nil ? "Create session" : "Use login")) { finish() }
+                Button(isNew ? "Create & sign in…" : "Create session") { finish() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(((session == nil || binding) && !SetupCatalog.validDirectory(directory)) || session?.busy == true || session?.changingSetting == true)
+                    .disabled(!SetupCatalog.validDirectory(directory))
             }
         }.padding(24).frame(width: 480).textFieldStyle(.roundedBorder)
     }
     private func finish() {
-        let target: Session
-        if let session, binding {
-            guard let profile = isNew ? store.makeLogin(engine: engine, name: loginName) : profiles.first(where: { $0.id == accountID }) else { return }
-            var entry = store.defaultEntry(engine: engine); entry.directory = directory
-            guard store.bindImportedSession(session, entry: entry, profile: profile) else { return }
-            if isNew { guard store.signInSession(session, freshProfile: profile) else { return } }
-            else if signIn { guard store.signInSession(session, name: profile.name) else { return } }
-            dismiss(); return
-        }
-        if let session {
-            if isNew || signIn {
-                guard store.signInSession(session, name: isNew ? loginName : profiles.first(where: { $0.id == accountID })?.name) else { return }
-            } else {
-                guard let profile = profiles.first(where: { $0.id == accountID }) else { return }
-                _ = store.chooseAccount(session, profile: profile)
-            }
-            target = session
-        } else {
-            guard let profile = isNew ? store.makeLogin(engine: engine, name: loginName) : profiles.first(where: { $0.id == accountID }) else { return }
-            var entry = store.defaultEntry(engine: engine); entry.directory = directory
-            guard let created = store.createBoundSession(entry: entry, profile: profile, title: title) else { return }
-            target = created
-            if isNew { guard store.signInSession(target, freshProfile: profile) else { return } }
-            else if signIn { guard store.signInSession(target, name: profile.name) else { return } }
-        }
+        guard let profile = isNew ? store.makeLogin(engine: engine, name: loginName) : profiles.first(where: { $0.id == accountID }) else { return }
+        var entry = store.defaultEntry(engine: engine); entry.directory = directory
+        guard let target = store.createBoundSession(entry: entry, profile: profile, title: title) else { return }
+        if isNew { guard store.signInSession(target, freshProfile: profile) else { return } }
+        else if signIn { guard store.signInSession(target, name: profile.name) else { return } }
         dismiss()
     }
 }
@@ -225,8 +187,8 @@ struct SessionSettingsRow: View {
             }
             Spacer()
             Button("Rename…") { AppDelegate.shared.renameSession(session) }
-            Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy || session.changingSetting)
-            Button("Login…") { flow.request = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id) }.disabled(session.busy || session.changingSetting)
+            Button("Configure…") { flow.request = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id) }.disabled(session.busy || session.changingSetting)
+            Button("Assistant & Login…") { flow.request = SessionSetupRequest(engine: session.entry.engine, sessionID: session.id, focusPickers: true) }.disabled(session.busy || session.changingSetting)
         }
     }
 }

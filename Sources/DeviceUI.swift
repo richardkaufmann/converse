@@ -215,6 +215,9 @@ struct RemoteSidebarRow: View {
                 if row.engine != "parking" {
                 Button("Rename…") { renameText = row.title; renaming = true }
                     .disabled(!online || !DeviceSyncService.shared.canRenameRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
+                Button("Change Assistant or Login…") {
+                    let alert = NSAlert(); alert.messageText = "Change it on " + homeName; alert.informativeText = ProviderHandoff.remoteRefusal; alert.runModal()
+                }
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
                 }
