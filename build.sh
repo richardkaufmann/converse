@@ -13,10 +13,16 @@ app="${app:A}"
 # Never replace code or resources in a running app bundle.
 converse_require_stopped_app "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+icon_name=Converse
+icon_source=Sources/Icon.swift
+if [[ "${CONVERSE_TEST_PROVIDER:-}" == Codex ]]; then
+  icon_name=ConverseTest
+  icon_source=Sources/TestIcon.swift
+fi
 if [[ "${CONVERSE_SKIP_ICON_BUILD:-0}" != 1 ]]; then
-  swift Sources/Icon.swift Converse.iconset
-  iconutil -c icns Converse.iconset -o "$app/Contents/Resources/Converse.icns"
-elif [[ ! -f "$app/Contents/Resources/Converse.icns" ]]; then
+  swift "$icon_source" "$icon_name.iconset"
+  iconutil -c icns "$icon_name.iconset" -o "$app/Contents/Resources/$icon_name.icns"
+elif [[ ! -f "$app/Contents/Resources/$icon_name.icns" ]]; then
   print -u2 'No existing icon to reuse'; exit 1
 fi
 mkdir -p "$app/Contents/Resources/ThirdParty"
@@ -39,7 +45,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>Converse</string>
 <key>CFBundleIdentifier</key><string>local.richard.Converse</string>
-<key>CFBundleIconFile</key><string>Converse</string>
+<key>CFBundleIconFile</key><string>$icon_name</string>
 <key>CFBundleName</key><string>Converse</string>
 <key>CFBundleDisplayName</key><string>Converse</string>
 <key>CFBundlePackageType</key><string>APPL</string>

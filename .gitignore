@@ -1,6 +1,7 @@
 .DS_Store
 Converse.app/
 Converse.iconset/
+ConverseTest.iconset/
 *.zip
 .build/
 
