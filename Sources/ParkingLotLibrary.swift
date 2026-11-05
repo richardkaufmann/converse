@@ -32,12 +32,15 @@ final class ParkingLotLibrary: ObservableObject {
         try JSONEncoder().encode(records).write(to: catalog, options: .atomic)
         self.records = records
     }
-    @discardableResult func create(name: String) throws -> ParkingLotStore {
+    /// `rows` seeds an imported lot; otherwise it starts with the default headings.
+    @discardableResult func create(name: String, id: UUID = UUID(), rows: [ParkingLotRow]? = nil) throws -> ParkingLotStore {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, title.count <= 100, records.count < 100 else { throw AgentFailure.message("Choose a name of 1–100 characters; up to 100 Parking Lots are supported.") }
-        let record = Record(id: UUID(), name: title)
+        guard !records.contains(where: { $0.id == id }) else { throw AgentFailure.message("That Parking Lot already exists.") }
+        let record = Record(id: id, name: title)
         let lot = ParkingLotStore(folder: folder, id: record.id, name: title)
-        lot.open(); guard lot.error.isEmpty else { throw AgentFailure.message(lot.error) }
+        if let rows { lot.openStarter(rows) } else { lot.open() }
+        guard lot.error.isEmpty else { throw AgentFailure.message(lot.error) }
         try save(records + [record]); cache[record.id] = lot; return lot
     }
     func rename(_ id: UUID, to name: String) throws {

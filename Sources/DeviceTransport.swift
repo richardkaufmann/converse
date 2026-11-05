@@ -570,6 +570,8 @@ extension DeviceSyncService {
             broadcastFabric()
         } catch { lastOutcome = "Could not forget device: " + error.localizedDescription }
     }
+    /// Read-only device directory for export scrubbing; never exported itself.
+    var trustedDevicesForScrubbing: [TrustedDevice] { trustStore?.devices ?? [] }
     func displayName(for id: String, fallback: String? = nil) -> String {
         let record = trustStore?.devices.first { $0.deviceID == id && $0.groupID == currentGroup?.id }
         return record?.displayName ?? fallback ?? (id == identity?.deviceID ? deviceName : homes[id]?.deviceName ?? record?.name ?? String(id.prefix(8)))
@@ -913,6 +915,8 @@ extension DeviceSyncService {
         var failure: String?
         switch command.action {
         case "teachSwitchboard": store.teachSwitchboard(session)
+        case "submit" where session.isUnboundImport:
+            failure = "This conversation was imported and has no provider yet. Choose one on its home device first. Nothing was sent."
         case "submit":
             let savedDraft = session.draft, savedAttachments = session.attachments
             let consumesHomeDraft = (command.text ?? "") == savedDraft

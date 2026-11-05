@@ -7,7 +7,7 @@ struct ProviderLogo: View {
         ["muse": "meta", "claude": "anthropic", "codex": "openai"][engine] ?? engine
     }
     private var label: String {
-        ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI", "parking": "Parking Lot"][engine] ?? engine.capitalized
+        ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI", "parking": "Parking Lot", ConverseExchange.unboundEngine: "Imported · choose a provider"][engine] ?? engine.capitalized
     }
     private var brandColor: Color {
         switch engine {
@@ -20,6 +20,8 @@ struct ProviderLogo: View {
         Group {
             if engine == "parking" {
                 ParkingLotShoe()
+            } else if engine == ConverseExchange.unboundEngine {
+                Image(systemName: "tray.and.arrow.down").resizable().scaledToFit()
             } else if let url = Bundle.main.url(forResource: provider, withExtension: "svg", subdirectory: "ProviderLogos"),
                let image = NSImage(contentsOf: url) {
                 Image(nsImage: image).renderingMode(.template).resizable().scaledToFit()

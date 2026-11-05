@@ -66,6 +66,8 @@ struct SavedSession: Codable {
     var clearedThroughMessageID: UUID? = nil
     // The sidebar 👀 must survive relaunch (including installing an update).
     var unseenResponse: Bool? = nil
+    // An imported transcript not yet handed to the bound provider.
+    var importedTranscriptPending: Bool? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -80,6 +82,8 @@ final class Session: ObservableObject, Identifiable {
     @Published var agent: AgentConfig? = nil { didSet { if oldValue != agent { agentChanged?(oldValue, agent) } } }
     var agentChanged: ((AgentConfig?, AgentConfig?) -> Void)?
     var isAgentSession: Bool { entry.engine == "agent" || agent != nil }
+    var isUnboundImport: Bool { entry.engine == ConverseExchange.unboundEngine }
+    var importedTranscriptPending = false
     var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
     static let missingAgentSettings = "Agent settings are missing. Open Agent Setup to review and save its configuration. No CLI sign-in is needed."
     @Published var title: String { didSet {
@@ -212,6 +216,7 @@ final class Session: ObservableObject, Identifiable {
         supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
         clearedThroughMessageID = saved.clearedThroughMessageID
         unseenResponse = saved.unseenResponse ?? false
+        importedTranscriptPending = saved.importedTranscriptPending ?? false
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -239,7 +244,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: importedTranscriptPending ? true : nil) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -252,6 +257,7 @@ final class Store: ObservableObject {
         return result
     }
     static let shared = Store()
+    static let importProviderNotice = "This conversation was imported. Choose a provider for it before sending; your draft is kept."
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
     @Published var setupCompleted = false
     @Published var accounts: [AccountProfile] = []
@@ -275,6 +281,8 @@ final class Store: ObservableObject {
     var switchboardService: DeviceSyncService?
     // Synchronous Parking Lot review for tests; nil uses the native review sheet.
     var parkingLotReviewConfirm: ((String) -> Bool)?
+    // Opens the provider picker for an imported session; wired by the app.
+    var chooseImportProvider: ((Session) -> Void)?
     var participantService: DeviceSyncService { switchboardService ?? .shared }
     var pendingSave: DispatchWorkItem?
     lazy var firstRun = FirstRunGuide(store: self)
@@ -562,6 +570,7 @@ final class Store: ObservableObject {
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
         switchboardTurnFinished(s, success: success && !s.interrupted)
         s.switchboardTurnStart = nil
+        if success && !s.interrupted && s.importedTranscriptPending { s.importedTranscriptPending = false }
         var shouldRun = s.interrupted ? s.resumeAfterInterrupt : success
         if s.interrupted && s.resumeAfterInterrupt && s.remoteID == nil && !s.started {
             shouldRun = false
@@ -574,7 +583,7 @@ final class Store: ObservableObject {
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
     func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil) {
-        guard s.entry.engine != "support" else { return }
+        guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
             s.probeError = Session.missingAgentSettings; s.status = "Agent setup required"; s.queuePaused = true
@@ -590,6 +599,11 @@ final class Store: ObservableObject {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDir), isDir.boolValue else {
             s.messages.append(Message(role: "notice", text: "Working directory does not exist: \(directory). Change it with Configure and retry this conversation.")); return
+        }
+        var importPreface: String?
+        if s.importedTranscriptPending && s.agent == nil {
+            do { importPreface = try writeImportedTranscript(s) }
+            catch { s.messages.append(Message(role: "notice", text: "Could not save the imported transcript for the provider, so nothing was sent. Your draft is kept. " + error.localizedDescription)); save(); return }
         }
         s.interrupted = false; s.resumeAfterInterrupt = false; s.turnFailed = false; s.retryDetail = nil; s.settingNotice = ""
         let text = s.draft.isEmpty ? "Please examine the attached image." : s.draft
@@ -619,6 +633,7 @@ final class Store: ObservableObject {
         var args: [String] = []
         updateExplicitStatus(s)
         var prompt = hiddenPreamble.map { $0 + "\n\n" + text } ?? text
+        if let importPreface { prompt = importPreface + "\n\n" + prompt }
         if s.supportTeachingVersion != nil { prompt += "\n\n" + AppSupport.instructions(agent: false) }
         if includesLocalContext {
             prompt += "\n\n" + localContext(s, directory: directory)
@@ -906,7 +921,7 @@ final class Store: ObservableObject {
         }
     }
     func refreshStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
-        guard s.entry.engine != "support" else { completion?(); return }
+        guard s.entry.engine != "support", !s.isUnboundImport else { completion?(); return }
         guard !applicationQuitting else { completion?(); return }
         if s.isAgentSession {
             s.probeError = s.needsAgentSetup ? Session.missingAgentSettings : ""
@@ -1059,6 +1074,12 @@ final class Store: ObservableObject {
     }
     func handleLocalCommand(_ s: Session) -> Bool {
         if firstRun.intercept(s) { return true }
+        if s.isUnboundImport {
+            // Keep the draft; nothing is sent until a provider is chosen.
+            if let chooseImportProvider { chooseImportProvider(s) }
+            else if s.messages.last?.text != Self.importProviderNotice { s.messages.append(Message(role: "notice", text: Self.importProviderNotice)); saveSoon() }
+            return true
+        }
         let command = s.draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard ["/help", "/model", "/models", "/usage", "/status", "/stop", "/login", "/clear", "/unclear"].contains(command) else { return false }
         if command == "/clear" || command == "/unclear" {
@@ -2489,7 +2510,14 @@ struct Conversation: View {
                     }
                 }
             Divider()
-            if session.needsAgentSetup {
+            if session.isUnboundImport {
+                HStack(spacing: 10) {
+                    Text("Imported conversation · not connected to a provider").foregroundStyle(.secondary)
+                    Button("Choose a provider…") { AppDelegate.shared.chooseLogin(session) }
+                        .help("Pick the assistant and login that continue this conversation. It reads the imported transcript before your first prompt.")
+                    Spacer(minLength: 0)
+                }.font(.system(size: 11)).lineLimit(1).padding(.horizontal, 10).padding(.vertical, 6)
+            } else if session.needsAgentSetup {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent settings are missing · automatic work is paused").foregroundStyle(.orange)
                     Button("Open Agent Setup…") { AgentWindows.shared.setup(session) }.buttonStyle(.link)
@@ -2760,10 +2788,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var quitReady = false
     private var resettingDemo = false
     var transcriptExporter: TranscriptExportController?
+    var converseImporter: ConverseImportController?
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        Store.shared.chooseImportProvider = { [weak self] in self?.chooseLogin($0) }
         Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }
         NSApp.appearance = nil
         paneObserver = Workspace.shared.$placements.sink { [weak self] placements in self?.updatePaneWidths(placements) }
@@ -2836,6 +2866,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         choices.addItem(withTitle: "Group…", action: #selector(showDeviceConnect), keyEquivalent: "")
         f.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
         f.addItem(withTitle: "Export…", action: #selector(exportTranscripts), keyEquivalent: "")
+        f.addItem(withTitle: "Import Conversations…", action: #selector(chooseConversationsToImport), keyEquivalent: "")
         f.addItem(withTitle: "Restore Closed Conversation", action: #selector(restoreDeletedConversation), keyEquivalent: "")
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
