@@ -86,12 +86,20 @@ public sealed partial class MainWindow
             DeviceAgentSettings? settings;
             if (local?.Agent is { } agent) settings = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(agent.Settings));
             else { var response = await _devices.RequestParticipantAsync(reference.Home, "agent.settings", target); settings = response.Settings; if (settings is null) { await AgentNotice(response.Detail); return; } }
+            var initialHAURL = settings.HomeAssistantURL;
+            var initialHAEntities = settings.HomeAssistantEntities;
+            var initialHARead = settings.HomeAssistantRead;
             var panel = new StackPanel { Spacing = 8, Width = 470 };
             panel.Children.Add(new TextBlock { Text = "Runs on " + (local is null ? "the home system" : "this system") + " when Converse is open. Your messages here are shared with the selected provider. If you enable this agent to examine selected sessions, those sessions’ content will also be shared.", TextWrapping = TextWrapping.Wrap });
             var modelOptions = local is null ? settings.ModelOptions ?? new() : await AgentModels.DiscoverAsync(_store, ReadAgentKey("meta"));
             if (!modelOptions.Any(o => o.Id == settings.Model)) modelOptions.Insert(0, new() { Id = settings.Model, Label = AgentModels.Label(settings.Model) + " · current" });
             var model = new ComboBox { Header = "Model", ItemsSource = modelOptions, DisplayMemberPath = "Label", SelectedValuePath = "Id", SelectedValue = settings.Model, HorizontalAlignment = HorizontalAlignment.Stretch }; panel.Children.Add(model);
             var repo = new TextBox { Header = "GitHub owner/name · optional", Text = settings.Repository }; panel.Children.Add(repo);
+            var haURL = new TextBox { Header = "Home Assistant URL · optional", Text = settings.HomeAssistantURL ?? "", PlaceholderText = "http://homeassistant.local:8123" }; panel.Children.Add(haURL);
+            var haEntities = new TextBox { Header = "Readable Home Assistant entity IDs · comma separated", Text = settings.HomeAssistantEntities ?? "" }; panel.Children.Add(haEntities);
+            var haRead = new CheckBox { Content = "Let this agent read selected Home Assistant states", IsChecked = settings.HomeAssistantRead == true }; panel.Children.Add(haRead);
+            if (local is null) { haURL.IsEnabled = false; haEntities.IsEnabled = false; haRead.IsEnabled = false; }
+            panel.Children.Add(new TextBlock { Text = local is null ? "Home Assistant access is set on the agent's home computer." : "Read only. Choose up to 32 entities; their states, names and observation times go to the selected model, never the token. Use HTTPS outside a trusted local network. Tokens stay on this computer.", TextWrapping = TextWrapping.Wrap });
             var objective = new TextBox { Header = "Objective and success criteria", Text = settings.Objective, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 90 }; panel.Children.Add(objective);
             var enabled = new CheckBox { Content = "Enable automatic loop", IsChecked = settings.Enabled }; panel.Children.Add(enabled);
             var seconds = new NumberBox { Header = "Fixed interval · minutes", Value = settings.IntervalSeconds / 60, Minimum = 1, Maximum = 525600 }; panel.Children.Add(seconds);
@@ -110,16 +118,26 @@ public sealed partial class MainWindow
             void AddScope(string global, string label) { if (global == target) return; var box = new CheckBox { Content = label, IsChecked = settings.Watched.Contains(global) }; scope.Add((global, box)); panel.Children.Add(box); }
             foreach (var s in _store.Sessions) AddScope(new DeviceGlobalID(_devices.DeviceId, s.Id).ToString(), "This PC · " + s.Title);
             foreach (var home in _devices.Homes.Values) foreach (var s in home.Rows) AddScope(s.GlobalID, home.DeviceName + " · " + s.Title);
-            PasswordBox? key = null, githubKey = null; CheckBox? remove = null, removeGithub = null;
+            var error = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            PasswordBox? key = null, githubKey = null, haKey = null; CheckBox? remove = null, removeGithub = null, removeHA = null;
             if (local is not null)
             {
                 key = new PasswordBox { PasswordRevealMode = PasswordRevealMode.Hidden, Header = "Meta API key · blank keeps saved key" }; panel.Children.Add(key);
                 remove = new CheckBox { Content = "Remove saved Meta key" }; panel.Children.Add(remove);
                 githubKey = new PasswordBox { Header = "GitHub token · optional, blank keeps saved token", PasswordRevealMode = PasswordRevealMode.Hidden }; panel.Children.Add(githubKey);
                 removeGithub = new CheckBox { Content = "Remove saved GitHub token" }; panel.Children.Add(removeGithub);
+                haKey = new PasswordBox { Header = "Home Assistant long-lived token · blank keeps saved token", PasswordRevealMode = PasswordRevealMode.Hidden }; panel.Children.Add(haKey);
+                removeHA = new CheckBox { Content = "Remove saved Home Assistant token" }; panel.Children.Add(removeHA);
+                var testHA = new Button { Content = "Test Home Assistant" }; panel.Children.Add(testHA);
+                testHA.Click += async (_, _) => {
+                    testHA.IsEnabled = false; error.Text = "Checking selected entities…";
+                    try { error.Text = await HomeAssistantAgent.TestAsync(haURL.Text, haEntities.Text, string.IsNullOrWhiteSpace(haKey.Password) ? ReadAgentKey("homeAssistant") : haKey.Password); }
+                    catch (Exception ex) { error.Text = ex is ArgumentException or InvalidOperationException ? ex.Message : "Could not reach Home Assistant. Check its URL and the network."; }
+                    finally { testHA.IsEnabled = true; }
+                };
                 panel.Children.Add(new TextBlock { Text = "Saved in Windows Credential Manager. Voice, Discord and file triggers remain Mac-home features in this release.", TextWrapping = TextWrapping.Wrap });
             }
-            var error = new TextBlock { TextWrapping = TextWrapping.Wrap }; panel.Children.Add(error);
+            panel.Children.Add(error);
             var dialog = new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Agent Setup / Loop", Content = new ScrollViewer { Content = panel, MaxHeight = 620 }, PrimaryButtonText = "Save", CloseButtonText = "Cancel" };
             dialog.PrimaryButtonClick += async (_, args) =>
             {
@@ -129,6 +147,10 @@ public sealed partial class MainWindow
                     ReadSchedule(); AgentSchedule.Compile(settings);
                     if (!double.IsFinite(runs.Value) || !double.IsFinite(cadence.Value)) throw new ArgumentException("Enter a run allowance and scoreboard interval.");
                     settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
+                    settings.HomeAssistantURL = local is null ? initialHAURL : haURL.Text.Trim();
+                    settings.HomeAssistantEntities = local is null ? initialHAEntities : haEntities.Text.Trim();
+                    settings.HomeAssistantRead = local is null ? initialHARead : haRead.IsChecked == true;
+                    HomeAssistantAgent.Validate(settings.HomeAssistantURL, settings.HomeAssistantEntities, settings.HomeAssistantRead == true);
                     settings.TurnLimit = checked((int)runs.Value); settings.ScoreboardEveryLoops = checked((int)cadence.Value); settings.GenerateArt = art.IsChecked == true; settings.ArtDirection = artDirection.Text;
                     // Preserve selected IDs temporarily absent from the current directory.
                     settings.Watched = settings.Watched.Except(scope.Select(s => s.Id)).Concat(scope.Where(s => s.Box.IsChecked == true).Select(s => s.Id)).Distinct().ToList();
@@ -136,12 +158,16 @@ public sealed partial class MainWindow
                     {
                         if (remove?.IsChecked == true && !string.IsNullOrWhiteSpace(key?.Password)) throw new ArgumentException("Choose key replacement or removal, not both.");
                         if (removeGithub?.IsChecked == true && !string.IsNullOrWhiteSpace(githubKey?.Password)) throw new ArgumentException("Choose GitHub token replacement or removal, not both.");
+                        if (removeHA?.IsChecked == true && !string.IsNullOrWhiteSpace(haKey?.Password)) throw new ArgumentException("Choose Home Assistant token replacement or removal, not both.");
+                        if (settings.HomeAssistantRead == true && (removeHA?.IsChecked == true || string.IsNullOrWhiteSpace(haKey?.Password) && string.IsNullOrWhiteSpace(ReadAgentKey("homeAssistant")))) throw new ArgumentException("Add a Home Assistant token before enabling state reading.");
                         config.Apply(settings); _store.Save();
                         var vault = new PasswordVault();
                         if (removeGithub?.IsChecked == true) { try { vault.Remove(vault.Retrieve(SetupPreview.CredentialResource, "github")); } catch { } }
                         else if (!string.IsNullOrWhiteSpace(githubKey?.Password)) vault.Add(new PasswordCredential(SetupPreview.CredentialResource, "github", githubKey.Password.Trim()));
                         if (remove?.IsChecked == true) { try { vault.Remove(vault.Retrieve(SetupPreview.CredentialResource, "meta")); } catch { } }
                         else if (!string.IsNullOrWhiteSpace(key?.Password)) vault.Add(new PasswordCredential(SetupPreview.CredentialResource, "meta", key.Password.Trim()));
+                        if (removeHA?.IsChecked == true) { try { vault.Remove(vault.Retrieve(SetupPreview.CredentialResource, "homeAssistant")); } catch { } }
+                        else if (!string.IsNullOrWhiteSpace(haKey?.Password)) vault.Add(new PasswordCredential(SetupPreview.CredentialResource, "homeAssistant", haKey.Password.Trim()));
                     }
                     else { var response = await _devices.RequestParticipantAsync(reference.Home, "agent.configure", target, settings: settings); if (response.Outcome != "completed") throw new ArgumentException(response.Detail); }
                 }

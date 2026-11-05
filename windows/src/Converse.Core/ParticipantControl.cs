@@ -271,6 +271,10 @@ public sealed partial class DeviceSyncService
                 case "agent.create": created = _store.CreateAgent(request.Title ?? "New Agent", false); session = created; detail = "Agent created paused. Choose a provider/model in Agent Setup on its home computer."; break;
                 case "agent.configure":
                     if (session?.Agent is null || request.Settings is null || request.Settings.Watched.Any(w => DeviceGlobalID.Parse(w) is not { } r || !IsParticipantAllowed(r.Home, group))) throw new ArgumentException("Agent missing or scope outside this group.");
+                    if ((request.Settings.HomeAssistantURL is not null && request.Settings.HomeAssistantURL != session.Agent.Settings.HomeAssistantURL) ||
+                        (request.Settings.HomeAssistantEntities is not null && request.Settings.HomeAssistantEntities != session.Agent.Settings.HomeAssistantEntities) ||
+                        (request.Settings.HomeAssistantRead is not null && request.Settings.HomeAssistantRead != session.Agent.Settings.HomeAssistantRead))
+                        throw new ArgumentException("Change Home Assistant access on the agent's home computer so its saved token and entity scope stay under local control.");
                     session.Agent.Apply(request.Settings); if (request.Settings.Enabled && session.Pending.Count == 0) session.QueuePaused = false; detail = "Settings saved on home."; break;
                 case "agent.run":
                     if (session?.Agent is not { } agent || agent.Settings.TurnLimit <= 0 || session.Pending.Count >= 100) throw new ArgumentException("Agent missing, budget exhausted, or queue full.");

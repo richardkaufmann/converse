@@ -24,6 +24,7 @@ import Foundation
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
     agentDiscordRouterSelfTests(check)
+    agentHomeAssistantSelfTests(check)
     let voice = AgentDictation()
     voice.keyReader = { "synthetic-key" }
     voice.permission = { false }

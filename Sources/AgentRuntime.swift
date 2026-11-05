@@ -4,7 +4,7 @@ import Foundation
 // Policy shared word-for-word with windows/src/Converse.Core/AgentRuntime.cs.
 enum AgentPolicy {
     static let objectiveGoverns = "The configured objective is the human's current instruction and governs what you report, track and score. Supplied evidence (repository, Discord, sessions, Parking Lots) and loop prompts are context, not reporting mandates: if the objective excludes a topic or source, leave it out even when evidence for it is supplied. The objective may have been edited since earlier turns: earlier replies and persistent notes that conflict with it are obsolete, so follow the current objective and drop the conflicting parts from memory."
-    static let scoreboardScope = "Every scoreboard metric must measure progress on THIS agent's objective, from its own selected sessions, Parking Lots, repository or research for that objective. Never add unrelated app, account, device, provider, Discord or GitHub status just because it is available. Fewer relevant metrics beat filler: if nothing relevant is measurable, return an empty metrics array and say why in summary."
+    static let scoreboardScope = "Every scoreboard metric must measure progress on THIS agent's objective, from its own selected sessions, Parking Lots, Home Assistant entities, repository or research for that objective. Never add unrelated app, account, device, provider, Discord or GitHub status just because it is available. Fewer relevant metrics beat filler: if nothing relevant is measurable, return an empty metrics array and say why in summary."
 }
 
 @MainActor final class AgentRuntime {
@@ -169,6 +169,19 @@ enum AgentPolicy {
                         throw AgentFailure.message("Discord scope changed during the run. Run again with the new settings.")
                     }
                 }
+                let haScope = session.agent ?? config
+                var homeAssistantEvidence: Any = NSNull()
+                if haScope.homeAssistantRead == true {
+                    let haToken = (try? self.keyReader("homeAssistant")) ?? nil
+                    homeAssistantEvidence = await AgentHomeAssistant().evidence(address: haScope.homeAssistantURL ?? "",
+                        token: haToken ?? "", entityText: haScope.homeAssistantEntities ?? "")
+                    try Task.checkCancellation()
+                    guard session.agent?.homeAssistantRead == true,
+                          session.agent?.homeAssistantURL == haScope.homeAssistantURL,
+                          session.agent?.homeAssistantEntities == haScope.homeAssistantEntities else {
+                        throw AgentFailure.message("Home Assistant scope changed during the run. Run again with the new settings.")
+                    }
+                }
                 let current = session.agent ?? config
                 var remainingCharacters = 120000
                 let transcripts: [[String: Any]] = evidenceItems.compactMap { captured, group, receivedAt in
@@ -200,6 +213,7 @@ enum AgentPolicy {
                 let parkingLotsEvidence: [[String: Any]] = try allowedLots.map { ["id": $0.id.uuidString, "name": $0.name, "document": try $0.evidence()] }
                 let evidence: [String: Any] = ["now": AgentPromptContext.localNow(), "repository": repositoryEvidence, "watchedSessions": transcripts,
                     "parkingLot": parkingEvidence, "parkingLots": parkingLotsEvidence,
+                    "homeAssistant": homeAssistantEvidence,
                     "parkingLotDirectory": try JSONSerialization.jsonObject(with: encoder.encode(service.parkingLotDirectory(for: session.id, agent: current))),
                     "switchboardDeliveries": store.switchboardRecoveryEvidence(for: session),
                     "discord": discordBatch?.evidence as Any? ?? NSNull(),

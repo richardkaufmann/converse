@@ -40,6 +40,9 @@ public sealed class DeviceAgentSettings
     [JsonPropertyName("discordShareSessionInformation")] public bool? DiscordShareSessionInformation { get; set; }
     [JsonPropertyName("discordShareScoreboard")] public bool? DiscordShareScoreboard { get; set; }
     [JsonPropertyName("scheduleTimeZone")] public string? ScheduleTimeZone { get; set; } = "UTC";
+    [JsonPropertyName("homeAssistantURL")] public string? HomeAssistantURL { get; set; }
+    [JsonPropertyName("homeAssistantEntities")] public string? HomeAssistantEntities { get; set; }
+    [JsonPropertyName("homeAssistantRead")] public bool? HomeAssistantRead { get; set; }
 }
 
 public sealed class DeviceParticipantRequest

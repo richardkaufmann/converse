@@ -13,6 +13,18 @@ static class AgentChecks
         var restoredLoop = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(dailyLoop));
         restoredLoop.RestoreSchedule(fired.AddHours(1));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Restart one hour after a daily check preserves the remaining 23 hours");
+        var haScope = HomeAssistantAgent.Validate("http://homeassistant.local:8123", "sensor.office_temperature, light.desk sensor.office_temperature", true);
+        check(haScope.Entities.SequenceEqual(new[] { "light.desk", "sensor.office_temperature" }), "Home Assistant accepts only unique selected entity IDs");
+        try { HomeAssistantAgent.Validate("https://user:secret@example.com", "sensor.office_temperature", true); check(false, "Home Assistant rejects embedded URL credentials"); }
+        catch (ArgumentException) { check(true, "Home Assistant rejects embedded URL credentials"); }
+        try { HomeAssistantAgent.Validate("https://example.com", "https://evil.example", true); check(false, "Home Assistant rejects entity URLs"); }
+        catch (ArgumentException) { check(true, "Home Assistant rejects entity URLs"); }
+        var haSettings = new DeviceAgentSettings { HomeAssistantURL = "http://homeassistant.local:8123", HomeAssistantEntities = "sensor.office_temperature", HomeAssistantRead = true };
+        var haAgent = new AgentConfig { Settings = haSettings };
+        var oldEditor = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(haSettings));
+        oldEditor.HomeAssistantURL = null; oldEditor.HomeAssistantEntities = null; oldEditor.HomeAssistantRead = null;
+        haAgent.Apply(oldEditor);
+        check(haAgent.Settings.HomeAssistantRead == true && haAgent.Settings.HomeAssistantEntities == "sensor.office_temperature", "Older Windows editors preserve Home Assistant scope");
         var artNow = D("2026-11-04T15:00:00Z");
         var artBoard = AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } });
         check(AgentArtPolicy.ShouldRegenerate(artNow, null, false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-1), true, false, false), "Windows art: first art and edited direction regenerate immediately");

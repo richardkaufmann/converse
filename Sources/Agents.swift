@@ -7,6 +7,9 @@ struct AgentConfig: Codable, Equatable {
     mutating func settingsChanged() { settingsRevision = min((settingsRevision ?? 0), UInt64.max - 1) + 1 }
     var objective = "Help me achieve the goals we agree on. Ask what success means, compare evidence with those goals, distinguish verified results from claims, and flag blockers. When research is available, identify the exact subject before searching: qualify ambiguous names with the project, owner, repository/domain, product category or other relevant context. Prefer official or primary sources, verify that each result is about the intended subject, and ignore unrelated namesakes. Use only public information in search queries, never private session text or secrets. If relevant evidence or a search tool is unavailable, say so instead of guessing."
     var repository = ""
+    var homeAssistantURL: String? = nil
+    var homeAssistantEntities: String? = nil
+    var homeAssistantRead: Bool? = nil
     var hasRepository: Bool { !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var repositorySnapshot: AgentRepoSnapshot? { hasRepository && snapshot?.repository == repository ? snapshot : nil }
     var parkingLotTalkID: UUID? = nil
@@ -438,7 +441,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "")
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "", homeAssistantURL: homeAssistantURL, homeAssistantEntities: homeAssistantEntities, homeAssistantRead: homeAssistantRead)
     }
     // Returns the transcript notice when a text schedule moved into the objective.
     @discardableResult mutating func apply(_ wire: DeviceAgentSettings) throws -> String? {
@@ -469,6 +472,23 @@ extension AgentConfig {
         if let share = wire.discordShareScoreboard { next.discordShareScoreboard = share }
         if let share = wire.discordShareSessionInformation { next.discordShareSessionInformation = share }
         if let direction = wire.artDirection { next.artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let address = wire.homeAssistantURL {
+            if !address.isEmpty { _ = try AgentHomeAssistant.base(address) }
+            next.homeAssistantURL = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let entities = wire.homeAssistantEntities {
+            _ = try AgentHomeAssistant.entities(entities)
+            next.homeAssistantEntities = entities.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let read = wire.homeAssistantRead {
+            if read {
+                let ids = try AgentHomeAssistant.entities(next.homeAssistantEntities ?? "")
+                guard !(next.homeAssistantURL ?? "").isEmpty, !ids.isEmpty else {
+                    throw AgentFailure.message("Choose a Home Assistant address and at least one entity before enabling reading.")
+                }
+            }
+            next.homeAssistantRead = read
+        }
         next.generateArt = wire.generateArt; next.speak = wire.speak; next.discord = wire.discord; next.fileTriggers = wire.fileTriggers
         let schedule = try next.scheduleRule()
         guard !wire.enabled || schedule.next(after: Date()) != nil else { throw AgentFailure.message("No future run is available. Review the schedule/calendar.") }

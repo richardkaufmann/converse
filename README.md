@@ -22,7 +22,7 @@ Its standout features:
 6. **[It’s distributed.](#connect-your-devices-into-a-group)** Systems running Converse can join peer-to-peer **Groups**. Each app instance can “take” (display) sessions from any system in the Group. Groups are persistent. Systems rejoin when they come back online, including iPhones and iPads, as long as they can reach the other systems.
 7. **[It hosts agent sessions.](#set-up-your-first-agent)** These sessions have initiative and can start periodically or via an external stimulus.
 8. **[It’s chatty.](#messaging-between-sessions)** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
-9. **[It talks to the outside world.](#give-the-agent-evidence-for-its-objective)** Agents interact with GitHub (to track PRs, issues, updates), [Discord](#connect-discord-on-a-mac) (to send and receive messages), and [Meta’s Muse mobile app](#jolly-mac) (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
+9. **[It talks to the outside world.](#give-the-agent-evidence-for-its-objective)** Agents interact with GitHub (to track PRs, issues, updates), [Discord](#connect-discord-on-a-mac) (to send and receive messages), [Home Assistant](#give-the-agent-evidence-for-its-objective) (to read selected device states), and [Meta’s Muse mobile app](#jolly-mac) (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
 10. **[It has polish.](#use)** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
 11. **[You can enter into spoken conversations with your agent.](#voice-on-mac)**
 12. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. You've been warned! Read the [security section](#security-and-privacy) to make sure this app is for you!
@@ -57,7 +57,7 @@ Coding sessions have scrubbed this repo for security issues, but please do read 
 
 ## First launch
 
-You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later. See [Set up Discord, Jolly and GitHub](#set-up-discord-jolly-and-github) to connect your own accounts and services.
+You do not need Discord to use App Support, set up Converse or report a bug. App Support lives right in Converse. Discord and Jolly are optional ways to reach agents later. See [Set up Discord, Jolly, GitHub and Home Assistant](#set-up-discord-jolly-github-and-home-assistant) to connect your own accounts and services.
 
 
 On a brand-new Mac installation, Converse opens with four things in the left panel: **Converse App Support**, a **Parking Lot**, **Coding** and an **Agent**. Only App Support is up. It says hello and asks one question: which provider should lead? Pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude**. A provider is the service behind the model; its account and usage charges are separate from Converse.
@@ -245,6 +245,8 @@ An agent can assess evidence and ask a coding session to act; selecting a CLI-ba
 
 **GitHub:** enter `owner/repository` in **Repository**, or leave it blank if the job has nothing to do with a repository. Converse fetches repository evidence and supplies it to the selected model. This works with CLI-backed agents as well as Meta API agents. **Test GitHub** checks access without changing the repository. Public polling has limits; private repositories need a GitHub token with appropriate access in the masked field.
 
+**Home Assistant:** enter your Home Assistant URL and up to 32 comma-separated entity IDs in an agent's **Agent Setup**. Save a long-lived token in the masked field on the agent's home computer, select **Let this agent read selected Home Assistant states**, and use **Test HA** (or **Test Home Assistant** on Windows). Each run receives only the selected entities' current state, friendly name, unit and change time. The token never goes to the model. Converse uses this connection only for reads: it cannot turn devices on or off or call services through the connector. The token itself retains the permissions of its Home Assistant account, so keep it private and revoke it there if needed. Each agent has its own entity selection; the saved token is shared by agents on that home computer. Without a configured connection, agent runs continue normally. Use HTTPS when connecting beyond a trusted local network. [Home Assistant's authentication guide](https://contributors.home-assistant.io/core/internals/auth-api/) explains long-lived tokens; [the REST API guide](https://contributors.home-assistant.io/core/internals/rest-api/) documents state reads.
+
 App Support illustrates the distinction: its goal is to notice releases and critical bugs; GitHub supplies the issue/release evidence. A coding-project steward can combine that evidence with the progress reports from the sessions you selected. Neither a healthy model response nor a quiet issue list proves that the app is bug-free.
 
 **Session monitoring:** the selected sessions supply recent submitted conversation and activity status. Unsent drafts and credentials are excluded. The agent can compare what those sessions report against its objective and send messages within its allowed scope. Start with a narrow selection and inspect its first report before enabling a loop.
@@ -306,7 +308,7 @@ Anyone able to post in the configured channel can use enabled mentions. By defau
 
 The Mac app must be open. Mention checks run independently of the agent's loop; pausing a daily loop does not disable enabled mentions. Windows/Linux do not host Discord integration yet. [Detailed Discord behavior](docs/agents.md#discord-bot-integration).
 
-## Set up Discord, Jolly and GitHub
+## Set up Discord, Jolly, GitHub and Home Assistant
 
 Tell App Support what you want: “Help me connect my own Discord server,” “Let me ask my agent questions from Muse on my phone,” or “Watch my GitHub repository for new issues.” It can walk you through the relevant guide and open supported settings. You supply your own accounts and credentials; installing Converse does not give you access to the developer’s services.
 
@@ -315,6 +317,7 @@ Tell App Support what you want: “Help me connect my own Discord server,” “
 | Discord | Your server, permission to install a bot, a bot token and a channel ID; a Mac home running Converse | [Discord setup](#connect-discord-on-a-mac), then Agent Setup on the Mac | Test Discord, then send a real bot mention and receive the intended agent’s reply |
 | Jolly / Meta Muse phone app | A Muse account with connector access, your Mac, a bridge, your own reachable HTTPS address and a bearer token | [Jolly setup](#jolly-mac); an operator prepares the connection first | List allowed agents, ask one by name, and receive its correlated reply on the phone |
 | GitHub | A repository you can access; a token for private access or report submission | [GitHub setup](#connect-your-own-github-repository), then Agent Setup or the report window | Test GitHub, run a check, and inspect the evidence; a submitted report must return an issue URL |
+| Home Assistant | Your server URL, a long-lived access token and the entity IDs this agent may read | Agent Setup on the Mac or Windows home | Test the connection, run once, and ask about one selected entity |
 
 Each connection is optional and independent. Start with one agent and one service. GitHub monitoring works on Mac and Windows; Discord and Jolly currently need a Mac home. A paired iPhone/iPad can view desktop work, but does not host these integrations. Keep the home app open and the computer awake and connected when you expect replies.
 

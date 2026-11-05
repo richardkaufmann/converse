@@ -37,7 +37,7 @@ import SwiftUI
     let session = store.supportSession()
     check(store.supportSession() === session && store.sessions.count == 1, "Support onboarding creates exactly one welcome session")
     check(!store.setupCompleted && session.supportTeachingVersion == nil && !session.switchboardEnabled, "Support is gated before a verified model response")
-    check(AppSupport.welcome.contains("[README](converse-help://readme)") && AppSupport.welcome.contains("[Discord](converse-help://discord)") && AppSupport.welcome.contains("[Connect the Meta Muse iPhone app](converse-help://muse-iphone)"), "Support welcome contains the three requested actionable links")
+    check(AppSupport.welcome.contains("[README](converse-help://readme)") && AppSupport.welcome.contains("[Discord](converse-help://discord)") && AppSupport.welcome.contains("[Home Assistant](converse-help://home-assistant)") && AppSupport.welcome.contains("[Connect the Meta Muse iPhone app](converse-help://muse-iphone)"), "Support welcome links to Home Assistant and the other connector guides")
     let help = try! HelpBook.load()
     check(AppSupport.guideTopics.values.allSatisfy { id in help.topics.contains { $0.id == id } } && AppSupport.guideTopics.keys.allSatisfy { AppSupport.welcome.contains("converse-help://" + $0) }, "All three support getting-started links resolve to bundled Help topics")
     let report = GitHubBugReport(title: "A & B / café", body: "Line one\n@someone &title=wrong # ?")

@@ -165,6 +165,12 @@ There are no overlapping runs or catch-up bursts. Relaunch preserves the saved d
 Mac and Windows host agents; iPad controls them on a desktop home. All three display attention, loop status, transcript images and scoreboards. Windows uses Windows Credential Manager for its Meta key and the same bounded direct Responses/Image APIs, with synthetic API and live loopback coverage. Voice, Discord and file triggers remain Mac-home features for this release; Windows explicitly rejects enabling unsupported options. Jolly continues to use the existing Mac bridge. No iPad background execution is promised.
 
 
+## Home Assistant state connector
+
+Mac and Windows home agents can read selected Home Assistant entity states on each run. In Agent Setup the owner supplies the home server URL, a long-lived token stored in the platform credential store, and up to 32 entity IDs. Reading starts off and is enabled per agent. The host issues GET requests only to `/api/states/{entity_id}` for those IDs, strips all attributes except friendly name and unit, and supplies the state and observation time as untrusted evidence. Redirects are disabled so the bearer token cannot follow a response to another origin. Failed entity lookups are marked unknown, never off. Test access with GET `/api/` and the selected IDs. No service/action API or model-selected URL is exposed.
+
+The credential stays on the agent's home. A remote Agent Setup editor may preserve existing Home Assistant settings but cannot change the URL, entity scope or read toggle; those changes require local setup on the home. The Mac Keychain and Windows Credential Manager each store their own token. iPhone and iPad may display a remote agent but do not host this connector.
+
 ## Discord bot integration
 
 Mac homes use one `discordBot` credential in the Converse Agent Keychain service,

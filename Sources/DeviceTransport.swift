@@ -2155,6 +2155,11 @@ extension DeviceSyncService {
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Scoreboard opened on home.", target: request.target)
             case "agent.configure":
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
+                guard (settings.homeAssistantURL == nil || settings.homeAssistantURL == session.agent?.homeAssistantURL),
+                      (settings.homeAssistantEntities == nil || settings.homeAssistantEntities == session.agent?.homeAssistantEntities),
+                      (settings.homeAssistantRead == nil || settings.homeAssistantRead == session.agent?.homeAssistantRead) else {
+                    reject("Change Home Assistant access on the agent's home computer so its saved token and entity scope stay under local control."); return true
+                }
                 guard settings.watched.allSatisfy({ ref in DeviceGlobalID(ref).map { acceptsParticipant(home: $0.home, groupID: group) } == true }) else { reject("Scope includes a participant outside this group."); return true }
                 migrationNotice = try session.agent?.apply(settings); pacingAfterCommit = true; session.toolStatus.model = AgentModels.label(settings.model)
                 if settings.enabled && session.pending.isEmpty { session.queuePaused = false }

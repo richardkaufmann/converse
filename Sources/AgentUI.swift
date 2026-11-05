@@ -12,6 +12,7 @@ struct AgentSetupView: View {
     @State private var testOutcomes: [String: String] = [:]
     @State private var githubKey = ""
     @State private var discordToken = ""
+    @State private var homeAssistantToken = ""
     @State private var discordClient = AgentDiscordClient()
     @State private var removeSecrets: Set<String> = []
     @State private var error = ""
@@ -55,6 +56,19 @@ struct AgentSetupView: View {
                         }
                         Text("One Converse bot serves all agents. Enable Message Content Intent in Discord; invite it with View Channel, Read Message History and Send Messages. Copy the channel ID with Discord Developer Mode enabled.").font(.caption).foregroundStyle(.secondary)
                         testStatus("discordBot")
+                        Text("Home Assistant").font(.headline)
+                        TextField("Home Assistant URL · e.g. http://homeassistant.local:8123", text: Binding(get: { settings.homeAssistantURL ?? "" }, set: { settings.homeAssistantURL = $0 }))
+                        HStack {
+                            SecureField("Long-lived access token · blank keeps saved token", text: $homeAssistantToken).disabled(testingServices.contains("homeAssistant"))
+                            Button(testingServices.contains("homeAssistant") ? "Testing…" : "Test HA") { testService("homeAssistant") }
+                                .disabled(testingServices.contains("homeAssistant") || removeSecrets.contains("homeAssistant"))
+                            Toggle("Remove saved", isOn: Binding(get: { removeSecrets.contains("homeAssistant") }, set: { if $0 { removeSecrets.insert("homeAssistant") } else { removeSecrets.remove("homeAssistant") } })).toggleStyle(.checkbox).fixedSize()
+                        }
+                        testStatus("homeAssistant")
+                        TextField("Readable entity IDs · comma separated", text: Binding(get: { settings.homeAssistantEntities ?? "" }, set: { settings.homeAssistantEntities = $0 }))
+                        Toggle("Let this agent read selected Home Assistant states", isOn: Binding(get: { settings.homeAssistantRead == true }, set: { settings.homeAssistantRead = $0 }))
+                        Text("Read only. Choose up to 32 entity IDs; the agent receives their states, names and observation times, never the token. Use HTTPS outside a trusted local network. Credentials are shared by agents on this Mac; each agent selects its own entities.")
+                            .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Picker("Model", selection: $settings.model) {
                                 if !modelOptions.contains(where: { $0.id == settings.model }) { Text(AgentModels.label(settings.model) + " · current").tag(settings.model) }
@@ -166,7 +180,7 @@ struct AgentSetupView: View {
         guard !testingServices.contains(service), !removeSecrets.contains(service) else { return }
         testingServices.insert(service)
         testOutcomes[service] = service == "discordBot" ? "Testing send and read with one labeled message; no session content or mentions." : "Checking access; no session history is sent."
-        let entered = service == "meta" ? metaKey : service == "github" ? githubKey : discordToken
+        let entered = service == "meta" ? metaKey : service == "github" ? githubKey : service == "homeAssistant" ? homeAssistantToken : discordToken
         let discordChannel = settings.discordChannelID ?? ""
         let model = AgentModels.parse(settings.model) == nil ? settings.model : "muse-spark-1.3", repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
@@ -175,6 +189,9 @@ struct AgentSetupView: View {
                 let key = try AgentCredentialProbe.resolve(entered, name: service)
                 let api = AgentAPI()
                 switch service {
+                case "homeAssistant":
+                    guard let key else { throw AgentFailure.message("Enter a Home Assistant token or save one first.") }
+                    testOutcomes[service] = try await AgentHomeAssistant().test(address: settings.homeAssistantURL ?? "", token: key, entityText: settings.homeAssistantEntities ?? "")
                 case "github": testOutcomes[service] = try await api.testGitHub(repository: repository, token: key)
                 case "discordBot":
                     guard let key else { throw AgentFailure.message("Enter a Converse bot token or save one first.") }
@@ -201,7 +218,12 @@ struct AgentSetupView: View {
         do {
             var current = session.agent ?? AgentConfig()
             let migrationNotice = try current.apply(settings.wire(home: DeviceSyncService.shared.localDeviceID ?? "local"))
-            guard ![("meta", metaKey), ("github", githubKey), ("discordBot", discordToken)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
+            guard ![("meta", metaKey), ("github", githubKey), ("discordBot", discordToken), ("homeAssistant", homeAssistantToken)].contains(where: { removeSecrets.contains($0.0) && !$0.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { error = "Choose either replacement or removal for each credential."; return }
+            if settings.homeAssistantRead == true {
+                guard !removeSecrets.contains("homeAssistant"), try AgentCredentialProbe.resolve(homeAssistantToken, name: "homeAssistant") != nil else {
+                    throw AgentFailure.message("Add a Home Assistant token before enabling state reading.")
+                }
+            }
             let channel = (settings.discordChannelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !channel.isEmpty || settings.discordRead == true || settings.discord || settings.discordMentions == true { _ = try AgentDiscord.channelID(channel) }
             if settings.discordRead == true || settings.discord || settings.discordMentions == true {
@@ -221,6 +243,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("meta", value: metaKey, remove: removeSecrets.contains("meta"))
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
+            try AgentSecrets.update("homeAssistant", value: homeAssistantToken, remove: removeSecrets.contains("homeAssistant"))
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             let notice = migrationNotice
             try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())

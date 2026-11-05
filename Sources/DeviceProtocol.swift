@@ -389,6 +389,9 @@ struct DeviceAgentSettings: Codable, Equatable {
     var discordShareScoreboard: Bool? = nil
     var discordShareSessionInformation: Bool? = nil
     var artDirection: String? = nil
+    var homeAssistantURL: String? = nil
+    var homeAssistantEntities: String? = nil
+    var homeAssistantRead: Bool? = nil
 }
 struct DeviceParticipantRequest: Codable, Equatable {
     var provider: String? = nil
