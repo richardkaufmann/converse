@@ -236,7 +236,13 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                 if selection.format == .converse && selection.includeHandoffs {
                     progress.orderOut(nil)
                     guard let collected = await Self.collectHandoffs(selection.chosen) else { return }
-                    notes = collected
+                    if !collected.failures.isEmpty {
+                        let alert = NSAlert(); alert.messageText = "Some handoff notes weren’t written"
+                        alert.informativeText = collected.failures.joined(separator: "\n") + "\n\nThose sessions export without a note."
+                        alert.addButton(withTitle: "Export Anyway"); alert.addButton(withTitle: "Cancel")
+                        guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    }
+                    notes = collected.notes
                     progress.makeKeyAndOrderFront(nil)
                 }
                 for chosen in selection.chosen {
@@ -283,11 +289,11 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     }
     /// Local, bound, idle, non-agent sessions write a handoff note, one at a
     /// time. Returns nil when the user cancels; failures can be skipped.
-    @MainActor static func collectHandoffs(_ chosen: [ExportSession], store: Store = .shared) async -> [UUID: String]? {
+    @MainActor static func collectHandoffs(_ chosen: [ExportSession], store: Store = .shared, progress: HandoffExportProgress = HandoffExportProgress()) async -> (notes: [UUID: String], failures: [String])? {
         let sessions = chosen.compactMap { item in store.sessions.first { $0.id == item.id && item.remoteID == nil && !item.isParkingLot } }
             .filter { !$0.isUnboundImport && store.providerChangeRefusal($0) == nil }
-        guard !sessions.isEmpty else { return [:] }
-        let state = HandoffExportProgress()
+        guard !sessions.isEmpty else { return ([:], []) }
+        let state = progress
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false; panel.title = "Writing handoff notes"
         panel.contentView = NSHostingView(rootView: HandoffExportProgressView(state: state))
@@ -298,8 +304,22 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             guard !state.cancelled else { return nil }
             state.current = session
             state.text = "Asking " + AssistantFamily.name(session.entry.engine) + " for a handoff note on “" + session.title + "” (\(index + 1) of \(sessions.count))…"
+            // Resume exactly once: on the note, on Cancel, or after the time limit.
+            // A stalled turn (e.g. waiting on a permission prompt) must never
+            // leave the export waiting forever.
             let result: Result<String, Error> = await withCheckedContinuation { continuation in
-                store.requestHandoffNote(session) { continuation.resume(returning: $0) }
+                var resumed = false
+                let finish: (Result<String, Error>) -> Void = { value in
+                    guard !resumed else { return }
+                    resumed = true; state.waiter = nil; continuation.resume(returning: value)
+                }
+                state.waiter = { finish(.failure(ProviderHandoff.error("Cancelled."))) }
+                store.requestHandoffNote(session) { finish($0) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + ProviderHandoff.exportNoteTimeout) {
+                    guard !resumed else { return }
+                    if session.busy { store.stop(session) }
+                    finish(.failure(ProviderHandoff.error("No handoff note after \(Int(ProviderHandoff.exportNoteTimeout / 60)) minutes; the turn was stopped.")))
+                }
             }
             state.current = nil
             guard !state.cancelled else { return nil }
@@ -310,14 +330,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             case .failure(let error): failures.append("“" + session.title + "”: " + error.localizedDescription)
             }
         }
-        if !failures.isEmpty {
-            panel.orderOut(nil)
-            let alert = NSAlert(); alert.messageText = "Some handoff notes weren’t written"
-            alert.informativeText = failures.joined(separator: "\n") + "\n\nThose sessions export without a note."
-            alert.addButton(withTitle: "Export Anyway"); alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        }
-        return notes
+        return (notes, failures)
     }
     @MainActor static func load(_ session: ExportSession, includeImages: Bool, service: DeviceSyncService = .shared) async throws -> (ExportSession, [String: Data]) {
         guard let id = session.remoteID, let global = DeviceGlobalID(id) else { return (session, [:]) }
@@ -514,9 +527,12 @@ final class HandoffExportProgress: ObservableObject {
     @Published var text = "Preparing handoff notes…"
     @Published var cancelled = false
     var current: Session?
+    /// Resumes the export's wait at once, so Cancel never hangs on a stalled turn.
+    var waiter: (() -> Void)?
     func cancel() {
         cancelled = true
         if let current, current.busy { Store.shared.stop(current) }
+        waiter?()
     }
 }
 struct HandoffExportProgressView: View {
