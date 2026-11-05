@@ -2,6 +2,10 @@
 set -euo pipefail
 cd "${0:A:h}"
 source ./signing.sh
+if [[ -n "${CONVERSE_TEST_PROVIDER:-}" ]]; then
+    case "$CONVERSE_TEST_PROVIDER" in Codex|Claude|Muse) ;; *) print -u2 'TEST provider must be Codex, Claude, or Muse'; exit 2;; esac
+    [[ "${CONVERSE_DEMO:-0}" != 1 ]] || { print -u2 'TEST and Demo editions are separate'; exit 2; }
+fi
 read -r app_version app_build < <(/usr/bin/python3 -c 'import json; v=json.load(open("VERSION.json")); print(v["version"], v["build"])')
 signing_identity=$(converse_signing_identity)
 app="${CONVERSE_APP_OUTPUT:-$PWD/.build/Converse.app}"
@@ -61,7 +65,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict></array>
 </dict></plist>
 PLIST
-if [[ "${CONVERSE_NUX_PREVIEW:-0}" == 1 || "${CONVERSE_DEMO:-0}" == 1 ]]; then
+if [[ "${CONVERSE_NUX_PREVIEW:-0}" == 1 || "${CONVERSE_DEMO:-0}" == 1 || -n "${CONVERSE_TEST_PROVIDER:-}" ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.richard.Converse.NUXPreview' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName Converse Setup Preview' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Converse Setup Preview' "$app/Contents/Info.plist"
@@ -72,6 +76,16 @@ if [[ "${CONVERSE_DEMO:-0}" == 1 ]]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName Converse Demo' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Converse Demo' "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :ConverseDemo bool true' "$app/Contents/Info.plist"
+fi
+if [[ -n "${CONVERSE_TEST_PROVIDER:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier local.richard.Converse.Test.$CONVERSE_TEST_PROVIDER" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName $CONVERSE_TEST_PROVIDER Converse TEST" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $CONVERSE_TEST_PROVIDER Converse TEST" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :ConverseTestProvider string $CONVERSE_TEST_PROVIDER" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :ConverseAgentKeychainService string app.kaoslabs.Converse.Test.$CONVERSE_TEST_PROVIDER.Agent" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :ConverseDeviceKeychainService string local.richard.Converse.Test.$CONVERSE_TEST_PROVIDER.device" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleDocumentTypes:0:LSHandlerRank Alternate' "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :ConverseTestSource string $(git describe --always --dirty)" "$app/Contents/Info.plist"
 fi
 /usr/bin/python3 scripts/build-help.py README.md "$app/Contents/Resources/Help"
 if [[ "$signing_identity" == - ]]; then

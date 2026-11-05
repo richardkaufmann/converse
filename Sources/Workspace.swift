@@ -305,7 +305,7 @@ struct WindowTitle: View {
     let state: WindowState
     var body: some View {
         HStack(spacing: 8) {
-            Text(state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Text(DemoReset.testName ?? state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
             Text(ConverseAbout.versionBuild).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
         }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())

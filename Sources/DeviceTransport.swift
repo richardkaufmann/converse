@@ -215,7 +215,7 @@ final class DeviceSyncService: ObservableObject {
         started = true
         do {
             let folder = storageFolder
-            if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true { deviceNameOverride = (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") }
+            if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true { deviceNameOverride = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? "Converse Setup Preview" }
             loadResumeEpochs(); loadRemoteSeen()
             identity = try DeviceIdentity.loadOrCreate(folder: folder, useKeychain: true)
             trustStore = try DeviceTrustStore(folder: folder)

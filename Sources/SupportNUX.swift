@@ -164,7 +164,7 @@ struct SupportNUXView: View {
             Spacer(minLength: 0)
             Text(AppSupport.closingInvitation).font(.callout)
             if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
-                Text((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "DEMO" : "SETUP PREVIEW") + " · Separate conversations, logins, credentials and device identity").font(.caption).foregroundStyle(.secondary)
+                Text((DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "DEMO" : "SETUP PREVIEW")) + " · Separate conversations, logins, credentials and device identity").font(.caption).foregroundStyle(.secondary)
             }
             HStack { Spacer(); Button("Quit") { AppDelegate.shared.quitConverse(nil) } }
         }.padding(26).frame(width: 670, height: 440).interactiveDismissDisabled()

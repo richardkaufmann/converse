@@ -37,7 +37,7 @@ struct DeviceIdentity {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return DeviceIdentity(privateKey: key)
     }
-    private static let service = Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "local.richard.Converse.Demo.device" : Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "local.richard.Converse.NUXPreview.device" : "local.richard.Converse.device"
+    static let service = (Bundle.main.object(forInfoDictionaryKey: "ConverseDeviceKeychainService") as? String) ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "local.richard.Converse.Demo.device" : Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? "local.richard.Converse.NUXPreview.device" : "local.richard.Converse.device")
     static func keychainDecision(status: OSStatus) -> Bool { status == errSecItemNotFound }
     private static func keychainRead() throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
