@@ -88,6 +88,8 @@ final class Session: ObservableObject, Identifiable {
     var agentChanged: ((AgentConfig?, AgentConfig?) -> Void)?
     var isAgentSession: Bool { entry.engine == "agent" || agent != nil }
     var isUnboundImport: Bool { entry.engine == ConverseExchange.unboundEngine }
+    /// Consecutive automatic queue resumes after failed agent turns (not saved).
+    var agentQueueRetries = 0
     var handoffPending: HandoffPending?
     var importedTranscriptPending: Bool {
         get { handoffPending != nil }
@@ -594,8 +596,22 @@ final class Store: ObservableObject {
             shouldRun = false
             s.messages.append(Message(role: "notice", text: "Interrupted before the CLI returned a conversation ID. Your queued message is held; use Resume queue to retry."))
         }
+        let stoppedByHuman = s.interrupted
         s.interrupted = false; s.resumeAfterInterrupt = false
         if !shouldRun { s.queuePaused = !s.pending.isEmpty; s.compactionRequested = false }
+        if completedTurn { s.agentQueueRetries = 0 }
+        // An agent must not stall behind one failed turn: its held queue resumes
+        // by itself after a back-off (1, 2, 4… minutes, at most 15). A human Stop,
+        // or a loop the human paused, still holds the queue.
+        if !shouldRun, !stoppedByHuman, s.agent?.enabled == true, !s.pending.isEmpty {
+            let delay = min(900, 60 * pow(2, Double(min(s.agentQueueRetries, 4))))
+            s.agentQueueRetries += 1
+            s.messages.append(Message(role: "notice", text: "That turn failed. Queued messages resume automatically in \(Int(delay / 60)) min, or use Resume queue now."))
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak s] in
+                guard let self, let s, s.queuePaused, !s.busy, !s.pending.isEmpty, s.agent?.enabled == true else { return }
+                s.queuePaused = false; self.save(); self.runNext(s)
+            }
+        }
         if !shouldRun && s.injectionTargetID != nil { s.injectionNotice = "Injection did not start. Check the queued input and session notice before retrying." }
         save()
         turnCompletion?(completedTurn)
