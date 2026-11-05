@@ -119,11 +119,13 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
         document["rows"] = rows; lotsJSON[0]["document"] = document; object["parkingLots"] = lotsJSON
         let future = try? ConverseExchange.decode(JSONSerialization.data(withJSONObject: object))
         check(future?.document.parkingLots.first?.document.rows.map(\.id) == [heading.id, item.id], "Lot rows with future fields (parent ID, sibling order) still import with the store's own decoder")
-        var lotV2 = lotsJSON; var docV2 = document; docV2["schemaVersion"] = 2; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
+        var lotV2 = lotsJSON; var docV2 = document; docV2["schemaVersion"] = ConverseExchange.supportedLotSchemaVersion + 1; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
         do { _ = try ConverseExchange.decode(JSONSerialization.data(withJSONObject: object)); check(false, "Newer Parking Lot schema rejected") }
         catch { check(error.localizedDescription.contains("newer Parking Lot format"), "A lot with a newer schemaVersion is refused instead of dropping its fields") }
         docV2["schemaVersion"] = 1; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
         check((try? ConverseExchange.decode(JSONSerialization.data(withJSONObject: object))) != nil, "schemaVersion 1 lots import")
+        docV2["schemaVersion"] = ConverseExchange.supportedLotSchemaVersion; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
+        check((try? ConverseExchange.decode(JSONSerialization.data(withJSONObject: object))) != nil, "Lots at the current schemaVersion (nested) import")
         object["parkingLots"] = lotsJSON
         object["version"] = 2
         do { _ = try ConverseExchange.decode(JSONSerialization.data(withJSONObject: object)); check(false, "Newer version rejected") }

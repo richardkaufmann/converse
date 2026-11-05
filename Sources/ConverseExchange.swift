@@ -43,7 +43,7 @@ enum ConverseExchange {
     private struct Header: Decodable { var format: String?; var version: Int? }
     /// Parking Lot documents gain `schemaVersion` with nested rows (absent = 1).
     /// Refuse newer lots instead of decoding them and silently dropping fields.
-    static let supportedLotSchemaVersion = 1
+    static let supportedLotSchemaVersion = ParkingLotDocument.currentSchemaVersion
     private struct LotSchemaHeader: Decodable {
         struct Lot: Decodable { struct Doc: Decodable { var schemaVersion: Int? }; var name: String?; var document: Doc? }
         var parkingLots: [Lot]?
