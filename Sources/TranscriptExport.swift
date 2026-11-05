@@ -329,50 +329,86 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             throw TranscriptExport.error("There are no submitted messages matching these options.")
         }
     }
-    /// Local, bound, idle, non-agent sessions write a handoff note, one at a
-    /// time. Returns nil when the user cancels; failures can be skipped.
+    /// Local, bound, idle, non-agent sessions write a handoff note. Each
+    /// provider has one serial queue, so it never runs two handoff turns at
+    /// once; the queues run side by side. Returns nil when the user cancels;
+    /// failures can be skipped.
     @MainActor static func collectHandoffs(_ chosen: [ExportSession], store: Store = .shared, progress: HandoffExportProgress = HandoffExportProgress()) async -> (notes: [UUID: String], failures: [String])? {
         let sessions = chosen.compactMap { item in store.sessions.first { $0.id == item.id && item.remoteID == nil && !item.isParkingLot } }
             .filter { !$0.isUnboundImport && store.providerChangeRefusal($0) == nil }
         guard !sessions.isEmpty else { return ([:], []) }
         let state = progress
+        state.store = store
+        var queues: [(engine: String, sessions: [Session])] = []
+        for session in sessions {
+            if let index = queues.firstIndex(where: { $0.engine == session.entry.engine }) { queues[index].sessions.append(session) }
+            else { queues.append((session.entry.engine, [session])) }
+        }
+        state.lines = queues.map { HandoffExportProgress.Line(id: $0.engine, provider: AssistantFamily.name($0.engine), total: $0.sessions.count) }
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false; panel.title = "Writing handoff notes"
         panel.contentView = NSHostingView(rootView: HandoffExportProgressView(state: state))
         panel.center(); panel.makeKeyAndOrderFront(nil)
         defer { panel.close() }
-        var notes: [UUID: String] = [:], failures: [String] = []
-        for (index, session) in sessions.enumerated() {
-            guard !state.cancelled else { return nil }
-            state.current = session
-            state.text = "Asking " + AssistantFamily.name(session.entry.engine) + " for a handoff note on “" + session.title + "” (\(index + 1) of \(sessions.count))…"
-            // Resume exactly once: on the note, on Cancel, or after the time limit.
-            // A stalled turn (e.g. waiting on a permission prompt) must never
-            // leave the export waiting forever.
-            let result: Result<String, Error> = await withCheckedContinuation { continuation in
-                var resumed = false
-                let finish: (Result<String, Error>) -> Void = { value in
-                    guard !resumed else { return }
-                    resumed = true; state.waiter = nil; continuation.resume(returning: value)
-                }
-                state.waiter = { finish(.failure(ProviderHandoff.error("Cancelled."))) }
-                store.requestHandoffNote(session) { finish($0) }
-                DispatchQueue.main.asyncAfter(deadline: .now() + ProviderHandoff.exportNoteTimeout) {
-                    guard !resumed else { return }
-                    if session.busy { store.stop(session) }
-                    finish(.failure(ProviderHandoff.error("No handoff note after \(Int(ProviderHandoff.exportNoteTimeout / 60)) minutes; the turn was stopped.")))
+        let started = Date()
+        typealias Outcome = (session: Session, result: Result<String, Error>, seconds: TimeInterval)
+        let outcomes: [Outcome] = await withTaskGroup(of: [Outcome].self) { group in
+            for queue in queues {
+                group.addTask { @MainActor in
+                    var done: [Outcome] = []
+                    let queueStarted = Date()
+                    for (index, session) in queue.sessions.enumerated() {
+                        guard !state.cancelled else { return done }
+                        state.begin(queue.engine, session: session, index: index)
+                        let noteStarted = Date()
+                        let result = await handoffNote(session, engine: queue.engine, store: store, state: state)
+                        let seconds = Date().timeIntervalSince(noteStarted)
+                        state.end(queue.engine, session: session, seconds: seconds)
+                        guard !state.cancelled else { return done }
+                        if case .success(let text) = result { _ = try? store.writeHandoffNote(session, text: text) }
+                        done.append((session, result, seconds))
+                    }
+                    state.finish(queue.engine, count: done.count, seconds: Date().timeIntervalSince(queueStarted))
+                    return done
                 }
             }
-            state.current = nil
-            guard !state.cancelled else { return nil }
-            switch result {
-            case .success(let text):
-                notes[session.id] = text
-                _ = try? store.writeHandoffNote(session, text: text)
-            case .failure(let error): failures.append("“" + session.title + "”: " + error.localizedDescription)
+            var all: [Outcome] = []
+            for await done in group { all += done }
+            return all
+        }
+        state.wallSeconds = Date().timeIntervalSince(started)
+        guard !state.cancelled else { return nil }
+        var notes: [UUID: String] = [:], failures: [String] = []
+        // Report in selection order, whichever queue finished first.
+        for session in sessions {
+            guard let outcome = outcomes.first(where: { $0.session === session }) else { continue }
+            switch outcome.result {
+            case .success(let text): notes[session.id] = text
+            case .failure(let error):
+                failures.append("“" + session.title + "” (" + AssistantFamily.name(session.entry.engine) + ", " + HandoffExportProgress.duration(outcome.seconds) + "): " + error.localizedDescription)
             }
         }
+        NSLog("Converse handoff export: %@", state.summary)
         return (notes, failures)
+    }
+    /// One export-owned handoff turn. Resumes exactly once: on the note, on
+    /// Cancel, or after the time limit, so a stalled turn (e.g. waiting on a
+    /// permission prompt) never leaves the export waiting forever.
+    @MainActor private static func handoffNote(_ session: Session, engine: String, store: Store, state: HandoffExportProgress) async -> Result<String, Error> {
+        await withCheckedContinuation { continuation in
+            var resumed = false
+            let finish: (Result<String, Error>) -> Void = { value in
+                guard !resumed else { return }
+                resumed = true; state.waiters[engine] = nil; continuation.resume(returning: value)
+            }
+            state.waiters[engine] = { finish(.failure(ProviderHandoff.error("Cancelled."))) }
+            store.requestHandoffNote(session) { finish($0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + ProviderHandoff.exportNoteTimeout) {
+                guard !resumed else { return }
+                if session.busy { store.stop(session) }
+                finish(.failure(ProviderHandoff.error("No handoff note after \(Int(ProviderHandoff.exportNoteTimeout / 60)) minutes; the turn was stopped.")))
+            }
+        }
     }
     @MainActor static func load(_ session: ExportSession, includeImages: Bool, service: DeviceSyncService = .shared) async throws -> (ExportSession, [String: Data]) {
         guard let id = session.remoteID, let global = DeviceGlobalID(id) else { return (session, [:]) }
@@ -572,23 +608,71 @@ enum TranscriptExport {
 }
 
 final class HandoffExportProgress: ObservableObject {
-    @Published var text = "Preparing handoff notes…"
+    /// One line per provider queue.
+    struct Line: Identifiable, Equatable {
+        let id: String
+        let provider: String
+        let total: Int
+        var position = 0
+        var title: String?
+        var done = false
+        var text: String {
+            if done { return provider + ": done" }
+            guard position > 0 else { return provider + ": waiting" }
+            return provider + ": \(position) of \(total)" + (title.map { " — " + $0 } ?? "")
+        }
+    }
+    @Published var lines: [Line] = []
     @Published var cancelled = false
-    var current: Session?
-    /// Resumes the export's wait at once, so Cancel never hangs on a stalled turn.
-    var waiter: (() -> Void)?
+    var store: Store = .shared
+    /// The export-owned handoff turn each provider is running.
+    var active: [String: Session] = [:]
+    /// Resumes each provider's wait at once, so Cancel never hangs on a stalled turn.
+    var waiters: [String: () -> Void] = [:]
+    /// How long each note took, the queues' totals, and the whole export.
+    var noteSeconds: [UUID: TimeInterval] = [:]
+    var queueTimes: [(provider: String, count: Int, seconds: TimeInterval)] = []
+    var wallSeconds: TimeInterval = 0
+    /// For example "Claude 3 notes in 2m10s; Codex 2 notes in 48s; total 2m10s".
+    var summary: String {
+        (queueTimes.map { $0.provider + " \($0.count) note" + ($0.count == 1 ? "" : "s") + " in " + Self.duration($0.seconds) } + ["total " + Self.duration(wallSeconds)]).joined(separator: "; ")
+    }
+    func begin(_ engine: String, session: Session, index: Int) {
+        active[engine] = session
+        update(engine) { $0.position = index + 1; $0.title = session.title }
+    }
+    func end(_ engine: String, session: Session, seconds: TimeInterval) {
+        active[engine] = nil; noteSeconds[session.id] = seconds
+    }
+    func finish(_ engine: String, count: Int, seconds: TimeInterval) {
+        update(engine) { $0.done = true; $0.title = nil }
+        queueTimes.append((AssistantFamily.name(engine), count, seconds))
+        queueTimes.sort { a, b in (lines.firstIndex { $0.provider == a.provider } ?? 0) < (lines.firstIndex { $0.provider == b.provider } ?? 0) }
+    }
+    private func update(_ engine: String, _ change: (inout Line) -> Void) {
+        if let index = lines.firstIndex(where: { $0.id == engine }) { change(&lines[index]) }
+    }
+    /// Stops every export-owned turn and releases every wait.
     func cancel() {
         cancelled = true
-        if let current, current.busy { Store.shared.stop(current) }
-        waiter?()
+        for session in active.values where session.busy { store.stop(session) }
+        for waiter in Array(waiters.values) { waiter() }
+    }
+    static func duration(_ seconds: TimeInterval) -> String {
+        if seconds < 10 { return String(format: "%.1fs", seconds) }
+        let whole = Int(seconds.rounded())
+        return whole < 60 ? "\(whole)s" : String(format: "%dm%02ds", whole / 60, whole % 60)
     }
 }
 struct HandoffExportProgressView: View {
     @ObservedObject var state: HandoffExportProgress
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ProgressView(state.text).fixedSize(horizontal: false, vertical: true)
-            Text("Each note is an ordinary turn, visible in its conversation.").font(.caption).foregroundStyle(.secondary)
+            ProgressView(state.cancelled ? "Stopping handoff notes…" : "Asking for handoff notes…")
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(state.lines) { Text($0.text).lineLimit(1).truncationMode(.tail).monospacedDigit() }
+            }
+            Text("Each note is an ordinary turn, visible in its conversation. Each assistant writes one note at a time.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Spacer(); Button("Cancel") { state.cancel() }.keyboardShortcut(.cancelAction).disabled(state.cancelled) }
         }.padding(16).frame(width: 420)
     }

@@ -166,6 +166,94 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
     check(finished && cancelledToNil, "Cancel ends the handoff export at once, even while a turn is running")
     wait({ !session.busy }, seconds: 10)
     session.entry.command = savedCommand; ProviderHandoff.exportNoteTimeout = savedTimeout; session.queuePaused = false
+
+    // One serial queue per provider, the queues side by side. Slow stand-ins
+    // log when each turn starts and ends, and tag their note.
+    let turnLog = root.appendingPathComponent("handoff-turns.log")
+    func slowCodex(_ tag: String, seconds: Double) -> String {
+        let url = root.appendingPathComponent("slow-codex-" + tag)
+        try? """
+        #!/usr/bin/python3 -I
+        import json, sys, time
+        args = sys.argv[1:]
+        log = open(\(String(reflecting: turnLog.path)), "a")
+        log.write("start \(tag) %f\\n" % time.time()); log.flush()
+        time.sleep(\(seconds))
+        text = "\(tag): " + (args[args.index("--") + 1] if "--" in args else "")
+        if "--output-last-message" in args:
+            open(args[args.index("--output-last-message") + 1], "w").write(text)
+        print(json.dumps({"type": "thread.started", "thread_id": "slow-\(tag)"}))
+        print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}))
+        log.write("end \(tag) %f\\n" % time.time())
+        """.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        return url.path
+    }
+    let slowMuse = root.appendingPathComponent("slow-muse")
+    try? "#!/bin/zsh\nsleep 2\nexec \(command) \"$@\"\n".write(to: slowMuse, atomically: true, encoding: .utf8)
+    _ = try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slowMuse.path)
+    func codexSession(_ title: String, command: String) -> Session? {
+        var entry = codex; entry.command = command
+        return store.createBoundSession(entry: entry, profile: codexLogin, title: title)
+    }
+    var slowEcho = echo; slowEcho.command = slowMuse.path
+    guard let codexA = codexSession("Queue A", command: slowCodex("A", seconds: 2)), let codexB = codexSession("Queue B", command: slowCodex("B", seconds: 2)),
+          let museC = store.createBoundSession(entry: slowEcho, profile: museLogin, title: "Queue C") else { check(false, "Handoff queue fixtures"); return }
+    let queueProgress = HandoffExportProgress()
+    var queued: (notes: [UUID: String], failures: [String])??
+    var sawLines: [String] = []
+    let queueStarted = Date()
+    Task { @MainActor in queued = await TranscriptExportController.collectHandoffs([codexA, museC, codexB].map(ExportSession.init), store: store, progress: queueProgress) }
+    wait({ queueProgress.active.count == 2 }, seconds: 10)
+    sawLines = queueProgress.lines.map(\.text)
+    check(codexA.busy && museC.busy && !codexB.busy, "Each provider's queue runs at once; the same provider waits its turn")
+    wait({ queued != nil }, seconds: 40)
+    let queueWall = Date().timeIntervalSince(queueStarted)
+    let queuedNotes = (queued ?? nil)?.notes ?? [:]
+    check(sawLines == ["Codex: 1 of 2 — Queue A", "Muse: 1 of 1 — Queue C"] && queueProgress.lines.map(\.text) == ["Codex: done", "Muse: done"],
+          "The progress panel shows one line per provider")
+    check(queuedNotes[codexA.id]?.hasPrefix("A: ") == true && queuedNotes[codexB.id]?.hasPrefix("B: ") == true
+          && queuedNotes[museC.id]?.contains("handoff note for your successor") == true && queuedNotes[museC.id]?.contains("CODEX") == false
+          && (queued ?? nil)?.failures.isEmpty == true, "Each handoff note maps to its own session")
+    let turns = ((try? String(contentsOf: turnLog, encoding: .utf8)) ?? "").split(separator: "\n").map { $0.split(separator: " ") }
+    let span: (String) -> (Double, Double)? = { tag in
+        guard let start = turns.first(where: { $0.count == 3 && $0[0] == "start" && $0[1] == tag }).flatMap({ Double($0[2]) }),
+              let end = turns.first(where: { $0.count == 3 && $0[0] == "end" && $0[1] == tag }).flatMap({ Double($0[2]) }) else { return nil }
+        return (start, end)
+    }
+    if let a = span("A"), let b = span("B") { check(b.0 >= a.1 || a.0 >= b.1, "One provider never runs two handoff turns at once") }
+    else { check(false, "One provider never runs two handoff turns at once") }
+    let noteSum = queueProgress.noteSeconds.values.reduce(0, +)
+    check(queueProgress.noteSeconds.count == 3 && queueWall < noteSum - 1 && queueProgress.wallSeconds < noteSum - 1,
+          "Different providers write their notes concurrently (wall \(HandoffExportProgress.duration(queueWall)) < notes \(HandoffExportProgress.duration(noteSum)))")
+    check(queueProgress.summary.hasPrefix("Codex 2 notes in ") && queueProgress.summary.contains("; Muse 1 note in ") && queueProgress.summary.contains("total "),
+          "Handoff export timing: " + queueProgress.summary)
+
+    // Cancel stops every provider's active turn and returns at once; a stall
+    // times out per session, the queues side by side.
+    for s in [codexA, museC] { s.entry.command = stall.path; s.queuePaused = false }
+    let cancelAll = HandoffExportProgress()
+    var allCancelled = false, cancelDone = false
+    Task { @MainActor in allCancelled = await TranscriptExportController.collectHandoffs([codexA, museC].map(ExportSession.init), store: store, progress: cancelAll) == nil; cancelDone = true }
+    wait({ codexA.busy && museC.busy }, seconds: 10)
+    let cancelAt = Date()
+    cancelAll.cancel()
+    wait({ cancelDone }, seconds: 10)
+    check(cancelDone && allCancelled && Date().timeIntervalSince(cancelAt) < 2, "Cancel returns nil at once with two providers mid-turn")
+    wait({ !codexA.busy && !museC.busy }, seconds: 10)
+    check(!codexA.busy && !museC.busy, "Cancel stops every export-owned handoff turn")
+    for s in [codexA, museC] { s.queuePaused = false }
+    ProviderHandoff.exportNoteTimeout = 2
+    var stalled: (notes: [UUID: String], failures: [String])??
+    let stallStarted = Date()
+    Task { @MainActor in stalled = await TranscriptExportController.collectHandoffs([codexA, museC].map(ExportSession.init), store: store) }
+    wait({ stalled != nil }, seconds: 20)
+    let stallFailures = (stalled ?? nil)?.failures ?? []
+    check(Date().timeIntervalSince(stallStarted) < 3.5 && stallFailures.count == 2 && stallFailures[0].hasPrefix("“Queue A” (Codex, ") && stallFailures[1].hasPrefix("“Queue C” (Muse, ")
+          && stallFailures.allSatisfy { $0.contains("No handoff note after") }, "Each stalled session reports its own time limit, with its duration")
+    wait({ !codexA.busy && !museC.busy }, seconds: 10)
+    ProviderHandoff.exportNoteTimeout = savedTimeout
+    for s in [codexA, museC, codexB] { try? store.closeSessionChecked(s) }
     var exported = ExportSession(session); exported.handoff = "Reach me at handoff@example.invalid. key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
     var scrubber: ExportScrubber? = ExportScrubber(context: .init())
     var plainScrub: ExportScrubber? = nil
