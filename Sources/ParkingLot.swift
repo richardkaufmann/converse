@@ -294,6 +294,26 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             return line + (row.images ?? []).map { continuation + "[Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { continuation + "> " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: continuation + "> ") }.joined()
         }.joined(separator: "\n")
     }
+    /// The heading an item sits under (headings are top-level; rows are preorder).
+    static func section(of id: UUID, in rows: [ParkingLotRow]) -> UUID? {
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        return rows[...index].last(where: \.heading)?.id
+    }
+    /// Headings an item can be moved to: every heading except its current section.
+    static func moveTargets(for id: UUID, in rows: [ParkingLotRow]) -> [ParkingLotRow] {
+        guard let row = rows.first(where: { $0.id == id }), !row.heading else { return [] }
+        let current = section(of: id, in: rows)
+        return rows.filter { $0.heading && $0.id != current }
+    }
+    /// Moves an item (with any nested children) to the end of a heading's section.
+    @discardableResult func moveToSection(_ id: UUID, heading: UUID) -> Bool {
+        let rows = document.rows
+        guard Self.moveTargets(for: id, in: rows).contains(where: { $0.id == heading }),
+              let start = rows.firstIndex(where: { $0.id == heading }) else { return false }
+        let next = rows[(start + 1)...].first(where: \.heading)?.id
+        move(id, before: next)
+        return Self.section(of: id, in: document.rows) == heading
+    }
     func move(_ id: UUID, before destination: UUID?) {
         var rows = document.rows
         guard id != destination, let range = Self.entryRange(id, in: rows) else { return }
@@ -563,6 +583,24 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     lot.update(item, text: "A useful idea")
     let reload = ParkingLotStore(folder: folder)
     check(reload.document == lot.document, "Parking Lot content and revision survive reopening")
+    do {
+        // Move ➞ <heading>: an item and its nested children go to the end of another section.
+        let moveFolder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-move-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: moveFolder) }
+        let moves = ParkingLotStore(folder: moveFolder); moves.open()
+        let now = moves.document.rows[0].id, future = moves.document.rows.first { $0.heading && $0.text == "Bugs" }!.id
+        let idea = moves.insert(text: "Idea", after: future), child = moves.insert(text: "Detail", after: idea)
+        _ = moves.changeIndent(child, deeper: true)
+        let existing = moves.insert(text: "Already here", after: now)
+        check(ParkingLotStore.moveTargets(for: idea, in: moves.document.rows).map(\.id) == [now] && ParkingLotStore.moveTargets(for: future, in: moves.document.rows).isEmpty,
+              "Move targets list every other heading for items, none for headings")
+        check(moves.moveToSection(idea, heading: now), "Move ➞ heading moves an item to another section")
+        let rows = moves.document.rows, ideaIndex = rows.firstIndex { $0.id == idea }!
+        check(ParkingLotStore.section(of: idea, in: rows) == now && rows[ideaIndex].parentID == now && rows[ideaIndex + 1].id == child && rows[ideaIndex + 1].parentID == idea
+              && ideaIndex > rows.firstIndex { $0.id == existing }! && ideaIndex < rows.firstIndex { $0.id == future }!,
+              "The item lands at the end of the target section with its nested children")
+        check(!moves.moveToSection(idea, heading: now), "Moving to the current section is refused")
+    }
     func edits(_ operations: [ParkingLotEdits.Operation], revision: Int? = nil) -> ParkingLotEdits {
         ParkingLotEdits(revision: revision ?? lot.document.revision, operations: operations)
     }

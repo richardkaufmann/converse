@@ -869,6 +869,15 @@ final class ParkingOutlineText: NSTextView {
                 self.showComments(entry.row.id)
             }
         }
+        if !entry.placeholder {
+            let targets = ParkingLotStore.moveTargets(for: entry.row.id, in: owner.parent.lot.document.rows)
+            if !targets.isEmpty { menu.addItem(.separator()) }
+            for heading in targets {
+                let name = heading.text.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+                let label = name.isEmpty ? "Untitled heading" : name.count > 48 ? String(name.prefix(47)) + "…" : name
+                item("Move ➞ " + label) { owner.parent.lot.moveToSection(entry.row.id, heading: heading.id); owner.render() }
+            }
+        }
         return menu
     }
 }
