@@ -18,6 +18,8 @@ struct LotViewerRow: Equatable, Identifiable {
     var text: String
     var comments: [LotViewerComment]
     var images: [String]
+    // Nil is the legacy flat format; nested Mac rows carry two spaces per level.
+    var depth: Int? = nil
 }
 
 enum LotViewerEntry: Equatable, Identifiable {
@@ -41,10 +43,12 @@ enum LotViewerParser {
     static func parse(_ message: DeviceWireMessage) -> LotViewerRow? {
         guard message.role == "assistant" else { return nil }
         let lines = message.text.components(separatedBy: "\n")
-        let first = lines[0]
+        let indentation = lines[0].prefix(while: { $0 == " " }).count
+        guard indentation % 2 == 0, indentation <= 14 else { return nil }
+        let first = String(lines[0].dropFirst(indentation))
         var heading = false, number: Int?
         var rest: Substring
-        if first.hasPrefix("# ") {
+        if first.hasPrefix("# "), indentation == 0 {
             heading = true; rest = first.dropFirst(2)
         } else if let dot = first.range(of: ". "), !first[..<dot.lowerBound].isEmpty,
                   first[..<dot.lowerBound].allSatisfy({ $0.isASCII && $0.isNumber }),
@@ -55,9 +59,10 @@ enum LotViewerParser {
         if rest.hasPrefix(doneMarker) { done = true; rest = rest.dropFirst(doneMarker.count) }
         var text = [String(rest)]
         var comments: [LotViewerComment] = []
+        let rowContinuation = String(repeating: " ", count: indentation) + continuation
         for line in lines.dropFirst() {
-            guard line.hasPrefix(continuation) else { return nil }
-            let body = line.dropFirst(continuation.count)
+            guard line.hasPrefix(rowContinuation) else { return nil }
+            let body = line.dropFirst(rowContinuation.count)
             if body.hasPrefix("> "), let comment = commentStart(body.dropFirst(2)) {
                 comments.append(comment)
             } else if !comments.isEmpty {
@@ -68,7 +73,8 @@ enum LotViewerParser {
                 text.append(String(body))
             }
         }
-        return LotViewerRow(id: message.id, heading: heading, number: number, done: done, text: text.joined(separator: "\n"), comments: comments, images: message.imageHashes)
+        return LotViewerRow(id: message.id, heading: heading, number: number, done: done, text: text.joined(separator: "\n"),
+                            comments: comments, images: message.imageHashes, depth: indentation == 0 ? nil : indentation / 2 + 1)
     }
     // "author: text", split at the first ": ". An author may contain a colon
     // that is not followed by a space (for example "Agent:Planner").
@@ -81,20 +87,21 @@ enum LotViewerParser {
     static func entries(_ messages: [DeviceWireMessage]) -> [LotViewerEntry] {
         messages.map { message in parse(message).map(LotViewerEntry.row) ?? .plain(message) }
     }
-    /// Rows to draw after local collapse state. A collapsed heading reports how
-    /// many entries it hides.
+    static func depth(_ entry: LotViewerEntry) -> Int {
+        if case .row(let row) = entry { return row.depth ?? (row.heading ? 0 : 1) }
+        return 1
+    }
+    /// Rows to draw after local collapse state. A collapsed row reports how
+    /// many descendants it hides.
     static func visible(_ entries: [LotViewerEntry], collapsed: Set<UUID>) -> [(entry: LotViewerEntry, hidden: Int)] {
         var result: [(entry: LotViewerEntry, hidden: Int)] = []
-        var hiding = false
+        var hiding: (depth: Int, index: Int)?
         for entry in entries {
-            if entry.isHeading {
-                hiding = collapsed.contains(entry.id)
-                result.append((entry, 0))
-            } else if hiding {
-                result[result.count - 1].hidden += 1
-            } else {
-                result.append((entry, 0))
-            }
+            let depth = depth(entry)
+            if let current = hiding, depth <= current.depth { hiding = nil }
+            if let current = hiding { result[current.index].hidden += 1; continue }
+            result.append((entry, 0))
+            if collapsed.contains(entry.id) { hiding = (depth, result.count - 1) }
         }
         return result
     }
@@ -290,8 +297,10 @@ struct PadLotPane: View {
                 ForEach(Array(lines.enumerated()), id: \.element.entry.id) { index, line in
                     switch line.entry {
                     case .row(let row):
+                        let sourceIndex = view.entries.firstIndex(where: { $0.id == row.id })
+                        let expandable = sourceIndex.map { $0 + 1 < view.entries.count && LotViewerParser.depth(view.entries[$0 + 1]) > LotViewerParser.depth(view.entries[$0]) } ?? false
                         LotRowView(row: row, hidden: line.hidden, first: index == 0, collapsed: model.lotCollapsed[id]?.contains(row.id) == true,
-                                   images: service.blobCache, toggle: { model.toggleLotHeading(id, heading: row.id) }, open: { fullImage = $0 })
+                                   expandable: expandable, images: service.blobCache, toggle: { model.toggleLotHeading(id, heading: row.id) }, open: { fullImage = $0 })
                     case .plain(let message):
                         LotPlainRow(message: message, images: service.blobCache, open: { fullImage = $0 })
                     }
@@ -311,14 +320,20 @@ struct LotRowView: View {
     let hidden: Int
     let first: Bool
     let collapsed: Bool
+    let expandable: Bool
     let images: [String: URL]
     var toggle: () -> Void
     var open: (LotImageItem) -> Void
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Group {
-                if row.heading {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down").font(.footnote.weight(.semibold))
+                if expandable {
+                    HStack(spacing: 2) {
+                        Button(action: toggle) {
+                            Image(systemName: collapsed ? "chevron.right" : "chevron.down").font(.caption2.weight(.semibold))
+                        }.buttonStyle(.plain).accessibilityLabel(collapsed ? "Expand item" : "Collapse item")
+                        if !row.heading { Text(row.number.map { "\($0)." } ?? "•").font(.body.monospacedDigit()) }
+                    }
                 } else {
                     Text(row.number.map { "\($0)." } ?? "•").font(.body.monospacedDigit())
                 }
@@ -333,9 +348,9 @@ struct LotRowView: View {
         }
         .padding(.top, row.heading && !first ? 14 : (row.heading ? 4 : 5))
         .padding(.bottom, row.heading ? 4 : 5)
+        .padding(.leading, CGFloat(max(0, min(5, (row.depth ?? (row.heading ? 0 : 1)) - 1))) * (LotStyle.compact ? 12 : 18))
         .contentShape(Rectangle())
-        // Only headings take taps, so links in item text stay tappable.
-        .gesture(row.heading ? TapGesture().onEnded(toggle) : nil)
+        .gesture(row.heading && expandable ? TapGesture().onEnded(toggle) : nil)
     }
     private var text: some View {
         var styled = LotStyle.linked(row.text.isEmpty ? " " : row.text)
@@ -346,20 +361,20 @@ struct LotRowView: View {
                 .foregroundStyle(row.done ? AnyShapeStyle(.secondary) : (row.heading ? AnyShapeStyle(LotStyle.heading) : AnyShapeStyle(.primary)))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
-            if row.heading && collapsed && hidden > 0 {
+            if expandable && collapsed && hidden > 0 {
                 Text("\(hidden) \(hidden == 1 ? "item" : "items")").font(.caption).foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel((row.number.map { "\($0). " } ?? "") + row.text)
-        .accessibilityAddTraits(row.heading ? [.isHeader, .isButton] : [])
+        .accessibilityAddTraits(row.heading ? [.isHeader, .isButton] : (expandable ? [.isButton] : []))
         .accessibilityValue(accessibilityValue)
-        .accessibilityAction { if row.heading { toggle() } }
+        .accessibilityAction { if expandable { toggle() } }
     }
     private var accessibilityValue: String {
         var parts: [String] = []
         if row.done { parts.append("Done") }
-        if row.heading && collapsed { parts.append("Collapsed, \(hidden) hidden") }
+        if expandable && collapsed { parts.append("Collapsed, \(hidden) hidden") }
         if !row.comments.isEmpty { parts.append("\(row.comments.count) \(row.comments.count == 1 ? "comment" : "comments")") }
         if !row.images.isEmpty { parts.append("\(row.images.count) \(row.images.count == 1 ? "image" : "images")") }
         return parts.joined(separator: ", ")

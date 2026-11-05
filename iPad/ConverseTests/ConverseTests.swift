@@ -613,6 +613,15 @@ final class ConverseTests: XCTestCase {
         for index in 6..<messages.count {
             XCTAssertEqual(entries[index], .plain(messages[index]), "Malformed message \(index) renders as it arrived")
         }
+        let nested = [lotMessage("# Plans"), lotMessage("1. Parent"),
+                      lotMessage("  1. Child\n     > Agent: Keep this"), lotMessage("    1. Grandchild"),
+                      lotMessage("2. Sibling")]
+        let nestedEntries = LotViewerParser.entries(nested)
+        guard case .row(let child) = nestedEntries[2] else { return XCTFail("Nested row did not parse") }
+        XCTAssertEqual(child.depth, 2); XCTAssertEqual(child.comments, [LotViewerComment(author: "Agent", text: "Keep this")])
+        let collapsed = LotViewerParser.visible(nestedEntries, collapsed: [nested[1].id])
+        XCTAssertEqual(collapsed.map(\.entry.id), [nested[0].id, nested[1].id, nested[4].id])
+        XCTAssertEqual(collapsed[1].hidden, 2, "Collapsing an item hides its whole nested subtree")
     }
     func testLotRefreshOnlyForChangedContentAndApplyClearsIt() {
         let ids = (0..<3).map { _ in UUID() }

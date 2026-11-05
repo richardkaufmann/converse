@@ -10,35 +10,49 @@ struct ParkingOutline {
         var before: UUID?
         var placeholder: Bool
         var number: Int
+        var depth: Int
+        var hasChildren: Bool
     }
     var entries: [Entry] = []
     var string = ""
     init(rows: [ParkingLotRow], collapsed: Set<UUID>, placeholders: inout [String: UUID]) {
-        var projected: [(ParkingLotRow, UUID?, Bool, Int)] = []
-        var section = "root", hidden = false, count = 0
+        var projected: [(ParkingLotRow, UUID?, Bool, Int, Int)] = []
+        let hierarchy = (try? ParkingLotTree.nodes(rows)) ?? [:]
+        let parents = Set(hierarchy.values.compactMap(\.parentID))
+        var section: UUID?, sectionHidden = false, count = 0
+        var hiddenByID: [UUID: Bool] = [:]
+        var counts: [UUID?: Int] = [:]
         func empty(_ heading: Bool, before: UUID?) {
-            let key = heading ? "heading" : section
+            let key = heading ? "heading" : (section?.uuidString ?? "root")
             let cached = placeholders[key]
             let id = cached.flatMap { id in rows.contains(where: { $0.id == id }) ? nil : id } ?? UUID()
             placeholders[key] = id
-            projected.append((ParkingLotRow(id: id, heading: heading, text: ""), before, true, count + 1))
+            projected.append((ParkingLotRow(id: id, heading: heading, text: "", parentID: heading ? nil : section),
+                              before, true, count + 1, heading ? 0 : (section == nil ? 0 : 1)))
         }
         for row in rows {
             if row.heading {
-                if !hidden && !projected.isEmpty { empty(false, before: row.id) }
-                section = row.id.uuidString; hidden = collapsed.contains(row.id); count = 0
-                projected.append((row, nil, false, 0))
-            } else if !hidden {
-                count += 1; projected.append((row, nil, false, count))
+                if !sectionHidden && !projected.isEmpty { empty(false, before: row.id) }
+                section = row.id; sectionHidden = collapsed.contains(row.id); count = 0
+                hiddenByID[row.id] = sectionHidden
+                projected.append((row, nil, false, 0, 0))
+            } else {
+                let parent = hierarchy[row.id]?.parentID
+                counts[parent, default: 0] += 1
+                if parent == section { count = counts[parent] ?? count }
+                let hidden = parent.flatMap { hiddenByID[$0] } ?? false
+                hiddenByID[row.id] = hidden || collapsed.contains(row.id)
+                if !hidden { projected.append((row, nil, false, counts[parent] ?? 1, hierarchy[row.id]?.depth ?? 1)) }
             }
         }
-        if !hidden && !projected.isEmpty { empty(false, before: nil) }
+        if !sectionHidden && !projected.isEmpty { empty(false, before: nil) }
         empty(true, before: nil)
-        for (row, before, placeholder, number) in projected {
+        for (row, before, placeholder, number, depth) in projected {
             if !entries.isEmpty { string += "\n" }
             let text = row.text.replacingOccurrences(of: "\n", with: "\u{2028}")
             let range = NSRange(location: (string as NSString).length, length: (text as NSString).length)
-            entries.append(Entry(row: row, range: range, before: before, placeholder: placeholder, number: number))
+            entries.append(Entry(row: row, range: range, before: before, placeholder: placeholder,
+                                 number: number, depth: depth, hasChildren: parents.contains(row.id)))
             string += text
         }
     }
@@ -67,6 +81,8 @@ struct ParkingOutline {
         let base = prefix.isEmpty && insertion.isEmpty && start != end && lastOffset == 0 ? last.row : first.row
         var newRows: [ParkingLotRow] = []
         let preserveSuffix = range.length == 0 && prefix.isEmpty && insertion.hasSuffix("\n") && !suffix.isEmpty
+        let firstParent = first.row.heading ? first.row.id : ((try? ParkingLotTree.nodes(rows))?[first.row.id]?.parentID ?? first.row.parentID)
+        var insertedHeading: UUID?
         for (i, piece) in pieces.enumerated() {
             var row = preserveSuffix ? (i == pieces.count - 1 ? first.row : ParkingLotRow(heading: false, text: "")) : (i == 0 ? base : ParkingLotRow(heading: false, text: ""))
             row.text = piece.replacingOccurrences(of: "\u{2028}", with: "\n"); row.editedBy = nil
@@ -77,6 +93,8 @@ struct ParkingOutline {
                     row.heading = false; row.text.removeSubrange(match)
                 }
             }
+            if row.heading { row.parentID = nil; insertedHeading = row.id }
+            else if rows.contains(where: { $0.id == row.id }) == false || first.placeholder { row.parentID = insertedHeading ?? firstParent }
             newRows.append(row)
         }
         // Backspace/Delete across the paragraph separator merges entries.
@@ -89,7 +107,23 @@ struct ParkingOutline {
         let caretLine = (prefix + insertion).components(separatedBy: "\n").count - 1
         let rawCaret = (prefix + insertion).components(separatedBy: "\n").last! as NSString
         let caret = min(rawCaret.length, (newRows[caretLine].text as NSString).length)
+        // A removed parent takes its hidden descendants with it. Editing the
+        // parent's text keeps its ID in newRows, so those children stay put.
+        let retained = Set(newRows.map(\.id))
+        let deletedRoots = removed.subtracting(retained)
+        let descendants = Set(deletedRoots.flatMap { id in
+            ParkingLotTree.range(id, in: rows).map { range in rows[range].map(\.id) } ?? []
+        })
+        result.removeAll { descendants.contains($0.id) }
         result.insert(contentsOf: newRows, at: min(destination, result.count))
+        // Return on a parent creates its next sibling after the whole subtree.
+        // Its existing children must remain directly below the original item.
+        if start == end, insertion == "\n", !first.row.heading, !first.placeholder,
+           newRows.count == 2, let originalRange = ParkingLotTree.range(first.row.id, in: rows),
+           originalRange.count > 1 {
+            let sibling = result.remove(at: destination + 1)
+            result.insert(sibling, at: min(destination + originalRange.count, result.count))
+        }
         return Edit(rows: result, caretID: newRows[caretLine].id, caretOffset: caret)
     }
     func markdown(_ selection: NSRange) -> String {
@@ -99,7 +133,8 @@ struct ParkingOutline {
             let overlap = NSIntersectionRange(selection, entry.range)
             guard overlap.length > 0 else { return nil }
             let text = (string as NSString).substring(with: overlap).replacingOccurrences(of: "\u{2028}", with: "\n")
-            return (overlap.location == entry.range.location ? (entry.row.heading ? "# " : "\(entry.number). ") : "") + text
+            let indent = String(repeating: "  ", count: max(0, entry.depth - 1))
+            return (overlap.location == entry.range.location ? (entry.row.heading ? "# " : indent + "\(entry.number). ") : "") + text
         }.joined(separator: "\n")
     }
 }
@@ -152,16 +187,21 @@ struct ParkingLotEditor: NSViewRepresentable {
             let body = NSMutableAttributedString(string: projection.string)
             let standard = NSMutableParagraphStyle(); standard.paragraphSpacing = 5
             body.addAttributes([.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor, .paragraphStyle: standard], range: NSRange(location: 0, length: body.length))
-            for entry in projection.entries where entry.row.heading {
-                let style = standard.mutableCopy() as! NSMutableParagraphStyle; style.paragraphSpacingBefore = 7
-                if entry.range.length > 0 { body.addAttributes([.font: NSFont.boldSystemFont(ofSize: 13), .paragraphStyle: style], range: entry.range) }
-            }
-            for entry in projection.entries where !(entry.row.images ?? []).isEmpty {
+            for entry in projection.entries {
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle
-                let sizes = text.lotImageSizes(entry.row.images!, width: width).compactMap { $0 }
-                style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
+                let offset = CGFloat(max(0, entry.depth - 1)) * 20
+                style.firstLineHeadIndent = offset; style.headIndent = offset
+                if entry.row.heading { style.paragraphSpacingBefore = 7 }
+                if let paths = entry.row.images, !paths.isEmpty {
+                    let sizes = text.lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 }
+                    style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
+                }
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
-                if length > 0 { body.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: length)) }
+                if length > 0 {
+                    let range = NSRange(location: entry.range.location, length: length)
+                    body.addAttribute(.paragraphStyle, value: style, range: range)
+                    if entry.row.heading { body.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 13), range: range) }
+                }
             }
             let anchor = caret ?? oldAnchor
             linkEditing = text.editingFocus ? anchor.flatMap { anchor in projection.entries.first { $0.row.id == anchor.0 }.map { (anchor.0, min(anchor.1, $0.range.length)) } } : nil
@@ -373,13 +413,23 @@ struct ParkingLotEditor: NSViewRepresentable {
         func add(heading: Bool, after entry: ParkingOutline.Entry? = nil) {
             let document = parent.lot.document
             let index: Int
+            var parentID: UUID?
             if let entry {
-                if entry.placeholder { index = entry.before.flatMap { id in document.rows.firstIndex { $0.id == id } } ?? document.rows.count }
-                else if heading && entry.row.heading { index = ParkingLotStore.entryRange(entry.row.id, in: document.rows)?.upperBound ?? document.rows.count }
-                else { index = document.rows.firstIndex { $0.id == entry.row.id }.map { $0 + 1 } ?? document.rows.count }
+                if entry.placeholder {
+                    index = entry.before.flatMap { id in document.rows.firstIndex { $0.id == id } } ?? document.rows.count
+                    parentID = entry.row.parentID
+                } else if heading {
+                    let section = document.rows.prefix { $0.id != entry.row.id }.last(where: \.heading)?.id
+                    let anchor = entry.row.heading ? entry.row.id : section
+                    index = anchor.flatMap { ParkingLotStore.entryRange($0, in: document.rows)?.upperBound } ?? document.rows.count
+                } else {
+                    index = ParkingLotStore.entryRange(entry.row.id, in: document.rows)?.upperBound ?? document.rows.count
+                    parentID = entry.row.heading ? entry.row.id : (try? ParkingLotTree.nodes(document.rows))?[entry.row.id]?.parentID
+                }
                 parent.collapsed.remove(entry.row.id)
             } else { index = document.rows.count }
-            let row = ParkingLotRow(heading: heading, text: "")
+            if !heading && parentID == nil { parentID = ParkingLotTree.parentForInsertion(at: index, in: document.rows, heading: false) }
+            let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parentID)
             var rows = document.rows; rows.insert(row, at: index)
             save(rows, expected: document, caret: (row.id, 0)); text?.window?.makeFirstResponder(text)
         }
@@ -395,6 +445,13 @@ struct ParkingLotEditor: NSViewRepresentable {
         func toggle(_ id: UUID) {
             if !parent.collapsed.insert(id).inserted { parent.collapsed.remove(id) }
             render()
+        }
+        func changeIndent(_ id: UUID, deeper: Bool) {
+            let offset = projection.entries.first(where: { $0.row.id == id }).map { entry in
+                max(0, min(entry.range.length, (text?.selectedRange().location ?? entry.range.location) - entry.range.location))
+            } ?? 0
+            if parent.lot.changeIndent(id, deeper: deeper) { render(caret: (id, offset)) }
+            else { NSSound.beep() }
         }
     }
 }
@@ -528,6 +585,13 @@ final class ParkingOutlineText: NSTextView {
         return super.validateUserInterfaceItem(item)
     }
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 48, !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option),
+           let owner, let index = owner.projection.index(at: selectedRange().location) {
+            let entry = owner.projection.entries[index]
+            if !entry.placeholder && !entry.row.heading {
+                owner.changeIndent(entry.row.id, deeper: !event.modifierFlags.contains(.shift)); return
+            }
+        }
         if event.keyCode == 36 || event.keyCode == 76 {
             if event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.command), let owner,
                let index = owner.projection.index(at: selectedRange().location) {
@@ -561,12 +625,21 @@ final class ParkingOutlineText: NSTextView {
         let entry = owner.projection.entries[index]
         let document = owner.parent.lot.document
         if let data = board.data(forType: Self.rowsType),
-           var pasted = try? JSONDecoder().decode([ParkingLotRow].self, from: data), !pasted.isEmpty {
+           var pasted = try? JSONDecoder().decode([ParkingLotRow].self, from: data), !pasted.isEmpty,
+           Set(pasted.map(\.id)).count == pasted.count {
             // Copied entries get new identities; attachment files are immutable
             // and retained for Undo and for other lots using the same image.
-            for i in pasted.indices { pasted[i].id = UUID() }
+            let newIDs = Dictionary(uniqueKeysWithValues: pasted.map { ($0.id, UUID()) })
+            for i in pasted.indices {
+                let oldID = pasted[i].id
+                pasted[i].id = newIDs[oldID]!
+                pasted[i].parentID = pasted[i].parentID.flatMap { newIDs[$0] }
+            }
             var rows = document.rows
-            let destination = entry.placeholder ? entry.before.flatMap { id in rows.firstIndex { $0.id == id } } ?? rows.count : rows.firstIndex { $0.id == entry.row.id }.map { $0 + 1 } ?? rows.count
+            let destination = entry.placeholder ? entry.before.flatMap { id in rows.firstIndex { $0.id == id } } ?? rows.count : ParkingLotStore.entryRange(entry.row.id, in: rows)?.upperBound ?? rows.count
+            if !pasted[0].heading {
+                pasted[0].parentID = ParkingLotTree.parentForInsertion(at: destination, in: rows, heading: false)
+            }
             rows.insert(contentsOf: pasted, at: destination)
             owner.save(rows, expected: document, caret: (pasted[0].id, 0)); return
         }
@@ -662,11 +735,12 @@ final class ParkingOutlineText: NSTextView {
                 let end = max(entry.range.location, NSMaxRange(entry.range) - 1)
                 let glyph = manager.glyphIndexForCharacter(at: min(end, max(0, (string as NSString).length - 1)))
                 let line = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
-                let width = min(Self.lotImageWidth, container.containerSize.width - 10)
+                let offset = CGFloat(max(0, entry.depth - 1)) * 20
+                let width = max(40, min(Self.lotImageWidth, container.containerSize.width - 10 - offset))
                 var y = textContainerOrigin.y + line.maxY + Self.lotImageGap
                 for (path, size) in zip(paths, lotImageSizes(paths, width: width)) {
                     guard let size, let image = imageCache[path] else { continue }
-                    let dest = NSRect(x: textContainerOrigin.x + 5, y: y, width: size.width, height: size.height)
+                    let dest = NSRect(x: textContainerOrigin.x + 5 + offset, y: y, width: size.width, height: size.height)
                     if dest.intersects(dirtyRect) {
                         image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     }
@@ -674,8 +748,13 @@ final class ParkingOutlineText: NSTextView {
                 }
             }
             guard rect.intersects(dirtyRect) else { continue }
+            let offset = CGFloat(max(0, entry.depth - 1)) * 20
             let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : "\(entry.number)."
-            (marker as NSString).draw(at: NSPoint(x: 12, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor])
+            (marker as NSString).draw(at: NSPoint(x: 12 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor])
+            if entry.hasChildren && !entry.row.heading {
+                let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
+                (disclosure as NSString).draw(at: NSPoint(x: 2 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor])
+            }
             if entry.placeholder {
                 ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: 13) : NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.placeholderTextColor])
             }
@@ -683,7 +762,8 @@ final class ParkingOutlineText: NSTextView {
     }
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if point.x < 32, let entry = owner?.projection.entries.first(where: { $0.row.heading && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }), !entry.placeholder {
+        if let entry = owner?.projection.entries.first(where: { ($0.row.heading || $0.hasChildren) && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }),
+           !entry.placeholder, point.x < (entry.row.heading ? 32 : 12 + CGFloat(max(0, entry.depth - 1)) * 20) {
             owner?.toggle(entry.row.id); return
         }
         // Clicking a link follows it instead of placing the caret for editing;
@@ -764,6 +844,13 @@ final class ParkingOutlineText: NSTextView {
         item("Paste") { self.paste(nil) }
         item("Reorder") { owner.parent.reorder() }
         if !entry.placeholder {
+            let rows = owner.parent.lot.document.rows
+            if ParkingLotTree.canIndent(entry.row.id, in: rows) {
+                item("Indent", key: "\t") { owner.changeIndent(entry.row.id, deeper: true) }
+            }
+            if ParkingLotTree.canOutdent(entry.row.id, in: rows) {
+                item("Outdent", key: "\t", modifiers: .shift) { owner.changeIndent(entry.row.id, deeper: false) }
+            }
             item(entry.row.isDone ? "Mark Not Done" : "Mark Done") {
                 owner.parent.lot.setDone(entry.row.id, !entry.row.isDone); owner.render()
             }
@@ -841,6 +928,22 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let firstRange = outline.entries.first { $0.row.id == first.id }!.range
     let afterItem = outline.replacing(NSRange(location: NSMaxRange(firstRange), length: 0), with: "\n", rows: rows)!
     check(afterItem.rows[1] == first && !afterItem.rows[2].heading && afterItem.caretID == afterItem.rows[2].id, "Return after an item creates a new item and places its caret there")
+    let nestedChild = ParkingLotRow(heading: false, text: "Child", parentID: first.id)
+    let nestedRows = [heading, first, nestedChild, second]
+    let nestedOutline = ParkingOutline(rows: nestedRows, collapsed: [], placeholders: &placeholders)
+    let parentRange = nestedOutline.entries.first { $0.row.id == first.id }!.range
+    let splitParent = nestedOutline.replacing(NSRange(location: NSMaxRange(parentRange), length: 0), with: "\n", rows: nestedRows)!
+    check(Array(splitParent.rows.map(\.id).prefix(3)) == [heading.id, first.id, nestedChild.id]
+          && splitParent.rows[3].id == splitParent.caretID
+          && (try? ParkingLotTree.nodes(splitParent.rows)) != nil,
+          "Return on a parent places its new sibling after the existing children")
+    let foldedNested = ParkingOutline(rows: nestedRows, collapsed: [first.id], placeholders: &placeholders)
+    let foldedParent = foldedNested.entries.first { $0.row.id == first.id }!.range
+    let followingSibling = foldedNested.entries.first { $0.row.id == second.id }!.range
+    let removedParent = foldedNested.replacing(NSRange(location: foldedParent.location,
+        length: followingSibling.location - foldedParent.location), with: "", rows: nestedRows)!
+    check(removedParent.rows.map(\.id) == [heading.id, second.id],
+          "Deleting a collapsed parent removes its hidden children")
     let blankOutline = ParkingOutline(rows: afterItem.rows, collapsed: [], placeholders: &placeholders)
     check(blankOutline.entries.contains { $0.row.id == afterItem.caretID && !$0.placeholder } && blankOutline.entries.filter { $0.placeholder && !$0.row.heading }.count == 2,
           "A real blank Return item coexists with each section's New item input")
