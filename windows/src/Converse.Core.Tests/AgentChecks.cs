@@ -33,23 +33,43 @@ static class AgentChecks
         check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
             && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
             && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
-        check(AgentRunFailure.IsTransient(new AgentHttpStatusException(503, false)) && AgentRunFailure.IsTransient(new AgentHttpStatusException(429, false)) && AgentRunFailure.IsTransient(new HttpRequestException("lost"))
-            && AgentRunFailure.IsTransient(new TaskCanceledException("timeout", new TimeoutException())) && !AgentRunFailure.IsTransient(new AgentHttpStatusException(401, false))
-            && !AgentRunFailure.IsTransient(new InvalidOperationException("Add a Meta API key")) && !AgentRunFailure.IsTransient(new TaskCanceledException("stopped")), "Windows retry: timeouts, network loss and HTTP 429/5xx are transient; keys and Stop are not");
-        var retry = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900 } };
-        retry.RecordFailure("The request timed out.", true, artNow); retry.RecordFailure("The request timed out.", true, artNow);
-        check(retry.Settings.Enabled && retry.TransientFailures == 2 && retry.Attention == "Retrying: The request timed out. (2 of 3)", "Windows retry: transient failures keep the loop on with a retry count");
-        var reset = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(retry)); reset.Attention = ""; reset.RecordSuccess();
-        check(reset.TransientFailures is null && reset.Settings.Enabled, "Windows retry: a success resets the counter");
-        retry.RecordFailure("The request timed out.", true, artNow);
-        check(!retry.Settings.Enabled && retry.PauseReason?.StartsWith("Paused: The request timed out. — failed 3 times in a row (") == true && retry.Attention == retry.PauseReason, "Windows retry: the third transient failure pauses with a reason");
-        retry.Attention = ""; retry.RecordSuccess();
-        check(retry.Attention == retry.PauseReason, "Windows retry: a later manual run keeps the pause reason visible");
-        var permanent = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900 } };
-        permanent.RecordFailure("Add a Meta API key.", false, artNow);
+        var transientErrors = new Exception[] { new AgentHttpStatusException(503, false), new AgentHttpStatusException(429, false), new AgentHttpStatusException(400, false), new HttpRequestException("lost"),
+            new TaskCanceledException("timeout", new TimeoutException()), new IOException("reset"), new InvalidOperationException("Something nobody anticipated."), new FormatException("odd"),
+            new InvalidOperationException("Home Assistant scope changed during the run. Retry with the new settings.") };
+        foreach (var error in transientErrors) check(AgentRunFailure.Classify(error) == AgentFailureKind.Transient, "Windows retry: transient, never a pause: " + error.Message);
+        var permanentErrors = new Exception[] { new AgentHttpStatusException(401, false), new AgentHttpStatusException(403, false), new InvalidOperationException(AgentPolicy.MissingMetaKey),
+            new InvalidOperationException("Supported calendar exhausted. Review the schedule/calendar."), new ArgumentException("Invalid agent settings."), new InvalidOperationException("Invalid provider selection. Choose a model again."),
+            new InvalidOperationException("This activation reached its turn limit.") };
+        foreach (var error in permanentErrors) check(AgentRunFailure.Classify(error) == AgentFailureKind.Permanent, "Windows retry: permanent, pause with a fix: " + error.Message);
+        var modelErrors = new Exception[] { new InvalidOperationException("Agent returned an invalid action format. No actions applied."), new InvalidOperationException("Agent response did not complete. No actions applied."),
+            new InvalidOperationException("Agent hit its response limit. No actions applied.") };
+        foreach (var error in modelErrors) check(AgentRunFailure.Classify(error) == AgentFailureKind.Model, "Windows retry: model output, re-asked once: " + error.Message);
+        check(AgentRunFailure.Classify(new TaskCanceledException("stopped")) == AgentFailureKind.Cancelled && AgentRunFailure.Correction("Agent hit its response limit") == AgentRunFailure.LengthCorrection
+            && AgentRunFailure.Correction("invalid action format") == AgentRunFailure.FormatCorrection, "Windows retry: Stop is cancellation; cut-off replies ask for a shorter answer");
+        check(new[] { 1, 2, 3, 4, 5, 40 }.Select(n => AgentRunFailure.Backoff(n, 900).TotalSeconds).SequenceEqual(new double[] { 60, 120, 240, 480, 900, 900 }), "Windows retry: back-off 1, 2, 4, 8 minutes, capped at the interval");
+        var retry = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900, TurnLimit = 3 } };
+        void Fail(string text, AgentFailureKind kind, DateTime at) { retry.NextRunUtc = at.AddSeconds(900); retry.RecordFailure(text, kind, at); }
+        Fail("The request timed out.", AgentFailureKind.Transient, artNow); Fail("The request timed out.", AgentFailureKind.Model, artNow.AddMinutes(1));
+        check(retry.Settings.Enabled && retry.TransientFailures == 2 && retry.Attention == "" && retry.TroubleSinceUtc == artNow && retry.NextRunUtc == artNow.AddMinutes(3), "Windows retry: early failures stay quiet, keep the loop on and back off");
+        var reset = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(retry)); reset.RecordSuccess();
+        check(reset.TransientFailures is null && reset.TroubleSinceUtc is null && reset.Settings.Enabled, "Windows retry: a success resets the counter");
+        Fail("The request timed out.", AgentFailureKind.Transient, artNow.AddMinutes(3));
+        check(retry.Settings.Enabled && retry.PauseReason is null && retry.Attention.StartsWith("Having trouble since ") && retry.Attention.EndsWith(": The request timed out. — still retrying (3 tries)"), "Windows retry: the third failure shows a trouble banner and keeps running");
+        for (var attempt = 4; attempt <= 25; attempt++) Fail("Agent service returned HTTP 503.", AgentFailureKind.Transient, artNow.AddMinutes(15 * attempt));
+        check(retry.Settings.Enabled && retry.PauseReason is null && retry.TransientFailures == 25 && retry.Attention.Contains("(25 tries)") && retry.NextRunUtc == artNow.AddMinutes(15 * 25 + 15), "Windows retry: many transient failures never pause");
+        retry.RecordSuccess();
+        check(retry.Attention == "" && retry.TransientFailures is null, "Windows retry: a success clears the trouble banner");
+        var permanent = new AgentConfig { Settings = new DeviceAgentSettings { Enabled = true, IntervalSeconds = 900, TurnLimit = 3 } };
+        permanent.RecordFailure("Add a Meta API key.", AgentFailureKind.Permanent, artNow);
         check(!permanent.Settings.Enabled && permanent.PauseReason?.StartsWith("Paused: Add a Meta API key.") == true, "Windows retry: permanent failures pause at once");
+        permanent.Attention = ""; permanent.RecordSuccess();
+        check(permanent.Attention == permanent.PauseReason, "Windows retry: a later manual run keeps the pause reason visible");
         var reenable = DeviceJson.Decode<DeviceAgentSettings>(DeviceJson.Encode(permanent.Settings)); reenable.Enabled = true; permanent.Apply(reenable);
         check(permanent.PauseReason is null && permanent.Settings.Enabled, "Windows retry: re-enabling clears the pause reason");
+        permanent.PauseLoop();
+        check(!permanent.Settings.Enabled && permanent.NextRunUtc is null && permanent.PauseReason is null, "Windows controls: Pause loop turns checks off without an alarm");
+        permanent.Pause("Add a Meta API key.", artNow); permanent.ResumeLoop(artNow);
+        check(permanent.Settings.Enabled && permanent.PauseReason is null && permanent.Attention == "" && permanent.NextRunUtc == artNow.AddSeconds(900), "Windows controls: Resume loop clears the pause and schedules the next check");
         restoredLoop.RestoreSchedule(fired.AddDays(3));
         check(restoredLoop.NextRunUtc == fired.AddDays(1), "Overdue deadline survives restart for catch-up on normal tick");
         restoredLoop.NextRunUtc = null; restoredLoop.RestoreSchedule(fired.AddHours(2));
@@ -189,6 +209,33 @@ static class AgentChecks
             agent.Draft = "Fallback probe"; store.Submit(agent);
             deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
             check(cacheBodies.Count == 2 && cacheBodies[0].Contains("prompt_cache_retention") && !cacheBodies[1].Contains("prompt_cache") && agent.Messages.Any(m => m.Text == "Cache fallback reply"), "Windows agent retries once without prompt cache fields after a 400 naming them");
+            // Same-run corrective re-ask, then transient failures that never pause.
+            var scripted = new Queue<string>(); var asked = new List<string>();
+            static string Completed(string text) => "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":" + JsonSerializer.Serialize(text) + "}]}]}";
+            home.Agents.Request = async (request, token) =>
+            {
+                asked.Add(JsonNode.Parse(request.Content is null ? "{}" : await request.Content.ReadAsStringAsync(token))?["instructions"]?.GetValue<string>() ?? "");
+                if (scripted.Count == 0) throw new HttpRequestException("lost");
+                return Encoding.UTF8.GetBytes(scripted.Dequeue());
+            };
+            agent.Agent.Settings.Enabled = true; agent.Agent.Settings.TurnLimit = 1; agent.Agent.NextRunUtc = DateTime.UtcNow.AddHours(1);
+            scripted.Enqueue(Completed("Here is my update, not JSON.")); scripted.Enqueue(Completed("{\"reply\":\"Recovered Windows report\"}"));
+            agent.Draft = "Re-ask probe"; store.Submit(agent);
+            deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
+            check(asked.Count == 2 && !asked[0].Contains(AgentRunFailure.FormatCorrection) && asked[1].EndsWith(AgentRunFailure.FormatCorrection) && agent.Messages.Any(m => m.Text == "Recovered Windows report")
+                && agent.Agent.Settings.Enabled && agent.Agent.TransientFailures is null, "Windows agent re-asks a malformed reply once in the same run and completes");
+            asked.Clear(); scripted.Enqueue(Completed("nope")); scripted.Enqueue(Completed("still nope"));
+            agent.Draft = "Double malformed probe"; store.Submit(agent);
+            deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
+            check(asked.Count == 2 && agent.Agent.Settings.Enabled && agent.Agent.PauseReason is null && agent.Agent.TransientFailures == 1, "Windows agent treats a second malformed reply as transient: the loop stays on");
+            for (var attempt = 2; attempt <= 4; attempt++)
+            {
+                agent.Draft = "Network probe " + attempt; store.Submit(agent);
+                deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
+            }
+            check(agent.Agent.Settings.Enabled && agent.Agent.PauseReason is null && agent.Agent.TransientFailures == 4 && agent.Agent.Attention.StartsWith(AgentRunFailure.TroublePrefix)
+                && agent.Agent.NextRunUtc <= DateTime.UtcNow.AddMinutes(9), "Windows agent keeps retrying through network failures with a trouble banner and an earlier next check");
+            agent.Agent.Settings.Enabled = false; agent.Agent.TransientFailures = null; agent.Agent.TroubleSinceUtc = null; agent.Agent.Attention = "";
             home.Agents.Request = originalRequest;
             home.Agents.Shutdown(); agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1); home.Agents.Tick(DateTime.UtcNow);
             check(calls == 2, "Shutdown prevents agent loop restart");

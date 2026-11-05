@@ -2528,7 +2528,7 @@ struct Conversation: View {
                 ViewThatFits(in: .horizontal) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 10) {
-                            Text(session.status).foregroundStyle(StatusTint.status(session)).help(session.status)
+                            SessionStatusMenu(session: session, compact: false)
                             Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary)
                             loginButton
                             Text("Last turn: " + session.toolStatus.usage).help("Last turn: " + session.toolStatus.usage)
@@ -2538,7 +2538,7 @@ struct Conversation: View {
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus) { store.refreshStatus(session, quota: true) }
                     }.fixedSize(horizontal: true, vertical: false)
                     HStack(spacing: 8) {
-                        Text(session.status).foregroundStyle(StatusTint.status(session)).lineLimit(1).truncationMode(.tail).help(session.status)
+                        SessionStatusMenu(session: session, compact: true)
                         Text(AssistantFamily.name(session.entry.engine)).foregroundStyle(.primary).fixedSize()
                         Spacer(minLength: 0)
                         AccountStatusView(status: session.toolStatus, refreshing: session.probingStatus, compact: true) { store.refreshStatus(session, quota: true) }

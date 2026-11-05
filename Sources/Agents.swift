@@ -59,8 +59,10 @@ struct AgentConfig: Codable, Equatable {
     var nextRunAt: Date? = nil
     var lastLoopAt: Date? = nil
     var attention = ""
-    // Consecutive transient run failures (nil = none); a success resets it.
+    // Consecutive transient run failures (nil = none) and when the first of
+    // them happened; a success resets both.
     var transientFailures: Int? = nil
+    var troubleSince: Date? = nil
     // "Paused: <reason> (<time>)" when the host paused the loop. It stays
     // visible through later manual runs until re-enabled or cleared.
     var pauseReason: String? = nil
@@ -365,7 +367,7 @@ final class AgentAPI {
         guard status == "completed" else {
             if reason == "max_output_tokens" { throw AgentFailure.message("Agent hit its response limit (\(Self.outputTokenLimit) tokens including reasoning). No actions applied. Try fewer watched sessions or a shorter request, then Run once.") }
             if reason == "content_filter" { throw AgentFailure.message("The model service stopped this response under its content policy. No actions applied.") }
-            throw AgentFailure.message("Agent response stopped before completion (\(status)). No actions applied. The loop is paused; try Run once.")
+            throw AgentFailure.message("Agent response stopped before completion (\(status)). No actions applied.")
         }
         // Hosted search can emit progress messages before its final answer.
         // Only the final message is actionable; never splice commentary into JSON.
