@@ -88,7 +88,7 @@ extension Store {
         return accountID == currentLoginID(s) ? .none : .login
     }
     /// The handoff checkbox starts on when the current assistant can answer.
-    func handoffAvailable(_ s: Session) -> Bool { !s.isUnboundImport && providerChangeRefusal(s) == nil }
+    func handoffAvailable(_ s: Session) -> Bool { !s.isUnboundImport && !s.restoringImport && providerChangeRefusal(s) == nil }
 
     /// Asks the current provider for a handoff note in an ordinary, visible
     /// turn and returns the reply text. The draft and queue are left alone.
@@ -126,7 +126,9 @@ extension Store {
         guard entry.engine == profile.engine, !["agent", "support", ConverseExchange.unboundEngine].contains(entry.engine) else {
             throw ProviderHandoff.error("Choose an assistant and one of its logins.")
         }
-        let imported = s.isUnboundImport
+        // A prepared but unsent catch-up draft means the provider has seen
+        // nothing yet, so choosing again rebinds like the first choice.
+        let imported = s.isUnboundImport || s.restoringImport
         guard imported || entry.engine != s.entry.engine else {
             throw ProviderHandoff.error("That is the same assistant. Choose another login to continue this conversation under it.")
         }
@@ -134,7 +136,7 @@ extension Store {
         // An import keeps what it arrived with (a plain preface, or its exported note).
         let pending = imported ? (s.handoffPending ?? HandoffPending(from: nil, note: false)) : HandoffPending(from: old, note: note)
         // Records first: a failed write leaves the session on its current provider.
-        try writeHandoffTranscript(s, pending: pending)
+        if !(s.restoringImport && FileManager.default.fileExists(atPath: handoffTranscriptURL(s).path)) { try writeHandoffTranscript(s, pending: pending) }
         if !imported && !note { try? FileManager.default.removeItem(at: handoffNoteURL(s)) }
         // A live Claude process finishes its background work; prompts for the
         // new provider wait for it to exit.
@@ -146,6 +148,8 @@ extension Store {
         s.remoteID = nil; s.started = false; s.freshConversationID = UUID()
         s.choices = SessionChoices(); s.toolStatus = ToolStatus(); s.settingNotice = ""; s.probeError = ""; s.status = "Ready"
         s.handoffPending = pending
+        // An import's context goes in the editable draft instead of a hidden preface.
+        if imported { prepareRestoreDraft(s) }
         if !imported {
             let name = AssistantFamily.name(entry.engine)
             s.messages.append(Message(role: "notice", text: "Switched from " + old + " to " + name + ". " + name + " starts a fresh conversation and reads " + (note ? "the handoff note and " : "") + "the transcript with your next prompt."))
@@ -198,10 +202,7 @@ struct ConfigureConversationView: View {
         var command = session.entry.command, directory = session.entry.directory
         if session.isUnboundImport {
             // An imported session picks its assistant like a new one does.
-            let preferred = store.sessions.first(where: { $0.supportAssistant }).flatMap { $0.agent.flatMap { AgentModels.parse($0.model)?.engine } ?? $0.entry.engine }
-            let families = store.assistantFamilies.filter { $0 != "support" }
-            engine = families.contains(preferred ?? "") ? preferred! : families.first ?? "claude"
-            accountID = store.preferredLogin(engine: engine)?.id ?? "new"
+            (engine, accountID) = store.importPickerDefaults()
             command = store.defaultEntry(engine: engine).command; directory = store.defaultEntry(engine: engine).directory
         }
         _engine = State(initialValue: engine); _accountID = State(initialValue: accountID)
@@ -263,7 +264,7 @@ struct ConfigureConversationView: View {
                 Text("Same conversation, continued under " + chosenLoginLabel + ".").font(.callout).foregroundStyle(.secondary)
             case .provider:
                 Text(newName + " starts a fresh conversation; this history stays here.").font(.callout).foregroundStyle(.secondary)
-                if !session.isUnboundImport {
+                if store.handoffAvailable(session) || !(session.isUnboundImport || session.restoringImport) {
                     Toggle("Ask " + currentName + " to write a handoff note first", isOn: $handoff).disabled(!store.handoffAvailable(session))
                         .help("Converse sends " + currentName + " one visible turn asking for a handoff note (goals, decisions, current state, open items, gotchas, files). " + newName + " reads it, and the full transcript, with your next prompt.")
                 }
@@ -348,6 +349,7 @@ extension AppDelegate {
             switch outcome {
             case .switched:
                 if fresh, let profile = store.loginAccount(for: session) { store.signInSession(session, freshProfile: profile) }
+                if session.restoreContext != nil { AppDelegate.focusDraftEnd(session) }
             case .failed(let reason): failed(reason)
             case .noteFailed(let reason):
                 let alert = NSAlert(); alert.messageText = "Switch without a handoff note?"

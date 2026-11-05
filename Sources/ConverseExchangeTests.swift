@@ -96,6 +96,8 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
         if let command = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"], let profile = target.preferredLogin(engine: "muse") {
             let echo = Entry(name: "Echo", command: command, directory: NSTemporaryDirectory(), engine: "muse")
             check(target.bindImportedSession(first, entry: echo, profile: profile) && !first.isUnboundImport && first.entry.engine == "muse" && first.entry.accountID == profile.id, "Choosing a provider binds the imported session without losing its history")
+            let draft = first.draft
+            check(draft.hasPrefix(RestoreContext.framing) && draft.hasSuffix(RestoreContext.separator + "Continue from here") && !first.busy && first.messages.count == 2, "Binding fills in the catch-up draft before the kept draft and sends nothing")
             target.send(first)
             let deadline = Date().addingTimeInterval(20)
             while first.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
@@ -103,8 +105,8 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
             let markdown = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
             let reply = first.messages.last { $0.role == "assistant" }?.text ?? ""
             check(markdown.contains("How do we plan?") && markdown.contains("Use **headings**.") && markdown.contains("## Prompt") && file.path == target.folder.appendingPathComponent("Handoffs/" + first.id.uuidString + "/transcript.md").path, "Binding an import writes the transcript to Handoffs/<session-id>/transcript.md")
-            check(reply.contains(ConverseExchange.preface(path: file.path)) && reply.contains("Continue from here") && first.messages.contains { $0.role == "user" && $0.text == "Continue from here" }, "First prompt carries one preface line pointing at the transcript; the visible prompt is unchanged")
-            check(!first.importedTranscriptPending, "The transcript preface is delivered once")
+            check(reply.contains("Full transcript: " + file.path) && reply.contains("Continue from here") && !reply.contains(ConverseExchange.preface(path: file.path)) && first.messages.contains { $0.role == "user" && $0.text == draft }, "The first prompt is the visible catch-up draft pointing at the transcript; no hidden preface")
+            check(!first.importedTranscriptPending, "No transcript preface is left pending")
             first.draft = "Second prompt"; target.send(first)
             let second = Date().addingTimeInterval(20)
             while first.busy && Date() < second { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }

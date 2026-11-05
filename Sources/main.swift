@@ -73,6 +73,8 @@ struct SavedSession: Codable {
     var handoffPending: HandoffPending? = nil
     // A fresh provider conversation after a switch; nil means the session ID.
     var freshConversationID: UUID? = nil
+    // The generated catch-up block in an imported session's unsent draft.
+    var restoreContext: String? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -99,6 +101,9 @@ final class Session: ObservableObject, Identifiable {
     // fresh one so returning to an earlier assistant never collides.
     var freshConversationID: UUID?
     var conversationID: UUID { freshConversationID ?? id }
+    // The catch-up block Converse put in the draft, until it is sent; a later
+    // binding replaces only this text.
+    @Published var restoreContext: String?
     // Called once when the current turn finishes (true on success).
     var turnCompletion: ((Bool) -> Void)?
     var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
@@ -234,7 +239,7 @@ final class Session: ObservableObject, Identifiable {
         clearedThroughMessageID = saved.clearedThroughMessageID
         unseenResponse = saved.unseenResponse ?? false
         handoffPending = saved.handoffPending ?? (saved.importedTranscriptPending == true ? HandoffPending(from: nil, note: false) : nil)
-        freshConversationID = saved.freshConversationID
+        freshConversationID = saved.freshConversationID; restoreContext = saved.restoreContext
         toolStatus = saved.toolStatus ?? ToolStatus()
         accountStatus = saved.toolStatus?.account ?? ""
         lastCompactedAt = saved.lastCompactedAt
@@ -262,7 +267,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext) }
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
 final class Store: ObservableObject {
@@ -648,6 +653,7 @@ final class Store: ObservableObject {
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
+        s.restoreContext = nil
         if clearDisplayBeforeReply {
             clearSessionDisplay(s)
             if let displayNotice { s.messages.append(Message(role: "notice", text: displayNotice)) }
@@ -2545,14 +2551,11 @@ struct Conversation: View {
                     }
                 }
             Divider()
-            if session.isUnboundImport {
-                HStack(spacing: 10) {
-                    Text("Imported conversation · not connected to a provider").foregroundStyle(.secondary)
-                    Button("Choose a provider…") { AppDelegate.shared.chooseLogin(session) }
-                        .help("Pick the assistant and login that continue this conversation. It reads the imported transcript before your first prompt.")
-                    Spacer(minLength: 0)
-                }.font(.system(size: 11)).lineLimit(1).padding(.horizontal, 10).padding(.vertical, 6)
-            } else if session.needsAgentSetup {
+            if session.isUnboundImport || session.restoringImport {
+                ImportProviderPicker(session: session).id(session.id)
+                if session.restoringImport { Divider() }
+            }
+            if session.isUnboundImport { EmptyView() } else if session.needsAgentSetup {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent settings are missing · automatic work is paused").foregroundStyle(.orange)
                     Button("Open Agent Setup…") { AgentWindows.shared.setup(session) }.buttonStyle(.link)

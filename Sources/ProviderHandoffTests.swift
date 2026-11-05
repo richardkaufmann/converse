@@ -187,9 +187,10 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
               && without.handoffPending == HandoffPending(from: nil, note: false), "Importing a record with a handoff note writes handoff.md and plans a takeover; others keep the import preface")
         let targetMuse = target.preferredLogin(engine: "muse")!
         check(target.bindImportedSession(withNote, entry: echo, profile: targetMuse), "Late binding an import with a note")
-        withNote.draft = "Pick it up"; target.send(withNote); wait { !withNote.busy }
+        withNote.draft += "Pick it up"; target.send(withNote); wait { !withNote.busy }
         let line = ProviderHandoff.takeoverPreface(from: "Claude", handoff: target.handoffNoteURL(withNote).path, transcript: target.handoffTranscriptURL(withNote).path)
-        check(occurrences(line, in: reply(withNote)) == 1 && !reply(withNote).contains("this conversation was imported"), "An imported handoff note uses the takeover line instead of the import preface")
+        check(occurrences("Read the handoff note first: " + target.handoffNoteURL(withNote).path, in: reply(withNote)) == 1 && occurrences(line, in: reply(withNote)) == 0 && !reply(withNote).contains("this conversation was imported"),
+              "An imported handoff note is named in the visible catch-up draft instead of a hidden line")
     } catch { check(false, "Handoff import failed: " + error.localizedDescription) }
     // Older files without `handoff` import exactly as before; oversized notes are refused.
     if let data = try? JSONEncoder().encode(package.document), var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], var records = object["sessions"] as? [[String: Any]] {
