@@ -305,6 +305,17 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         guard let range = Self.entryRange(id, in: document.rows) else { return }
         var rows = document.rows; rows.removeSubrange(range); commit(rows)
     }
+    /// Where an agent's add/move lands. With a parentID, `before` is honored only
+    /// when it names one of that parent's direct children; otherwise the row goes
+    /// to the end of the parent's subtree. Agents often send both, and a
+    /// conflicting pair must not fail the whole batch.
+    static func placement(_ destination: Int?, parent: UUID?, in rows: [ParkingLotRow]) throws -> Int {
+        guard let parent else { return destination ?? rows.count }
+        guard let parentRange = ParkingLotTree.range(parent, in: rows) else { throw AgentFailure.message("Parking Lot parent no longer exists.") }
+        if let destination, destination < rows.count, !rows[destination].heading,
+           (try? ParkingLotTree.nodes(rows))?[rows[destination].id]?.parentID == parent { return destination }
+        return parentRange.upperBound
+    }
     static func entryRange(_ id: UUID, in rows: [ParkingLotRow]) -> Range<Int>? {
         ParkingLotTree.range(id, in: rows)
     }
@@ -379,8 +390,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                 let id = operation.id ?? UUID()
                 guard !rows.contains(where: { $0.id == id }) else { throw AgentFailure.message("Parking Lot row ID already exists.") }
                 let heading = operation.heading ?? false
-                let position = destination ?? operation.parentID.flatMap { ParkingLotTree.range($0, in: rows)?.upperBound } ?? rows.count
-                let parentID = operation.parentID ?? ParkingLotTree.parentForInsertion(at: position, in: rows, heading: heading)
+                let position = try Self.placement(destination, parent: heading ? nil : operation.parentID, in: rows)
+                let parentID = (heading ? nil : operation.parentID) ?? ParkingLotTree.parentForInsertion(at: position, in: rows, heading: heading)
                 rows.insert(ParkingLotRow(id: id, heading: heading, text: text, editedBy: author, done: operation.done,
                                           parentID: heading ? nil : parentID), at: position)
             case "update":
@@ -399,7 +410,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                 var moving = Array(rows[range]); rows.removeSubrange(range)
                 let destination = operation.before.flatMap { id in rows.firstIndex(where: { $0.id == id }) }
                 guard operation.before == nil || destination != nil else { throw AgentFailure.message("Parking Lot destination no longer exists or is inside the section being moved.") }
-                let position = destination ?? operation.parentID.flatMap { ParkingLotTree.range($0, in: rows)?.upperBound } ?? rows.count
+                let position = try Self.placement(destination, parent: moving[0].heading ? nil : operation.parentID, in: rows)
                 guard !moving[0].heading || (operation.parentID == nil && (position == rows.count || rows[position].heading)) else {
                     throw AgentFailure.message("A Parking Lot heading cannot be nested inside an item.")
                 }
@@ -648,6 +659,28 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
               && ideaIndex > rows.firstIndex { $0.id == existing }! && ideaIndex < rows.firstIndex { $0.id == future }!,
               "The item lands at the end of the target section with its nested children")
         check(!moves.moveToSection(idea, heading: now), "Moving to the current section is refused")
+        // Agents often send both parentID and before. A conflicting pair (before
+        // names a row in another section) places the row at the end of the
+        // parent's subtree instead of failing the whole batch.
+        let otherSection = moves.document.rows.first { !$0.heading && ParkingLotStore.section(of: $0.id, in: moves.document.rows) == future }?.id
+            ?? moves.insert(text: "Bug row", after: future)
+        do {
+            let added = UUID()
+            try moves.apply(ParkingLotEdits(revision: moves.document.revision, operations: [.init(action: "add", id: added, text: "Nested note", before: otherSection, parentID: idea)]), author: "Agent")
+            let after = moves.document.rows, ideaRange = ParkingLotTree.range(idea, in: after)!
+            check(after.first { $0.id == added }?.parentID == idea && ideaRange.contains(after.firstIndex { $0.id == added }!),
+                  "An add whose before conflicts with its parentID lands at the end of the parent's subtree")
+            try moves.apply(ParkingLotEdits(revision: moves.document.revision, operations: [.init(action: "move", id: added, before: otherSection, parentID: now)]), author: "Agent")
+            check(moves.document.rows.first { $0.id == added }?.parentID == now && ParkingLotStore.section(of: added, in: moves.document.rows) == now,
+                  "A move whose before conflicts with its parentID goes to the end of that parent")
+            let sibling = moves.insert(text: "Sibling", after: existing)
+            let placed = UUID()
+            try moves.apply(ParkingLotEdits(revision: moves.document.revision, operations: [.init(action: "add", id: placed, text: "Before sibling", before: sibling, parentID: now)]), author: "Agent")
+            let rows = moves.document.rows
+            check(rows.firstIndex { $0.id == placed }! + 1 == rows.firstIndex { $0.id == sibling }!, "before is honored when it names a direct child of the parent")
+            do { try moves.apply(ParkingLotEdits(revision: moves.document.revision, operations: [.init(action: "add", text: "Orphan", parentID: UUID())]), author: "Agent"); check(false, "Unknown parent rejected") }
+            catch { check(error.localizedDescription.contains("parent no longer exists"), "An unknown parentID is refused clearly") }
+        } catch { check(false, "Agent placement tests: " + error.localizedDescription) }
     }
     func edits(_ operations: [ParkingLotEdits.Operation], revision: Int? = nil) -> ParkingLotEdits {
         ParkingLotEdits(revision: revision ?? lot.document.revision, operations: operations)

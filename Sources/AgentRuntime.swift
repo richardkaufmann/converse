@@ -258,10 +258,18 @@ enum AgentPolicy {
                         throw AgentFailure.message("Choose one explicitly allowed Parking Lot. No Parking Lot edits applied.")
                     }
                     if current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
-                        parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
-                            store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true
-                        })
-                    } else { try lot.apply(edits, author: session.title) }
+                        do {
+                            parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
+                                store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true
+                            })
+                        } catch is CancellationError { throw CancellationError() }
+                        catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
+                    } else {
+                        // A rejected lot edit is reported, not fatal: the reply is still
+                        // delivered and the agent loop keeps running.
+                        do { try lot.apply(edits, author: session.title) }
+                        catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
+                    }
                 }
                 session.supportPendingCommand = decoded.appControl
                 let reply: AgentReply? = decoded
