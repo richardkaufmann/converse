@@ -3315,6 +3315,7 @@ func selfTest() {
     let store = Store.shared
     func check(_ value: Bool, _ label: String) { if !value { fputs("FAIL: \(label)\n", stderr); exit(1) }; print("PASS: \(label)") }
     MainActor.assumeIsolated { appSupportSelfTests(check) }
+    MainActor.assumeIsolated { appSupportSetupSelfTests(check) }
     MainActor.assumeIsolated { firstRunSelfTests(check) }
     providerSelfTests(check)
     MainActor.assumeIsolated { textSubstitutionSelfTests(check) }
