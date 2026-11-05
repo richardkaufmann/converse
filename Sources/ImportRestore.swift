@@ -8,7 +8,7 @@ enum RestoreContext {
     static let messageCount = 10
     static let messageLimit = 2_000
     static let blockLimit = 16_000
-    static let truncated = "…[truncated]"
+    static let truncated = "…[truncated; the rest is in transcript.md]"
     static let separator = "\n\n---\n"
 
     static func clip(_ text: String, _ limit: Int) -> String {
