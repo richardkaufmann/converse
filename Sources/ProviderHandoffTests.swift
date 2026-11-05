@@ -137,11 +137,35 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
     check(occurrences(bare, in: reply(session)) == 1 && !bare.contains("handoff.md") && session.handoffPending == nil, "Without a note the takeover line omits the handoff clause")
 
     // Export with handoff notes: each selected session writes its note first.
-    var notes: [UUID: String]??
+    var notes: (notes: [UUID: String], failures: [String])??
     Task { @MainActor in notes = await TranscriptExportController.collectHandoffs([ExportSession(session), ExportSession(agent)], store: store) }
     wait({ notes != nil }, seconds: 40)
-    let collected = (notes ?? nil) ?? [:]
+    let collected = ((notes ?? nil)?.notes) ?? [:]
     check(collected.count == 1 && collected[session.id]?.contains("handoff note for your successor") == true, "Include handoff notes asks each local, bound, idle session (not agents) for a note")
+    // A stalled handoff turn times out instead of hanging the export, and
+    // Cancel returns at once even while a turn is still running.
+    let stall = root.appendingPathComponent("stall-provider")
+    try? "#!/bin/zsh\nsleep 30\n".write(to: stall, atomically: true, encoding: .utf8)
+    _ = try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stall.path)
+    let savedCommand = session.entry.command, savedTimeout = ProviderHandoff.exportNoteTimeout
+    session.entry.command = stall.path; ProviderHandoff.exportNoteTimeout = 2
+    var timed: (notes: [UUID: String], failures: [String])??
+    let started = Date()
+    Task { @MainActor in timed = await TranscriptExportController.collectHandoffs([ExportSession(session)], store: store) }
+    wait({ timed != nil }, seconds: 20)
+    check(Date().timeIntervalSince(started) < 15 && (timed ?? nil)?.failures.first?.contains("No handoff note after") == true,
+          "A stalled handoff turn times out and is reported instead of hanging the export")
+    wait({ !session.busy }, seconds: 10)
+    ProviderHandoff.exportNoteTimeout = 60
+    let progress = HandoffExportProgress()
+    var cancelledToNil = false, finished = false
+    Task { @MainActor in cancelledToNil = await TranscriptExportController.collectHandoffs([ExportSession(session)], store: store, progress: progress) == nil; finished = true }
+    wait({ session.busy }, seconds: 10)
+    progress.cancel()
+    wait({ finished }, seconds: 10)
+    check(finished && cancelledToNil, "Cancel ends the handoff export at once, even while a turn is running")
+    wait({ !session.busy }, seconds: 10)
+    session.entry.command = savedCommand; ProviderHandoff.exportNoteTimeout = savedTimeout; session.queuePaused = false
     var exported = ExportSession(session); exported.handoff = "Reach me at handoff@example.invalid. key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
     var scrubber: ExportScrubber? = ExportScrubber(context: .init())
     var plainScrub: ExportScrubber? = nil
