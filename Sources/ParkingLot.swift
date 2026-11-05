@@ -481,11 +481,27 @@ struct ParkingLotSidebar: View {
                     do { try library.setConfirmsSessionEdits(lot.id, value) } catch { library.error = error.localizedDescription }
                 }))
                 Button("Rename Parking Lot…") { ParkingLotLibrary.shared.promptRename(lot) }
+                Button("Import…") { ParkingLotTransfer.importConversations() }
+                Button("Export Parking Lot…") { ParkingLotTransfer.export(lot) }
                 Button("Delete Parking Lot…") { ParkingLotLibrary.shared.promptDelete(lot) }
             }
             .sheet(isPresented: $showingLinks) { ParkingLotLinksView(lot: lot) }
     }
 }
+/// The lot menus reuse the normal reviewed import/export flows. Export starts
+/// with this lot alone, rather than silently selecting every conversation.
+enum ParkingLotTransfer {
+    static func importConversations() { (NSApp.delegate as? AppDelegate)?.chooseConversationsToImport() }
+    static func export(_ lot: ParkingLotStore) {
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        if let exporter = delegate.transcriptExporter { exporter.showActivePanel(); return }
+        let exporter = TranscriptExportController(sessions: [ExportSession(lot: lot)])
+        delegate.transcriptExporter = exporter
+        exporter.completed = { [weak delegate] in delegate?.transcriptExporter = nil }
+        exporter.show(for: NSApp.keyWindow)
+    }
+}
+
 struct ParkingLotView: View {
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
@@ -589,7 +605,23 @@ struct ParkingLotView: View {
             catch { lot.error = "Could not export recovery copy: " + error.localizedDescription }
         }
     }
+    private func foldButtons(_ folding: ParkingLotFolding, compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            Button { collapsed = folding.targets } label: {
+                if compact { Image(systemName: "chevron.up") } else { Text("Collapse All") }
+            }.disabled(!folding.canCollapseAll)
+                .accessibilityLabel("Collapse All")
+                .help("Collapse All: fold every heading and nested branch without changing the lot.")
+            if folding.collapsedCount >= 2 {
+                Button { collapsed = [] } label: {
+                    if compact { Image(systemName: "chevron.down") } else { Text("Expand All") }
+                }.accessibilityLabel("Expand All")
+                    .help("Expand All: show every nested level.")
+            }
+        }.fixedSize()
+    }
     var body: some View {
+        let folding = ParkingLotFolding(rows: lot.document.rows, collapsed: collapsed)
         VStack(alignment: .leading, spacing: 8) {
             ParkingLotTalkBar(lot: lot)
             HStack(spacing: 8) {
@@ -597,13 +629,39 @@ struct ParkingLotView: View {
                 ProviderLogo(engine: "parking")
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
+                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+            }.padding(.horizontal, 8).padding(.vertical, 4)
+            HStack(spacing: 6) {
                 Button(reordering ? "Done" : "Reorder") {
                     let previous = undoFocus.view?.window?.firstResponder
                     reordering.toggle()
                     DispatchQueue.main.async { undoFocus.activate(ifUnchangedFrom: previous) }
-                }.controlSize(.small).disabled(lot.isReadOnly)
-                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
-            }.padding(.horizontal, 8).padding(.vertical, 4)
+                }.controlSize(.small).disabled(lot.isReadOnly).fixedSize()
+                if !lot.isReadOnly {
+                    ViewThatFits(in: .horizontal) {
+                        foldButtons(folding, compact: false)
+                        foldButtons(folding, compact: true)
+                    }
+                    if folding.hiddenCount > 0 {
+                        Text("\(folding.hiddenCount) hidden").font(.caption).foregroundStyle(.secondary)
+                            .fixedSize()
+                            .help("Items hidden inside collapsed headings or branches.")
+                    }
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    if !lot.isReadOnly {
+                        Button("Collapse All") { collapsed = folding.targets }.disabled(!folding.canCollapseAll)
+                        Button("Expand All") { collapsed = [] }.disabled(folding.collapsedCount == 0)
+                        Divider()
+                    }
+                    Button("Import…") { ParkingLotTransfer.importConversations() }
+                        .help("Review a Converse file and import it as new conversations and Parking Lots.")
+                    Button("Export Parking Lot…") { ParkingLotTransfer.export(lot) }
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .accessibilityLabel("Parking Lot actions")
+            }.controlSize(.small).padding(.horizontal, 8)
             Divider()
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }

@@ -1,6 +1,27 @@
 import AppKit
 import SwiftUI
 
+/// Folding is view state, never a document edit. Include hidden descendants so
+/// expanding a section after Collapse All still leaves its nested branches folded.
+struct ParkingLotFolding {
+    let targets: Set<UUID>
+    let collapsedCount: Int
+    let hiddenCount: Int
+    var canCollapseAll: Bool { collapsedCount < targets.count }
+    init(rows: [ParkingLotRow], collapsed: Set<UUID>) {
+        let nodes = (try? ParkingLotTree.nodes(rows)) ?? [:]
+        targets = Set(rows.filter(\.heading).map(\.id)).union(nodes.values.compactMap(\.parentID))
+        collapsedCount = targets.intersection(collapsed).count
+        var hiddenByID: [UUID: Bool] = [:], count = 0
+        for row in rows {
+            let hidden = nodes[row.id]?.parentID.flatMap { hiddenByID[$0] } ?? false
+            if hidden { count += 1 }
+            hiddenByID[row.id] = hidden || collapsed.contains(row.id)
+        }
+        hiddenCount = count
+    }
+}
+
 // Paragraphs are outline entries; soft line breaks stay within an entry. The
 // projection is ephemeral: displaying an empty input never writes to the file.
 struct ParkingOutline {
@@ -853,8 +874,21 @@ final class ParkingOutlineText: NSTextView {
             item.keyEquivalentModifierMask = modifiers
             item.target = target; item.representedObject = target; menu.addItem(item)
         }
+        func lotActions() {
+            let folding = ParkingLotFolding(rows: owner.parent.lot.document.rows, collapsed: owner.parent.collapsed)
+            menu.addItem(.separator())
+            if folding.canCollapseAll {
+                item("Collapse All") { owner.parent.collapsed = folding.targets; owner.render() }
+            }
+            if folding.collapsedCount > 0 {
+                item("Expand All") { owner.parent.collapsed = []; owner.render() }
+            }
+            item("Import…") { ParkingLotTransfer.importConversations() }
+            item("Export Parking Lot…") { ParkingLotTransfer.export(owner.parent.lot) }
+        }
         guard let i = owner.projection.index(at: index) else {
             item("New heading") { owner.add(heading: true) }
+            lotActions()
             return menu
         }
         let entry = owner.projection.entries[i]
@@ -901,6 +935,7 @@ final class ParkingOutlineText: NSTextView {
                 self.showComments(entry.row.id)
             }
         }
+        lotActions()
         if !entry.placeholder {
             let targets = ParkingLotStore.moveTargets(for: entry.row.id, in: owner.parent.lot.document.rows)
             if !targets.isEmpty { menu.addItem(.separator()) }
@@ -972,6 +1007,28 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let nestedChild = ParkingLotRow(heading: false, text: "Child", parentID: first.id)
     let nestedRows = [heading, first, nestedChild, second]
     let nestedOutline = ParkingOutline(rows: nestedRows, collapsed: [], placeholders: &placeholders)
+    let grandchild = ParkingLotRow(heading: false, text: "Grandchild", parentID: nestedChild.id)
+    let foldRows = [heading, first, nestedChild, grandchild, second, other, hidden]
+    let expandedState = ParkingLotFolding(rows: foldRows, collapsed: [])
+    let allFolded = ParkingLotFolding(rows: foldRows, collapsed: expandedState.targets)
+    let foldedProjection = ParkingOutline(rows: foldRows, collapsed: expandedState.targets, placeholders: &placeholders)
+    check(expandedState.targets == Set([heading.id, first.id, nestedChild.id, other.id]) && expandedState.canCollapseAll
+          && allFolded.hiddenCount == 5 && allFolded.collapsedCount == 4 && !allFolded.canCollapseAll
+          && foldedProjection.entries.filter { !$0.placeholder }.map { $0.row.id } == [heading.id, other.id],
+          "Collapse All folds headings and every nested branch, counts hidden rows once, and keeps headings visible")
+    let reopenedHeading = expandedState.targets.subtracting([heading.id])
+    let reopenedProjection = ParkingOutline(rows: foldRows, collapsed: reopenedHeading, placeholders: &placeholders)
+    check(reopenedProjection.entries.filter { !$0.placeholder }.map { $0.row.id } == [heading.id, first.id, second.id, other.id]
+          && ParkingLotFolding(rows: foldRows, collapsed: reopenedHeading).hiddenCount == 3,
+          "Opening one heading after Collapse All leaves its nested branches folded")
+    let expandedProjection = ParkingOutline(rows: foldRows, collapsed: [], placeholders: &placeholders)
+    check(expandedProjection.entries.filter { !$0.placeholder }.map(\.row) == foldRows
+          && ParkingLotFolding(rows: foldRows, collapsed: []).hiddenCount == 0,
+          "Expand All restores every original row including comments and nested relationships")
+    let orphanedFold = ParkingLotFolding(rows: [heading], collapsed: [first.id, UUID()])
+    check(orphanedFold.collapsedCount == 0 && orphanedFold.hiddenCount == 0
+          && ParkingLotFolding(rows: [], collapsed: []).targets.isEmpty,
+          "Fold controls ignore removed rows and handle empty lots")
     let parentRange = nestedOutline.entries.first { $0.row.id == first.id }!.range
     let splitParent = nestedOutline.replacing(NSRange(location: NSMaxRange(parentRange), length: 0), with: "\n", rows: nestedRows)!
     check(Array(splitParent.rows.map(\.id).prefix(3)) == [heading.id, first.id, nestedChild.id]
