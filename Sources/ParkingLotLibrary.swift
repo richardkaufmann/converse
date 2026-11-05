@@ -198,6 +198,8 @@ struct OrderedDeviceSidebar: View {
                                 ForEach(store.assistantFamilies, id: \.self) { engine in Button("New " + AssistantFamily.name(engine) + " session…") { state.sessionSetup = SessionSetupRequest(engine: engine) } }
                                 Button("New agent…") { AgentWindows.shared.create() }
                                 Button("New Parking Lot…") { library.promptNew() }
+                                Divider()
+                                Button("Import Conversations…") { AppDelegate.shared.chooseConversationsToImport() }
                             } label: { Image(systemName: "plus") }.menuStyle(.borderlessButton).fixedSize()
                         }.padding(.horizontal, 4).frame(height: 28)
                     }
