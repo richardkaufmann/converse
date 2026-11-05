@@ -95,11 +95,14 @@ enum AgentPolicy {
         // Keep saved loop settings intact. Late cancellation callbacks must not
         // pause configured loops, clear attention, or drain another queued prompt.
     }
-    func cancel(_ session: Session) {
+    // Runs stopped by Stop current run: the loop stays on and no alarm shows.
+    private var stoppedRuns: Set<UUID> = []
+    func cancel(_ session: Session, keepLoop: Bool = false) {
+        if keepLoop { stoppedRuns.insert(session.id) }
         tasks.removeValue(forKey: session.id)?.cancel()
-        if !session.resumeAfterInterrupt, session.agent?.enabled == true {
+        if !keepLoop, !session.resumeAfterInterrupt, session.agent?.enabled == true {
             session.agent?.enabled = false
-            session.agent?.attention = "Loop paused by Stop. Re-enable it in Agent Setup / Loop."
+            session.agent?.attention = "Loop paused by Stop. Choose Resume loop from … or the footer status, or re-enable it in Agent Setup / Loop."
             session.agent?.lastOutcome = "Paused by Stop."
         }
     }
@@ -109,16 +112,32 @@ enum AgentPolicy {
     func finishCancelledTurn(_ session: Session, store: Store) {
         let wasEnabled = session.agent?.enabled == true
         let stopPressed = session.queuePaused
+        let runOnly = stoppedRuns.remove(session.id) != nil, attention = session.agent?.attention ?? ""
         finish(session, store: store, success: false, error: "Agent stopped. Your draft and queued messages are preserved.", kind: .cancelled)
         guard !shuttingDown else { return }
-        if wasEnabled {
+        if runOnly {
+            session.agent?.enabled = wasEnabled
+            session.agent?.attention = attention
+            session.agent?.lastOutcome = wasEnabled ? "Run stopped; loop remains on." : "Run stopped."
+            session.status = attention.isEmpty ? "Ready" : "Waiting for attention"
+            session.agent?.preservePause(); store.save()
+        } else if wasEnabled {
             session.agent?.enabled = true
             session.agent?.attention = "Turn cancelled; loop remains on."
             session.agent?.lastOutcome = "Turn cancelled; loop remains on."
         } else if stopPressed {
-            session.agent?.attention = "Loop paused by Stop. Re-enable it in Agent Setup / Loop."
+            session.agent?.attention = "Loop paused by Stop. Choose Resume loop from … or the footer status, or re-enable it in Agent Setup / Loop."
             session.agent?.lastOutcome = "Paused by Stop."
         }
+    }
+    // Stop current run: cancels the in-flight run only. The loop stays on
+    // unless it is paused, and queued messages wait as after any Stop.
+    func stopRun(_ session: Session) {
+        guard session.agent != nil, session.busy, !session.interrupted, tasks[session.id] != nil else { return }
+        if AgentConversation.shared.owns(session) { AgentConversation.shared.stop(resumeQueued: false) }
+        session.resumeAfterInterrupt = false; session.interrupted = true
+        session.status = "Stopping…"
+        cancel(session, keepLoop: true)
     }
     func run(_ session: Session, store: Store, responseID: UUID, loopTick: Bool = false) {
         guard !shuttingDown, let config = session.agent else { return }
@@ -237,39 +256,52 @@ enum AgentPolicy {
                 try budget.consume()
                 guard session.agent?.model == config.model else { throw AgentFailure.message("Model selection changed during this activation. Retry with the new selection.") }
                 var usage: AgentUsage?
-                let text = try await self.respond(store: store, model: config.model, instructions: instructions, input: input, key: key, images: visual.images, webSearch: current.webSearch != false, cacheKey: AgentInstructions.cacheKey(session.id), research: { research = $0 }, observe: { diagnostic in
-                    usage = diagnostic.usage
-                    // Safe metadata only: never raw output, prompts, keys or reasoning.
+                // A malformed or cut-off reply is re-asked once in this run with a
+                // short correction; the re-ask belongs to the same turn.
+                var correction: String?
+                var parsed: AgentReply?
+                for attempt in 0..<2 {
+                    let text: String
                     do {
-                        try FileManager.default.createDirectory(at: diagnosticFolder, withIntermediateDirectories: true)
-                        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-                        try encoder.encode(diagnostic).write(to: diagnosticFolder.appendingPathComponent("last-response.json"), options: .atomic)
-                    } catch { /* Diagnostics must not change delivery semantics. */ }
-                })
-                try Task.checkCancellation()
-                guard store.sessions.contains(where: { $0 === session }) else { return }
+                        text = try await self.respond(store: store, model: config.model, instructions: correction.map { instructions + "\n\n" + $0 } ?? instructions, input: input, key: key, images: visual.images, webSearch: current.webSearch != false, cacheKey: AgentInstructions.cacheKey(session.id), research: { research = $0 }, observe: { diagnostic in
+                            usage = diagnostic.usage
+                            // Safe metadata only: never raw output, prompts, keys or reasoning.
+                            do {
+                                try FileManager.default.createDirectory(at: diagnosticFolder, withIntermediateDirectories: true)
+                                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                                try encoder.encode(diagnostic).write(to: diagnosticFolder.appendingPathComponent("last-response.json"), options: .atomic)
+                            } catch { /* Diagnostics must not change delivery semantics. */ }
+                        })
+                    } catch let error where attempt == 0 && AgentRunFailure.classify(error) == .model {
+                        try Task.checkCancellation()
+                        correction = AgentRunFailure.correction(for: error.localizedDescription); continue
+                    }
+                    try Task.checkCancellation()
+                    guard store.sessions.contains(where: { $0 === session }) else { return }
+                    if let reply = AgentReply.decode(text) { parsed = reply; break }
+                    correction = AgentRunFailure.formatCorrection
+                }
                 if let usage { session.toolStatus.usage = usage.label }
-                guard let decoded = AgentReply.decode(text) else { throw AgentFailure.message("Agent returned an invalid action format. No actions applied; loop paused.") }
+                guard let decoded = parsed else { throw AgentFailure.message("Agent returned an invalid action format twice. No actions applied; the next check tries again.") }
                 var parkingOutcome = ""
+                // A rejected or unscoped lot edit is reported, not fatal: the reply
+                // is still delivered and the agent loop keeps running.
                 if let edits = decoded.parkingLotEdits {
-                    guard let id = edits.lotID ?? (allowedLots.count == 1 ? allowedLots[0].id : nil),
-                          let lot = ParkingLotLibrary.shared.lot(id), allowedLots.contains(where: { $0.id == id }),
-                          session.agent?.allows(local: id, home: service.localDeviceID) == true else {
-                        throw AgentFailure.message("Choose one explicitly allowed Parking Lot. No Parking Lot edits applied.")
-                    }
-                    if current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
-                        do {
-                            parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
-                                store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true
-                            })
-                        } catch is CancellationError { throw CancellationError() }
-                        catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
-                    } else {
-                        // A rejected lot edit is reported, not fatal: the reply is still
-                        // delivered and the agent loop keeps running.
-                        do { try lot.apply(edits, author: session.title) }
-                        catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
-                    }
+                    let id = edits.lotID ?? (allowedLots.count == 1 ? allowedLots[0].id : nil)
+                    if let id, let lot = ParkingLotLibrary.shared.lot(id), allowedLots.contains(where: { $0.id == id }),
+                       session.agent?.allows(local: id, home: service.localDeviceID) == true {
+                        if current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
+                            do {
+                                parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
+                                    store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true
+                                })
+                            } catch is CancellationError { throw CancellationError() }
+                            catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
+                        } else {
+                            do { try lot.apply(edits, author: session.title) }
+                            catch { parkingOutcome = "Parking Lot edits were not applied: " + error.localizedDescription + " The lot is unchanged." }
+                        }
+                    } else { parkingOutcome = "Parking Lot edits were not applied: choose one explicitly allowed Parking Lot. The lot is unchanged." }
                 }
                 session.supportPendingCommand = decoded.appControl
                 let reply: AgentReply? = decoded
@@ -305,16 +337,23 @@ enum AgentPolicy {
                         catch { session.messages.append(Message(role: "notice", text: "Status art unavailable; the measured scoreboard is still current.")) }
                     }
                     try Task.checkCancellation()
+                    // Side effects never fail a completed run: report and finish.
                     if session.agent?.discord == true, let notification = reply.notifyDiscord, !notification.isEmpty {
-                        guard session.agent?.discordChannelID == current.discordChannelID else { throw AgentFailure.message("Discord destination changed during this run. Alert was not sent.") }
-                        try await self.notifyDiscord(String(notification.prefix(1600)), from: session)
+                        do {
+                            guard session.agent?.discordChannelID == current.discordChannelID else { throw AgentFailure.message("Discord destination changed during this run.") }
+                            try await self.notifyDiscord(String(notification.prefix(1600)), from: session)
+                        } catch is CancellationError { throw CancellationError() }
+                        catch { session.messages.append(Message(role: "notice", text: "Discord alert was not sent: " + error.localizedDescription)) }
                     }
                 }
                 try Task.checkCancellation()
                 // Playback belongs exclusively to an explicitly started AgentConversation.
                 if refreshScoreboard { session.agent?.loopsSinceScoreboard = 0 }
                 else if loopTick { session.agent?.loopsSinceScoreboard = min(1000, max(0, session.agent?.loopsSinceScoreboard ?? 0) + 1) }
-                if refreshScoreboard { try AgentWidgetExport.writeSnapshot(session, store: store) }
+                if refreshScoreboard {
+                    do { try AgentWidgetExport.writeSnapshot(session, store: store) }
+                    catch { session.messages.append(Message(role: "notice", text: "Scoreboard widget was not updated: " + error.localizedDescription)) }
+                }
                 if let batch = discordBatch, session.agent?.discordRead == true, session.agent?.discordChannelID == batch.channel {
                     session.agent?.discordCursorChannel = batch.channel
                     session.agent?.discordLastMessageID = batch.newestID

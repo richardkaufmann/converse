@@ -20,31 +20,63 @@ public sealed class AgentConfig
     // Label/value pairs the current art reflects; null on older archives.
     public List<string>? ArtSignature { get; set; }
     public int LoopsSinceScoreboard { get; set; }
-    // Consecutive transient failures, and why the host last paused the loop.
+    // Consecutive transient failures, when the first of them happened, and why
+    // the host last paused the loop.
     public int? TransientFailures { get; set; }
+    public DateTime? TroubleSinceUtc { get; set; }
     public string? PauseReason { get; set; }
-    // Mirrors Sources/AgentRetry.swift: transient failures keep the loop on and
-    // retry at the next tick; the third in a row or any permanent one pauses.
-    public void RecordFailure(string message, bool transient, DateTime now)
+    // Mirrors Sources/AgentRetry.swift: only permanent failures pause. Transient
+    // and repeated model-output failures keep the loop on and bring the next
+    // check forward to the back-off deadline; from the third in a row a banner
+    // says the agent is having trouble.
+    public void RecordFailure(string message, AgentFailureKind kind, DateTime now)
     {
-        if (!Settings.Enabled) { Attention = Clip(message); PreservePause(); return; }
-        if (transient)
-        {
-            var count = Math.Min(AgentRunFailure.RetryLimit, Math.Max(0, TransientFailures ?? 0) + 1);
-            if (count < AgentRunFailure.RetryLimit) { TransientFailures = count; Attention = AgentRunFailure.RetryPrefix + message + $" ({count} of {AgentRunFailure.RetryLimit})"; return; }
-            message += $" — failed {count} times in a row";
-        }
-        Settings.Enabled = false; TransientFailures = null;
-        PauseReason = Clip("Paused: " + message + " (" + now.ToLocalTime().ToString("g") + ")"); Attention = PauseReason;
+        if (kind == AgentFailureKind.Cancelled || !Settings.Enabled) { Attention = Clip(message); PreservePause(); return; }
+        if (kind != AgentFailureKind.Permanent) { RetryLater(message, now); return; }
+        Pause(message, now);
     }
-    public void RecordSuccess() { TransientFailures = null; PreservePause(); }
+    public void RetryLater(string message, DateTime now)
+    {
+        var count = Math.Min(1_000_000, Math.Max(0, TransientFailures ?? 0) + 1);
+        TransientFailures = count;
+        var since = TroubleSinceUtc ??= now;
+        var retry = now + AgentRunFailure.Backoff(count, Settings.IntervalSeconds);
+        if (CanSchedule) NextRunUtc = NextRunUtc is { } next && next < retry ? next : retry;
+        if (count >= AgentRunFailure.TroubleAfter) Attention = AgentRunFailure.Trouble(since, message, count);
+    }
+    public void Pause(string reason, DateTime now)
+    {
+        Settings.Enabled = false; TransientFailures = null; TroubleSinceUtc = null;
+        PauseReason = Clip("Paused: " + reason + " (" + now.ToLocalTime().ToString("g") + ")"); Attention = PauseReason;
+    }
+    public bool HasTroubleBanner => Attention.StartsWith(AgentRunFailure.TroublePrefix, StringComparison.Ordinal) || Attention.StartsWith(AgentRunFailure.RetryPrefix, StringComparison.Ordinal);
+    public void RecordSuccess()
+    {
+        TransientFailures = null; TroubleSinceUtc = null;
+        if (HasTroubleBanner) Attention = "";
+        PreservePause();
+    }
+    // Pause loop / Resume loop controls. Pausing leaves a current run alone;
+    // resuming clears the pause and schedules the next check.
+    public void PauseLoop()
+    {
+        Settings.Enabled = false; NextRunUtc = null; ClearPause();
+        if (HasTroubleBanner) Attention = "";
+    }
+    public void ResumeLoop(DateTime now)
+    {
+        if (Settings.TurnLimit < 1) throw new ArgumentException("Add at least one automatic turn before resuming the loop.");
+        var next = AgentSchedule.Compile(Settings).Next(now) ?? throw new ArgumentException("No future date in this calendar. Review the schedule.");
+        if ((PauseReason is { } reason && Attention.StartsWith(reason, StringComparison.Ordinal)) || Attention.StartsWith("Agent interrupted", StringComparison.Ordinal)) Attention = "";
+        Settings.Enabled = true; ClearPause(); NextRunUtc = next;
+    }
     // Later manual or group-requested runs add to a pause reason, never hide it.
     public void PreservePause()
     {
         if (Settings.Enabled || PauseReason is not { } reason || Attention.StartsWith(reason, StringComparison.Ordinal)) return;
         Attention = Clip(Attention.Length == 0 ? reason : reason + " · " + Attention);
     }
-    public void ClearPause() { PauseReason = null; TransientFailures = null; }
+    public void ClearPause() { PauseReason = null; TransientFailures = null; TroubleSinceUtc = null; }
     private static string Clip(string text) => text[..Math.Min(text.Length, 1000)];
     public bool CanSchedule => Settings.Enabled && Settings.TurnLimit > 0;
     public void RestoreSchedule(DateTime now)
@@ -112,26 +144,64 @@ public static class AgentArtPolicy
     }
 }
 
+public enum AgentFailureKind { Transient, Model, Permanent, Cancelled }
+
+// Mirrors AgentRunFailure in Sources/AgentRetry.swift. Only problems the human
+// must fix are permanent: rejected or missing credentials (HTTP 401/403), a
+// spent turn limit or run budget, an invalid schedule or settings, and Stop.
+// Malformed model output is re-asked once in the run. Everything else,
+// including unknown errors, is transient and backs off without pausing.
 public static class AgentRunFailure
 {
-    public const int RetryLimit = 3;
+    public const int TroubleAfter = 3;
     public const string RetryPrefix = "Retrying: ";
-    // Timeouts, unreachable or lost networks and HTTP 429/5xx are transient;
-    // credentials, settings, budgets, schedules and Stop are not.
-    public static bool IsTransient(Exception e) => e switch
+    public const string TroublePrefix = "Having trouble since ";
+    public const string FormatCorrection = "Your previous reply was not one valid JSON object. Return the same answer as exactly one JSON object.";
+    public const string LengthCorrection = "Your previous reply was cut off before it finished. Return a shorter answer as exactly one JSON object.";
+    public static readonly string[] PermanentMarkers = ["http 401", "http 403", "api key", "rejected the", "denied", "bot token", "token missing", "add a ",
+        "turn limit", "run budget", "schedule/calendar", "saved schedule", "no future run", "invalid agent settings", "invalid provider selection",
+        "choose a model", "no longer enabled", "paused by stop"];
+    public static readonly string[] ModelMarkers = ["invalid action format", "stopped before completion", "response limit", "max_output_tokens",
+        "did not return a completed final response", "returned no answer", "response did not complete", "reply is missing"];
+    public static AgentFailureKind Classify(Exception e) => e switch
     {
-        AgentHttpStatusException h => h.Status == 429 || h.Status >= 500,
-        HttpRequestException => true,
-        TimeoutException => true,
-        TaskCanceledException t => t.InnerException is TimeoutException,
-        IOException => true,
-        _ => false,
+        AgentHttpStatusException h => h.Status is 401 or 403 ? AgentFailureKind.Permanent : AgentFailureKind.Transient,
+        TaskCanceledException t => t.InnerException is TimeoutException ? AgentFailureKind.Transient : AgentFailureKind.Cancelled,
+        OperationCanceledException => AgentFailureKind.Cancelled,
+        InvalidOperationException or ArgumentException => Classify(e.Message),
+        _ => AgentFailureKind.Transient,
     };
+    public static AgentFailureKind Classify(string message)
+    {
+        var text = message.ToLowerInvariant();
+        if (PermanentMarkers.Any(text.Contains)) return AgentFailureKind.Permanent;
+        if (ModelMarkers.Any(text.Contains)) return AgentFailureKind.Model;
+        return AgentFailureKind.Transient;
+    }
+    public static bool IsTransient(Exception e) => Classify(e) == AgentFailureKind.Transient;
+    public static string Correction(string message)
+    {
+        var text = message.ToLowerInvariant();
+        return text.Contains("response limit") || text.Contains("max_output_tokens") || text.Contains("stopped before completion") || text.Contains("did not complete") ? LengthCorrection : FormatCorrection;
+    }
+    // Retry n (1-based) waits 1, 2, 4, 8… minutes, capped at the loop interval.
+    public static TimeSpan Backoff(int failures, double intervalSeconds)
+    {
+        var cap = double.IsFinite(intervalSeconds) ? Math.Max(60, intervalSeconds) : 900;
+        return TimeSpan.FromSeconds(Math.Min(cap, 60 * Math.Pow(2, Math.Min(30, Math.Max(0, failures - 1)))));
+    }
+    public static string Trouble(DateTime since, string reason, int tries)
+    {
+        var text = TroublePrefix + since.ToLocalTime().ToString("g") + ": " + reason + $" — still retrying ({tries} tries)";
+        return text[..Math.Min(text.Length, 1000)];
+    }
     public static string Describe(Exception e) => e switch
     {
         AgentHttpStatusException h => $"Agent service returned HTTP {h.Status}.",
+        InvalidOperationException or ArgumentException => e.Message,
         TimeoutException or TaskCanceledException => "The request timed out.",
-        _ => "The network request failed.",
+        HttpRequestException or IOException => "The network request failed.",
+        _ => "Agent request failed. The next check tries again.",
     };
 }
 public sealed class AgentHttpStatusException(int status, bool mentionsPromptCache)
@@ -284,28 +354,45 @@ public sealed class AgentRuntime
             if (session.SupportTeachingVersion is not null) body["instructions"] = body["instructions"]!.GetValue<string>() + "\n" + AppSupportTeaching.InstructionsFor(session);
             if (!_promptCacheRejected) { body["prompt_cache_key"] = PromptCacheKey(session.Id); body["prompt_cache_retention"] = "24h"; }
             if (session.Agent?.Settings.Model != selectedModel) throw new InvalidOperationException("Model selection changed during this activation. Retry with the new selection.");
-            JsonObject root;
-            if (route is { } selected)
+            // A malformed or cut-off reply is re-asked once in this run with a
+            // short correction; a second failure is an ordinary transient one.
+            var output = new JsonArray(); JsonObject? reply = null; string? human = null;
+            var baseInstructions = body["instructions"]!.GetValue<string>();
+            for (var attempt = 0; attempt < 2 && human is null; attempt++)
             {
-                var result = await AgentCLI.RespondAsync(providerEntry!, selected.Model, body["instructions"]!.GetValue<string>(), body["input"]!.GetValue<string>(), token);
-                root = new() { ["status"] = "completed", ["output"] = new JsonArray(new JsonObject { ["type"] = "message", ["content"] = new JsonArray(new JsonObject { ["type"] = "output_text", ["text"] = result }) }) };
-            }
-            else
-            {
-                if (config.Settings.Model.StartsWith("cli|")) throw new InvalidOperationException("Invalid provider selection.");
-                try { root = await JsonAsync("https://api.meta.ai/v1/responses", body, key, token); }
-                catch (AgentHttpStatusException e) when (e.Status == 400 && e.MentionsPromptCache && body.ContainsKey("prompt_cache_key"))
+                try
                 {
-                    _promptCacheRejected = true; body.Remove("prompt_cache_key"); body.Remove("prompt_cache_retention");
-                    root = await JsonAsync("https://api.meta.ai/v1/responses", body, key, token);
+                    JsonObject root;
+                    if (route is { } selected)
+                    {
+                        var result = await AgentCLI.RespondAsync(providerEntry!, selected.Model, body["instructions"]!.GetValue<string>(), body["input"]!.GetValue<string>(), token);
+                        root = new() { ["status"] = "completed", ["output"] = new JsonArray(new JsonObject { ["type"] = "message", ["content"] = new JsonArray(new JsonObject { ["type"] = "output_text", ["text"] = result }) }) };
+                    }
+                    else
+                    {
+                        if (config.Settings.Model.StartsWith("cli|")) throw new InvalidOperationException("Invalid provider selection. Choose a model again.");
+                        try { root = await JsonAsync("https://api.meta.ai/v1/responses", body, key, token); }
+                        catch (AgentHttpStatusException e) when (e.Status == 400 && e.MentionsPromptCache && body.ContainsKey("prompt_cache_key"))
+                        {
+                            _promptCacheRejected = true; body.Remove("prompt_cache_key"); body.Remove("prompt_cache_retention");
+                            root = await JsonAsync("https://api.meta.ai/v1/responses", body, key, token);
+                        }
+                    }
+                    if (root["status"]?.GetValue<string>() != "completed")
+                        throw new InvalidOperationException(root["incomplete_details"]?["reason"]?.ToString() == "max_output_tokens" ? "Agent hit its response limit. No actions applied." : "Agent response did not complete. No actions applied.");
+                    output = root["output"] as JsonArray ?? new();
+                    var text = string.Concat(output.OfType<JsonObject>().SelectMany(o => (o["content"] as JsonArray ?? new()).OfType<JsonObject>()).Where(c => c["type"]?.GetValue<string>() == "output_text").Select(c => c["text"]?.GetValue<string>() ?? "")).Trim();
+                    if (text.StartsWith("```json\n") && text.EndsWith("\n```")) text = text[8..^4];
+                    try { reply = JsonNode.Parse(text) as JsonObject; } catch (JsonException) { reply = null; }
+                    human = reply?["reply"] is JsonValue value && value.TryGetValue<string>(out var said) ? said : null;
+                    if (human is null) throw new InvalidOperationException("Agent returned an invalid action format. No actions applied.");
+                }
+                catch (InvalidOperationException e) when (attempt == 0 && !token.IsCancellationRequested && AgentRunFailure.Classify(e) == AgentFailureKind.Model)
+                {
+                    body["instructions"] = baseInstructions + "\n\n" + AgentRunFailure.Correction(e.Message);
                 }
             }
-            if (root["status"]?.GetValue<string>() != "completed") throw new InvalidOperationException("Agent response did not complete. No actions applied; loop paused.");
-            var output = root["output"] as JsonArray ?? new();
-            var text = string.Concat(output.OfType<JsonObject>().SelectMany(o => (o["content"] as JsonArray ?? new()).OfType<JsonObject>()).Where(c => c["type"]?.GetValue<string>() == "output_text").Select(c => c["text"]?.GetValue<string>() ?? "")).Trim();
-            if (text.StartsWith("```json\n") && text.EndsWith("\n```")) text = text[8..^4];
-            var reply = JsonNode.Parse(text) as JsonObject ?? throw new InvalidOperationException("Agent returned invalid action JSON.");
-            var human = reply["reply"]?.GetValue<string>() ?? throw new InvalidOperationException("Agent reply is missing.");
+            if (reply is null || human is null) throw new InvalidOperationException("Agent returned an invalid action format. No actions applied.");
             token.ThrowIfCancellationRequested();
             config = session.Agent!; message.Text = human[..Math.Min(24000, human.Length)];
             config.Attention = Clip(reply["attention"], 1000); config.Memory = Clip(reply["memory"], 8000); config.RecordSuccess();
@@ -344,13 +431,20 @@ public sealed class AgentRuntime
                 }
             }
             else if (session.ActiveAgentLoopTick) config.LoopsSinceScoreboard++;
+            // Side effects never fail a completed run: report and finish.
             foreach (var tell in (reply["tell"] as JsonArray ?? new()).OfType<JsonObject>().Take(2))
             {
                 var target = Clip(tell["to"], 200); var content = Clip(tell["text"], 8000);
-                if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, suppliedReply: tell["inReplyTo"] is JsonValue correlation && correlation.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
+                try { if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, suppliedReply: tell["inReplyTo"] is JsonValue correlation && correlation.TryGetValue<string>(out var suppliedID) ? suppliedID : null); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception e) { session.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard: tell was not delivered: " + AgentRunFailure.Describe(e), CreatedAt = DateTime.UtcNow }); }
             }
             if (reply["appControl"] is JsonObject operation && _store.AppSupportRequest is { } handler)
-                await handler(session, operation);
+            {
+                try { await handler(session, operation); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception e) { session.Messages.Add(new ChatMessage { Role = "notice", Text = "App action did not complete: " + AgentRunFailure.Describe(e), CreatedAt = DateTime.UtcNow }); }
+            }
             session.Status = "Ready";
         }
         catch (Exception e)
@@ -358,9 +452,10 @@ public sealed class AgentRuntime
             if (!_stopping)
             {
                 if (e is OperationCanceledException && token.IsCancellationRequested) { config.Settings.Enabled = false; config.Attention = "Agent interrupted; loop paused."; }
-                else if (AgentRunFailure.IsTransient(e)) config.RecordFailure(AgentRunFailure.Describe(e), true, DateTime.UtcNow);
-                else config.RecordFailure(e is InvalidOperationException or ArgumentException ? e.Message : "Agent request failed. Check network and settings; loop paused.", false, DateTime.UtcNow);
-                message.Text = config.Attention; session.Status = "Needs attention";
+                else config.RecordFailure(AgentRunFailure.Describe(e), AgentRunFailure.Classify(e), DateTime.UtcNow);
+                // A quiet retry (before the trouble banner) still explains itself.
+                message.Text = config.Attention.Length > 0 ? config.Attention : AgentRunFailure.RetryPrefix + AgentRunFailure.Describe(e);
+                session.Status = config.Attention.Length > 0 ? "Needs attention" : "Ready";
             }
         }
         finally

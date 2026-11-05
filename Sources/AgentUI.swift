@@ -270,11 +270,16 @@ struct AgentControls: View {
             TimelineView(.periodic(from: .now, by: 5)) { context in
                 HStack(spacing: 8) {
                     ConversationActivity(busy: session.busy, status: "Agent thinking", waiting: false)
-                    Text(session.busy ? "Thinking now" : "Idle").fontWeight(.semibold)
-                    Text(session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
-                        .foregroundStyle(.secondary).lineLimit(1)
-                        .help((session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off")
-                              + (session.agent.map { "\n" + $0.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) } ?? ""))
+                    let loop = session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off"
+                    StatusMenu(help: loop + (session.agent.map { "\n" + $0.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) } ?? "")
+                               + "\nClick to pause or resume the loop, stop this run or run once.") {
+                        AgentRunControls(session: session, runOnce: true)
+                    } label: { hovering in
+                        HStack(spacing: 8) {
+                            Text(session.interrupted ? "Stopping…" : session.busy ? "Thinking now" : "Idle").fontWeight(.semibold).underline(hovering)
+                            Text(loop).foregroundStyle(.secondary).lineLimit(1).underline(hovering)
+                        }
+                    }
                     Spacer(minLength: 0)
                 }.font(.caption)
             }
@@ -301,6 +306,8 @@ struct AgentControls: View {
                     }
                 } }.frame(maxWidth: .infinity)
                 Menu {
+                    AgentRunControls(session: session, runOnce: false)
+                    Divider()
                     Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }
                         .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
@@ -317,7 +324,7 @@ struct AgentControls: View {
                     Button("Dictate…") { conversation.stop(); dictating = true }
                 } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                    .help("Agent actions: setup, loop, run once, scoreboard and voice")
+                    .help("Agent actions: pause, resume or stop; setup, loop, run once, scoreboard and voice")
                     .accessibilityLabel("Agent actions")
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
                     .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
@@ -336,6 +343,74 @@ struct AgentControls: View {
                 if conversation.sessionID == old { conversation.stop() }
             }
             .onDisappear { if conversation.owns(session) { conversation.stop() } }
+    }
+}
+
+// Pause/Resume loop and Stop current run, shared by the … menu and the
+// clickable footer status.
+struct AgentRunControls: View {
+    @ObservedObject var session: Session
+    var runOnce: Bool
+    var body: some View {
+        if session.agent?.enabled == true {
+            Button("Pause loop") { Store.shared.pauseAgentLoop(session) }
+                .help("Stop automatic checks. A run in progress finishes.")
+        } else {
+            Button("Resume loop") { Store.shared.resumeAgentLoop(session) }
+                .disabled((session.agent?.turnLimit ?? 0) == 0)
+                .help("Clear the pause and schedule the next check")
+        }
+        if session.busy {
+            Button("Stop current run") { Store.shared.stopAgentRun(session) }
+                .disabled(session.interrupted)
+                .help("Cancel this run only; the loop stays on unless paused")
+        }
+        if runOnce {
+            Button("Run once") { Store.shared.queueAgentRun(session) }
+                .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
+        }
+        if !session.pending.isEmpty {
+            Button(session.queuePaused ? "Resume queue" : "Pause queue") { Store.shared.toggleQueue(session) }
+        }
+    }
+}
+
+// Footer status text that opens a small control menu. It underlines and
+// shows a pointing hand on hover so it reads as clickable.
+struct StatusMenu<Content: View, Label: View>: View {
+    var help: String
+    var fixed = true
+    @ViewBuilder var content: () -> Content
+    @ViewBuilder var label: (Bool) -> Label
+    @State private var hovering = false
+    var body: some View {
+        Menu { content() } label: { label(hovering).contentShape(Rectangle()) }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize(horizontal: fixed, vertical: true)
+            .onHover { inside in
+                hovering = inside
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .help(help)
+    }
+}
+
+// An ordinary session's footer status: Stop interrupts the current turn,
+// as the Stop button does; the queue can be paused or resumed.
+struct SessionStatusMenu: View {
+    @ObservedObject var session: Session
+    var compact: Bool
+    var body: some View {
+        StatusMenu(help: session.status + "\nClick to stop this turn" + (session.pending.isEmpty ? "" : " or pause the queue"), fixed: !compact) {
+            Button("Stop") { Store.shared.stop(session) }
+                .disabled(!session.busy && session.claudeLive == nil)
+                .help("Interrupt the current turn; queued messages wait")
+            if !session.pending.isEmpty {
+                Button(session.queuePaused ? "Resume queue" : "Pause queue") { Store.shared.toggleQueue(session) }
+            }
+        } label: { hovering in
+            Text(session.status).foregroundStyle(StatusTint.status(session)).underline(hovering)
+                .lineLimit(1).truncationMode(.tail)
+        }
     }
 }
 
@@ -360,7 +435,7 @@ struct AgentLoopOptions: View {
             Stepper("Maximum turns per loop: \(turns)", value: $turns, in: 1...1000)
             Text("A fresh ceiling for each activation. Checks currently use one model response; future scheduled checks are not spent.").font(.caption).foregroundStyle(.secondary)
             Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
-            Text("Run once refreshes the scoreboard immediately. Artwork keeps its objective or Setup limits. Loops run while Converse is open on this agent’s home. Network hiccups retry; repeated or setup errors pause the loop.").font(.caption).foregroundStyle(.secondary)
+            Text("Run once refreshes the scoreboard immediately. Artwork keeps its objective or Setup limits. Loops run while Converse is open on this agent’s home. Hiccups retry with back-off and never pause the loop; only problems you must fix, such as a rejected key, pause it.").font(.caption).foregroundStyle(.secondary)
             if session.queuePaused && !session.pending.isEmpty { Text("Held messages require Resume queue before the loop can continue.").font(.caption).foregroundStyle(.orange) }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
