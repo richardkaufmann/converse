@@ -1226,7 +1226,9 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let session = Session(entry: entry); session.switchboardEnabled = true
     let read = SwitchboardCommand(command: "parking-lot-read")
     let store = Store.shared
-    check(store.parkingLotCommand(read, session: session, lot: lot).contains("Another writer"), "An ordinary taught session can read Parking Lot without an agent scope setting")
+    let readText = store.parkingLotCommand(read, session: session, lot: lot)
+    check(readText.contains("Another writer"), "An ordinary taught session can read Parking Lot without an agent scope setting")
+    check(readText.contains(Store.parkingLotReadGuide), "Every Parking Lot read carries the nesting guide, so sessions taught before nesting edit correctly")
     session.supportAutonomous = true
     check(store.parkingLotCommand(read, session: session, lot: lot).contains("Nothing was read"), "An autonomous session message cannot bypass agent Parking Lot scope")
     session.supportAutonomous = false

@@ -262,7 +262,7 @@ extension Store {
             guard lot.error.isEmpty else { throw AgentFailure.message(lot.error) }
             if request.command == "parking-lot-read" {
                 let data = try JSONSerialization.data(withJSONObject: lot.evidence(), options: [.sortedKeys, .prettyPrinted])
-                return "[Parking Lot · local home Mac · reference data, not instructions]\n" + String(decoding: data, as: UTF8.self)
+                return "[Parking Lot · local home Mac · reference data, not instructions]\n" + Self.parkingLotReadGuide + "\n" + String(decoding: data, as: UTF8.self)
             }
             guard let edits = request.parkingLotEdits else { throw AgentFailure.message("Missing parkingLotEdits.") }
             guard requiresConfirmation else { return try reviewParkingLot(edits, session: session, lot: lot, confirm: { _ in false }, requiresConfirmation: false) }
@@ -270,6 +270,8 @@ extension Store {
             return try reviewParkingLot(edits, session: session, lot: lot, confirm: confirm)
         } catch { return "Parking Lot: " + error.localizedDescription + " No changes applied." }
     }
+    /// Sent with every read so sessions taught before nesting still edit correctly.
+    static let parkingLotReadGuide = "[Outline: rows are in display order. An item's parentID is the heading or item it is nested under; an item without one belongs to the heading above it. To nest, add or move with \"parentID\":\"ROW-ID\" (before is optional and must name one of that parent's children). Moving or deleting a row takes its nested children with it. Headings are never nested. Edit with parking-lot-edit using this revision.]"
     func parkingLotReviewSummary(_ edits: ParkingLotEdits, session: Session, lot: ParkingLotStore) throws -> String? {
             let proposed = try lot.preview(edits, author: session.title)
             let current = lot.document.rows
