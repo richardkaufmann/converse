@@ -119,6 +119,12 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
         document["rows"] = rows; lotsJSON[0]["document"] = document; object["parkingLots"] = lotsJSON
         let future = try? ConverseExchange.decode(JSONSerialization.data(withJSONObject: object))
         check(future?.document.parkingLots.first?.document.rows.map(\.id) == [heading.id, item.id], "Lot rows with future fields (parent ID, sibling order) still import with the store's own decoder")
+        var lotV2 = lotsJSON; var docV2 = document; docV2["schemaVersion"] = 2; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
+        do { _ = try ConverseExchange.decode(JSONSerialization.data(withJSONObject: object)); check(false, "Newer Parking Lot schema rejected") }
+        catch { check(error.localizedDescription.contains("newer Parking Lot format"), "A lot with a newer schemaVersion is refused instead of dropping its fields") }
+        docV2["schemaVersion"] = 1; lotV2[0]["document"] = docV2; object["parkingLots"] = lotV2
+        check((try? ConverseExchange.decode(JSONSerialization.data(withJSONObject: object))) != nil, "schemaVersion 1 lots import")
+        object["parkingLots"] = lotsJSON
         object["version"] = 2
         do { _ = try ConverseExchange.decode(JSONSerialization.data(withJSONObject: object)); check(false, "Newer version rejected") }
         catch { check(error.localizedDescription.contains("newer version of Converse"), "A newer export version is rejected with an update message") }
@@ -168,10 +174,34 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
     check(!selection.scrub && selection.exportsImages, "HTML export starts unscrubbed with images")
     selection.format = .converse
     check(selection.scrub && !selection.exportsImages && TranscriptExportFormat.converse.fileName("Shared.html") == "Shared.converse", "The Converse format scrubs by default and leaves images out unless included")
-    selection.includeImages = true
+    selection.includeImages = true; selection.imagesChosen = true
     check(selection.exportsImages, "Include images (not scrubbed) puts images back")
     selection.scrub = false; selection.scrubChosen = true; selection.format = .html; selection.format = .converse
     check(!selection.scrub, "A deliberate scrub choice survives format changes")
+    selection.format = .text
+    check(!selection.exportsImages, "Text exports never carry images")
+    let plain = TranscriptExportSelection(sessions: [ExportSession(chat)])
+    plain.includeImages = false; plain.imagesChosen = true
+    check(!plain.exportsImages, "Include images can be turned off for an unscrubbed HTML export")
+
+    // Date range: only messages sent inside the window; untimed messages are left out; lots stay whole.
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    let timed = Session(entry: Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
+    timed.messages = [Message(role: "user", text: "early", createdAt: base),
+                      Message(role: "assistant", text: "middle", createdAt: base.addingTimeInterval(3600)),
+                      Message(role: "user", text: "untimed", createdAt: nil),
+                      Message(role: "assistant", text: "late", createdAt: base.addingTimeInterval(7200))]
+    let ranged = TranscriptExportSelection(sessions: [ExportSession(timed)])
+    check(ranged.windowed(ExportSession(timed)).messages.count == 4, "Without a date range every message is exported")
+    ranged.limitDates = true; ranged.startDate = base.addingTimeInterval(1800); ranged.endDate = base.addingTimeInterval(5400)
+    check(ranged.windowed(ExportSession(timed)).messages.map(\.text) == ["middle"], "A date range keeps only messages inside it and drops untimed ones")
+    ranged.startDate = base; ranged.endDate = base.addingTimeInterval(7200)
+    check(ranged.windowed(ExportSession(timed)).messages.map(\.text) == ["early", "middle", "late"], "Date range bounds are inclusive")
+    ranged.endDate = base.addingTimeInterval(-60)
+    check(!ranged.validDateRange, "A start after the end is invalid")
+    var lotSession = ExportSession(timed); lotSession.isParkingLot = true
+    ranged.endDate = base.addingTimeInterval(1)
+    check(ranged.windowed(lotSession).messages.count == 4, "Parking Lots are exported whole, whatever the date range")
 }
 
 func exportScrubberSelfTests(_ check: (Bool, String) -> Void) {

@@ -63,12 +63,30 @@ final class TranscriptExportSelection: ObservableObject {
     @Published var lineNumbers = true
     @Published var format = TranscriptExportFormat.html { didSet { if format != oldValue && !scrubChosen { scrub = format == .converse } } }
     // Default on for the shareable Converse format; a deliberate choice sticks.
-    @Published var scrub = false
+    @Published var scrub = false { didSet { if scrub != oldValue && !imagesChosen { includeImages = !scrub } } }
     var scrubChosen = false
-    @Published var includeImages = false
+    /// Images cannot be inspected, so scrubbing turns them off unless the user
+    /// deliberately includes them.
+    @Published var includeImages = true
+    var imagesChosen = false
+    /// Optional time window. Untimed (older) messages are left out when it is on;
+    /// Parking Lots have no row times and are always exported whole.
+    @Published var limitDates = false
+    @Published var startDate = Calendar.current.date(byAdding: .day, value: -7, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+    @Published var endDate = Date()
     init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
-    /// Images cannot be inspected, so scrubbing leaves them out unless asked.
-    var exportsImages: Bool { !scrub || includeImages }
+    var exportsImages: Bool { includeImages && format != .text }
+    var validDateRange: Bool { !limitDates || startDate < endDate }
+    func inRange(_ message: Message) -> Bool {
+        guard limitDates else { return true }
+        guard let time = message.createdAt else { return false }
+        return time >= startDate && time <= endDate
+    }
+    /// The session as it will be exported: messages outside the date range removed.
+    func windowed(_ session: ExportSession) -> ExportSession {
+        guard limitDates, !session.isParkingLot else { return session }
+        var copy = session; copy.messages = session.messages.filter(inRange); return copy
+    }
     var chosen: [ExportSession] { sessions.filter { selected.contains($0.id) } }
     var selectionState: NSControl.StateValue {
         let count = chosen.count
@@ -144,8 +162,19 @@ struct TranscriptExportOptionsView: View {
             HStack(spacing: 16) {
                 Toggle("Remove secrets and personal info", isOn: Binding(get: { selection.scrub }, set: { selection.scrub = $0; selection.scrubChosen = true }))
                     .help("Best-effort: replaces keys, tokens, passwords, email addresses, phone numbers, IP addresses, your name, home folder and this Group’s device names with placeholders such as [email 1].")
-                Toggle("Include images (not scrubbed)", isOn: $selection.includeImages).disabled(!selection.scrub || selection.format == .text)
-                    .help("Images can’t be checked for private details. Leave this off unless you have looked at them.")
+                Toggle(selection.scrub ? "Include images (not scrubbed)" : "Include images", isOn: Binding(get: { selection.includeImages }, set: { selection.includeImages = $0; selection.imagesChosen = true }))
+                    .disabled(selection.format == .text)
+                    .help(selection.format == .text ? "Text exports list images by filename only." : selection.scrub ? "Images can’t be checked for private details. Leave this off unless you have looked at them." : "Embed pasted and generated images in the export.")
+            }
+            HStack(spacing: 8) {
+                Toggle("Only messages from", isOn: $selection.limitDates)
+                    .help("Export only messages sent in this window. Older messages without a recorded time are left out; Parking Lots are always exported whole.")
+                DatePicker("Start", selection: $selection.startDate, displayedComponents: [.date, .hourAndMinute]).labelsHidden().disabled(!selection.limitDates)
+                Text("to").foregroundStyle(.secondary)
+                DatePicker("End", selection: $selection.endDate, displayedComponents: [.date, .hourAndMinute]).labelsHidden().disabled(!selection.limitDates)
+            }
+            if !selection.validDateRange {
+                Text("The start must be before the end.").font(.caption).foregroundStyle(.red)
             }
             Text(caption).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if selection.order == .interleaved && selection.format != .converse && selection.includesUntimedMessages {
@@ -176,7 +205,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         let view = NSHostingView(rootView: TranscriptExportOptionsView(selection: selection))
-        view.frame = NSRect(x: 0, y: 0, width: 510, height: 470)
+        view.frame = NSRect(x: 0, y: 0, width: 510, height: 510)
         panel.accessoryView = view
         panel.delegate = self
         formatObserver = selection.$format.removeDuplicates().sink { [weak self] format in
@@ -198,8 +227,8 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                 var sessions: [ExportSession] = [], images: [String: Data] = [:]
                 let withImages = selection.exportsImages
                 for chosen in selection.chosen {
-                    let loaded = try await Self.load(chosen, includeImages: selection.format != .text && withImages)
-                    sessions.append(loaded.0); images.merge(loaded.1) { old, _ in old }
+                    let loaded = try await Self.load(chosen, includeImages: withImages)
+                    sessions.append(selection.windowed(loaded.0)); images.merge(loaded.1) { old, _ in old }
                 }
                 var scrubber = selection.scrub ? ExportScrubber(context: .current) : nil
                 let document: Data
@@ -231,7 +260,8 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     }
     func panel(_ sender: Any, validate url: URL) throws {
         guard !selection.selected.isEmpty else { throw TranscriptExport.error("Select at least one session to export.") }
-        guard selection.chosen.contains(where: { $0.remoteID != nil || $0.isParkingLot || $0.messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || (!$0.images.isEmpty && selection.exportsImages)) } }) else {
+        guard selection.validDateRange else { throw TranscriptExport.error("Choose a start date and time before the end.") }
+        guard selection.chosen.contains(where: { $0.remoteID != nil || $0.isParkingLot || selection.windowed($0).messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || (!$0.images.isEmpty && selection.exportsImages)) } }) else {
             throw TranscriptExport.error("There are no submitted messages matching these options.")
         }
     }

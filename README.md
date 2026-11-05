@@ -201,7 +201,7 @@ Both **Describe image** and **Find Segments** require a **Meta API key** (a cred
 
 ## Export transcripts
 
-On Mac, choose **File → Export…** and select one or more sessions. Choose prompts, responses or both, and whether to place sessions one after another or interleave them by message time.
+On Mac, choose **File → Export…** and select one or more sessions. Choose prompts, responses or both, and whether to place sessions one after another or interleave them by message time. Turn on **Only messages from** to export just a window of time, say last Tuesday's design session, by picking a start and end date and time. Older messages without a recorded time are left out when you do; Parking Lots are always exported whole. **Include images** decides whether pasted and generated images come along (HTML and Converse formats).
 
 **HTML** makes one portable document with formatting and embedded images; open it in a browser to read or print. **Text** preserves Markdown and lists attachment filenames. Exports exclude unsent drafts, account configuration and hidden tool activity. Check the content before sharing it.
 
