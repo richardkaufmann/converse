@@ -117,6 +117,16 @@ func importRestoreSelfTests(_ check: (Bool, String) -> Void) {
     _ = target.useImportProvider(withNote, engine: "codex", accountID: codexLogin.id)
     check(withNote.draft == "Rewritten by hand", "A catch-up block the human edited or deleted is left alone")
 
+    // A failed first send puts the catch-up message back in the draft.
+    let workingCommand = withNote.entry.command
+    withNote.draft = generated + RestoreContext.separator + "First try"; withNote.attachments = []
+    let firstTry = withNote.draft
+    withNote.entry.command = "/usr/bin/false"
+    target.submit(withNote); wait { !withNote.busy }
+    check(withNote.draft == firstTry && withNote.restoreContext == generated && withNote.messages.contains { $0.role == "notice" && $0.text.contains("catch-up message is back in your draft") },
+          "A failed first send puts the catch-up message back in the draft")
+    withNote.entry.command = workingCommand; withNote.queuePaused = false
+
     // Return sends the draft as typed; no hidden preface rides along.
     withNote.draft = generated + RestoreContext.separator + "What next?"; withNote.attachments = []
     let typed = withNote.draft
