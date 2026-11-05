@@ -157,7 +157,7 @@ struct ParkingOutline {
             guard overlap.length > 0 else { return nil }
             let text = (string as NSString).substring(with: overlap).replacingOccurrences(of: "\u{2028}", with: "\n")
             let indent = String(repeating: "  ", count: max(0, entry.depth - 1))
-            return (overlap.location == entry.range.location ? (entry.row.heading ? "# " : indent + "\(entry.number). ") : "") + text
+            return (overlap.location == entry.range.location ? (entry.row.heading ? "# " : indent + ParkingLotTree.label(entry.number, depth: entry.depth) + ". ") : "") + text
         }.joined(separator: "\n")
     }
 }
@@ -778,8 +778,11 @@ final class ParkingOutlineText: NSTextView {
             }
             guard rect.intersects(dirtyRect) else { continue }
             let offset = CGFloat(max(0, entry.depth - 1)) * 20
-            let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : "\(entry.number)."
-            (marker as NSString).draw(at: NSPoint(x: 12 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor])
+            let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
+            let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]
+            // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
+            let markerX = entry.row.heading ? 12 + offset : max(2, 32 + offset - (marker as NSString).size(withAttributes: markerAttributes).width)
+            (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
             if entry.hasChildren && !entry.row.heading {
                 let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
                 (disclosure as NSString).draw(at: NSPoint(x: 2 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor])

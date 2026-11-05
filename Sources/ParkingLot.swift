@@ -44,6 +44,28 @@ struct ParkingLotDocument: Codable, Equatable {
 enum ParkingLotTree {
     struct Node { let parentID: UUID?; let depth: Int }
     static let maximumDepth = 8
+    /// Outline labels by level: 1, 2, 3 → a, b, c → i, ii, iii, then repeat.
+    static func label(_ number: Int, depth: Int) -> String {
+        let n = max(1, number)
+        switch (max(1, depth) - 1) % 3 {
+        case 1: return letters(n)
+        case 2: return roman(n)
+        default: return String(n)
+        }
+    }
+    /// a…z, then aa, ab… (like spreadsheet columns).
+    static func letters(_ number: Int) -> String {
+        var n = number, result = ""
+        while n > 0 { n -= 1; result = String(UnicodeScalar(UInt8(97 + n % 26))) + result; n /= 26 }
+        return result
+    }
+    static func roman(_ number: Int) -> String {
+        guard number < 4000 else { return String(number) }
+        let table: [(Int, String)] = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")]
+        var n = number, result = ""
+        for (value, symbol) in table { while n >= value { result += symbol; n -= value } }
+        return result
+    }
     static func nodes(_ rows: [ParkingLotRow]) throws -> [UUID: Node] {
         var result: [UUID: Node] = [:]
         var path: [UUID] = []
@@ -214,7 +236,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             copy.images = nil
             var text = Self.markdown([copy])
             if !row.heading {
-                if text.hasPrefix("1. ") { text = "\(counts[parent] ?? 1). " + text.dropFirst(3) }
+                if text.hasPrefix("1. ") { text = ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". " + text.dropFirst(3) }
                 let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
                 text = indent + text.replacingOccurrences(of: "\n   ", with: "\n" + indent + "   ")
             }
@@ -327,7 +349,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             if !row.heading { counts[parent, default: 0] += 1 }
             let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
             let continuation = "\n" + indent + "   "
-            let line = (row.heading ? "# " : indent + "\(counts[parent] ?? 1). ") + (row.isDone ? "[Done] " : "") + row.text.replacingOccurrences(of: "\n", with: continuation)
+            let line = (row.heading ? "# " : indent + ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + row.text.replacingOccurrences(of: "\n", with: continuation)
             return line + (row.images ?? []).map { continuation + "[Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { continuation + "> " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: continuation + "> ") }.joined()
         }.joined(separator: "\n")
     }
@@ -629,6 +651,9 @@ private struct ParkingLotFrames: PreferenceKey {
 }
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
+    check((1...3).map { ParkingLotTree.label($0, depth: 1) } == ["1", "2", "3"] && (1...3).map { ParkingLotTree.label($0, depth: 2) } == ["a", "b", "c"]
+          && [1, 2, 3, 4, 9, 14].map { ParkingLotTree.label($0, depth: 3) } == ["i", "ii", "iii", "iv", "ix", "xiv"] && ParkingLotTree.label(2, depth: 4) == "2"
+          && ParkingLotTree.letters(27) == "aa" && ParkingLotTree.letters(26) == "z", "Outline labels go 1, a, i by level, then repeat")
     parkingOutlineSelfTests(check)
     parkingLinkEditorSelfTests(check)
     parkingLibrarySelfTests(check)
