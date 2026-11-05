@@ -329,6 +329,8 @@ Credentials go in the app’s masked fields or the connector’s authentication 
 
 Monitoring does not submit issues or push code. To report a Converse bug, use [Report a bug](#report-a-bug): that separate workflow targets `richardkaufmann/converse`, requires issue-writing permission for direct submission, and lets you review the exact report. A token for your own repository does not automatically grant access to Converse. Coding sessions use their own Git/CLI authentication. Automatic GitHub-to-Parking-Lot synchronization is planned, not available yet.
 
+If you use Home Assistant, the optional [Converse GitHub metrics bridge](integrations/home-assistant/README.md) creates a native dashboard for releases, issues, traffic and optional Discord counts. It is configured for your own repository and Home Assistant, with credentials kept out of the repository.
+
 ## Jolly (Mac)
 
 **Connect the Meta Muse iPhone app** means letting Meta's phone assistant, Jolly, send requests to allowed Converse agents on your Mac. For example: “Ask Project Steward what is blocking the release,” or “Ask Converse whether the app is up.” General app-health questions route to an allowed Converse App Support agent, which can report the app's state and the connected devices it knows about. If Jolly addresses one agent but the request names another (“summarize the KAOS Parking Lot” sent to Converse Steward), Converse sends nothing and tells Jolly which agent to ask instead.
