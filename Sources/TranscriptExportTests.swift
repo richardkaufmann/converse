@@ -26,6 +26,50 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
     let roundTrip = try! JSONDecoder().decode(Message.self, from: JSONEncoder().encode(first.messages[0]))
     check(legacy.createdAt == nil && roundTrip.createdAt == later, "Message dates persist without inventing dates for legacy archives")
     let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1kAAAAASUVORK5CYII=")!
+    // Hold actual preparation at its image loader until a main-queue callback
+    // runs. This catches accidental main-actor inheritance, without relying on
+    // a machine-speed threshold for regex/JSON work.
+    var prepared: ConverseExportPreparation.Output?, preparationError: Error?
+    var finished = false, mainResponded = false
+    let preparing = Task { @MainActor in
+        do {
+            prepared = try await ConverseExportPreparation.prepare(sessions: sessions, content: .both,
+                context: ExportScrubber.Context(), includeImages: true, images: [:],
+                attachmentRoot: Store.shared.folder.appendingPathComponent("Attachments"), app: .current,
+                imageData: { _ in
+                    let gate = DispatchSemaphore(value: 0)
+                    DispatchQueue.main.async { mainResponded = true; gate.signal() }
+                    return gate.wait(timeout: .now() + 2) == .success ? png : nil
+                })
+        } catch { preparationError = error }
+        finished = true
+    }
+    let preparationDeadline = Date().addingTimeInterval(10)
+    while !finished && Date() < preparationDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    preparing.cancel()
+    let package = prepared.flatMap { try? ConverseExchange.decode($0.data) }
+    check(finished && preparationError == nil && mainResponded && package?.document.sessions.count == 2 && package?.document.attachments.count == 1,
+          "Converse export prepares scrubbed sessions and attachments while the main queue remains responsive")
+    var cancellationFinished = false, cancelled = false
+    var cancelling: Task<Void, Never>?
+    cancelling = Task { @MainActor in
+        do {
+            _ = try await ConverseExportPreparation.prepare(sessions: sessions, content: .both, context: nil,
+                includeImages: true, images: [:], attachmentRoot: Store.shared.folder, app: .current,
+                imageData: { _ in
+                    let gate = DispatchSemaphore(value: 0)
+                    DispatchQueue.main.async { cancelling?.cancel(); gate.signal() }
+                    _ = gate.wait(timeout: .now() + 2)
+                    return png
+                })
+        } catch is CancellationError { cancelled = true }
+        catch { }
+        cancellationFinished = true
+    }
+    let cancellationDeadline = Date().addingTimeInterval(10)
+    while !cancellationFinished && Date() < cancellationDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    cancelling?.cancel()
+    check(cancellationFinished && cancelled, "Cancelling a Converse export interrupts background preparation and returns no document")
     do {
         let plain = try TranscriptExport.text(sessions: sessions, order: .interleaved, content: .responses)
         check(plain.contains("**Bold**") && plain.contains("[Attached image: fixture.png]") && plain.contains("Time unavailable") && !plain.contains("Prompt beta") && !plain.contains("<article") && !plain.contains("class=\"ln\"") && !plain.contains("DO NOT EXPORT"), "Text export preserves original Markdown and image labels with no HTML, generated line numbers, prompts or private drafts")

@@ -197,10 +197,32 @@ struct TranscriptExportOptionsView: View {
     }
 }
 
+/// All live app state is captured by the caller. The worker owns its scrubber,
+/// reads only attachment files, and returns bytes for the main-thread review.
+enum ConverseExportPreparation {
+    struct Output { let data: Data; let scrubber: ExportScrubber? }
+    static func prepare(sessions: [ExportSession], content: TranscriptExportContent, context: ExportScrubber.Context?,
+                        includeImages: Bool, images: [String: Data], attachmentRoot: URL, app: ConverseExchange.App,
+                        imageData: ((String) -> Data?)? = nil) async throws -> Output {
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .userInitiated) {
+            var scrubber = context.map { ExportScrubber(context: $0) }
+            let data = try ConverseExchange.export(sessions, content: content, scrubber: &scrubber, includeImages: includeImages,
+                imageData: { path in images[path] ?? (imageData?(path) ?? TranscriptExportController.imageData(path, attachmentRoot: attachmentRoot)) },
+                app: app, checkCancellation: { try Task.checkCancellation() })
+            return Output(data: data, scrubber: scrubber)
+        }
+        return try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+    }
+}
+
 final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     let selection: TranscriptExportSelection
     let panel = NSSavePanel()
     private var formatObserver: AnyCancellable?
+    private var exportTask: Task<Void, Never>?
+    private var progressPanel: NSPanel?
+    func showActivePanel() { (progressPanel ?? panel).makeKeyAndOrderFront(nil) }
     var completed: (() -> Void)?
     init(sessions: [ExportSession]) { selection = TranscriptExportSelection(sessions: sessions); super.init() }
     func show(for window: NSWindow?) {
@@ -221,12 +243,18 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         }
         let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
             guard response == .OK, let url = panel.url else { completed?(); return }
-            Task { @MainActor in
-            defer { completed?() }
-            let progress = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 90), styleMask: [.titled], backing: .buffered, defer: false)
+            exportTask = Task { @MainActor in
+            defer { exportTask = nil; progressPanel = nil; completed?() }
+            let progress = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
+            progressPanel = progress
             progress.isReleasedWhenClosed = false
             progress.title = "Exporting conversations"
-            progress.contentView = NSHostingView(rootView: ProgressView("Reading selected transcripts and images…").padding())
+            progress.contentView = NSHostingView(rootView: VStack(spacing: 12) {
+                ProgressView("Preparing selected conversations…")
+                if selection.format == .converse {
+                    Button("Cancel") { self.exportTask?.cancel() }
+                }
+            }.padding())
             progress.center(); progress.makeKeyAndOrderFront(nil)
             defer { progress.close() }
             do {
@@ -240,6 +268,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                     progress.makeKeyAndOrderFront(nil)
                 }
                 for chosen in selection.chosen {
+                    try Task.checkCancellation()
                     var loaded = try await Self.load(chosen, includeImages: withImages)
                     loaded.0.handoff = notes[chosen.id]
                     sessions.append(selection.windowed(loaded.0)); images.merge(loaded.1) { old, _ in old }
@@ -248,7 +277,10 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                 let document: Data
                 switch selection.format {
                 case .converse:
-                    document = try ConverseExchange.export(sessions, content: selection.content, scrubber: &scrubber, includeImages: withImages, imageData: { images[$0] ?? Self.imageData($0) })
+                    let prepared = try await ConverseExportPreparation.prepare(sessions: sessions, content: selection.content,
+                        context: scrubber?.context, includeImages: withImages, images: images,
+                        attachmentRoot: Store.shared.folder.appendingPathComponent("Attachments"), app: .current)
+                    document = prepared.data; scrubber = prepared.scrubber
                 case .html, .text:
                     if var active = scrubber { sessions = sessions.map { $0.scrubbed(&active, includeImages: withImages) }; scrubber = active }
                     let text = selection.format == .html
@@ -256,6 +288,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                         : try TranscriptExport.text(sessions: sessions, order: selection.order, content: selection.content)
                     document = Data(text.utf8)
                 }
+                try Task.checkCancellation()
                 if let scrubber {
                     progress.orderOut(nil)
                     let review = NSAlert(); review.messageText = "Review before sharing"
@@ -263,9 +296,18 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                     review.addButton(withTitle: "Save"); review.addButton(withTitle: "Cancel")
                     guard review.runModal() == .alertFirstButtonReturn else { return }
                 }
-                try document.write(to: url, options: .atomic)
+                if selection.format == .converse {
+                    // Review is complete. Keep file I/O off the UI thread too.
+                    // The atomic write is the commit point; cancellation is
+                    // available during preparation, not after Save was accepted.
+                    progress.contentView = NSHostingView(rootView: ProgressView("Saving export…").padding())
+                    progress.makeKeyAndOrderFront(nil)
+                    try await Task.detached(priority: .userInitiated) { try document.write(to: url, options: .atomic) }.value
+                } else { try document.write(to: url, options: .atomic) }
                 progress.orderOut(nil)
                 NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch is CancellationError {
+                // Cancel before review never creates or replaces the chosen file.
             } catch {
                 let alert = NSAlert(); alert.messageText = "Could not export conversations"; alert.informativeText = error.localizedDescription; alert.runModal()
             }
@@ -323,7 +365,9 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         guard let id = session.remoteID, let global = DeviceGlobalID(id) else { return (session, [:]) }
         var q = DeviceExportRequest(), messages: [DeviceWireMessage] = []
         while true {
+            try Task.checkCancellation()
             let response = await service.requestParticipant(home: global.home, action: "session.export", target: id, exportRequest: q)
+            try Task.checkCancellation()
             guard response.outcome == "completed", response.target == id, let page = response.exportPage,
                   page.offset == messages.count, page.total >= messages.count, page.total <= 1_000_000,
                   q.fingerprint == nil || q.fingerprint == page.fingerprint,
@@ -338,6 +382,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             for hash in Set(messages.flatMap(\.imageHashes)).sorted() {
                 var data = Data(), total: Int?
                 while total == nil || data.count < total! {
+                    try Task.checkCancellation()
                     let response = await service.requestParticipant(home: global.home, action: "session.export", target: id, exportRequest: DeviceExportRequest(offset: data.count, imageHash: hash))
                     guard response.outcome == "completed", response.target == id, let chunk = response.exportImage, let size = response.exportImageTotal,
                           size > 0, size <= 25_000_000, total == nil || total == size, !chunk.isEmpty, chunk.count <= 262144, data.count + chunk.count <= size else { throw TranscriptExport.error(session.title + ": could not export an attached image. " + response.detail) }
@@ -352,8 +397,11 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         return (result, images)
     }
     static func imageData(_ path: String) -> Data? {
+        imageData(path, attachmentRoot: Store.shared.folder.appendingPathComponent("Attachments"))
+    }
+    static func imageData(_ path: String, attachmentRoot: URL) -> Data? {
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        let root = Store.shared.folder.appendingPathComponent("Attachments").resolvingSymlinksInPath().path + "/"
+        let root = attachmentRoot.resolvingSymlinksInPath().path + "/"
         guard url.path.hasPrefix(root), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 25_000_000,
               let data = try? Data(contentsOf: url), let bitmap = NSBitmapImageRep(data: data) else { return nil }
         return bitmap.representation(using: .png, properties: [:])
@@ -361,7 +409,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
 }
 extension AppDelegate {
     @objc func exportTranscripts() {
-        if let exporter = transcriptExporter { exporter.panel.makeKeyAndOrderFront(nil); return }
+        if let exporter = transcriptExporter { exporter.showActivePanel(); return }
         let service = DeviceSyncService.shared
         let remote = service.homes.values.sorted { $0.deviceName < $1.deviceName }.flatMap { home in
             home.rows.map { ExportSession(row: $0, home: home.deviceName, id: service.placementID(forGlobal: $0.globalID)) }

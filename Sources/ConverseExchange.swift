@@ -63,7 +63,12 @@ enum ConverseExchange {
     // MARK: Export
 
     static func export(_ sessions: [ExportSession], content: TranscriptExportContent, scrubber: inout ExportScrubber?, includeImages: Bool,
-                       imageData: (String) -> Data?, now: Date = Date(), app: App = .current) throws -> Data {
+                       imageData: (String) -> Data?, now: Date = Date(), app: App = .current,
+                       checkCancellation: () throws -> Void = {}) throws -> Data {
+        // Each export owns its formatter; background exports must not share the
+        // import path's mutable formatter.
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var attachments: [String: Attachment] = [:]
         func attach(_ path: String) -> String? {
             guard includeImages, let png = imageData(path), !png.isEmpty, png.count <= maxImageBytes else { return nil }
@@ -74,8 +79,10 @@ enum ConverseExchange {
         func clean(_ text: String) -> String { scrubber == nil ? text : scrubber!.scrub(text) }
         var records: [SessionRecord] = [], lots: [LotRecord] = []
         for session in sessions {
+            try checkCancellation()
             if session.isParkingLot, let document = session.lotDocument {
-                let rows = document.rows.map { source -> ParkingLotRow in
+                let rows = try document.rows.map { source -> ParkingLotRow in
+                    try checkCancellation()
                     var row = source
                     row.text = clean(row.text)
                     row.editedBy = row.editedBy.map(clean)
@@ -89,6 +96,7 @@ enum ConverseExchange {
             }
             var messages: [MessageRecord] = []
             for message in session.messages where ["user", "assistant"].contains(message.role) && (session.isParkingLot || content.includes(message.role)) {
+                try checkCancellation()
                 let text = Store.visibleText(message.text)
                 let images = message.images.compactMap(attach)
                 guard !text.isEmpty || !images.isEmpty else { continue }
@@ -102,7 +110,10 @@ enum ConverseExchange {
                                 scrub: Scrub(applied: scrubber != nil, counts: scrubber?.counts ?? [:]),
                                 sessions: records, parkingLots: lots, attachments: attachments)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(document)
+        try checkCancellation()
+        let data = try encoder.encode(document)
+        try checkCancellation()
+        return data
     }
 
     // MARK: Read and validate (imported content is untrusted)
