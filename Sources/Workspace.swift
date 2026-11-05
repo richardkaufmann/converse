@@ -259,7 +259,7 @@ struct SidebarSession: View {
             }
                 .help("Use 1, 2 or 3 to show this session in a pane. Clicking its name never moves panes.")
             if showsModel {
-                ProviderLogo(engine: session.entry.engine == "agent" ? "muse" : session.entry.engine).frame(width: 24).help(session.toolStatus.model)
+                SessionProviderLogo(session: session, guide: Store.shared.firstRun).frame(width: 24)
             }
             PaneButtonGroup(hover: hover) {
                 PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
@@ -370,7 +370,7 @@ struct SessionPane: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("\(pane)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(.white).frame(width: 19, height: 19).background(Color.paneNumberBadge).clipShape(RoundedRectangle(cornerRadius: 3))
-                ProviderLogo(engine: session.entry.engine)
+                SessionProviderLogo(session: session, guide: Store.shared.firstRun)
                 SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
                 PaneButton(label: "P", selected: false) { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")

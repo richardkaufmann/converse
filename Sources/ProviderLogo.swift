@@ -7,7 +7,7 @@ struct ProviderLogo: View {
         ["muse": "meta", "claude": "anthropic", "codex": "openai"][engine] ?? engine
     }
     private var label: String {
-        ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI", "parking": "Parking Lot", ConverseExchange.unboundEngine: "Imported · choose a provider"][engine] ?? engine.capitalized
+        ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI", "parking": "Parking Lot", "unassigned": "Choose a provider", ConverseExchange.unboundEngine: "Imported · choose a provider"][engine] ?? engine.capitalized
     }
     private var brandColor: Color {
         switch engine {
@@ -18,7 +18,7 @@ struct ProviderLogo: View {
     }
     var body: some View {
         Group {
-            if engine == "parking" {
+            if engine == "parking" || engine == "unassigned" {
                 ParkingLotShoe()
             } else if engine == ConverseExchange.unboundEngine {
                 Image(systemName: "tray.and.arrow.down").resizable().scaledToFit()
@@ -61,4 +61,22 @@ struct ParkingLotShoe: View {
             context.stroke(laces, with: .color(.white), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
         }
     }
+}
+
+/// Starter sessions have implementation defaults before the human chooses a provider.
+/// Keep those defaults out of the sidebar and pane header; observe the guide so
+/// choosing a provider updates every parked starter row immediately.
+struct SessionProviderLogo: View {
+    @ObservedObject var session: Session
+    @ObservedObject var guide: FirstRunGuide
+    private var engine: String {
+        if let record = guide.record,
+           [record.supportID, record.codingID, record.agentID].contains(session.id) {
+            if record.provider == nil { return "unassigned" }
+            if ["choose", "later", "login"].contains(record.stage), let provider = record.provider { return provider }
+        }
+        if let agent = session.agent { return AgentModels.parse(agent.model)?.engine ?? "muse" }
+        return session.entry.engine
+    }
+    var body: some View { ProviderLogo(engine: engine) }
 }
