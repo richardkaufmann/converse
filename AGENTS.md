@@ -1,6 +1,6 @@
 # Converse development
 
-The user has authorized committing and pushing changes to this GitHub repository as work progresses. After each completed, verified change, commit it and push `main` to `origin`. The user has authorized making it public and publishing downloadable Mac releases. Never include credentials, personal settings, transcripts, or attachments.
+Development happens in the private repository `richardkaufmann/converse-dev`, which is `origin`. The user has authorized committing and pushing changes there as work progresses: after each completed, verified change, commit it and push your branch or `main` to `origin`. The public repository `richardkaufmann/converse` is the `public` remote and is fetch-only: never push to it, open PRs on it, or create releases or tags there. Work reaches the public repository only when Richard says "publish"; ClaudeConverse, the release driver, then fast-forwards public `main` and publishes the release. Never include credentials, personal settings, transcripts, or attachments.
 
 Build with `./build.sh`. Run `./test.sh` for session engine, adapter, timing, persistence, and text behavior changes. Reversible visual-only changes can be checked by building and inspecting the native app. Generated app and icon bundles are ignored by Git.
 
