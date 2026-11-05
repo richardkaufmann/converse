@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -41,6 +41,7 @@ METRICS = {
     "cloners_14d": "Unique cloners (14 days)",
     "discord_members": "Discord members (approximate)",
     "discord_online": "Discord members online (approximate)",
+    "discord_messages_24h": "Discord channel messages (24 hours)",
 }
 
 
@@ -146,8 +147,38 @@ def collect_github(config: dict[str, Any], token: str | None) -> tuple[dict[str,
     return values, detail
 
 
-def collect_discord(config: dict[str, Any]) -> tuple[dict[str, int], dict[str, Any]]:
-    token = credential(config, "discord")
+def discord_messages_24h(channel_id: str, token: str, *, now: datetime | None = None) -> int:
+    """Count recent channel messages without retaining their content.
+
+    Discord returns newest messages first. A page cap prevents a very busy
+    channel from making every scheduled collection unbounded; an incomplete
+    count is an error rather than a misleading sensor value.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=24)
+    before = None
+    count = 0
+    for _ in range(20):
+        url = DISCORD + "/channels/" + quote(channel_id, safe="") + "/messages?limit=100"
+        if before:
+            url += "&before=" + quote(before, safe="")
+        messages, _ = json_request(url, token=token, discord=True)
+        if not isinstance(messages, list):
+            raise ValueError("Discord returned an unexpected message response")
+        if not messages:
+            return count
+        for message in messages:
+            stamp = datetime.fromisoformat(message["timestamp"].replace("Z", "+00:00"))
+            if stamp <= cutoff:
+                return count
+            count += 1
+        if len(messages) < 100:
+            return count
+        before = str(messages[-1]["id"])
+    raise ValueError("Discord channel exceeded 2,000 messages in 24 hours; count omitted")
+
+
+def collect_discord(config: dict[str, Any], token: str | None = None) -> tuple[dict[str, int], dict[str, Any]]:
+    token = token or credential(config, "discord")
     if not token:
         return {}, {"discord_unavailable": "No Discord bot credential configured."}
     guild_id = config.get("discord_guild_id")
@@ -162,7 +193,15 @@ def collect_discord(config: dict[str, Any]) -> tuple[dict[str, int], dict[str, A
         values["discord_members"] = int(guild["approximate_member_count"])
     if guild.get("approximate_presence_count") is not None:
         values["discord_online"] = int(guild["approximate_presence_count"])
-    return values, {"discord_guild": guild.get("name", str(guild_id))}
+    detail = {"discord_guild": guild.get("name", str(guild_id))}
+    if config.get("discord_channel_id"):
+        try:
+            values["discord_messages_24h"] = discord_messages_24h(str(config["discord_channel_id"]), token)
+        except (HTTPError, URLError, ValueError, KeyError) as error:
+            if isinstance(error, HTTPError):
+                error.close()
+            detail["discord_activity_unavailable"] = f"Discord channel activity unavailable: {error}"
+    return values, detail
 
 
 def metric_entity(prefix: str, name: str) -> str:
@@ -222,7 +261,7 @@ def dashboard_config(config: dict[str, Any], available: set[str]) -> dict[str, A
     if "views_14d" in available:
         cards.append({"type": "history-graph", "title": "Traffic history", "hours_to_show": 168,
                       "entities": sensors("views_14d", "viewers_14d", "clones_14d", "cloners_14d")})
-    discord = sensors("discord_members", "discord_online")
+    discord = sensors("discord_members", "discord_online", "discord_messages_24h")
     if discord:
         cards.append({"type": "entities", "title": "Discord", "entities": discord})
     return {"title": config["dashboard_title"], "views": [{"title": "Overview", "path": "overview", "cards": cards}]}

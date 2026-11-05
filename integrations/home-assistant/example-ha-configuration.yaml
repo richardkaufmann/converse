@@ -1,0 +1,11 @@
+# Copy custom_components/kaos_converse into HA's /config/custom_components/.
+# Add this block to HA's /config/configuration.yaml, then restart HA.
+# Put the two credential values in HA's /config/secrets.yaml only.
+kaos_converse:
+  github_repo: richardkaufmann/converse
+  release_tag: v0.6.3
+  entity_prefix: kaos_converse
+  dashboard_title: KAOS Converse
+  github_token: !secret converse_github_token
+  discord_bot_token: !secret converse_discord_bot_token
+  discord_channel_id: "1565556423323156643"

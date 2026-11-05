@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from urllib.error import HTTPError
 from io import BytesIO
@@ -66,6 +67,35 @@ class MetricsTests(unittest.TestCase):
         values, detail = metrics.collect_discord(CONFIG)
         self.assertEqual(values, {})
         self.assertIn("discord_unavailable", detail)
+
+    def test_discord_activity_pages_until_cutoff(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        recent = (now - timedelta(hours=2)).isoformat()
+        old = (now - timedelta(hours=25)).isoformat()
+        urls = []
+        def fake(url: str, **kwargs: object) -> tuple[object, dict[str, str]]:
+            urls.append(url)
+            if "before=" not in url:
+                return ([{"id": str(n), "timestamp": recent} for n in range(100, 0, -1)], {})
+            return ([{"id": "0", "timestamp": recent}, {"id": "older", "timestamp": old}], {})
+        with patch.object(metrics, "json_request", side_effect=fake):
+            self.assertEqual(metrics.discord_messages_24h("123", "fake", now=now), 101)
+        self.assertIn("before=1", urls[1])
+
+    def test_discord_activity_permission_error_keeps_member_counts(self) -> None:
+        def fake(url: str, **kwargs: object) -> tuple[object, dict[str, str]]:
+            if url.endswith("/channels/123"):
+                return {"guild_id": "456"}, {}
+            if "/guilds/456" in url:
+                return {"name": "Example", "approximate_member_count": 5}, {}
+            if "/messages?" in url:
+                raise HTTPError(url, 403, "forbidden", {}, BytesIO(b"{}"))
+            raise AssertionError(url)
+        with patch.object(metrics, "credential", return_value="fake"), patch.object(metrics, "json_request", side_effect=fake):
+            values, detail = metrics.collect_discord({**CONFIG, "discord_channel_id": "123"})
+        self.assertEqual(values["discord_members"], 5)
+        self.assertNotIn("discord_messages_24h", values)
+        self.assertIn("discord_activity_unavailable", detail)
 
     def test_config_rejects_bad_entity_prefix(self) -> None:
         with self.assertRaises(ValueError):

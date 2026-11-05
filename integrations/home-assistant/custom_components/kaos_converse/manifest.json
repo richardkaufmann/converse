@@ -1,0 +1,10 @@
+{
+  "domain": "kaos_converse",
+  "name": "KAOS Converse metrics",
+  "version": "0.1.0",
+  "documentation": "https://github.com/richardkaufmann/converse/tree/main/integrations/home-assistant",
+  "codeowners": [],
+  "dependencies": [],
+  "requirements": [],
+  "iot_class": "cloud_polling"
+}

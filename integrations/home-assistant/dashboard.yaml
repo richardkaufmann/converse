@@ -1,0 +1,47 @@
+title: KAOS Converse
+views:
+  - title: Overview
+    path: overview
+    cards:
+      - type: markdown
+        content: >-
+          [Open repository](https://github.com/richardkaufmann/converse).
+          GitHub traffic is a rolling 14-day window; Home Assistant Recorder
+          retains subsequent observations.
+      - type: entities
+        title: Reach
+        entities:
+          - sensor.kaos_converse_stars
+          - sensor.kaos_converse_watchers
+          - sensor.kaos_converse_forks
+          - sensor.kaos_converse_open_issues
+          - sensor.kaos_converse_open_bugs
+          - sensor.kaos_converse_open_prs
+      - type: entities
+        title: Downloads
+        entities:
+          - sensor.kaos_converse_release_downloads
+          - sensor.kaos_converse_release_mac_downloads
+          - sensor.kaos_converse_release_windows_downloads
+          - sensor.kaos_converse_release_demo_downloads
+      - type: entities
+        title: Traffic (rolling 14 days)
+        entities:
+          - sensor.kaos_converse_views_14d
+          - sensor.kaos_converse_viewers_14d
+          - sensor.kaos_converse_clones_14d
+          - sensor.kaos_converse_cloners_14d
+      - type: history-graph
+        title: Traffic history
+        hours_to_show: 168
+        entities:
+          - sensor.kaos_converse_views_14d
+          - sensor.kaos_converse_viewers_14d
+          - sensor.kaos_converse_clones_14d
+          - sensor.kaos_converse_cloners_14d
+      - type: entities
+        title: Discord (optional)
+        entities:
+          - sensor.kaos_converse_discord_members
+          - sensor.kaos_converse_discord_online
+          - sensor.kaos_converse_discord_messages_24h
