@@ -156,6 +156,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     @Published private(set) var document = ParkingLotDocument()
     @Published private(set) var active = false
     @Published var error = ""
+    @Published private(set) var readOnlyReason: String?
+    var isReadOnly: Bool { readOnlyReason != nil }
     private let file: URL
     let attachmentFolder: URL
     init(folder: URL, id: UUID = ParkingLotStore.id, name: String = "Parking Lot") {
@@ -165,13 +167,32 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         if FileManager.default.fileExists(atPath: file.path) {
             do {
                 let saved = try JSONDecoder().decode(ParkingLotDocument.self, from: Data(contentsOf: file))
-                try Self.validate(saved.rows)
+                // Structural corruption must never be mistaken for a size limit.
+                _ = try ParkingLotTree.nodes(saved.rows)
                 document = saved; active = true
+                do { try Self.validateSize(saved.rows) }
+                catch { readOnlyReason = "This Parking Lot exceeds the editing size limits. It is open read-only. Export a recovery copy before reducing or splitting it; the saved file is unchanged." }
             }
-            catch { self.error = "Could not read Parking Lot. The saved file has been left intact." }
+            catch {
+                self.error = "Could not read Parking Lot. The saved file has been left intact."
+                readOnlyReason = self.error
+            }
         }
     }
+    private func requireWritable() throws {
+        if let readOnlyReason { throw AgentFailure.message(readOnlyReason) }
+    }
+    /// Preserve the source bytes, including fields unknown to this build.
+    /// Attachments remain in the original lot's attachment folder.
+    func exportRecovery(to destination: URL) throws {
+        guard destination.resolvingSymlinksInPath().standardizedFileURL != file.resolvingSymlinksInPath().standardizedFileURL else {
+            throw AgentFailure.message("Choose a different file for the recovery copy.")
+        }
+        try Data(contentsOf: file).write(to: destination, options: .atomic)
+    }
+    func showSavedFile() { NSWorkspace.shared.activateFileViewerSelecting([file]) }
     func saveImage(_ image: NSImage) throws -> String {
+        try requireWritable()
         guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]), png.count <= 25_000_000 else {
             throw AgentFailure.message("Choose an image smaller than 25 MB.")
@@ -211,6 +232,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         commit(rows)
     }
     private func persist(_ next: ParkingLotDocument) throws {
+        try requireWritable()
         var next = next
         next.rows = try ParkingLotTree.normalized(next.rows)
         next.schemaVersion = ParkingLotDocument.currentSchemaVersion
@@ -234,13 +256,17 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         catch { self.error = "Parking Lot was not saved: " + error.localizedDescription }
     }
     static func validate(_ rows: [ParkingLotRow]) throws {
-        guard rows.count <= 500, Set(rows.map(\.id)).count == rows.count,
+        _ = try ParkingLotTree.nodes(rows)
+        try validateSize(rows)
+    }
+    private static func validateSize(_ rows: [ParkingLotRow]) throws {
+        guard rows.count <= 500,
               rows.allSatisfy({ $0.text.count <= 20_000 && ($0.notes ?? []).allSatisfy { $0.text.count <= 20_000 } }), rows.reduce(0, { $0 + $1.text.count + ($1.notes ?? []).reduce(0) { $0 + $1.text.count } }) <= 250_000 else {
             throw AgentFailure.message("Parking Lot exceeds its size limit (500 entries, 20,000 characters per entry).")
         }
-        _ = try ParkingLotTree.nodes(rows)
     }
     func replaceUserRows(_ rows: [ParkingLotRow], revision: Int) throws {
+        try requireWritable()
         guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
         try Self.validate(rows)
         if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows)) }
@@ -255,7 +281,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         undoManager.setActionName(actionName)
     }
     @discardableResult func changeIndent(_ id: UUID, deeper: Bool) -> Bool {
-        guard let rows = ParkingLotTree.changingIndent(id, in: document.rows, deeper: deeper) else { return false }
+        guard !isReadOnly, let rows = ParkingLotTree.changingIndent(id, in: document.rows, deeper: deeper) else { return false }
         commit(rows); return true
     }
     func update(_ id: UUID, text: String) {
@@ -337,6 +363,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         if rows != document.rows { try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
     }
     func preview(_ edits: ParkingLotEdits, author: String) throws -> [ParkingLotRow] {
+        try requireWritable()
         guard error.isEmpty else { throw AgentFailure.message(error) }
         guard edits.lotID == nil || edits.lotID == id else { throw AgentFailure.message("Those edits name a different Parking Lot. Nothing changed.") }
         guard edits.revision == document.revision else { throw AgentFailure.message("Parking Lot changed during this run. Read it again before editing; no edits applied.") }
@@ -519,6 +546,16 @@ struct ParkingLotView: View {
         })
         .overlay(alignment: .top) { if dragging != nil && dropBefore == row.id { Color.accentColor.frame(height: 2) } }
     }
+    private func exportRecovery() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = lot.name + " Recovery.json"
+        panel.message = "Save an exact copy of the lot data. Image references still point to the original attachment folder."
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do { try lot.exportRecovery(to: url) }
+            catch { lot.error = "Could not export recovery copy: " + error.localizedDescription }
+        }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ParkingLotTalkBar(lot: lot)
@@ -531,13 +568,24 @@ struct ParkingLotView: View {
                     let previous = undoFocus.view?.window?.firstResponder
                     reordering.toggle()
                     DispatchQueue.main.async { undoFocus.activate(ifUnchangedFrom: previous) }
-                }.controlSize(.small)
+                }.controlSize(.small).disabled(lot.isReadOnly)
                 PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
             }.padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
-            if !reordering {
+            if let reason = lot.readOnlyReason {
+                Text(reason).font(.callout).padding(.horizontal).textSelection(.enabled)
+                HStack {
+                    Button("Export recovery copy…", action: exportRecovery)
+                    Button("Show saved file") { lot.showSavedFile() }
+                }.padding(.horizontal)
+                ScrollView {
+                    Text(ParkingLotStore.markdown(lot.document.rows))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled).padding()
+                }
+            } else if !reordering {
                 ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
                     .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: lot.substitutionFeedback).padding(12) }
             } else {
@@ -555,7 +603,7 @@ struct ParkingLotView: View {
             HStack {
                 Text(lot.name).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Talk…") { talking = true }
+                Button("Talk…") { talking = true }.disabled(lot.isReadOnly)
             }.padding(8)
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
             .background(ParkingLotUndoAnchor(lot: lot, focus: undoFocus).frame(width: 0, height: 0))
@@ -688,6 +736,60 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
         tree.undoManager.undo()
         check(tree.document.rows.map(\.id) == before.rows.map(\.id), "Undo restores a deleted nested subtree")
     } catch { check(false, "Nested Parking Lot tests: " + error.localizedDescription) }
+    do {
+        let heading = ParkingLotRow(heading: true, text: "Recovery")
+        let overRows = [heading] + (0..<500).map { ParkingLotRow(heading: false, text: "Item \($0)", parentID: heading.id) }
+        let longText = [ParkingLotRow(heading: false, text: String(repeating: "x", count: 20_001))]
+        let longNote = [ParkingLotRow(heading: false, text: "Item", notes: [.init(author: "Test", text: String(repeating: "n", count: 20_001))])]
+        let totalText = (0..<13).map { _ in ParkingLotRow(heading: false, text: String(repeating: "t", count: 20_000)) }
+        for (index, rows) in [overRows, longText, longNote, totalText].enumerated() {
+            let home = folder.appendingPathComponent("oversize-\(index)")
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            let source = home.appendingPathComponent("parking-lot.json")
+            let original = ParkingLotDocument(revision: 7, rows: rows)
+            // Extra unknown fields and whitespace must survive recovery export.
+            let encoded = try JSONEncoder().encode(original)
+            let bytes = Data(("{\"recoveryTest\":true," + String(decoding: encoded, as: UTF8.self).dropFirst() + "\n").utf8)
+            try bytes.write(to: source)
+            let recovered = ParkingLotStore(folder: home)
+            check(recovered.active && recovered.isReadOnly && recovered.document == original && recovered.error.isEmpty,
+                  "Size-only limit \(index) opens its complete document read-only")
+            check(recovered.exportMessages.count == rows.count && (try? recovered.evidence()) != nil,
+                  "Size-only limit \(index) remains available for export and reading")
+            recovered.open(); recovered.openStarter([])
+            recovered.update(rows[0].id, text: "Overwrite")
+            recovered.delete(rows[0].id)
+            do { try recovered.replaceUserRows([], revision: 7); check(false, "Recovery editor must refuse saves") } catch {}
+            do { try recovered.apply(.init(revision: 7, operations: [.init(action: "delete", id: rows[0].id)]), author: "Agent"); check(false, "Recovery agent must refuse saves") } catch {}
+            check(try recovered.document == original && !recovered.undoManager.canUndo && Data(contentsOf: source) == bytes,
+                  "Recovery protects source and revision against user and agent writes")
+            let copy = home.appendingPathComponent("recovery.json")
+            try recovered.exportRecovery(to: copy)
+            check(try Data(contentsOf: copy) == bytes, "Recovery export preserves exact source bytes and unknown fields")
+            do { try recovered.exportRecovery(to: source); check(false, "Recovery must refuse its source as destination") } catch {}
+        }
+        let invalids = [
+            [heading, ParkingLotRow(heading: false, text: "Orphan", parentID: UUID())],
+            [heading, heading],
+            overRows + [ParkingLotRow(heading: false, text: "Broken and oversized", parentID: UUID())]
+        ]
+        for (index, rows) in invalids.enumerated() {
+            let home = folder.appendingPathComponent("invalid-tree-\(index)")
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            let source = home.appendingPathComponent("parking-lot.json")
+            let bytes = try JSONEncoder().encode(ParkingLotDocument(revision: 8, rows: rows))
+            try bytes.write(to: source)
+            let invalid = ParkingLotStore(folder: home)
+            check(!invalid.active && invalid.document.rows.isEmpty && !invalid.error.isEmpty && invalid.isReadOnly,
+                  "Invalid tree \(index) refuses to load, even when also oversized")
+            invalid.open(); invalid.openStarter([]); _ = invalid.insert(text: "Overwrite")
+            do { try invalid.replaceUserRows([], revision: 0); check(false, "Invalid tree must refuse replacement") } catch {}
+            let copy = home.appendingPathComponent("recovery.json")
+            try invalid.exportRecovery(to: copy)
+            check(try Data(contentsOf: source) == bytes && Data(contentsOf: copy) == bytes,
+                  "Invalid tree stays byte-identical and can be copied for recovery")
+        }
+    } catch { check(false, "Parking Lot recovery tests: " + error.localizedDescription) }
     let corrupt = folder.appendingPathComponent("bad")
     try? FileManager.default.createDirectory(at: corrupt, withIntermediateDirectories: true)
     try? Data("broken".utf8).write(to: corrupt.appendingPathComponent("parking-lot.json"))

@@ -62,7 +62,7 @@ struct ParkingOutline {
         var caretID: UUID
         var caretOffset: Int
     }
-    func replacing(_ range: NSRange, with replacement: String, rows: [ParkingLotRow]) -> Edit? {
+    func replacing(_ range: NSRange, with replacement: String, rows: [ParkingLotRow], mergeSeparator: Bool = true) -> Edit? {
         guard range.location != NSNotFound, NSMaxRange(range) <= (string as NSString).length,
               let start = index(at: range.location), let end = index(at: NSMaxRange(range)) else { return nil }
         let first = entries[start], last = entries[end]
@@ -97,12 +97,32 @@ struct ParkingOutline {
             else if rows.contains(where: { $0.id == row.id }) == false || first.placeholder { row.parentID = insertedHeading ?? firstParent }
             newRows.append(row)
         }
-        // Backspace/Delete across the paragraph separator merges entries.
-        // Keep attachments from both sides instead of losing the second row's
-        // images when its identity is removed.
-        if start != end && insertion.isEmpty && range.length == 1 && firstOffset == firstText.length && lastOffset == 0 {
+        // Only a single real row separator is a merge. Full-row Cut/Delete
+        // continues to remove the selected subtree, including hidden children.
+        let merging = mergeSeparator && start != end && insertion.isEmpty && range.length == 1
+            && firstOffset == firstText.length && lastOffset == 0
+            && !first.placeholder && !last.placeholder
+        if merging {
+            func section(_ id: UUID) -> UUID? {
+                guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+                return rows[...index].last(where: \.heading)?.id
+            }
+            guard section(first.row.id) == section(last.row.id) else { return nil }
+            // Even an empty first row survives a separator merge.
+            newRows[0] = first.row
+            newRows[0].text = (prefix + suffix).replacingOccurrences(of: "\u{2028}", with: "\n")
+            newRows[0].editedBy = nil
             let images = (first.row.images ?? []) + (last.row.images ?? [])
             if !images.isEmpty { newRows[0].images = images }
+            let notes = (first.row.notes ?? []) + (last.row.notes ?? [])
+            if !notes.isEmpty { newRows[0].notes = notes }
+            // Normalize legacy implicit parents before transferring children.
+            guard let normalized = try? ParkingLotTree.normalized(rows) else { return nil }
+            result = normalized.filter { !removed.contains($0.id) }.map { row in
+                var row = row
+                if row.parentID == last.row.id { row.parentID = first.row.id }
+                return row
+            }
         }
         let caretLine = (prefix + insertion).components(separatedBy: "\n").count - 1
         let rawCaret = (prefix + insertion).components(separatedBy: "\n").last! as NSString
@@ -114,7 +134,7 @@ struct ParkingOutline {
         let descendants = Set(deletedRoots.flatMap { id in
             ParkingLotTree.range(id, in: rows).map { range in rows[range].map(\.id) } ?? []
         })
-        result.removeAll { descendants.contains($0.id) }
+        if !merging { result.removeAll { descendants.contains($0.id) } }
         result.insert(contentsOf: newRows, at: min(destination, result.count))
         // Return on a parent creates its next sibling after the whole subtree.
         // Its existing children must remain directly below the original item.
@@ -124,6 +144,9 @@ struct ParkingOutline {
             let sibling = result.remove(at: destination + 1)
             result.insert(sibling, at: min(destination + originalRange.count, result.count))
         }
+        // Reparenting may make a deep previous row exceed the depth cap, or
+        // break preorder. Refuse the entire edit rather than losing descendants.
+        if merging, (try? ParkingLotTree.nodes(result)) == nil { return nil }
         return Edit(rows: result, caretID: newRows[caretLine].id, caretOffset: caret)
     }
     func markdown(_ selection: NSRange) -> String {
@@ -353,7 +376,7 @@ struct ParkingLotEditor: NSViewRepresentable {
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard !rendering, let replacementString, let displayed, let affectedCharRange = atomic(affectedCharRange, replacementString),
-                  let edit = projection.replacing(affectedCharRange, with: replacementString, rows: displayed.rows) else { return false }
+                  let edit = projection.replacing(affectedCharRange, with: replacementString, rows: displayed.rows, mergeSeparator: text?.cutting != true) else { return false }
             if replacementString.contains("\n"), let index = projection.index(at: affectedCharRange.location) {
                 parent.collapsed.remove(projection.entries[index].row.id)
             }
@@ -563,7 +586,7 @@ final class ParkingOutlineText: NSTextView {
         if let owner, selectedRange().length == 0,
            let index = owner.projection.index(at: selectedRange().location) {
             let entry = owner.projection.entries[index]
-            if !entry.placeholder && !entry.row.heading && entry.row.text.isEmpty && (entry.row.images ?? []).isEmpty {
+            if !entry.placeholder && !entry.row.heading && !entry.hasChildren && entry.row.text.isEmpty && (entry.row.images ?? []).isEmpty {
                 let document = owner.parent.lot.document
                 let previous = owner.projection.entries.prefix(index).last { !$0.placeholder }
                 owner.save(document.rows.filter { $0.id != entry.row.id }, expected: document,
@@ -617,7 +640,13 @@ final class ParkingOutlineText: NSTextView {
         }
         return source as String
     }
-    override func cut(_ sender: Any?) { guard selectedRange().length > 0 else { return }; copy(sender); insertText("", replacementRange: selectedRange()) }
+    var cutting = false
+    override func cut(_ sender: Any?) {
+        guard selectedRange().length > 0 else { return }
+        copy(sender)
+        cutting = true; defer { cutting = false }
+        insertText("", replacementRange: selectedRange())
+    }
     override func paste(_ sender: Any?) { paste(from: .general) }
     func paste(from board: NSPasteboard) {
         suppressSubstitutions = true; defer { suppressSubstitutions = false }
@@ -960,6 +989,61 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let illustratedOutline = ParkingOutline(rows: illustrated, collapsed: [], placeholders: &placeholders)
     let joined = illustratedOutline.replacing(NSRange(location: 5, length: 1), with: "", rows: illustrated)!
     check(joined.rows[0].text == "FirstSecond" && joined.rows[0].images == ["a.png", "b.png"], "Joining items with Backspace preserves both sets of images")
+    do {
+        let h = ParkingLotRow(heading: true, text: "Heading")
+        let a = ParkingLotRow(heading: false, text: "A", parentID: h.id)
+        let ac = ParkingLotRow(heading: false, text: "A child", parentID: a.id)
+        let b = ParkingLotRow(heading: false, text: "B", notes: [.init(author: "Test", text: "B note")], parentID: h.id)
+        let bc = ParkingLotRow(heading: false, text: "B child", parentID: b.id)
+        let bg = ParkingLotRow(heading: false, text: "B grandchild", parentID: bc.id)
+        func merge(_ rows: [ParkingLotRow], after id: UUID, collapsed: Set<UUID> = []) -> ParkingOutline.Edit? {
+            var placeholders: [String: UUID] = [:]
+            let projection = ParkingOutline(rows: rows, collapsed: collapsed, placeholders: &placeholders)
+            let entry = projection.entries.first { $0.row.id == id }!
+            return projection.replacing(NSRange(location: NSMaxRange(entry.range), length: 1), with: "", rows: rows)
+        }
+        for collapsed: Set<UUID> in [[], [b.id]] {
+            let joined = merge([h, a, b, bc, bg], after: a.id, collapsed: collapsed)!
+            let hierarchy = try ParkingLotTree.nodes(joined.rows)
+            check(joined.rows.map(\.id) == [h.id, a.id, bc.id, bg.id] && hierarchy[bc.id]?.parentID == a.id
+                  && hierarchy[bg.id]?.parentID == bc.id && joined.rows[1].notes == b.notes,
+                  "Separator merge keeps expanded or collapsed descendants and comments")
+        }
+        let bothFolded = merge([h, a, ac, b, bc, bg], after: a.id, collapsed: [a.id, b.id])!
+        check(bothFolded.rows.map(\.id) == [h.id, a.id, ac.id, bc.id, bg.id]
+              && bothFolded.rows[3].parentID == a.id && (try? ParkingLotTree.nodes(bothFolded.rows)) != nil,
+              "Merging two collapsed parents keeps both subtrees in preorder")
+        let childMerge = merge([h, b, bc, bg], after: b.id)!
+        check(childMerge.rows.map(\.id) == [h.id, b.id, bg.id] && childMerge.rows[2].parentID == b.id,
+              "Merging parent with first child reparents its grandchildren")
+        var empty = a; empty.text = ""
+        let emptyMerge = merge([h, empty, b, bc], after: empty.id)!
+        check(emptyMerge.rows[1].id == a.id && emptyMerge.rows[1].text == "B" && emptyMerge.rows[2].parentID == a.id,
+              "An empty first row survives a separator merge with descendants")
+        let otherHeading = ParkingLotRow(heading: true, text: "Other")
+        check(merge([h, a, otherHeading], after: h.id, collapsed: [h.id]) == nil,
+              "Merging collapsed sections is refused")
+        var chain = [h, a]
+        for depth in 2...ParkingLotTree.maximumDepth {
+            chain.append(ParkingLotRow(heading: false, text: "Depth \(depth)", parentID: chain.last!.id))
+        }
+        let deepest = chain.last!.id
+        check(merge(chain + [b, bc], after: deepest) == nil,
+              "A merge that would reparent descendants beyond the depth cap is refused")
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("codex-lot-merge-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = ParkingLotStore(folder: home)
+        store.openStarter([h, a, ac, b, bc, bg])
+        let before = store.document
+        try store.replaceUserRows(bothFolded.rows, revision: before.revision)
+        check(ParkingLotStore(folder: home).document.rows == bothFolded.rows, "Merged descendants persist across reopening")
+        store.undoManager.undo()
+        check(store.document.rows == before.rows, "Undo restores both original subtrees after a separator merge")
+        store.undoManager.redo()
+        check(store.document.rows == bothFolded.rows, "Redo restores the complete merged subtree")
+        store.delete(a.id)
+        check(store.document.rows.map(\.id) == [h.id], "Explicit Delete still removes the entire merged subtree")
+    } catch { check(false, "Separator subtree merge tests: " + error.localizedDescription) }
     let emptyOutline = ParkingOutline(rows: [], collapsed: [], placeholders: &placeholders)
     check(emptyOutline.entries.count == 1 && emptyOutline.entries[0].placeholder && emptyOutline.entries[0].row.heading,
           "An empty lot always offers New Heading")
@@ -1019,6 +1103,30 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.add(heading: true, after: ready)
     let position = lot.document.rows.firstIndex { $0.id == nextHeading }!
     check(lot.document.rows[position - 1].heading && lot.document.rows[position - 1].text.isEmpty, "Right-click creation at a ready input inserts at that section, not at the end of the document")
+    let mergeLot = ParkingLotStore(folder: folder.appendingPathComponent("native-merges"))
+    let mergeHeading = ParkingLotRow(heading: true, text: "Native")
+    let survivor = ParkingLotRow(heading: false, text: "First", parentID: mergeHeading.id)
+    let blankParent = ParkingLotRow(heading: false, text: "", parentID: mergeHeading.id)
+    let keptChild = ParkingLotRow(heading: false, text: "Keep me", parentID: blankParent.id)
+    mergeLot.openStarter([mergeHeading, survivor, blankParent, keptChild])
+    let mergeBefore = mergeLot.document.rows
+    let mergeCoordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: mergeLot, collapsed: .constant([blankParent.id]), reorder: {}))
+    let mergeText = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+    mergeText.isRichText = false; mergeText.owner = mergeCoordinator; mergeText.delegate = mergeCoordinator
+    mergeCoordinator.text = mergeText; mergeCoordinator.render()
+    let blankRange = mergeCoordinator.projection.entries.first { $0.row.id == blankParent.id }!.range
+    mergeText.setSelectedRange(NSRange(location: blankRange.location, length: 0))
+    mergeText.deleteBackward(nil)
+    check(mergeLot.document.rows.map(\.id) == [mergeHeading.id, survivor.id, keptChild.id]
+          && mergeLot.document.rows.last?.parentID == survivor.id,
+          "Native Backspace on a blank collapsed parent preserves and reparents its children")
+    mergeText.undo(nil)
+    check(mergeLot.document.rows == mergeBefore, "Native Undo restores the blank parent and descendants")
+    let cutBoard = NSPasteboard.withUniqueName()
+    defer { cutBoard.releaseGlobally() }
+    mergeCoordinator.copyEntry(blankParent.id, cut: true, board: cutBoard)
+    check(mergeLot.document.rows.map(\.id) == [mergeHeading.id, survivor.id],
+          "Native Cut Item removes the blank parent and its hidden descendants")
     let imageLot = ParkingLotStore(folder: folder.appendingPathComponent("images")); imageLot.open()
     let imageCoordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: imageLot, collapsed: .constant([]), reorder: {}))
     let imageText = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 600))
