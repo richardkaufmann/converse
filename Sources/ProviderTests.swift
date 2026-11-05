@@ -16,6 +16,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     groupSwitchboardSelfTests(check)
     transcriptExportSelfTests(check)
     converseExchangeSelfTests(check)
+    providerHandoffSelfTests(check)
     setupSelfTests(check)
     accountLoginSelfTests(check)
     sessionSetupSelfTests(check)

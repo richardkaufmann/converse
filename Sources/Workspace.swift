@@ -283,7 +283,11 @@ struct SidebarSession: View {
                     Button("Show scoreboard") { AgentWindows.shared.widget(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.needsAgentSetup)
                     Button("Clear attention banner") { Store.shared.clearAgentAttention(session) }
-                } else { Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy) }
+                    Button("Change Assistant or Login…") { AppDelegate.shared.configureSession(session, focusPickers: true) }
+                } else {
+                    Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
+                    Button("Change Assistant or Login…") { AppDelegate.shared.configureSession(session, focusPickers: true) }.disabled(session.busy)
+                }
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }
                 }

@@ -37,6 +37,8 @@ struct ExportSession: Identifiable {
     var isAgent = false
     // A local lot's own rows, for the Converse format. Remote lots export as transcripts.
     var lotDocument: ParkingLotDocument? = nil
+    /// The outgoing provider's handoff note, Converse format only.
+    var handoff: String? = nil
     init(_ session: Session) { id = session.id; title = session.title; provider = session.entry.name; messages = session.messages; engine = session.entry.engine; isAgent = session.isAgentSession }
     init(lot: ParkingLotStore) {
         id = lot.id; title = lot.name; provider = "Parking Lot"; messages = lot.exportMessages; isParkingLot = true; engine = "parking"; lotDocument = lot.document
@@ -74,6 +76,8 @@ final class TranscriptExportSelection: ObservableObject {
     @Published var limitDates = false
     @Published var startDate = Calendar.current.date(byAdding: .day, value: -7, to: Calendar.current.startOfDay(for: Date())) ?? Date()
     @Published var endDate = Date()
+    /// Converse format: each selected local session first writes a handoff note.
+    @Published var includeHandoffs = false
     init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
     var exportsImages: Bool { includeImages && format != .text }
     var validDateRange: Bool { !limitDates || startDate < endDate }
@@ -166,6 +170,8 @@ struct TranscriptExportOptionsView: View {
                     .disabled(selection.format == .text)
                     .help(selection.format == .text ? "Text exports list images by filename only." : selection.scrub ? "Images can’t be checked for private details. Leave this off unless you have looked at them." : "Embed pasted and generated images in the export.")
             }
+            Toggle("Include handoff notes", isOn: $selection.includeHandoffs).disabled(selection.format != .converse)
+                .help("Before exporting, Converse asks each selected session’s assistant to write a handoff note (goals, decisions, current state, open items, gotchas, files). The note travels in the file, so whoever imports it can hand the conversation to any assistant. Agents, busy sessions and imports without a provider are skipped.")
             HStack(spacing: 8) {
                 Toggle("Only messages from", isOn: $selection.limitDates)
                     .help("Export only messages sent in this window. Older messages without a recorded time are left out; Parking Lots are always exported whole.")
@@ -205,7 +211,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         let view = NSHostingView(rootView: TranscriptExportOptionsView(selection: selection))
-        view.frame = NSRect(x: 0, y: 0, width: 510, height: 510)
+        view.frame = NSRect(x: 0, y: 0, width: 510, height: 540)
         panel.accessoryView = view
         panel.delegate = self
         formatObserver = selection.$format.removeDuplicates().sink { [weak self] format in
@@ -226,8 +232,16 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             do {
                 var sessions: [ExportSession] = [], images: [String: Data] = [:]
                 let withImages = selection.exportsImages
+                var notes: [UUID: String] = [:]
+                if selection.format == .converse && selection.includeHandoffs {
+                    progress.orderOut(nil)
+                    guard let collected = await Self.collectHandoffs(selection.chosen) else { return }
+                    notes = collected
+                    progress.makeKeyAndOrderFront(nil)
+                }
                 for chosen in selection.chosen {
-                    let loaded = try await Self.load(chosen, includeImages: withImages)
+                    var loaded = try await Self.load(chosen, includeImages: withImages)
+                    loaded.0.handoff = notes[chosen.id]
                     sessions.append(selection.windowed(loaded.0)); images.merge(loaded.1) { old, _ in old }
                 }
                 var scrubber = selection.scrub ? ExportScrubber(context: .current) : nil
@@ -264,6 +278,44 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
         guard selection.chosen.contains(where: { $0.remoteID != nil || $0.isParkingLot || selection.windowed($0).messages.contains { selection.content.includes($0.role) && (!$0.text.isEmpty || (!$0.images.isEmpty && selection.exportsImages)) } }) else {
             throw TranscriptExport.error("There are no submitted messages matching these options.")
         }
+    }
+    /// Local, bound, idle, non-agent sessions write a handoff note, one at a
+    /// time. Returns nil when the user cancels; failures can be skipped.
+    @MainActor static func collectHandoffs(_ chosen: [ExportSession], store: Store = .shared) async -> [UUID: String]? {
+        let sessions = chosen.compactMap { item in store.sessions.first { $0.id == item.id && item.remoteID == nil && !item.isParkingLot } }
+            .filter { !$0.isUnboundImport && store.providerChangeRefusal($0) == nil }
+        guard !sessions.isEmpty else { return [:] }
+        let state = HandoffExportProgress()
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false; panel.title = "Writing handoff notes"
+        panel.contentView = NSHostingView(rootView: HandoffExportProgressView(state: state))
+        panel.center(); panel.makeKeyAndOrderFront(nil)
+        defer { panel.close() }
+        var notes: [UUID: String] = [:], failures: [String] = []
+        for (index, session) in sessions.enumerated() {
+            guard !state.cancelled else { return nil }
+            state.current = session
+            state.text = "Asking " + AssistantFamily.name(session.entry.engine) + " for a handoff note on “" + session.title + "” (\(index + 1) of \(sessions.count))…"
+            let result: Result<String, Error> = await withCheckedContinuation { continuation in
+                store.requestHandoffNote(session) { continuation.resume(returning: $0) }
+            }
+            state.current = nil
+            guard !state.cancelled else { return nil }
+            switch result {
+            case .success(let text):
+                notes[session.id] = text
+                _ = try? store.writeHandoffNote(session, text: text)
+            case .failure(let error): failures.append("“" + session.title + "”: " + error.localizedDescription)
+            }
+        }
+        if !failures.isEmpty {
+            panel.orderOut(nil)
+            let alert = NSAlert(); alert.messageText = "Some handoff notes weren’t written"
+            alert.informativeText = failures.joined(separator: "\n") + "\n\nThose sessions export without a note."
+            alert.addButton(withTitle: "Export Anyway"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        }
+        return notes
     }
     @MainActor static func load(_ session: ExportSession, includeImages: Bool, service: DeviceSyncService = .shared) async throws -> (ExportSession, [String: Data]) {
         guard let id = session.remoteID, let global = DeviceGlobalID(id) else { return (session, [:]) }
@@ -453,5 +505,25 @@ enum TranscriptExport {
         *{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#222;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:auto;padding:40px 24px}h1{font-size:30px;margin:0}.summary{font-size:13px;color:#657083;margin:4px 0 30px}.session{margin:32px 0 12px;font-size:23px}.session small{display:block;font-size:13px;font-weight:400;color:#657083}.message{margin:0 0 22px;background:white;border:1px solid #dde3eb;border-radius:10px;overflow:hidden;break-inside:auto}.message header{display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e6eaf0;font-size:12px;color:#526174}.line{display:grid;grid-template-columns:\(lineNumbers ? "48px minmax(0,1fr)" : "minmax(0,1fr)")}.ln{background:white;color:#797979;text-align:right;font:11px/25.6px ui-monospace,monospace;padding:0 10px;user-select:none;border-right:1px solid #e6eaf0}.prompt .ln{background:#e0eeff}.text{padding:0 16px;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}.literal .text{font-style:italic}.message header+.line{padding-top:10px}.message .line:last-child{padding-bottom:10px}h1,h2,h3,h4,h5,h6,blockquote{white-space:normal}h1,h2,h3,h4,h5,h6{line-height:1.3;margin:8px 0}blockquote{margin:4px 0;border-left:3px solid #adbed6;padding-left:12px;color:#526174}code{font:14px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;background:#f1f4f8;border-radius:3px}.code-line .text{background:#f1f4f8;overflow-wrap:normal;overflow-x:auto}a{color:#175eba;text-decoration:underline}.list-item{white-space:normal;display:flex;gap:8px}.bullet{min-width:20px}img{max-width:100%;max-height:720px;object-fit:contain;margin:8px 0}.table-scroll{overflow-x:auto;padding:8px 0}table{border-collapse:collapse;width:100%}th,td{border:1px solid #dce3ed;padding:7px 12px;text-align:left;vertical-align:top}th{background:#f1f5fa}td.ln{width:48px}.unavailable{color:#7e6470;font-size:13px}hr{border:0;border-top:1px solid #ccd5e2}@media print{body{background:white}main{max-width:none;padding:0}.message{border-radius:0}.message header{break-after:avoid}tr,img{break-inside:avoid}}
         </style></head><body><main><h1>Converse Transcripts</h1><p class="summary">\(sessions.count) session\(sessions.count == 1 ? "" : "s") · \(escape(content.rawValue)) · \(escape(order.rawValue)) · Times: \(escape(TimeZone.current.identifier)).\(escape(note))</p>\(body)</main></body></html>
         """
+    }
+}
+
+final class HandoffExportProgress: ObservableObject {
+    @Published var text = "Preparing handoff notes…"
+    @Published var cancelled = false
+    var current: Session?
+    func cancel() {
+        cancelled = true
+        if let current, current.busy { Store.shared.stop(current) }
+    }
+}
+struct HandoffExportProgressView: View {
+    @ObservedObject var state: HandoffExportProgress
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ProgressView(state.text).fixedSize(horizontal: false, vertical: true)
+            Text("Each note is an ordinary turn, visible in its conversation.").font(.caption).foregroundStyle(.secondary)
+            HStack { Spacer(); Button("Cancel") { state.cancel() }.keyboardShortcut(.cancelAction).disabled(state.cancelled) }
+        }.padding(16).frame(width: 420)
     }
 }
