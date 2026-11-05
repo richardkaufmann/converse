@@ -5,42 +5,29 @@ import ImageIO
 // Explicit image references become managed attachments. File imports stay
 // inside permitted roots; HTTPS downloads use a bounded, credential-free client.
 enum ResponseImages {
+    // Local screenshots may be much larger than the attachment sent to peers.
+    // Keep network downloads and normalized output at their existing 8 MB limit.
+    static let localInputLimit = 32_000_000
     struct Captured { var range: NSRange; var caption: String; var file: URL }
     static func capture(_ text: String, roots: [URL], destination: URL) -> [Captured] {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)"#)
         let allowed = roots.map { $0.resolvingSymlinksInPath().standardizedFileURL.path + "/" }
-        var captured: [Captured] = []; var offset = 0; var fence: String?
-        for line in text.components(separatedBy: "\n") {
-            defer { offset += (line as NSString).length + 1 }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                let marker = String(trimmed.prefix(3)); if fence == marker { fence = nil } else if fence == nil { fence = marker }; continue
-            }
-            guard fence == nil, !trimmed.hasPrefix(">"), !line.contains("`"), captured.count < 8 else { continue }
-            let source = line as NSString
-            for match in expression.matches(in: line, range: NSRange(location: 0, length: source.length)) where captured.count < 8 {
-                guard match.range.location == 0 || source.substring(with: NSRange(location: match.range.location - 1, length: 1)) != "\\" else { continue }
-                let urlRange = match.range(at: 2).location == NSNotFound ? match.range(at: 3) : match.range(at: 2)
-                let path = source.substring(with: urlRange)
-                let candidate: URL
-                if path.hasPrefix("/") { candidate = URL(fileURLWithPath: path.removingPercentEncoding ?? path) }
-                else if let url = URL(string: path), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" { candidate = url }
-                else { continue }
-                let file = candidate.resolvingSymlinksInPath().standardizedFileURL
-                guard allowed.contains(where: { file.path.hasPrefix($0) }),
-                      let properties = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), properties.isRegularFile == true,
-                      let size = properties.fileSize, size <= 8_000_000,
-                      let handle = try? FileHandle(forReadingFrom: file) else { continue }
-                let bytes = try? handle.read(upToCount: 8_000_001); try? handle.close()
-                guard let bytes, bytes.count <= 8_000_000, let png = normalizedPNG(bytes) else { continue }
-                let hash = DeviceBlob.sha256Hex(png)
-                let output = destination.appendingPathComponent("Response-" + hash + ".png")
-                do {
-                    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                    try png.write(to: output, options: .atomic)
-                    captured.append(Captured(range: NSRange(location: offset + match.range.location, length: match.range.length), caption: source.substring(with: match.range(at: 1)), file: output))
-                } catch { continue }
-            }
+        var captured: [Captured] = []
+        for reference in TranscriptStyle.localImageReferences(text) {
+            guard captured.count < 8 else { break }
+            let file = reference.url.resolvingSymlinksInPath().standardizedFileURL
+            guard allowed.contains(where: { file.path.hasPrefix($0) }),
+                  let properties = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), properties.isRegularFile == true,
+                  let size = properties.fileSize, size <= localInputLimit,
+                  let handle = try? FileHandle(forReadingFrom: file) else { continue }
+            let bytes = try? handle.read(upToCount: localInputLimit + 1); try? handle.close()
+            guard let bytes, bytes.count <= localInputLimit, let png = normalizedPNG(bytes) else { continue }
+            let hash = DeviceBlob.sha256Hex(png)
+            let output = destination.appendingPathComponent("Response-" + hash + ".png")
+            do {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try png.write(to: output, options: .atomic)
+                captured.append(Captured(range: reference.range, caption: reference.caption, file: output))
+            } catch { continue }
         }
         return captured
     }
@@ -53,8 +40,11 @@ enum ResponseImages {
         guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0, width <= 16384, height <= 16384, width * height <= 64_000_000 else { return nil }
-        var dimension = min(2048, max(width, height))
+              width > 0, height > 0, width <= 131072, height <= 131072, width <= 64_000_000 / height else { return nil }
+        // Preserve readable detail in stitched pages and panoramas. The result
+        // still fits the existing peer dimension and byte limits.
+        let longImage = max(width, height) / min(width, height) >= 4
+        var dimension = min(longImage ? 16384 : 2048, max(width, height))
         while dimension >= 128 || dimension == max(width, height) {
             guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: dimension, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
             if let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]), png.count <= 8_000_000 { return png }
@@ -192,6 +182,41 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         check(ResponseImages.capture("![private](" + escape.absoluteString + ")", roots: [allowed], destination: output).isEmpty, "Response image imports reject symlink escapes")
         let quoted = "```md\n![Example](" + input.absoluteString + ")\n```\n[ordinary link](" + input.absoluteString + ")\n![remote](https://example.invalid/image.jpg)"
         check(ResponseImages.capture(quoted, roots: [allowed], destination: output).isEmpty, "Response image imports ignore code examples, ordinary links and network URLs")
+        let spaced = allowed.appendingPathComponent("full page.png")
+        let tall = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 128, pixelsHigh: 17000, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        memset(tall.bitmapData!, 180, tall.bytesPerRow * tall.pixelsHigh)
+        var tallBytes = tall.representation(using: .png, properties: [:])!
+        tallBytes.append(Data(count: 8_000_001 - tallBytes.count))
+        try tallBytes.write(to: spaced)
+        for target in [spaced.absoluteString, "file://" + spaced.path, "<file://" + spaced.path + ">"] {
+            let captured = ResponseImages.capture("![Full page](" + target + ")", roots: [allowed], destination: output)
+            let normalized = captured.first.flatMap { try? Data(contentsOf: $0.file) }
+            let decoded = normalized.flatMap(NSBitmapImageRep.init(data:))
+            check(captured.count == 1 && (normalized?.count ?? Int.max) <= 8_000_000 && (decoded?.pixelsHigh ?? 0) > 2048 && (decoded?.pixelsHigh ?? Int.max) <= 16384, "Tall image above old byte/height limits imports with detail and bounded output: " + (target.contains("%20") ? "encoded" : "spaces"))
+        }
+        check((try Data(contentsOf: spaced)) == tallBytes, "Normalization preserves the original full-page file")
+        let tooLarge = allowed.appendingPathComponent("over-limit.png")
+        FileManager.default.createFile(atPath: tooLarge.path, contents: nil)
+        let oversizedHandle = try FileHandle(forWritingTo: tooLarge)
+        try oversizedHandle.truncate(atOffset: UInt64(ResponseImages.localInputLimit + 1)); try oversizedHandle.close()
+        check(ResponseImages.capture("![Large](" + tooLarge.absoluteString + ")", roots: [allowed], destination: output).isEmpty, "Local image input limit remains bounded")
+        let unavailable = MarkdownText.render("![Missing](" + spaced.absoluteString + ")")
+        check(unavailable.string.contains("Image not displayed") && unavailable.string.contains("full%20page.png"), "Uncaptured local images retain an explicit fallback path")
+        check(ConverseExchange.neutralizeLocalImages("![Raw](file://" + spaced.path + ")").hasPrefix("[Raw]"), "Imported raw-space local embeds remain neutralized")
+        if let fixture = ProcessInfo.processInfo.environment["CONVERSE_RESPONSE_IMAGE_FIXTURE"] {
+            let file = URL(fileURLWithPath: fixture)
+            let captured = ResponseImages.capture("![Full-page regression](" + file.absoluteString + ")", roots: [file.deletingLastPathComponent()], destination: output)
+            check(captured.count == 1, "Real full-page screenshot captures into a managed attachment")
+            if let captured = captured.first {
+                let fixtureSession = Session(entry: Entry(name: "Image fixture", command: "unused", directory: root.path, engine: "codex"))
+                fixtureSession.messages = [Message(role: "assistant", text: captured.caption, images: [captured.file.path])]
+                let view = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+                let coordinator = ScrollingConversation.Coordinator(fixtureSession); coordinator.render(view)
+                var attachments = 0
+                view.textStorage?.enumerateAttribute(.attachment, in: NSRange(location: 0, length: view.textStorage?.length ?? 0)) { value, _, _ in if value is NSTextAttachment { attachments += 1 } }
+                check(attachments == 1, "Real full-page screenshot renders as a native transcript image")
+            }
+        }
         let remoteURL = URL(string: "https://images.example.invalid/valid.jpg")!
         let loader = ResponseImageLoader()
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ResponseImageFixture.self]

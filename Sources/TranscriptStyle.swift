@@ -112,6 +112,31 @@ struct TranscriptImageReference {
     var url: URL
 }
 extension TranscriptStyle {
+    static func localImageReferences(_ text: String) -> [TranscriptImageReference] {
+        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|(file://[^\r\n\)]+|[^\s\)]+))\s*\)"#)
+        var result: [TranscriptImageReference] = [], offset = 0
+        var fence: String?
+        for line in text.components(separatedBy: "\n") {
+            defer { offset += (line as NSString).length + 1 }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let marker = String(trimmed.prefix(3)); if fence == marker { fence = nil } else if fence == nil { fence = marker }; continue
+            }
+            guard fence == nil, !trimmed.hasPrefix(">"), !line.contains("`") else { continue }
+            let source = line as NSString
+            for match in expression.matches(in: line, range: NSRange(location: 0, length: source.length)) {
+                guard match.range.location == 0 || source.substring(with: NSRange(location: match.range.location - 1, length: 1)) != "\\" else { continue }
+                let urlRange = match.range(at: 2).location == NSNotFound ? match.range(at: 3) : match.range(at: 2)
+                let path = source.substring(with: urlRange).trimmingCharacters(in: .whitespaces)
+                let candidate: URL
+                if path.hasPrefix("/") { candidate = URL(fileURLWithPath: path.removingPercentEncoding ?? path) }
+                else if let url = URL(string: path), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" { candidate = url }
+                else { continue }
+                result.append(TranscriptImageReference(range: NSRange(location: offset + match.range.location, length: match.range.length), caption: source.substring(with: match.range(at: 1)), url: candidate))
+            }
+        }
+        return result
+    }
     static func imageReferences(_ text: String) -> [TranscriptImageReference] {
         let regex = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)"#)
         var result: [TranscriptImageReference] = [], offset = 0
@@ -139,7 +164,12 @@ extension TranscriptStyle {
     // its caption and full URL as an ordinary link so the destination is plain.
     static func imageLinks(_ text: String) -> String {
         let result = NSMutableString(string: text)
-        for ref in imageReferences(text).reversed() {
+        // A failed local capture must not collapse silently to just its alt text.
+        // This is display-only: the original reference remains retryable on disk.
+        let references = imageReferences(text) + localImageReferences(text).map {
+            TranscriptImageReference(range: $0.range, caption: "Image not displayed" + ($0.caption.isEmpty ? "" : ": " + $0.caption), url: $0.url)
+        }
+        for ref in references.sorted(by: { $0.range.location > $1.range.location }) {
             var label = ""
             for character in ref.url.absoluteString { if "\\`*_[]<>~".contains(character) { label.append("\\") }; label.append(character) }
             result.replaceCharacters(in: ref.range, with: (ref.caption.isEmpty ? "" : ref.caption + ": ") + "[" + label + "](" + ref.url.absoluteString + ")")
