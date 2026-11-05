@@ -2875,7 +2875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
-        if DemoReset.enabled { sub.addItem(withTitle: "Reset Demo…", action: #selector(resetDemo), keyEquivalent: "") }
+        if DemoReset.enabled { sub.addItem(withTitle: DemoReset.testName == nil ? "Reset Demo…" : "Reset TEST…", action: #selector(resetDemo), keyEquivalent: "") }
         sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(quitConverse(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
@@ -2947,7 +2947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.setup = !Store.shared.setupCompleted
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 760, height: 540)
-        window.title = (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") : state.title) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = (DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") : state.title)) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
         title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
         window.addTitlebarAccessoryViewController(title)
@@ -3046,12 +3046,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func resetDemo() {
         guard DemoReset.enabled, !quitting else { return }
         let alert = NSAlert()
-        alert.messageText = "Reset Converse Demo?"
-        alert.informativeText = "This stops Demo’s work and quits. Reopen Converse Demo to start the welcome walkthrough again, with fresh sessions, provider logins and Group pairing. Saved Demo API tokens will be removed. The old Demo files are kept in a local backup. Your normal Converse app and project files are untouched."
+        alert.messageText = "Reset " + DemoReset.profileName + "?"
+        alert.informativeText = "This stops this app’s work and quits. Reopen " + DemoReset.profileName + " to start the welcome walkthrough again, with fresh sessions, provider logins and Group pairing. This profile’s saved API tokens will be removed. Its old files are kept in a local backup. Other Converse apps and project files are untouched."
         alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Reset and Quit")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         do {
-            try DemoReset.request(folder: Store.shared.folder, enabled: DemoReset.enabled)
+            try DemoReset.request(folder: Store.shared.folder, enabled: DemoReset.enabled, profileName: DemoReset.profileName)
             resettingDemo = true
             quitConverse(nil)
         } catch { NSAlert(error: error).runModal() }
@@ -3859,11 +3859,11 @@ if CommandLine.arguments.contains("--provider-self-test") {
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
-    let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent((Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
+    let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))
     setenv("CONVERSE_DATA_DIR", isolated.path, 1)
     do {
         try DemoReset.wipeSetupPreview(folder: isolated)
-        if try DemoReset.consume(folder: isolated, enabled: DemoReset.enabled, clearCredentials: DemoReset.clearCredentials) != nil,
+        if try DemoReset.consume(folder: isolated, enabled: DemoReset.enabled, profileName: DemoReset.profileName, clearCredentials: DemoReset.clearCredentials) != nil,
            let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
     } catch {
         NSAlert(error: error).runModal()

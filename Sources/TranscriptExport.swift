@@ -264,6 +264,8 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                     guard review.runModal() == .alertFirstButtonReturn else { return }
                 }
                 try document.write(to: url, options: .atomic)
+                progress.orderOut(nil)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
             } catch {
                 let alert = NSAlert(); alert.messageText = "Could not export conversations"; alert.informativeText = error.localizedDescription; alert.runModal()
             }

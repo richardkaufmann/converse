@@ -26,6 +26,25 @@ import SwiftUI
     check((try! String(contentsOf: realFolder.appendingPathComponent("sessions.json"), encoding: .utf8)) == "production fixture" && (try! DemoReset.consume(folder: demoFolder, enabled: true, clearCredentials: { clearedDemoKeys += 1 })) == nil && clearedDemoKeys == 1, "Demo Reset preserves production and is consumed only once")
     try! DemoReset.request(folder: demoFolder, enabled: true)
     check((try? DemoReset.consume(folder: demoFolder, enabled: true, clearCredentials: { throw NSError(domain: "fixture", code: 1) })) == nil && FileManager.default.fileExists(atPath: demoFolder.appendingPathComponent(DemoReset.marker).path), "Failed Demo credential reset retains request for retry instead of starting NUX")
+    for provider in DemoReset.testProviders {
+        let name = DemoReset.testName(provider: provider)!
+        let folder = resetRoot.appendingPathComponent(name)
+        try! FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try! Data("imported conversation".utf8).write(to: folder.appendingPathComponent("sessions.json"))
+        check((try! DemoReset.consume(folder: folder, enabled: true, profileName: name, clearCredentials: {})) == nil
+              && FileManager.default.fileExists(atPath: folder.appendingPathComponent("sessions.json").path),
+              "\(provider) TEST preserves imported conversations without an explicit reset")
+        check((try? DemoReset.request(folder: realFolder, enabled: true, profileName: name)) == nil
+              && (try? DemoReset.request(folder: demoFolder, enabled: true, profileName: name)) == nil,
+              "\(provider) TEST reset refuses production and Demo profiles")
+        try! DemoReset.request(folder: folder, enabled: true, profileName: name)
+        let backup = try! DemoReset.consume(folder: folder, enabled: true, profileName: name, clearCredentials: {})!
+        check((try! String(contentsOf: backup.appendingPathComponent("sessions.json"), encoding: .utf8)) == "imported conversation"
+              && !FileManager.default.fileExists(atPath: folder.appendingPathComponent("sessions.json").path),
+              "\(provider) TEST reset backs up imports then starts with an empty profile")
+    }
+    check(DemoReset.testName(provider: "../../Converse") == nil && DemoReset.testName(provider: nil) == nil,
+          "TEST profile names only accept known developer seats")
     let oldAPI = AgentRuntime.shared.api, oldKeyReader = AgentRuntime.shared.keyReader
     defer { AgentRuntime.shared.api = oldAPI; AgentRuntime.shared.keyReader = oldKeyReader }
     AgentRuntime.shared.keyReader = { _ in nil }
