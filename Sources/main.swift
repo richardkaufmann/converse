@@ -104,6 +104,9 @@ final class Session: ObservableObject, Identifiable {
     // The catch-up block Converse put in the draft, until it is sent; a later
     // binding replaces only this text.
     @Published var restoreContext: String?
+    // The sent catch-up message, kept until its turn succeeds so a failed
+    // first send puts it back in the draft (not saved).
+    var restoreRetry: (text: String, context: String)?
     // Called once when the current turn finishes (true on success).
     var turnCompletion: ((Bool) -> Void)?
     var needsAgentSetup: Bool { entry.engine == "agent" && agent == nil }
@@ -605,6 +608,14 @@ final class Store: ObservableObject {
         s.interrupted = false; s.resumeAfterInterrupt = false
         if !shouldRun { s.queuePaused = !s.pending.isEmpty; s.compactionRequested = false }
         if completedTurn { s.agentQueueRetries = 0 }
+        if let retry = s.restoreRetry {
+            s.restoreRetry = nil
+            // The provider may never have received the catch-up message.
+            if !completedTurn && s.draft.isEmpty {
+                s.draft = retry.text; s.restoreContext = retry.context
+                s.messages.append(Message(role: "notice", text: "The first message didn’t go through, so the catch-up message is back in your draft. Press Return to try again."))
+            }
+        }
         // An agent must not stall behind one failed turn: its held queue resumes
         // by itself after a back-off (1, 2, 4… minutes, at most 15). A human Stop,
         // or a loop the human paused, still holds the queue.
@@ -653,6 +664,7 @@ final class Store: ObservableObject {
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         s.messages.append(Message(role: "user", text: text, images: images))
+        if let context = s.restoreContext { s.restoreRetry = (text, context) }
         s.restoreContext = nil
         if clearDisplayBeforeReply {
             clearSessionDisplay(s)
