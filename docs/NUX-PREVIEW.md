@@ -47,7 +47,7 @@ agents use the optional `appControl` object in their existing reply JSON.
 Only successful final responses are processed; Codex uses its authoritative
 final-answer file. Quotes, partial output, and bare JSON never execute.
 
-Operations: inspect, help, open, create-agent, configure-agent, show-session.
+Operations: inspect, help, open, create-parking-lot, create-agent, configure-agent, show-session.
 No arbitrary shell/paths, credential reads, deletion, auto-updates, or scheduled
 loop activation are exposed. Background/forwarded requests cannot invoke these
 commands. A human request can continue for at most eight app operations before

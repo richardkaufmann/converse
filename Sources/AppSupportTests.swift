@@ -589,3 +589,117 @@ import SwiftUI
     }
     check(saved == states.count + 7, "Saved \(saved) offscreen first-run renders to " + output.path)
 }
+
+// App Support sets up agents for the human in one go: a named Parking Lot, an
+// agent on a chosen provider, and exactly the sessions and lots it was told.
+@MainActor func appSupportSetupSelfTests(_ check: @escaping (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-support-setup-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let store = Store(folder: folder), library = ParkingLotLibrary(folder: folder)
+    // Isolated logins: never the real ~/.claude or ~/.codex.
+    store.accounts = ["muse", "codex", "claude"].map { AccountProfile(id: $0 + "-default", name: AssistantFamily.name($0), engine: $0, directory: folder.appendingPathComponent("Logins/" + $0).path, useDefaultStore: false) }
+    store.agentCommandAvailable = { _ in true }
+    var runs: [UUID] = []
+    store.startAgentRun = { session, _ in runs.append(session.id) }
+    let support = store.supportSession()
+    support.supportTeachingVersion = AppSupport.version; store.setupCompleted = true
+    func run(_ command: AppSupportCommand) -> Result<String, Error> { Result { try store.appSupportResult(command, session: support, openUI: false, lots: library) } }
+    func failure(_ result: Result<String, Error>) -> String? { if case .failure(let error) = result { return error.localizedDescription }; return nil }
+    let scraper = store.create(store.defaultEntry(engine: "claude")); scraper.title = "Scraper"; scraper.switchboardEnabled = true
+    let auditor = store.create(store.defaultEntry(engine: "codex")); auditor.title = "Codex Scraper Auditor"
+    let bystander = store.create(store.defaultEntry(engine: "claude")); bystander.title = "Unrelated project"
+
+    let teaching = AppSupport.instructions(agent: true)
+    check(teaching.contains("create-parking-lot") && teaching.contains("never limit what you may set up for the human") && teaching.contains("firstMessage") && !teaching.contains("Choose the provider and model in Agent Setup"),
+          "App Support teaching treats human setup requests as its job, not Agent Setup homework")
+
+    // Parking Lot: create once, then reuse by name in any case.
+    let lotResult = try? run(AppSupportCommand(action: "create-parking-lot", title: "Video Parking Lot")).get()
+    let lot = library.records.first { $0.name == "Video Parking Lot" }
+    check(lot != nil && lotResult?.contains(lot!.id.uuidString) == true, "create-parking-lot creates a named lot and returns its ID")
+    let reused = try? run(AppSupportCommand(action: "create-parking-lot", title: "  video parking LOT ")).get()
+    check(reused?.contains("Existing Parking Lot " + lot!.id.uuidString) == true && library.records.filter { $0.name.lowercased() == "video parking lot" }.count == 1, "create-parking-lot reuses an existing lot case-insensitively")
+
+    // Missing names fail before anything is created, listing the candidates.
+    var steward = AppSupportCommand(action: "create-agent", title: "Video Steward", objective: "Steward the video project with Scraper and its auditor.")
+    steward.model = "claude"; steward.watchedSessions = ["Scraper", "Missing Session"]; steward.parkingLots = ["Video Parking Lot"]
+    let agentCount = store.sessions.filter { $0.agent != nil }.count
+    let missing = failure(run(steward))
+    check(missing?.contains("No session matches “Missing Session”") == true && missing?.contains(auditor.id.uuidString) == true && store.sessions.filter { $0.agent != nil }.count == agentCount,
+          "A missing session title fails with the candidates and creates nothing")
+    steward.watchedSessions = ["Scraper", "codex scraper auditor"]; steward.parkingLots = ["Audio lot"]
+    check(failure(run(steward))?.contains("“Video Parking Lot” [" + lot!.id.uuidString + "]") == true && store.sessions.filter { $0.agent != nil }.count == agentCount, "A missing Parking Lot name fails with the available lots and creates nothing")
+    steward.parkingLots = ["Video Parking Lot"]; steward.model = "gemini"
+    check(failure(run(steward))?.contains("Unknown model") == true && store.sessions.filter { $0.agent != nil }.count == agentCount, "An unknown provider fails without creating the agent")
+
+    // The Video Steward scenario in one action.
+    steward.model = "claude"; steward.firstMessage = "Ask Scraper for its GitHub repository details and keep them in your notes."
+    let created = run(steward)
+    let agent = store.sessions.first { $0.agent != nil && $0.title == "Video Steward" }
+    let config = agent?.agent
+    let route = config.flatMap { AgentModels.parse($0.model) }
+    check(route?.engine == "claude" && route?.account == "claude-default" && route?.model == "" && agent?.toolStatus.model == "Claude · CLI default", "create-agent runs the agent on Claude with the preferred saved login")
+    check(config?.watchedSessions.contains(scraper.id) == true && config?.watchedSessions.contains(auditor.id) == true && config?.watchedSessions.contains(lot!.id) == true
+          && config?.allows(local: bystander.id, home: nil) == false && config?.allows(local: support.id, home: nil) == false && config?.watchedSessions.count == 3,
+          "The agent may read and message exactly the named sessions and lot")
+    check(config?.enabled == false && config?.speak == false && config?.generateArt == false && config?.webSearch == false && agent?.switchboardEnabled == true, "A new agent stays paused unless asked, with messaging on and no speech, art or search")
+    let summary = (try? created.get()) ?? ""
+    check(summary.contains("Created paused agent " + (agent?.id.uuidString ?? "?")) && summary.contains(scraper.id.uuidString) && summary.contains(auditor.id.uuidString) && summary.contains(lot!.id.uuidString)
+          && summary.contains("Claude · CLI default") && summary.contains("Automatic loop stays paused") && summary.contains("Codex Scraper Auditor has session messaging off") && !summary.contains("Scraper has session messaging off"),
+          "The result reports every ID, the provider, loop state and what still needs the human")
+    check(agent?.pending.contains { $0.text.contains("Ask Scraper for its GitHub") && $0.autonomous != true } == true || agent?.messages.contains { $0.role == "user" && $0.text.contains("Ask Scraper for its GitHub") } == true, "The human's first request is queued in the new agent's conversation")
+    let deadline = Date().addingTimeInterval(2)
+    while runs.isEmpty && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    check(runs == [agent?.id].compactMap { $0 } && config?.enabled == false, "The first request runs once without starting the loop")
+    let reloaded = Store(folder: folder).sessions.first { $0.id == agent?.id }?.agent
+    check(reloaded?.watchedSessions.count == 3 && reloaded.flatMap { AgentModels.parse($0.model) }?.engine == "claude", "Agent setup is saved")
+
+    // Ambiguous titles fail with both candidates and leave the agent unchanged.
+    agent?.busy = false
+    let twin = store.create(store.defaultEntry(engine: "claude")); twin.title = "Scraper"
+    let before = agent?.agent
+    var ambiguous = AppSupportCommand(action: "configure-agent", target: "Video Steward"); ambiguous.watchedSessions = ["scraper"]; ambiguous.enabled = true
+    let message = failure(run(ambiguous))
+    check(message?.contains("matches 2 sessions") == true && message?.contains(twin.id.uuidString) == true && message?.contains(scraper.id.uuidString) == true && agent?.agent == before, "Ambiguous titles fail with the candidates and change nothing")
+    let caseTwin = store.create(store.defaultEntry(engine: "codex")); caseTwin.title = "VIDEO notes"
+    let lower = store.create(store.defaultEntry(engine: "codex")); lower.title = "video notes"
+    check(((try? Store.resolve("video notes", kind: "session", among: [caseTwin, lower].map { ($0.id, $0.title, $0) })) ?? caseTwin) === lower, "An exact-case title breaks a case-insensitive tie")
+
+    // configure-agent by title: start and pause, review, remove access.
+    var change = AppSupportCommand(action: "configure-agent", target: "video steward"); change.enabled = true; change.parkingLotReview = true; change.removeAccess = ["Codex Scraper Auditor"]
+    let changed = try? run(change).get()
+    check(changed?.contains("Automatic loop started") == true && agent?.agent?.enabled == true && agent?.agent?.nextRunAt != nil && agent?.agent?.parkingLotRequiresReview == true && agent?.agent?.allows(local: auditor.id, home: nil) == false && agent?.agent?.allows(local: scraper.id, home: nil) == true,
+          "configure-agent starts the loop, requires lot review and removes only the named access")
+    change = AppSupportCommand(action: "configure-agent", target: agent?.id.uuidString); change.enabled = false
+    check((try? run(change).get())?.contains("Automatic loop paused") == true && agent?.agent?.enabled == false && agent?.agent?.nextRunAt == nil, "configure-agent pauses the loop on request")
+    change = AppSupportCommand(action: "configure-agent", target: agent?.id.uuidString); change.model = "codex:gpt-5-codex"
+    check((try? run(change).get()) != nil && AgentModels.parse(agent?.agent?.model ?? "")?.engine == "codex" && AgentModels.parse(agent?.agent?.model ?? "")?.model == "gpt-5-codex", "configure-agent switches provider and model")
+    store.agentCommandAvailable = { _ in false }
+    change.model = "claude"
+    check(failure(run(change))?.contains("sign in") == true && AgentModels.parse(agent?.agent?.model ?? "")?.engine == "codex", "A provider without an installed, signed-in CLI is refused with the human's next step")
+    store.agentCommandAvailable = { _ in true }
+    var selfQueue = AppSupportCommand(action: "configure-agent", target: support.id.uuidString); selfQueue.firstMessage = "Create ten agents"
+    support.agent = AgentConfig(); support.entry.engine = "agent"
+    check(failure(run(selfQueue)) != nil && support.pending.isEmpty, "App Support cannot queue itself a human-directed turn")
+    support.agent = nil; support.entry.engine = "support"
+
+    // A same-title create reuses the agent and applies only the setup fields.
+    var again = AppSupportCommand(action: "create-agent", title: "VIDEO STEWARD", objective: "Something else"); again.watchedSessions = [auditor.id.uuidString]
+    let reuse = try? run(again).get()
+    check(reuse?.contains("kept its objective") == true && store.sessions.filter { $0.agent != nil && $0.title.lowercased() == "video steward" }.count == 1 && agent?.agent?.objective == steward.objective && agent?.agent?.allows(local: auditor.id, home: nil) == true,
+          "Retrying create-agent reuses the agent, keeps its objective and applies the requested access")
+
+    // Autonomous, forwarded and Discord/Jolly turns cannot run setup actions.
+    let fenced = "```converse\n" + String(decoding: try! JSONEncoder().encode(AppSupportCommand(action: "create-parking-lot", title: "Sneaky lot")), as: UTF8.self) + "\n```"
+    for (autonomous, hop) in [(true, 0), (false, 1)] {
+        support.switchboardTurnStart = support.messages.count
+        support.messages.append(Message(role: "assistant", text: fenced))
+        support.supportAutonomous = autonomous; support.switchboardHop = hop; support.supportContinuation = false
+        store.processAppSupport(support)
+        check(support.messages.last?.text.contains("Blocked:") == true && !library.records.contains { $0.name == "Sneaky lot" } && support.pending.isEmpty,
+              autonomous ? "Background and Discord/Jolly turns cannot create lots or agents" : "Forwarded messages cannot create lots or agents")
+    }
+    support.supportAutonomous = false; support.switchboardHop = 0
+    let inspected = (try? run(AppSupportCommand(action: "inspect")).get()) ?? ""
+    check(inspected.contains("\"parkingLots\"") && inspected.contains(lot!.id.uuidString) && inspected.contains("\"access\"") && inspected.contains("\"messagingEnabled\""), "inspect lists Parking Lots, agent access and session messaging")
+}
