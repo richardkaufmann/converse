@@ -329,7 +329,6 @@ Credentials go in the app’s masked fields or the connector’s authentication 
 
 Monitoring does not submit issues or push code. To report a Converse bug, use [Report a bug](#report-a-bug): that separate workflow targets `richardkaufmann/converse`, requires issue-writing permission for direct submission, and lets you review the exact report. A token for your own repository does not automatically grant access to Converse. Coding sessions use their own Git/CLI authentication. Automatic GitHub-to-Parking-Lot synchronization is planned, not available yet.
 
-If you use Home Assistant, the optional [Converse GitHub metrics bridge](integrations/home-assistant/README.md) creates a native dashboard for releases, issues, traffic and optional Discord counts. It is configured for your own repository and Home Assistant, with credentials kept out of the repository.
 
 ## Jolly (Mac)
 
