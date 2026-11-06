@@ -1,4 +1,57 @@
 import Foundation
+import AppKit
+
+/// Presentation only. The original message stays in the archive, model context,
+/// switchboard parser and Copy Message source.
+struct TranscriptDisclosure {
+    let prefix: String
+    let details: String
+    let summary: String
+    static let attribute = NSAttributedString.Key("ConverseDisclosure")
+
+    static func parse(_ source: String, role: String, resolveName: (String) -> String? = { _ in nil }) -> Self? {
+        let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if role != "assistant", text.hasPrefix("[Parking Lot · "),
+           let start = text.range(of: "\n{"),
+           let json = String(text[start.lowerBound...]).data(using: .utf8) {
+            if let value = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any],
+               let revision = value["revision"] as? Int, value["rows"] is [[String: Any]] {
+                return Self(prefix: "", details: text, summary: "Read Parking Lot · revision \(revision)")
+            }
+        }
+        guard role == "assistant", case .command(let command) = SwitchboardCommand.trailing(text),
+              ["ask", "tell", "tell-urgently"].contains(command.command),
+              command.to != nil, command.text != nil,
+              let opening = text.range(of: "```converse\n", options: .backwards) else { return nil }
+        let fence = String(text[opening.lowerBound...])
+        guard let summary = TranscriptStyle.trafficSummary(fence, resolveName: resolveName) else { return nil }
+        return Self(prefix: String(text[..<opening.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines),
+                    details: fence, summary: summary)
+    }
+
+    func rendered(id: UUID, expanded: Bool, fontSize: CGFloat,
+                  base: [NSAttributedString.Key: Any]) -> NSMutableAttributedString {
+        let body = prefix.isEmpty ? NSMutableAttributedString(string: "") : MarkdownText.render(prefix)
+        if !prefix.isEmpty {
+            PaneTextSize.scale(body, by: fontSize / CGFloat(PaneTextSize.standard))
+            let references = TranscriptStyle.imageReferences(prefix)
+            body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                guard let url = value as? URL, let reference = references.first(where: { $0.url == url }) else { return }
+                body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: id, url: url, caption: reference.caption), range: range)
+            }
+            body.append(NSAttributedString(string: "\n", attributes: base))
+        }
+        let attributes = base.merging([
+            .link: URL(string: "converse-disclosure://" + id.uuidString)!,
+            Self.attribute: id.uuidString,
+            .toolTip: expanded ? "Hide full message" : "Show full message",
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]) { _, new in new }
+        body.append(NSAttributedString(string: (expanded ? "▾ " : "▸ ") + summary, attributes: attributes))
+        if expanded { body.append(NSAttributedString(string: "\n" + details, attributes: base)) }
+        return body
+    }
+}
 
 // Keep destinations when a rich-text selection is pasted into a plain-text app.
 enum TranscriptClipboard {

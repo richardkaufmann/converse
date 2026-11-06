@@ -2392,6 +2392,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var renderedAttachments: [String] = []
         var renderedFontSize: CGFloat?
         var messageStarts: [UUID: Int] = [:]
+        var expandedDisclosures: Set<UUID> = []
+        private var disclosureNeedsRender = false
         var historyEnd = 0
         private(set) var historyBuildCount = 0
         private(set) var lastReplacementStart = 0
@@ -2468,6 +2470,12 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
+            if let url, url.scheme == "converse-disclosure", let id = url.host.flatMap(UUID.init(uuidString:)),
+               let text = textView as? ConversationTextView, charIndex >= 0, charIndex < (text.string as NSString).length,
+               text.textStorage?.attribute(TranscriptDisclosure.attribute, at: charIndex, effectiveRange: nil) as? String == id.uuidString {
+                if !expandedDisclosures.insert(id).inserted { expandedDisclosures.remove(id) }
+                disclosureNeedsRender = true; render(text); return true
+            }
             if let url, AppSupport.handleLink(url) { return true }
             if let url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
             return true
@@ -2527,11 +2535,13 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             let previous = renderedMessages
             let firstRender = previous == nil
-            var historyChanged = firstRender
+            let disclosureChanged = disclosureNeedsRender
+            disclosureNeedsRender = false
+            var historyChanged = firstRender || disclosureChanged
             let restyle = !firstRender && renderedFontSize != text.fontSize
             if seenMessagesRevision != session.messagesRevision {
                 let messages = session.displayedMessages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
-                historyChanged = previous != messages
+                historyChanged = historyChanged || previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
@@ -2570,7 +2580,7 @@ struct ScrollingConversation: NSViewRepresentable {
             if let previous {
                 while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
             }
-            let unchangedPrefix = firstRender || restyle ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
+            let unchangedPrefix = firstRender || restyle || disclosureChanged ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
             renderedAttachments = session.attachments
             historyBuildCount += 1
             let selection = text.selectedRange()
@@ -2579,8 +2589,8 @@ struct ScrollingConversation: NSViewRepresentable {
             let scroll = text.enclosingScrollView
             let origin = scroll?.contentView.bounds.origin ?? .zero
             let nativeScroll = scroll as? ConversationScrollView
-            let follow = (firstRender || historyChanged) && (nativeScroll?.prepareForRender(first: firstRender) ?? true)
-            if !firstRender && contentChanged { nativeScroll?.outputArrived() }
+            let follow = !disclosureChanged && (firstRender || historyChanged) && (nativeScroll?.prepareForRender(first: firstRender) ?? true)
+            if !firstRender && contentChanged && !disclosureChanged { nativeScroll?.outputArrived() }
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
@@ -2604,8 +2614,12 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
+                let disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveSessionName)
                 let trafficSummary = TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
-                if let summary = trafficSummary {
+                if let disclosure {
+                    body = disclosure.rendered(id: message.id, expanded: expandedDisclosures.contains(message.id), fontSize: text.fontSize, base: base)
+                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
+                } else if let summary = trafficSummary {
                     let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                     body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
                     markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
@@ -2630,7 +2644,7 @@ struct ScrollingConversation: NSViewRepresentable {
                         markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
                     }
                 } else { body = NSMutableAttributedString(string: visible, attributes: base) }
-                for mark in (trafficSummary == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
+                for mark in (trafficSummary == nil && disclosure == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
                     let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
                     let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
                     let at = min(renderedOffset, body.length)
@@ -2661,7 +2675,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 }
                 document.append(body)
                 if message.role == "user" || message.role == "assistant" {
-                    let formatted = message.role == "assistant" ? markdownCache[message.id]!.1 : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+                    let formatted = disclosure != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? markdownCache[message.id]!.1 : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }

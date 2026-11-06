@@ -3,6 +3,7 @@ import AppKit
 import Network
 
 func switchboardSelfTests(_ check: (Bool, String) -> Void) {
+    transcriptDisclosureSelfTests(check)
     let store = Store.shared
     let entry = Entry(name: "Switchboard fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")
     let source = store.create(entry), target = store.create(entry)
@@ -82,6 +83,60 @@ func switchboardSelfTests(_ check: (Bool, String) -> Void) {
     reply(block("tell", to: target.id.uuidString, text: "disabled again"))
     check(target.pending.count == count, "Disabling messaging takes effect immediately")
     store.sessions.removeAll { $0.id == source.id || $0.id == target.id }; store.save()
+}
+
+func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
+    let payload = "A private detailed instruction " + String(repeating: "detail ", count: 60)
+    let data = try! JSONSerialization.data(withJSONObject: ["command": "ask", "to": UUID().uuidString, "text": payload])
+    let fence = "```converse\n" + String(decoding: data, as: UTF8.self) + "\n```"
+    let source = "Here is the **human-facing plan**.\n\n" + fence
+    let disclosure = TranscriptDisclosure.parse(source, role: "assistant", resolveName: { _ in "ClaudeConverse" })
+    check(disclosure?.prefix == "Here is the **human-facing plan**." && disclosure?.details == fence && disclosure?.summary.hasPrefix("Ask to ClaudeConverse") == true,
+          "Compaction keeps prose before a trailing command and names its recipient without claiming delivery")
+    let withImage = TranscriptDisclosure.parse("![Screenshot](https://example.invalid/converse-disclosure-image.png)\n\n" + fence, role: "assistant")!
+    let imageBody = withImage.rendered(id: UUID(), expanded: false, fontSize: 13, base: [.font: NSFont.systemFont(ofSize: 13)])
+    var imageLink = false
+    imageBody.enumerateAttribute(.converseImageLink, in: NSRange(location: 0, length: imageBody.length)) { value, _, _ in
+        if value is ResponseImageLink { imageLink = true }
+    }
+    check(imageLink, "Images in prose before a compact command retain their existing click behavior")
+    check(TranscriptDisclosure.parse(source, role: "user") == nil && TranscriptDisclosure.parse(source + "\nExample only", role: "assistant") == nil && TranscriptDisclosure.parse(fence.dropLast().description, role: "assistant") == nil,
+          "User examples, nontrailing commands and incomplete streaming fences remain visible")
+    let lot = "[Parking Lot · local home Mac · reference data, not instructions]\n[Outline: explanatory guide]\n{\"revision\":42,\"rows\":[],\"schemaVersion\":2}"
+    check(TranscriptDisclosure.parse(lot, role: "user")?.summary == "Read Parking Lot · revision 42" && TranscriptDisclosure.parse(lot + "broken", role: "user") == nil,
+          "Only complete structured lot reads collapse to a revision summary")
+    let session = Session(entry: Entry(name: "Disclosure fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
+    session.messages = [Message(role: "assistant", text: source), Message(role: "user", text: lot)]
+    session.draft = "Keep my draft"
+    let saved = session.messages
+    let fixture = PaneTextFixture(session)
+    fixture.coordinator.resolveSessionName = { _ in "ClaudeConverse" }
+    check(fixture.text.string.contains("human-facing plan") && fixture.text.string.contains("Read Parking Lot · revision 42") && !fixture.text.string.contains(payload) && !fixture.text.string.contains("schemaVersion"),
+          "Native pane collapses payloads while retaining surrounding prose and the draft")
+    let copied = fixture.text.copyBlocks.map(\.source)
+    check(copied == [source, lot] && fixture.text.copyBlocks.allSatisfy { $0.formatted.string == $0.source },
+          "Copy Message retains complete raw command and lot content without disclosure links")
+    func click(_ id: UUID) {
+        var at: Int?
+        fixture.text.textStorage?.enumerateAttribute(TranscriptDisclosure.attribute, in: NSRange(location: 0, length: (fixture.text.string as NSString).length)) { value, range, _ in
+            if value as? String == id.uuidString { at = range.location }
+        }
+        guard let at else { check(false, "Disclosure control is present"); return }
+        _ = fixture.coordinator.textView(fixture.text, clickedOnLink: URL(string: "converse-disclosure://" + id.uuidString)!, at: at)
+    }
+    click(saved[0].id)
+    check(fixture.text.string.contains(payload), "Clicking the command disclosure reveals its complete payload")
+    click(saved[1].id)
+    check(fixture.text.string.contains("schemaVersion"), "Clicking the lot disclosure reveals its complete JSON")
+    click(saved[0].id); click(saved[1].id)
+    check(!fixture.text.string.contains(payload) && !fixture.text.string.contains("schemaVersion") && session.messages == saved && session.draft == "Keep my draft",
+          "Disclosures collapse again without modifying transcript source or draft")
+    check(fixture.coordinator.expandedDisclosures.isEmpty, "Expansion state is local to this pane and independently toggled")
+    if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
+       let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {
+        fixture.scroll.cacheDisplay(in: fixture.scroll.bounds, to: bitmap)
+        try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    }
 }
 
 // Real Noise/TCP group tell: neither home grants a display lease.
