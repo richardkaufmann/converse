@@ -117,6 +117,8 @@ struct DeviceSidebarSection: View {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
                                                  freePanes: Set((1...3).filter { workspace.paneIsAvailable($0, for: service.placementID(forGlobal: row.globalID), in: state.id) }),
+                                                 elsewhere: ShownElsewhere.resolve(localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id), window: ShownElsewhere.window(workspace.placements[service.placementID(forGlobal: row.globalID)], here: state.id, names: workspace.names),
+                                                                           device: ShownElsewhere.remoteDevice(row, home: home.deviceID, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), me: service.identity?.deviceID) { service.displayName(for: $0) }),
                                                  park: { service.releaseRemote(globalID: row.globalID); workspace.park(service.placementID(forGlobal: row.globalID)) },
                                                  assign: { pane in service.releaseDisplaced(in: state.id, pane: pane, incomingPlacement: service.placementID(forGlobal: row.globalID)); service.acquireRemote(globalID: row.globalID); workspace.assign(service.placementID(forGlobal: row.globalID), to: state.id, pane: pane) })
                             }
@@ -152,6 +154,8 @@ struct RemoteSidebarRow: View {
     let localPane: Int?
     // Panes in this window that taking the session would not evict anyone from.
     var freePanes: Set<Int> = []
+    // Another window here or another device shows it; P and X turn red on hover.
+    var elsewhere = ShownElsewhere()
     let park: () -> Void
     let assign: (Int) -> Void
     @StateObject private var hover = SidebarHoverState()
@@ -197,15 +201,15 @@ struct RemoteSidebarRow: View {
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             PaneButtonGroup(hover: hover) {
-                PaneButton(label: "P", selected: localPane == nil) { park() }.accessibilityLabel("Park " + row.title).help("Park this session: hide its pane here and release control. Its work continues on its home.")
+                PaneButton(label: "P", selected: localPane == nil, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { park() }.accessibilityLabel("Park " + row.title).help(elsewhere.help("Park this session: hide its pane here and release control. Its work continues on its home."))
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane), stripHovered: hover.overButtons) { assign(pane) }
                         .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
                 }
                 if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
-                PaneButton(label: "X", selected: confirmingClose, destructive: true) { confirmingClose = true }
+                PaneButton(label: "X", selected: confirmingClose, destructive: true, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { confirmingClose = true }
                     .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
-                    .help("Close this session on its home and remove it from every viewer. The home must support remote closing.")
+                    .help(elsewhere.help("Close this session on its home and remove it from every viewer. The home must support remote closing."))
                 }
             }.disabled(!online)
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)

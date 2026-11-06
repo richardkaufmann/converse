@@ -135,6 +135,8 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var loopPaused: Bool? = nil
     var pausedReason: String? = nil
     var lastResponseAt: Date? = nil
+    // The home itself shows the session in one of its panes, so taking it here steals it.
+    var shownOnHome: Bool? = nil
     var isAgentRow: Bool { participantKind == "agent" || engine == "agent" }
     // Same red marker as a local paused agent loop.
     var showsLoopPaused: Bool { isAgentRow && loopPaused == true }

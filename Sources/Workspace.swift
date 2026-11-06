@@ -180,19 +180,66 @@ struct PaneButton: View {
     var available = false
     // The row's whole P 1 2 3 X strip is hovered, so every free pane shows at once.
     var stripHovered = false
+    // P and X turn red on row hover while the session is shown in another window or device.
+    var shownElsewhere = false
+    var rowHovered = false
     let action: () -> Void
     // The current pane stays green.
     static func showsOpen(available: Bool, selected: Bool, stripHovered: Bool) -> Bool { available && !selected && stripHovered }
+    static func showsElsewhere(shownElsewhere: Bool, rowHovered: Bool) -> Bool { shownElsewhere && rowHovered }
     var body: some View {
         let open = Self.showsOpen(available: available, selected: selected, stripHovered: stripHovered)
+        let elsewhere = Self.showsElsewhere(shownElsewhere: shownElsewhere, rowHovered: rowHovered)
         Button(action: action) {
             Text(label).font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(selected && !open ? Color.white : Color.black)
+                .foregroundStyle(elsewhere || (selected && !open) ? Color.white : Color.black)
                 .frame(width: 18, height: 19)
-                .background(open ? Color.orange : selected ? (destructive ? Color(red: 0.55, green: 0.06, blue: 0.08) : Color(red: 0.12, green: 0.52, blue: 0.28)) : .white)
-                .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(selected ? 0 : 0.18), lineWidth: 0.5))
+                .background(elsewhere ? Color.red : open ? Color.orange : selected ? (destructive ? Color(red: 0.55, green: 0.06, blue: 0.08) : Color(red: 0.12, green: 0.52, blue: 0.28)) : .white)
+                .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(selected || elsewhere ? 0 : 0.18), lineWidth: 0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 2))
         }.buttonStyle(.plain)
+    }
+}
+/// Where else a sidebar row's session is displayed: another window on this Mac,
+/// another device, or both. P and X warn with it, since taking the session steals it.
+struct ShownElsewhere: Equatable {
+    var window: String? = nil
+    var device: String? = nil
+    var isShown: Bool { window != nil || device != nil }
+    var label: String? {
+        switch (window, device) {
+        case let (window?, device?): return "Shown in " + window + " · on " + device
+        case let (window?, nil): return "Shown in " + window
+        case let (nil, device?): return "Shown on " + device
+        case (nil, nil): return nil
+        }
+    }
+    /// Richard's rule: if 1, 2 or 3 is green (shown in this window), the session
+    /// is here already, so P and X never turn red.
+    static func resolve(localPane: Int?, window: String?, device: String?) -> ShownElsewhere {
+        localPane == nil ? ShownElsewhere(window: window, device: device) : ShownElsewhere()
+    }
+    // Leads the button's own help, so the warning reads first.
+    func help(_ text: String) -> String { label.map { $0 + "\n" + text } ?? text }
+    private static func named(_ name: String?, fallback: String) -> String {
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return fallback }
+        return name
+    }
+    /// The other window on this Mac holding the session, if not this one.
+    static func window(_ placement: PaneLocation?, here: UUID, names: [UUID: String]) -> String? {
+        guard let placement, placement.windowID != here else { return nil }
+        return named(names[placement.windowID], fallback: "another window")
+    }
+    /// A device displaying the session, other than this one.
+    static func device(_ id: String?, me: String?, name: (String) -> String?) -> String? {
+        guard let id, !id.isEmpty, id != me else { return nil }
+        return named(name(id), fallback: "another device")
+    }
+    /// A session homed elsewhere: a viewer's lease names it, or its home reports its own pane.
+    /// The home's local display fence expires on its own, so its pane report alone counts for it.
+    static func remoteDevice(_ row: DeviceSidebarRow, home: String, homeName: String?, me: String?, name: (String) -> String?) -> String? {
+        if let holder = row.leaseHolder, holder != home, let viewer = device(holder, me: me, name: name) { return viewer }
+        return row.shownOnHome == true ? named(homeName, fallback: "another device") : nil
     }
 }
 /// The P 1 2 3 X strip in a sidebar row. AppKit tracking sets hover.overButtons from the pointer;
@@ -246,6 +293,12 @@ struct SidebarSession: View {
         Binding(get: { confirmingClose }, set: { if $0 { state.closingSessionID = session.id } else if confirmingClose { state.closingSessionID = nil } })
     }
     var localPane: Int? { workspace.pane(for: session.id, in: state.id) }
+    // Read on each render; hovering the row re-renders it, so the warning is current when shown.
+    var elsewhere: ShownElsewhere {
+        let devices = DeviceSyncService.shared
+        return ShownElsewhere.resolve(localPane: localPane, window: ShownElsewhere.window(workspace.placements[session.id], here: state.id, names: workspace.names),
+                              device: ShownElsewhere.device(devices.remoteDisplayHolder(session.id), me: devices.identity?.deviceID) { devices.displayName(for: $0) })
+    }
     var body: some View {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
@@ -262,12 +315,12 @@ struct SidebarSession: View {
                 SessionProviderLogo(session: session, guide: Store.shared.firstRun).frame(width: 24)
             }
             PaneButtonGroup(hover: hover) {
-                PaneButton(label: "P", selected: localPane == nil) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help("Park this session: hide its pane while its work continues.")
+                PaneButton(label: "P", selected: localPane == nil, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { workspace.park(session.id) }.accessibilityLabel("Park \(session.title)").help(elsewhere.help("Park this session: hide its pane while its work continues."))
                 ForEach(1...3, id: \.self) { pane in
                     PaneButton(label: String(pane), selected: localPane == pane, available: workspace.paneIsAvailable(pane, for: session.id, in: state.id), stripHovered: hover.overButtons) { AppDelegate.shared.assign(session, to: state, pane: pane) }
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)").help("Move this session to pane \(pane) here, taking it back from any other display.")
                 }
-                PaneButton(label: "X", selected: confirmingClose, destructive: true) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored.")
+                PaneButton(label: "X", selected: confirmingClose, destructive: true, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help(elsewhere.help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored."))
             }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))

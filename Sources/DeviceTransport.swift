@@ -776,7 +776,8 @@ extension DeviceSyncService {
                              status: session.status, busy: session.busy, queued: session.pending.count, queuePaused: session.queuePaused,
                              leaseHolder: leases?.holder(session: session.id)?.device, leaseEpoch: leases?.holder(session: session.id)?.epoch,
                              accountName: session.entry.accountName, messagingEnabled: session.switchboardEnabled, participantKind: session.agent == nil ? nil : "agent", attention: session.agent?.attention,
-                             loopPaused: session.agent == nil ? nil : session.agentLoopPaused, pausedReason: session.pausedLoopReason, lastResponseAt: session.lastResponseAt)
+                             loopPaused: session.agent == nil ? nil : session.agentLoopPaused, pausedReason: session.pausedLoopReason, lastResponseAt: session.lastResponseAt,
+                             shownOnHome: Workspace.shared.placements[session.id] == nil ? nil : true)
         }
         let parkingRows = parkingLibrary.lots.filter(\.active).map { lot in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot.id).string, sessionID: lot.id,
@@ -1392,6 +1393,12 @@ extension DeviceSyncService {
         guard let displaced = Workspace.shared.session(in: windowID, pane: pane), displaced != incomingPlacement,
               let globalID = globalID(forPlacement: displaced) else { return }
         releaseRemote(globalID: globalID)
+    }
+    /// The paired device currently displaying this home session, if any.
+    /// The home's own fence is excluded: its panes are read from the workspace.
+    func remoteDisplayHolder(_ sessionID: UUID) -> String? {
+        guard let holder = leases?.holder(session: sessionID)?.device, holder != identity?.deviceID else { return nil }
+        return holder
     }
     func localTake(sessionID: UUID) {
         guard started, let home = identity?.deviceID, let leases else { return }
