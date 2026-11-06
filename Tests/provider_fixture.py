@@ -67,8 +67,20 @@ if '--no-session-persistence' in args:
     emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': q['request_id'], 'response': {
         'models': [{'value': 'default', 'displayName': 'Default', 'resolvedModel': 'fixture-opus', 'supportedEffortLevels': ['low','high']}, {'value': 'sonnet', 'displayName': 'Sonnet', 'resolvedModel': 'fixture-sonnet', 'supportedEffortLevels': ['low','high']}],
         'current_permission_mode': 'manual', 'account': {'email': os.environ.get('CLAUDE_CONFIG_DIR', 'default'), 'tokenSource': 'oauth'}}}})
+    line = sys.stdin.readline()
+    if line:
+        # The optional usage read mirrors Claude Code's get_usage shape.
+        q = json.loads(line)
+        assert q['type'] == 'control_request' and q['request']['subtype'] == 'get_usage'
+        emit({'type': 'system', 'subtype': 'status', 'session_id': 'unrelated'})
+        emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': q['request_id'], 'response': {
+            'subscription_type': 'fixture', 'rate_limits_available': True, 'rate_limits': {
+                'five_hour': None, 'seven_day': {'utilization': 30, 'resets_at': '2026-11-07T07:00:00.404638+00:00', 'locked_reason': None},
+                'seven_day_opus': None, 'seven_day_sonnet': None,
+                'model_scoped': [{'display_name': 'Fixture', 'utilization': 12, 'resets_at': '2026-11-07T07:00:00+00:00'}]}}}})
+        line = sys.stdin.readline()
     # The client closes the probe; no prompt follows.
-    assert not sys.stdin.readline()
+    assert not line
     sys.exit()
 # Claude turns arrive as stream-json user messages on stdin; one process may
 # take several turns while a fixture background task is outstanding.
@@ -163,5 +175,8 @@ def turn(prompt):
       if not prompt.startswith('switchboard-file-only:'):
           emit({'type':'item.completed','item':{'type':'agent_message','text':answer}})
       emit({'type':'turn.completed','usage':{'input_tokens':2,'output_tokens':3}})
-  else: emit({'type':'result','session_id':'fixture-thread','result':answer})
+  else:
+      emit({'type':'rate_limit_event','rate_limit_info':{'status':'allowed','resetsAt':1794034800,'rateLimitType':'seven_day','isUsingOverage':False,
+            'unifiedWindows':{'five_hour':{'utilization':0.07,'resetsAt':1794000000},'seven_day':{'utilization':0.29,'resetsAt':1794034800}}},'session_id':'fixture-thread'})
+      emit({'type':'result','session_id':'fixture-thread','result':answer})
 for prompt in prompts(): turn(prompt)

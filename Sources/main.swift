@@ -1091,7 +1091,7 @@ final class Store: ObservableObject {
             completion?(); return
         }
         guard ProcessInfo.processInfo.environment["CONVERSE_SKIP_STATUS_PROBE"] == nil else { completion?(); return }
-        if s.entry.engine != "muse" { refreshProviderStatus(s, completion: completion); return }
+        if s.entry.engine != "muse" { refreshProviderStatus(s, quota: quota, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
