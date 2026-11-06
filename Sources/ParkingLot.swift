@@ -139,17 +139,50 @@ enum ParkingLotTree {
                   let previous = rows[..<index].last(where: { !$0.heading && hierarchy[$0.id]?.parentID == node.parentID }) else { return nil }
             result[index].parentID = previous.id
         } else {
-            guard canOutdent(id, in: rows), let parent = node.parentID,
-                  let range = range(id, in: rows) else { return nil }
-            var moving = Array(result[range]); moving[0].parentID = hierarchy[parent]?.parentID
-            result.removeSubrange(range)
-            guard let parentRange = self.range(parent, in: result) else { return nil }
-            result.insert(contentsOf: moving, at: parentRange.upperBound)
+            // Outliner outdent: the row stays put and adopts its following
+            // siblings after its own children. No row moves.
+            guard canOutdent(id, in: rows), let parent = node.parentID else { return nil }
+            result[index].parentID = hierarchy[parent]?.parentID
+            for later in result.indices where later > index && hierarchy[rows[later].id]?.parentID == parent { result[later].parentID = id }
         }
         return (try? nodes(result)) == nil ? nil : result
     }
+    /// Moves an item's subtree before `destination` (nil: the end) at an outline
+    /// depth. Like an outliner drop, it may nest under the row before the drop
+    /// point or anything back out to the next row's level; nil keeps the row
+    /// before's level. Headings move whole sections between sections only.
+    static func moving(_ id: UUID, before destination: UUID?, depth: Int? = nil, in rows: [ParkingLotRow]) -> [ParkingLotRow]? {
+        guard let range = range(id, in: rows), let hierarchy = try? nodes(rows) else { return nil }
+        var moving = Array(rows[range]), remaining = rows
+        remaining.removeSubrange(range)
+        let index: Int
+        if destination == id { index = range.lowerBound }
+        else if let destination {
+            guard let found = remaining.firstIndex(where: { $0.id == destination }) else { return nil }
+            index = found
+        } else { index = remaining.count }
+        if moving[0].heading {
+            guard index == remaining.count || remaining[index].heading else { return nil }
+        } else {
+            guard let tree = try? nodes(remaining) else { return nil }
+            let previous = index > 0 ? remaining[index - 1] : nil
+            let previousDepth = previous.map { $0.heading ? 0 : tree[$0.id]?.depth ?? 1 } ?? 0
+            let base = hierarchy[id]?.depth ?? 1
+            let height = moving.map { (hierarchy[$0.id]?.depth ?? base) - base }.max() ?? 0
+            let next = index < remaining.count && !remaining[index].heading ? tree[remaining[index].id]?.depth ?? 1 : 1
+            let deepest = min(previousDepth + 1, maximumDepth - height)
+            guard next <= deepest else { return nil }
+            let wanted = min(max(depth ?? max(1, previousDepth), next), deepest)
+            var parent = previous?.id, level = previousDepth
+            while level >= wanted, let current = parent { parent = tree[current]?.parentID; level -= 1 }
+            moving[0].parentID = parent
+        }
+        remaining.insert(contentsOf: moving, at: index)
+        return (try? nodes(remaining)) == nil ? nil : remaining
+    }
     /// Selected descendants travel with their selected ancestor exactly once.
-    /// Reverse outdents so siblings retain their order after their parent.
+    /// Reverse outdents so each item adopts only the siblings after it that
+    /// are not themselves selected; selected siblings stay siblings.
     static func changingIndent(_ ids: Set<UUID>, in rows: [ParkingLotRow], deeper: Bool) -> [ParkingLotRow]? {
         guard !ids.isEmpty, let hierarchy = try? nodes(rows),
               ids.allSatisfy({ id in rows.contains { $0.id == id && !$0.heading } }) else { return nil }
@@ -438,20 +471,14 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         guard Self.moveTargets(for: id, in: rows).contains(where: { $0.id == heading }),
               let start = rows.firstIndex(where: { $0.id == heading }) else { return false }
         let next = rows[(start + 1)...].first(where: \.heading)?.id
-        move(id, before: next)
+        move(id, before: next, depth: 1)
         return Self.section(of: id, in: document.rows) == heading
     }
-    func move(_ id: UUID, before destination: UUID?) {
-        var rows = document.rows
-        guard id != destination, let range = Self.entryRange(id, in: rows) else { return }
-        var moving = Array(rows[range])
-        guard !moving.contains(where: { $0.id == destination }) else { return }
-        rows.removeSubrange(range)
-        let index = destination.flatMap { id in rows.firstIndex(where: { $0.id == id }) } ?? rows.count
-        if moving[0].heading, index < rows.count, !rows[index].heading { return }
-        moving[0].parentID = ParkingLotTree.parentForInsertion(at: index, in: rows, heading: moving[0].heading)
-        rows.insert(contentsOf: moving, at: index)
-        commit(rows)
+    /// A drop or move adopts the parent at the destination; see ParkingLotTree.moving.
+    @discardableResult func move(_ id: UUID, before destination: UUID?, depth: Int? = nil) -> Bool {
+        guard !isReadOnly, let rows = ParkingLotTree.moving(id, before: destination, depth: depth, in: document.rows) else { return false }
+        if rows != document.rows { commit(rows) }
+        return true
     }
     func evidence() throws -> Any {
         guard error.isEmpty else { throw AgentFailure.message(error) }
@@ -591,6 +618,7 @@ struct ParkingLotView: View {
     @State private var talking = false
     @State private var dragging: UUID?
     @State private var dropBefore: UUID?
+    @State private var dropDepth: Int?
     @State private var rowFrames: [UUID: CGRect] = [:]
     @State private var collapsed: Set<UUID> = []
     @FocusState private var focused: UUID?
@@ -632,14 +660,32 @@ struct ParkingLotView: View {
             (!source.heading || row.heading) && (rowFrames[row.id]?.midY ?? -.infinity) > location.y
         }?.id
     }
+    /// Dragging sideways by one indent changes the drop level, as in an outliner.
+    private func wantedDepth(_ row: ParkingLotRow, _ value: DragGesture.Value) -> Int {
+        ParkingLotTree.depth(of: row.id, in: lot.document.rows) + Int((value.translation.width / 20).rounded())
+    }
     private func reorderGesture(_ row: ParkingLotRow) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named("parkingOutline"))
-            .onChanged { value in dragging = row.id; dropBefore = destination(for: value.location, source: row) }
+            .onChanged { value in
+                dragging = row.id; dropBefore = destination(for: value.location, source: row)
+                dropDepth = ParkingLotTree.moving(row.id, before: dropBefore, depth: wantedDepth(row, value), in: lot.document.rows)
+                    .map { ParkingLotTree.depth(of: row.id, in: $0) }
+            }
             .onEnded { value in
                 let area = rowFrames.values.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -14, dy: -50)
-                if area.contains(value.location) { lot.move(row.id, before: destination(for: value.location, source: row)); undoFocus.activate() }
-                dragging = nil; dropBefore = nil
+                if area.contains(value.location) {
+                    if lot.move(row.id, before: destination(for: value.location, source: row), depth: wantedDepth(row, value)) { undoFocus.activate() }
+                    else { NSSound.beep() }
+                }
+                dragging = nil; dropBefore = nil; dropDepth = nil
             }
+    }
+    private func dropIndicator(before id: UUID?) -> some View {
+        Group {
+            if dragging != nil && dropBefore == id, let dropDepth {
+                Color.accentColor.frame(height: 2).padding(.leading, CGFloat(max(0, dropDepth - 1)) * 20)
+            }
+        }
     }
     private func rowView(_ row: ParkingLotRow) -> some View {
         let hasChildren = (ParkingLotTree.range(row.id, in: lot.document.rows)?.count ?? 1) > 1
@@ -673,7 +719,7 @@ struct ParkingLotView: View {
         .background(GeometryReader { geometry in
             Color.clear.preference(key: ParkingLotFrames.self, value: [row.id: geometry.frame(in: .named("parkingOutline"))])
         })
-        .overlay(alignment: .top) { if dragging != nil && dropBefore == row.id { Color.accentColor.frame(height: 2) } }
+        .overlay(alignment: .top) { dropIndicator(before: row.id) }
     }
     private func exportRecovery() {
         let panel = NSSavePanel()
@@ -743,7 +789,7 @@ struct ParkingLotView: View {
                     .accessibilityLabel("Parking Lot actions")
             }.controlSize(.small).padding(.horizontal, 8)
             Divider()
-            if reordering { Text("Drag the handles to reorder headings and items.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
+            if reordering { Text("Drag the handles to reorder headings and items. Drag sideways to change an item's level.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
             if let reason = lot.readOnlyReason {
                 Text(reason).font(.callout).padding(.horizontal).textSelection(.enabled)
@@ -766,7 +812,7 @@ struct ParkingLotView: View {
                         rowView(row)
                     }
                     Text(reordering ? "Drop here to move to the end" : "").frame(maxWidth: .infinity, minHeight: 40)
-                        .overlay(alignment: .top) { if dragging != nil && dropBefore == nil { Color.accentColor.frame(height: 2) } }
+                        .overlay(alignment: .top) { dropIndicator(before: nil) }
                 }.padding(.horizontal, 14)
             }.coordinateSpace(name: "parkingOutline")
                 .onPreferenceChange(ParkingLotFrames.self) { rowFrames = $0 }
@@ -1022,6 +1068,67 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
     check(!lot.changeIndent([a.id, c.id], deeper: true) && lot.document.revision == revision && lot.document.rows == before,
           "An impossible batch is refused atomically instead of indenting only some items")
     check(!lot.changeIndent([h.id, b.id], deeper: true), "A selection containing a heading cannot accidentally nest the heading")
+    // Richard's lot: 17 > a > i…vii. Shift-Tab on i keeps every row in place.
+    let oh = ParkingLotRow(heading: true, text: "Lot"), o17 = ParkingLotRow(heading: false, text: "17", parentID: oh.id)
+    let oa = ParkingLotRow(heading: false, text: "a", parentID: o17.id)
+    let romans = (1...7).map { ParkingLotRow(heading: false, text: ParkingLotTree.roman($0), parentID: oa.id) }
+    let outline = [oh, o17, oa] + romans
+    func lines(_ rows: [ParkingLotRow]?) -> [String] { rows.map { ParkingLotStore.markdown($0).components(separatedBy: "\n") } ?? [] }
+    func outdent(_ ids: Set<UUID>, _ rows: [ParkingLotRow]? = nil) -> [ParkingLotRow]? { ParkingLotTree.changingIndent(ids, in: rows ?? outline, deeper: false) }
+    let head = ["# Lot", "1. 17"]
+    let first = outdent([romans[0].id])
+    check(lines(first) == head + ["  a. a", "  b. i"] + (2...7).map { "    " + ParkingLotTree.roman($0 - 1) + ". " + ParkingLotTree.roman($0) }
+          && first?.map(\.id) == outline.map(\.id),
+          "Outdenting the first child keeps it in place and adopts its following siblings, renumbered")
+    check(lines(outdent([romans[2].id])) == head + ["  a. a", "    i. i", "    ii. ii", "  b. iii"] + (4...7).map { "    " + ParkingLotTree.roman($0 - 3) + ". " + ParkingLotTree.roman($0) },
+          "Outdenting a middle child leaves earlier siblings under their parent")
+    check(lines(outdent([romans[6].id])) == head + ["  a. a"] + (1...6).map { "    " + ParkingLotTree.roman($0) + ". " + ParkingLotTree.roman($0) } + ["  b. vii"],
+          "Outdenting the last child adopts nothing")
+    check(lines(outdent([romans[1].id, romans[2].id])) == head + ["  a. a", "    i. i", "  b. ii", "  c. iii"] + (4...7).map { "    " + ParkingLotTree.roman($0 - 3) + ". " + ParkingLotTree.roman($0) },
+          "Outdenting selected siblings keeps them siblings; the last one adopts the rest")
+    let own = ParkingLotRow(heading: false, text: "own", parentID: romans[0].id)
+    let withOwn = [oh, o17, oa, romans[0], own] + romans.dropFirst()
+    check(lines(outdent([romans[0].id], withOwn)) == head + ["  a. a", "  b. i", "    i. own"] + (2...7).map { "    " + ParkingLotTree.roman($0) + ". " + ParkingLotTree.roman($0) },
+          "An outdented item's own children stay first, before its adopted siblings")
+    let undoLot = ParkingLotStore(folder: folder.appendingPathComponent("outdent")); undoLot.openStarter(outline)
+    let original = undoLot.document.rows
+    check(undoLot.changeIndent(romans[0].id, deeper: false) && lines(undoLot.document.rows) == lines(first), "Shift-Tab in the lot applies the outliner outdent")
+    undoLot.undoManager.undo()
+    check(undoLot.document.rows == original, "One Undo restores the rows exactly as they were before the outdent")
+    // Reorder: a drop takes the level of the row before it, or deeper/shallower
+    // by dragging sideways, so an item can move into any parent's list.
+    let o18 = ParkingLotRow(heading: false, text: "18", parentID: oh.id), next = ParkingLotRow(heading: true, text: "Next")
+    let field = [oh, o17, oa, romans[0], romans[1], o18, next]
+    func depth(_ id: UUID, _ rows: [ParkingLotRow]?) -> Int { rows.map { ParkingLotTree.depth(of: id, in: $0) } ?? -1 }
+    func parent(_ id: UUID, _ rows: [ParkingLotRow]?) -> UUID? { (rows.flatMap { try? ParkingLotTree.nodes($0) })?[id]?.parentID }
+    let between = ParkingLotTree.moving(o18.id, before: romans[1].id, in: field)
+    check(parent(o18.id, between) == oa.id && between?.map(\.text) == ["Lot", "17", "a", "i", "18", "ii", "Next"],
+          "Dropping between a's children makes the item one of a's children")
+    var later = o18; later.parentID = next.id
+    let atEnd = ParkingLotTree.moving(o18.id, before: next.id, in: [oh, o17, oa, romans[0], romans[1], next, later])
+    check(parent(o18.id, atEnd) == oa.id && atEnd?.map(\.text) == ["Lot", "17", "a", "i", "ii", "18", "Next"],
+          "Dropping after the last child appends to that child list at the row before's level")
+    check(parent(o18.id, ParkingLotTree.moving(o18.id, before: next.id, depth: 2, in: field)) == o17.id
+          && parent(o18.id, ParkingLotTree.moving(o18.id, before: next.id, depth: 1, in: field)) == oh.id,
+          "Dragging left at the end of a nested list moves out to each enclosing level")
+    check(parent(romans[1].id, ParkingLotTree.moving(romans[1].id, before: romans[1].id, depth: 4, in: field)) == romans[0].id,
+          "Dragging an item right in place nests it under a childless row before it")
+    check(parent(romans[1].id, ParkingLotTree.moving(romans[1].id, before: romans[1].id, depth: 9, in: field)) == romans[0].id
+          && parent(romans[1].id, ParkingLotTree.moving(romans[1].id, before: o18.id, depth: 0, in: field)) == oh.id,
+          "Drop levels clamp between the next row's level and one below the row before")
+    check(depth(oa.id, ParkingLotTree.moving(oa.id, before: romans[0].id, in: field)) == -1
+          && ParkingLotTree.moving(next.id, before: romans[1].id, in: field) == nil
+          && depth(next.id, ParkingLotTree.moving(next.id, before: oh.id, depth: 5, in: field)) == 0,
+          "A parent cannot drop inside itself, and headings move only between sections at the top level")
+    let chain = (1...8).reduce(into: [oh]) { rows, n in rows.append(ParkingLotRow(heading: false, text: "d\(n)", parentID: n == 1 ? oh.id : rows.last!.id)) }
+    let p = ParkingLotRow(heading: false, text: "p", parentID: oh.id), q = ParkingLotRow(heading: false, text: "q", parentID: p.id)
+    let capped = ParkingLotTree.moving(p.id, before: nil, depth: 9, in: chain + [p, q])
+    check(depth(p.id, capped) == 7 && depth(q.id, capped) == ParkingLotTree.maximumDepth, "A dropped subtree never nests deeper than eight levels")
+    let moveLot = ParkingLotStore(folder: folder.appendingPathComponent("drop")); moveLot.openStarter(field)
+    let unmoved = moveLot.document.rows
+    check(moveLot.move(o18.id, before: romans[1].id) && parent(o18.id, moveLot.document.rows) == oa.id, "Reorder moves an item into another parent's list")
+    moveLot.undoManager.undo()
+    check(moveLot.document.rows == unmoved, "One Undo restores the rows before the reorder")
     let viewer = UUID(), otherViewer = UUID()
     lot.beginViewing(viewer)
     check(!lot.hasUnseenChanges, "Opening a lot clears its unseen-change marker")
