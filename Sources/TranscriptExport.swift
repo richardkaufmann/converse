@@ -584,7 +584,8 @@ enum TranscriptExport {
         let nodes = try ParkingLotTree.nodes(document.rows)
         let children = Dictionary(grouping: document.rows.filter { !$0.heading }, by: { nodes[$0.id]?.parentID })
         func content(_ row: ParkingLotRow) -> String {
-            let text = inline(row.text).replacingOccurrences(of: "\n", with: "<br>")
+            let tag = row.tag.map { "<span style=\"color:" + $0.lightHex + ";font-weight:600\">[" + $0.rawValue + "]</span> " } ?? ""
+            let text = tag + inline(row.text).replacingOccurrences(of: "\n", with: "<br>")
             var html = "<div class=\"lot-text\(row.isDone ? " done" : "")\">" + text + "</div>"
             for note in row.notes ?? [] {
                 html += "<p class=\"lot-comment\"><em>" + escape(note.author) + ": " + inline(note.text).replacingOccurrences(of: "\n", with: "<br>") + "</em></p>"

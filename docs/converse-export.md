@@ -117,3 +117,7 @@ The flag clears after the first successful turn, so a failed first turn retries 
 Kept on purpose: git SHAs and other hex digests, UUIDs, versions, dates and times, `localhost` and `127.0.0.1`, ordinary links and prose.
 
 Images cannot be inspected. With scrubbing on, images are left out unless the user turns on **Include images (not scrubbed)**; the save review then says images were not checked.
+
+### Parking Lot color tags
+
+Lot schema 3 adds optional row `tag`: `red`, `orange`, `yellow`, `green`, `blue`, or `purple`. An absent tag means untagged. Older files remain readable; older importers must refuse schema 3 rather than silently discard tags. Local saves without tags remain schema 2. Tags survive structured export/import; HTML/text exports show the color name as well. Assistant evidence includes `unresolvedTagCounts` for unfinished non-heading rows, counting explicit tags only, not inherited heading colors. An add/update operation may set `tag` to a named color or `none` to clear it; omission preserves the tag. Completing work, not clearing its color, satisfies a no-red-items goal.

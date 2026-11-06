@@ -531,7 +531,7 @@ final class ParkingOutlineText: NSTextView {
             : NSColor(srgbRed: 0.05, green: 0.25, blue: 0.55, alpha: 1)
     }
     static func color(for row: ParkingLotRow) -> NSColor {
-        row.isDone ? .secondaryLabelColor : (row.heading ? headingColor : .textColor)
+        row.isDone ? .secondaryLabelColor : (row.tag?.color ?? (row.heading ? headingColor : .textColor))
     }
     private var commentButtons: [UUID: NSButton] = [:]
     func updateCommentButtons() {
@@ -823,7 +823,7 @@ final class ParkingOutlineText: NSTextView {
             guard rect.intersects(dirtyRect) else { continue }
             let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
             let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
-            let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.secondaryLabelColor]
+            let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: entry.row.tag?.color ?? NSColor.secondaryLabelColor]
             // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
             let markerX = entry.row.heading ? gutterWidth / 3 + offset : max(2, gutterWidth - 4 + offset - (marker as NSString).size(withAttributes: markerAttributes).width)
             (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
@@ -917,6 +917,13 @@ final class ParkingOutlineText: NSTextView {
         let entry = owner.projection.entries[i]
         let clickedLink = link(at: point).flatMap { owner.link(containing: $0.1) }
         if selectedRange().length == 0 || !NSLocationInRange(index, selectedRange()) { setSelectedRange(NSRange(location: index, length: 0)) }
+        if !entry.placeholder {
+            let colors = NSMenuItem(title: "Color Tag", action: nil, keyEquivalent: "")
+            colors.view = ParkingTagMenuView(selected: entry.row.tag, enabled: !owner.parent.lot.isReadOnly) { tag in
+                owner.parent.lot.setTag(entry.row.id, tag); owner.render()
+            }
+            menu.addItem(colors); menu.addItem(.separator())
+        }
         if let clickedLink {
             let (row, link, source) = clickedLink
             item("Edit Link…") { self.editLink(row, at: link.range.location, source: source) }
@@ -1635,7 +1642,7 @@ func parkingAtomicLinkSelfTests(_ check: (Bool, String) -> Void) {
         return text.menu(for: event)?.items.map(\.title) ?? []
     }
     let titles = menu(at: a + 3)
-    check(titles.prefix(3) == ["Edit Link…", "Remove Link", "Copy Link Address"] && !menu(at: 1).contains("Edit Link…"), "Right-clicking a link offers Edit Link, Remove Link and Copy Link Address")
+    check(titles.first == "Color Tag" && titles.dropFirst(2).prefix(3) == ["Edit Link…", "Remove Link", "Copy Link Address"] && !menu(at: 1).contains("Edit Link…"), "Right-clicking a link offers Edit Link, Remove Link and Copy Link Address")
     check(ParkingOutlineText.linkFields(source).map { [$0.label, $0.address] } == ["KAOS Labs Logo.png", address] && ParkingOutlineText.linkHelp.contains("Option-click"),
           "Edit Link shows the label and address and explains Option-click")
     check(coordinator.setLink(item, at: a, source: source, label: "javascript:alert(1)", address: "javascript:alert(1)") != nil && row() == stored + " ", "Edit Link refuses other schemes")

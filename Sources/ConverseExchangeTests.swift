@@ -28,7 +28,7 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
     try? FileManager.default.createDirectory(at: lot.attachmentFolder, withIntermediateDirectories: true)
     try? png.write(to: lotImage)
     let heading = ParkingLotRow(heading: true, text: "Plans", done: true)
-    let item = ParkingLotRow(heading: false, text: "Ship import", editedBy: "Reviewer", notes: [ParkingLotNote(author: "Reviewer", text: "Looks right")], images: [lotImage.path], done: false)
+    let item = ParkingLotRow(heading: false, text: "Ship import", editedBy: "Reviewer", notes: [ParkingLotNote(author: "Reviewer", text: "Looks right")], images: [lotImage.path], done: false, tag: .blue)
     do { try lot.replaceUserRows([heading, item], revision: lot.document.revision) } catch { check(false, "Exchange fixture rows: " + error.localizedDescription) }
     let exportSessions = [ExportSession(chat), ExportSession(agent), ExportSession(lot: lot)]
     check(exportSessions[1].isAgent && exportSessions[2].lotDocument?.rows.count == 2, "Export keeps agent kind and the lot's own rows")
@@ -42,6 +42,7 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
     check(!json.contains("DO NOT EXPORT") && !json.contains("SECRET OBJECTIVE") && !json.contains(NSTemporaryDirectory()) && !json.contains(imagePath.path), "Converse export excludes drafts, tool activity, notices, agent configuration and local paths")
     let package: ConverseExchange.Package
     do { package = try ConverseExchange.decode(data) } catch { check(false, "Converse decode failed: " + error.localizedDescription); return }
+    check(package.document.parkingLots.first?.document.rows.last?.tag == .blue, "Color tags survive Converse package export and decode")
     let key = DeviceBlob.sha256Hex(png)
     check(package.document.sessions.count == 2 && package.document.parkingLots.count == 1 && package.document.attachments.keys.sorted() == [key] && package.images[key] != nil && !package.document.scrub.applied, "Converse export round-trips sessions, lots and one de-duplicated verified image")
     check(package.document.sessions[0].messages.count == 2 && ConverseExchange.date(package.document.sessions[0].messages[0].createdAt) == when && package.document.sessions[0].messages[1].createdAt == nil, "Message times round-trip; unknown legacy times stay unknown")
