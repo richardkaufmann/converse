@@ -17,10 +17,11 @@ struct ParkingLotRow: Codable, Equatable, Identifiable {
     // Nil in an old document means the nearest preceding heading. Rows stay
     // in preorder; this ID gives nested items a stable parent across edits.
     var parentID: UUID? = nil
+    var tag: ParkingLotTag? = nil
     var isDone: Bool { done == true }
 }
 struct ParkingLotDocument: Codable, Equatable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
     var schemaVersion: Int = currentSchemaVersion
     var revision: Int = 0
     var rows: [ParkingLotRow] = []
@@ -178,6 +179,7 @@ struct ParkingLotEdits: Decodable {
         var before: UUID?
         var done: Bool? = nil
         var parentID: UUID? = nil
+        var tag: String? = nil
     }
     var revision: Int
     var operations: [Operation]
@@ -191,6 +193,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     Choose a section by meaning when adding an item, unless the human specified a destination. Read the existing headings and their items first; use the most relevant existing section without asking when the fit is clear. A report of broken behavior belongs under Bugs, praise under Compliments, and a deferred idea under Future work. Respect project boundaries and planning-only headings. Do not append to the last section just because it is convenient. Rows belong to the nearest preceding heading: to append inside a section, set before to the NEXT heading's UUID; omit before only if the chosen section is the last one. To place an item first in a section, use its first item's UUID (or the next heading for an empty section). If no section fits, propose a clearly named heading with the item; ask only when the intended classification is genuinely ambiguous. Preserve existing wording, IDs, comments, images and Done state when moving an item. Do not reorganize unrelated items. Briefly name the chosen section in your reply.
     For a nested item, set parentID to the item it belongs under and place it after that parent or its descendants. Rows are stored in preorder. A move or delete of a parent includes its descendants. Headings stay at the top level.
     """
+    static let tagGuidance = "Tags are explicit named colors: red, orange, yellow, green, blue, purple. Add/update may set tag to a color or none to clear it; omitted tag preserves it. unresolvedTagCounts counts unfinished non-heading items only, with no inheritance from parents. A goal such as no red items means resolving the work, not deleting items or clearing/recoloring tags to improve the score."
     // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
     let id: UUID
     let substitutionFeedback = SubstitutionFeedback()
@@ -296,7 +299,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try requireWritable()
         var next = next
         next.rows = try ParkingLotTree.normalized(next.rows)
-        next.schemaVersion = ParkingLotDocument.currentSchemaVersion
+        next.schemaVersion = next.rows.contains(where: { $0.tag != nil }) ? 3 : 2
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(next).write(to: file, options: .atomic)
         let before = document.rows
@@ -342,6 +345,21 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         rows[index].done = done; rows[index].editedBy = nil; commit(rows)
         let actionName: String = done ? "Mark Done" : "Mark Not Done"
         undoManager.setActionName(actionName)
+    }
+    func setTag(_ id: UUID, _ tag: ParkingLotTag?) {
+        var rows = document.rows
+        guard !isReadOnly, let index = rows.firstIndex(where: { $0.id == id }), rows[index].tag != tag else { return }
+        undoManager.beginUndoGrouping()
+        defer { undoManager.endUndoGrouping() }
+        rows[index].tag = tag; rows[index].editedBy = nil; commit(rows)
+        undoManager.setActionName(tag == nil ? "Clear Color Tag" : "Color Tag")
+    }
+    static func unresolvedTagCounts(_ rows: [ParkingLotRow]) -> [String: Int] {
+        var counts = Dictionary(uniqueKeysWithValues: ParkingLotTag.allCases.map { ($0.rawValue, 0) })
+        for row in rows where !row.heading && !row.isDone {
+            if let tag = row.tag { counts[tag.rawValue, default: 0] += 1 }
+        }
+        return counts
     }
     @discardableResult func changeIndent(_ id: UUID, deeper: Bool) -> Bool {
         changeIndent([id], deeper: deeper)
@@ -399,7 +417,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             if !row.heading { counts[parent, default: 0] += 1 }
             let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
             let continuation = "\n" + indent + "   "
-            let line = (row.heading ? "# " : indent + ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + row.text.replacingOccurrences(of: "\n", with: continuation)
+            let line = (row.heading ? "# " : indent + ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + (row.tag.map { "[Tag: " + $0.rawValue + "] " } ?? "") + row.text.replacingOccurrences(of: "\n", with: continuation)
             return line + (row.images ?? []).map { continuation + "[Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { continuation + "> " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: continuation + "> ") }.joined()
         }.joined(separator: "\n")
     }
@@ -437,7 +455,10 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     func evidence() throws -> Any {
         guard error.isEmpty else { throw AgentFailure.message(error) }
-        return try JSONSerialization.jsonObject(with: JSONEncoder().encode(document))
+        var value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(document)) as! [String: Any]
+        value["unresolvedTagCounts"] = Self.unresolvedTagCounts(document.rows)
+        value["tagGuidance"] = Self.tagGuidance
+        return value
     }
     // Build and validate a whole transaction before saving. A user edit or a
     // second agent run invalidates the old revision instead of losing work.
@@ -454,6 +475,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         var rows = document.rows
         for operation in edits.operations {
             let index = operation.id.flatMap { id in rows.firstIndex(where: { $0.id == id }) }
+            let tag = try ParkingLotTag.parseEdit(operation.tag)
             switch operation.action {
             case "add":
                 guard let text = operation.text else { throw AgentFailure.message("A Parking Lot addition needs text.") }
@@ -465,11 +487,12 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                 let position = try Self.placement(destination, parent: heading ? nil : operation.parentID, in: rows)
                 let parentID = (heading ? nil : operation.parentID) ?? ParkingLotTree.parentForInsertion(at: position, in: rows, heading: heading)
                 rows.insert(ParkingLotRow(id: id, heading: heading, text: text, editedBy: author, done: operation.done,
-                                          parentID: heading ? nil : parentID), at: position)
+                                          parentID: heading ? nil : parentID, tag: tag), at: position)
             case "update":
-                guard let index, operation.text != nil || operation.done != nil else { throw AgentFailure.message("Parking Lot entry no longer exists or no changes were supplied.") }
+                guard let index, operation.text != nil || operation.done != nil || operation.tag != nil else { throw AgentFailure.message("Parking Lot entry no longer exists or no changes were supplied.") }
                 if let text = operation.text { rows[index].text = text }
                 if let done = operation.done { rows[index].done = done }
+                if operation.tag != nil { rows[index].tag = tag }
                 rows[index].editedBy = author
             case "comment":
                 guard let index, let text = operation.text else { throw AgentFailure.message("Parking Lot entry no longer exists or text is missing.") }
@@ -768,6 +791,7 @@ private struct ParkingLotFrames: PreferenceKey {
 }
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
+    parkingLotTagSelfTests(check)
     parkingLotPolishSelfTests(check)
     check((1...3).map { ParkingLotTree.label($0, depth: 1) } == ["1", "2", "3"] && (1...3).map { ParkingLotTree.label($0, depth: 2) } == ["a", "b", "c"]
           && [1, 2, 3, 4, 9, 14].map { ParkingLotTree.label($0, depth: 3) } == ["i", "ii", "iii", "iv", "ix", "xiv"] && ParkingLotTree.label(2, depth: 4) == "2"

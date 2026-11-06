@@ -312,11 +312,14 @@ extension Store {
             for op in edits.operations {
                 let label = op.id.flatMap { before[$0]?.text ?? after[$0]?.text } ?? op.text ?? "entry"
                 switch op.action {
-                case "update": lines.append("Change: “" + label + "” → “" + (op.text ?? "") + "”")
+                case "update":
+                    if let text = op.text { lines.append("Change: “" + label + "” → “" + text + "”") }
+                    if let done = op.done { lines.append((done ? "Mark done: “" : "Mark not done: “") + label + "”") }
+                    if let tag = op.tag { lines.append("Color tag: “" + label + "” → " + tag) }
                 case "delete": lines.append("Delete: “" + label + "”")
                 case "move": lines.append("Move: “" + label + "” " + (op.before.flatMap { after[$0]?.text }.map { "before “" + $0 + "”" } ?? "to the end") + (op.id.flatMap { before[$0]?.heading } == true ? " (including its items)" : ""))
                 case "comment": lines.append("Comment on “" + label + "”: " + (op.text ?? ""))
-                default: lines.append("Add " + (op.heading == true ? "heading" : "item") + ": “" + (op.text ?? "") + "”")
+                default: lines.append("Add " + (op.heading == true ? "heading" : "item") + ": “" + (op.text ?? "") + "”" + (op.tag.map { " (tag: " + $0 + ")" } ?? ""))
                 }
             }
             return lines.joined(separator: "\n\n")
