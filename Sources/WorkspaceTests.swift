@@ -140,6 +140,9 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         let nobody = ShownElsewhere(window: ShownElsewhere.window(nil, here: here.id, names: names), device: ShownElsewhere.device(nil, me: "me") { _ in "iPad" })
         check(!nobody.isShown && nobody.label == nil && nobody.help("Park") == "Park" && !PaneButton.showsElsewhere(shownElsewhere: nobody.isShown, rowHovered: true), "A session displayed nowhere else keeps normal P and X")
         check(ShownElsewhere.window(PaneLocation(windowID: here.id, pane: 1), here: here.id, names: names) == nil && ShownElsewhere.device("me", me: "me") { _ in "This Mac" } == nil, "This window and this device never count as elsewhere")
+        check(!ShownElsewhere.resolve(localPane: 2, window: "Other window", device: "Windows 11 (Parallels)").isShown
+              && ShownElsewhere.resolve(localPane: nil, window: nil, device: "Windows 11 (Parallels)").label == "Shown on Windows 11 (Parallels)",
+              "When 1, 2 or 3 is green (shown in this window), P and X never turn red, even if the session is also shown elsewhere")
         let inWindow = ShownElsewhere(window: ShownElsewhere.window(PaneLocation(windowID: there.id, pane: 2), here: here.id, names: names))
         check(inWindow.isShown && inWindow.label == "Shown in " + (names[there.id] ?? "?") && inWindow.help("Park") == inWindow.label! + "\nPark", "A session in another window here warns with that window's name")
         check(PaneButton.showsElsewhere(shownElsewhere: inWindow.isShown, rowHovered: true) && !PaneButton.showsElsewhere(shownElsewhere: inWindow.isShown, rowHovered: false), "P and X turn red only while the row is hovered")

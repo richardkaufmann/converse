@@ -214,6 +214,11 @@ struct ShownElsewhere: Equatable {
         case (nil, nil): return nil
         }
     }
+    /// Richard's rule: if 1, 2 or 3 is green (shown in this window), the session
+    /// is here already, so P and X never turn red.
+    static func resolve(localPane: Int?, window: String?, device: String?) -> ShownElsewhere {
+        localPane == nil ? ShownElsewhere(window: window, device: device) : ShownElsewhere()
+    }
     // Leads the button's own help, so the warning reads first.
     func help(_ text: String) -> String { label.map { $0 + "\n" + text } ?? text }
     private static func named(_ name: String?, fallback: String) -> String {
@@ -291,7 +296,7 @@ struct SidebarSession: View {
     // Read on each render; hovering the row re-renders it, so the warning is current when shown.
     var elsewhere: ShownElsewhere {
         let devices = DeviceSyncService.shared
-        return ShownElsewhere(window: ShownElsewhere.window(workspace.placements[session.id], here: state.id, names: workspace.names),
+        return ShownElsewhere.resolve(localPane: localPane, window: ShownElsewhere.window(workspace.placements[session.id], here: state.id, names: workspace.names),
                               device: ShownElsewhere.device(devices.remoteDisplayHolder(session.id), me: devices.identity?.deviceID) { devices.displayName(for: $0) })
     }
     var body: some View {
