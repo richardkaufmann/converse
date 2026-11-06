@@ -1,6 +1,6 @@
 # Mobile Parking Lot editor
 
-Build 141 prepares the native iPhone/iPad editor for release, following Richard’s successful iPad editing and reconnect checks in private 140. Mac hosts the document. Windows 141 can take a read-only view with the same exclusive display ownership. Automated tests use isolated data.
+Build 142 prepares the native iPhone/iPad editor for release, following Richard’s successful iPad editing and reconnect checks in private 140. Mac hosts the document. Windows 141 can take a read-only view with the same exclusive display ownership. Automated tests use isolated data.
 
 ## Outline behavior
 
@@ -28,7 +28,7 @@ The isolated `--lot-editing-self-test` Mac command covers the shared operation q
 
 Editing is enabled by default; `CONVERSE_EDITABLE_LOTS=0` supports legacy interop fixtures. iPhone/iPad edit Mac-hosted lots; Windows 141 displays them read-only. Mac remote-client editing and Windows lot hosting/editing remain future work.
 
-The next mobile controls remove per-row circles, use row or selection ellipsis menus, and support two-finger text sizing. Lot cars, the blue shoe and agent markers match the Mac. A clean lot resumes conditionally after reconnect; unconfirmed edits require explicit recovery and never replay automatically.
+The mobile controls remove per-row circles, use row or selection ellipsis menus, and support two-finger text sizing. Lot cars, the blue shoe and agent markers match the Mac. A clean lot resumes conditionally after reconnect; unconfirmed edits require explicit recovery and never replay automatically.
 
 Physical iPhone acceptance is required for this release: editing, multi-selection, menus, pinch, rotation, background/foreground, network loss, and taking between Mac/iPad/iPhone. Simulator passes do not substitute for those checks. Pending edits are memory-only: a terminated mobile process cannot recover changes that never reached home. Wait for Saved on home before quitting, or copy unconfirmed text while the process is running.
 
