@@ -61,9 +61,9 @@ Pinch with two fingers to resize session text, drafts and editable Parking Lot e
 
 ## Parking Lots
 
-Private build 140 supports native editing of Mac-hosted Parking Lots. Both the Mac and iPhone/iPad must run 140. Open the lot and take it here; the previous display parks, and ordered changes save back to the Mac. Per-entry arrows preserve nested collapse choices, while Outline → Collapse All shows only headings and Expand All opens every level. Each entry has an … menu for Done, nesting, moving, comments, colors and images. Tap Select, then tap rows or drag across a range; selected entries are highlighted and share one … menu in the header. Right-click or long-press opens the same actions. Done and colors apply only to selected rows; copy, cut, move and delete carry their children. Images and existing comments are managed on individual entries. Undo/Redo is scoped to the current take. Export saves a `.converse` file from the latest confirmed revision, with optional images and secret/personal-information scrubbing.
+Build 141 supports native editing of Mac-hosted Parking Lots. Update the Mac and iPhone/iPad together. Open the lot and take it here; the previous display parks, and ordered changes save back to the Mac. Per-entry arrows preserve nested collapse choices, while Outline → Collapse All shows only headings and Expand All opens every level. Each entry has an … menu for Done, nesting, moving, comments, colors and images. Tap Select, then tap rows or drag across a range; selected entries are highlighted and share one … menu in the header. Right-click or long-press opens the same actions. Done and colors apply only to selected rows; copy, cut, move and delete carry their children. Images and existing comments are managed on individual entries. Undo/Redo is scoped to the current take. Export saves a `.converse` file from the latest confirmed revision, with optional images and secret/personal-information scrubbing.
 
-Session and agent proposals pause typing and drain pending saves before showing an exact before/after approval sheet on the holding device. A disconnected editor freezes and offers manual Copy of unconfirmed text; taking again never automatically replays it. Windows 139 cannot open an exclusive lot. Mobile hosting and Mac remote-client editing are not part of this trial.
+Session and agent proposals pause typing and drain pending saves before showing an exact before/after approval sheet on the holding device. A disconnected editor with unconfirmed changes freezes and offers manual Copy; taking again never automatically replays those changes. A clean editor conditionally resumes its existing display claim without an unnecessary recovery prompt. Windows 141 can view these lots read-only using the same exclusive take/park rules; Windows 139 must be updated. Mobile hosting and Mac remote-client editing are not included.
 
 `./iPad/test.sh --lot-editing` exercises an isolated Mac home, two mobile identities, pending-edit handoff, image transfer, save acknowledgement, recovery and native layouts. The legacy `--interop` fixture retains coverage of old read-only subscriptions. Set `CONVERSE_APP_OUTPUT` to the built Mac app and `CONVERSE_IPAD_SIMULATOR` to an owned simulator UUID.
 
@@ -93,12 +93,9 @@ CONVERSE_APP_OUTPUT="$PWD/.build/PinAndHelp/Converse.app" ./build.sh
 
 Real-device gates remain: BigPad installation, LAN permission denial/recovery, Bonjour discovery across physical devices, background for 60 seconds, rotation during a lease, HEIC Photos import and Mac/Windows-home interoperability. A simulator run is not evidence that these physical-device checks passed.
 
-## Editable Parking Lot development preview
+## Parking Lot appearance and acceptance checks
 
-The next mobile update matches the Mac’s lot car, shared blue shoe, agent marker and imported-provider icon. A disconnected lot with no unconfirmed changes resumes using its existing display claim; it does not take the lot from another viewer. Pending changes still require explicit recovery and never replay automatically.
-
-Private build 140 enables the native editor by default for Mac-hosted lots. The isolated `./iPad/test.sh --lot-editing` path enables it against a disposable Mac home and exercises ordered saves, image transfer, exclusive handoff and recovery. It includes per-level disclosure, outline numbering, text, comments, Done, tags, structural editing, Undo/Redo and `.converse` export. See [the preview notes](../docs/mobile-lot-editor-preview.md) for trial scope and remaining acceptance checks. Both the Mac home and mobile client must run 140; Windows 139 cannot view these exclusive lots.
-
+Mobile uses the Mac’s lot car, shared blue shoe, agent marker and imported-provider icon. See [the editor notes](../docs/mobile-lot-editor-preview.md) for the supported editing operations and remaining physical-device checks. Run the checks on both iPhone and iPad: the phone's stacked panes, keyboard and smaller menus need their own acceptance pass.
 
 ## Agents (0.5.22)
 

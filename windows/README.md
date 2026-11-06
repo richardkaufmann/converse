@@ -182,8 +182,7 @@ previous transcript blocks must be removed even when both diff caches are empty.
 
 ### Mac Parking Lot interoperability check
 
-Windows opens shared Mac Parking Lots as read-only Group views, including
-item-bound images and live updates. Native Parking Lot editing and Talk remain
+With both apps on 141 or later, Windows takes shared Mac Parking Lots as read-only Group views, including item-bound images and live updates. Taking parks the previous viewer; P releases the display. Reconnect only resumes if no other device took it. Approval requests for a lot displayed read-only on Windows are handled on its Mac home. Older Windows clients cannot open the exclusive lot protocol. Native Parking Lot editing and Talk remain
 Mac features. Image downloads use the active lot view's epoch-zero grant; they
 do not acquire an editable session lease.
 

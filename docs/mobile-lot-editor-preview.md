@@ -1,6 +1,6 @@
-# Mobile Parking Lot editor development preview
+# Mobile Parking Lot editor
 
-This branch adds a native iPhone/iPad editor backed by a Mac home. Richard authorized private build 140 with editing enabled by default for Mac-hosted lots on iPhone/iPad. Windows remains on 139 for this trial. Automated tests still use isolated data.
+Build 141 prepares the native iPhone/iPad editor for release, following Richard’s successful iPad editing and reconnect checks in private 140. Mac hosts the document. Windows 141 can take a read-only view with the same exclusive display ownership. Automated tests use isolated data.
 
 ## Outline behavior
 
@@ -24,8 +24,10 @@ Run `CONVERSE_APP_OUTPUT="$PWD/.build/MobileLotCheck.app" CONVERSE_IPAD_SIMULATO
 
 The isolated `--lot-editing-self-test` Mac command covers the shared operation queue, transport fencing, duplicate receipts, drained holder review and mobile-export compatibility. Approval commits the exact preview document, including generated row/comment IDs. `--lot-disclosure-preview <output-directory>` captures the native Mac outline in light and dark appearances. Both commands require `CONVERSE_TEST_COMMAND` and an isolated `CONVERSE_DATA_DIR`.
 
-## Private trial scope and remaining checks
+## Release scope and acceptance
 
-Build 140 enables mobile editing by default; `CONVERSE_EDITABLE_LOTS=0` is an override for legacy interop fixtures. This trial covers Mac-hosted lots edited from iPhone/iPad. Mac remote-viewer editing and Windows compatibility rollout remain separate work. Richard accepted testing on his devices before completing the remaining acceptance checks. Physical-device acceptance is currently blocked because BigPad is unavailable to Xcode; simulator tests do not replace background/network testing on a real device.
+Editing is enabled by default; `CONVERSE_EDITABLE_LOTS=0` supports legacy interop fixtures. iPhone/iPad edit Mac-hosted lots; Windows 141 displays them read-only. Mac remote-client editing and Windows lot hosting/editing remain future work.
 
-Follow-up work includes Mac remote-client integration and the supported-client upgrade path. During this private trial, exercise holder review and attachment/caret behavior on a real device, and check background/foreground, silent partitions, interrupted uploads and rotation. Pending edits are intentionally memory-only; a terminated mobile process cannot recover edits that never reached home. The editor displays saved versus unconfirmed state and offers manual Copy recovery while running.
+The next mobile controls remove per-row circles, use row or selection ellipsis menus, and support two-finger text sizing. Lot cars, the blue shoe and agent markers match the Mac. A clean lot resumes conditionally after reconnect; unconfirmed edits require explicit recovery and never replay automatically.
+
+Physical iPhone acceptance is required for this release: editing, multi-selection, menus, pinch, rotation, background/foreground, network loss, and taking between Mac/iPad/iPhone. Simulator passes do not substitute for those checks. Pending edits are memory-only: a terminated mobile process cannot recover changes that never reached home. Wait for Saved on home before quitting, or copy unconfirmed text while the process is running.
