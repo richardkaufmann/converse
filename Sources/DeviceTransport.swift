@@ -672,7 +672,7 @@ extension DeviceSyncService {
             // Viewer authority never survives disconnect.
             for row in homes[hello.deviceID]?.rows ?? [] {
                 pendingTakes.removeValue(forKey: row.globalID)
-                freezeLot(row.globalID, reason: "Home disconnected. Unconfirmed edits are retained here for Copy; take the lot again to resume.")
+                freezeLot(row.globalID, reason: "Home disconnected. Unconfirmed edits are retained here for Copy; take the lot again to resume.", cleanReason: "Home disconnected. No unsaved changes. Reconnecting when home is available…")
                 remoteLeases.removeValue(forKey: row.globalID); remoteOffline.insert(row.globalID)
                 try? outboxStore?.markUncertain(sessionID: row.globalID)
             }
@@ -820,7 +820,7 @@ extension DeviceSyncService {
     }
     #endif
     private func discardRemoteDisplay(_ id: String) {
-        freezeLot(id, reason: "This lot moved or closed. Unconfirmed changes remain available to copy.")
+        freezeLot(id, reason: "This lot moved or closed. Unconfirmed changes remain available to copy.", cleanReason: "This lot moved or closed. All changes were saved on home.")
         forgetDisplay(id)
         pendingTakes.removeValue(forKey: id)
         remoteLeases.removeValue(forKey: id); leaseBoots.removeValue(forKey: id)
@@ -1174,7 +1174,7 @@ extension DeviceSyncService {
             }
         case DeviceMessageKind.leaseExpired.rawValue:
             if let id = envelope.sessionID, DeviceGlobalID(id)?.home == peerHome, let epoch = envelope.epoch, remoteLeases[id] == epoch {
-                freezeLot(id, reason: "The editing lease expired. Copy unconfirmed changes or take the lot again.")
+                freezeLot(id, reason: "The editing lease expired. Copy unconfirmed changes or take the lot again.", cleanReason: "The editing lease expired. No unsaved changes. Reconnecting…")
                 remoteLeases.removeValue(forKey: id); leaseBoots.removeValue(forKey: id)
                 remoteOffline.insert(id)
                 // Retain the pane and its remembered epoch; restore is conditional.
@@ -1420,7 +1420,8 @@ extension DeviceSyncService {
     // Never use lease.acquire here: an automatic reconnect must not steal.
     func restoreAvailableDisplays() {
         for (id, epoch) in resumeEpochs {
-            guard !(editableLotsEnabled && remoteRow(globalID: id)?.engine == "parking"),
+            // Clean lots can resume conditionally, just like sessions. Never replay pending edits.
+            guard !(editableLotsEnabled && remoteRow(globalID: id)?.engine == "parking" && (lotEditors[id]?.unconfirmedCount ?? 0) > 0),
                   viewerHasPlacement(id), remoteLeases[id] == nil, pendingTakes[id] == nil,
                   let global = DeviceGlobalID(id), let peer = peerForHome(global.home),
                   peer.hello?.capabilities.contains("lease-resume-v1") == true else { continue }
@@ -2374,12 +2375,12 @@ extension DeviceSyncService {
             }
         } catch { freezeLot(id, reason: error.localizedDescription) }
     }
-    private func freezeLot(_ id: String, reason: String) {
+    private func freezeLot(_ id: String, reason: String, cleanReason: String? = nil) {
         guard var editor = lotEditors[id] else { return }
         if editor.unconfirmedCount > 0 { lotRecovery[id] = editor.projected }
-        editor.frozenReason = reason; lotEditors[id] = editor
+        editor.frozenReason = editor.unconfirmedCount == 0 ? (cleanReason ?? reason) : reason; lotEditors[id] = editor
         lotProposals.removeValue(forKey: id)
-        lastOutcome = reason
+        lastOutcome = editor.frozenReason ?? reason
     }
     func decideLotProposal(_ id: String, approved: Bool) {
         guard let proposal = lotProposals[id], let editor = lotEditors[id], let global = DeviceGlobalID(id), let peer = peerForHome(global.home),
@@ -2391,7 +2392,7 @@ extension DeviceSyncService {
         let now = Date()
         for (id, editor) in lotEditors where remoteLeases[id] == editor.saved.leaseEpoch && editor.frozenReason == nil {
             if remoteOffline.contains(id) || now.timeIntervalSince(lotRenewed[id] ?? .distantPast) >= 10 {
-                freezeLot(id, reason: "Home connection is uncertain. Editing paused; unconfirmed changes can be copied.")
+                freezeLot(id, reason: "Home connection is uncertain. Editing paused; unconfirmed changes can be copied.", cleanReason: "Home connection is uncertain. No unsaved changes. Editing paused.")
             } else if let start = lotStarted[id], now.timeIntervalSince(start) >= 15 {
                 freezeLot(id, reason: "Home has not confirmed the save. Editing paused; unconfirmed text can be copied.")
             } else if let sent = lotSent[id], now.timeIntervalSince(sent) > 5, let edit = editor.inFlight,
@@ -2495,7 +2496,9 @@ extension DeviceSyncService {
                 let snapshot = try JSONDecoder().decode(LotSnapshot.self, from: data)
                 guard snapshot.globalID == id, snapshot.homeBoot == envelope.boot, snapshot.leaseEpoch == envelope.epoch else { throw ParkingLotError.message("Snapshot authority mismatch.") }
                 if var editor = lotEditors[id], editor.saved.leaseEpoch == snapshot.leaseEpoch, editor.saved.homeBoot == snapshot.homeBoot {
-                    try editor.installExternal(snapshot); lotEditors[id] = editor
+                    try editor.installExternal(snapshot)
+                    // A fresh authenticated snapshot under the current lease safely resumes a clean queue.
+                    editor.frozenReason = nil; lotEditors[id] = editor
                 } else {
                     if let previous = lotEditors[id], previous.unconfirmedCount > 0 { lotRecovery[id] = previous.projected }
                     lotEditors[id] = try LotEditQueue(snapshot: snapshot, author: deviceName)

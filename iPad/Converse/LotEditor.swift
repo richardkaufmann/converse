@@ -142,6 +142,7 @@ struct EditableLotPane: View {
     private var header: some View {
         HStack {
             Text(String(pane + 1)).font(.caption.bold()).padding(6).background(.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+            ParkingLotShoe().frame(width: 20, height: 20).accessibilityLabel("Parking Lot")
             Text(editor?.saved.name ?? service.remoteRow(globalID: id)?.title ?? "Parking Lot").font(.headline).lineLimit(1)
             Spacer()
             if !selected.isEmpty {
@@ -161,7 +162,9 @@ struct EditableLotPane: View {
                 if let reason = editor.frozenReason {
                     Label(reason, systemImage: "wifi.slash").foregroundStyle(.orange)
                     HStack {
-                        Button("Copy unconfirmed text") { UIPasteboard.general.string = Self.markdown(editor.projected.rows) }
+                        if editor.unconfirmedCount > 0 {
+                            Button("Copy unconfirmed text") { UIPasteboard.general.string = Self.markdown(editor.projected.rows) }
+                        }
                         Button("Take again") { service.releaseRemote(globalID: id); service.acquireRemote(globalID: id) }
                     }
                 } else if editor.draining { Label("Finishing saves…", systemImage: "pause.circle") }

@@ -1436,6 +1436,15 @@ extension ConverseTests {
         let snapshot = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: "Mobile Roadmap", document: ParkingLotDocument(revision: 12, rows: [heading, item, child]))
         service.handleEnvelope(peer, try snapshot.envelope())
         XCTAssertTrue(service.lotCanEdit(id)); XCTAssertEqual(service.lotEditors[id]?.projected.rows.count, 3)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.expired", boot: 9, sessionID: id, epoch: 4))
+        XCTAssertFalse(service.lotCanEdit(id))
+        XCTAssertTrue(service.lotEditors[id]?.frozenReason?.contains("No unsaved changes") == true)
+        XCTAssertNil(service.lotRecovery[id])
+        service.restoreAvailableDisplays()
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 9, sessionID: id, epoch: 4))
+        service.handleEnvelope(peer, try snapshot.envelope())
+        XCTAssertTrue(service.lotCanEdit(id), "An authenticated fresh snapshot resumes the clean editor")
+        XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0)
         for width: CGFloat in [430, 1024] {
             for style: UIUserInterfaceStyle in [.light, .dark] {
                 let host = UIHostingController(rootView: EditableLotPane(id: id, pane: 0, model: model).frame(width: width))
@@ -1479,6 +1488,11 @@ extension ConverseTests {
         XCTAssertEqual(service.lotEditors[id]?.projected.rows[1].text, "Typed on phone", "A new take never replays unconfirmed edits")
         XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Unconfirmed words to recover", "Recovery survives retake for manual copy")
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Pending at background"))
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.expired", boot: 10, sessionID: id, epoch: 6))
+        service.restoreAvailableDisplays()
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 10, sessionID: id, epoch: 7))
+        XCTAssertNil(service.remoteLeases[id], "No automatic resume request exists: an unsolicited grant cannot replay unconfirmed edits")
+        XCTAssertTrue(service.lotEditors[id]?.frozenReason?.contains("unconfirmed") == true)
         service.suspendViewer()
         XCTAssertFalse(service.lotCanEdit(id), "Backgrounding immediately ends editing authority")
         XCTAssertNotNil(service.lotEditors[id]?.frozenReason)
@@ -1631,5 +1645,29 @@ extension ConverseTests {
         XCTAssertEqual(atomic.revision, 5, "One batch is one home revision and one Undo action")
         XCTAssertThrowsError(try LotMenuSelection.applying(ops + [LotOperation(kind: .setDone, rowID: UUID(), done: true)], to: doc, author: "Tester"))
         XCTAssertFalse(doc.rows[1].isDone, "A failed batch leaves the source intact")
+    }
+}
+
+
+extension ConverseTests {
+    func testMobileSidebarIconAppearance() async throws {
+        for style: UIUserInterfaceStyle in [.light, .dark] {
+            let host = UIHostingController(rootView: VStack(alignment: .leading, spacing: 12) {
+                HStack { PadSessionName(title: "Parking Lot", isAgent: false, isParkingLot: true); Spacer(); PadProviderLogo(engine: "parking") }
+                HStack { PadSessionName(title: "Converse Steward", isAgent: true); Spacer(); PadProviderLogo(engine: "muse") }
+                HStack { Text("Claude"); Spacer(); PadProviderLogo(engine: "claude") }
+                HStack { Text("Codex"); Spacer(); PadProviderLogo(engine: "codex") }
+                HStack { Text("Choose a provider"); Spacer(); PadProviderLogo(engine: "unassigned") }
+                HStack { Text("Imported conversation"); Spacer(); PadProviderLogo(engine: "imported") }
+            }.font(.system(size: 13)).padding().frame(width: 360))
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+            let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 360, height: 270)
+            window.overrideUserInterfaceStyle = style; window.rootViewController = host; window.makeKeyAndVisible()
+            host.view.frame = window.bounds; host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(150))
+            let image = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+            image.name = "Mac-matching mobile icons \(style == .dark ? "dark" : "light")"; image.lifetime = .keepAlways; add(image)
+            window.isHidden = true
+        }
     }
 }

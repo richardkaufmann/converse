@@ -292,10 +292,10 @@ struct PadRoot: View {
                                 else if markers.paused || (markers.unseen && !attention) { PadRowMarker(markers: markers).frame(width: 14) }
                                 else { Text(attention ? "!" : "").bold().frame(width: 14) }
                                 Button { sessionActions = row } label: {
-                                    PadSessionName(title: row.title, isAgent: row.isAgentRow, isPaused: markers.paused, unread: markers.unseen).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                    PadSessionName(title: row.title, isAgent: row.isAgentRow, isParkingLot: row.engine == "parking", isPaused: markers.paused, unread: markers.unseen).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityLabel("Actions for " + row.title + PadRowMarker.spoken(markers))
                                     .simultaneousGesture(LongPressGesture().onEnded { _ in sessionActions = row })
-                                Group { if row.engine == "parking" { Image(systemName: "note.text") } else { PadProviderLogo(engine: row.engine) } }.frame(width: 24).help(row.model)
+                                PadProviderLogo(engine: row.engine).frame(width: 24).help(row.model)
                                 HStack(spacing: 3) {
                                     placementButton("P", selected: pane == nil) { model.park(row.globalID) }
                                     ForEach(0..<3) { index in placementButton(String(index + 1), selected: pane == index) { model.assign(row.globalID, pane: index) } }
@@ -345,7 +345,7 @@ struct PhoneSessionPicker: View {
                                     Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Color.accentColor : .secondary)
                                     PadRowMarker(markers: markers).frame(width: 14)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        PadSessionName(title: row.title, isAgent: row.isAgentRow, isPaused: markers.paused, unread: markers.unseen)
+                                        PadSessionName(title: row.title, isAgent: row.isAgentRow, isParkingLot: row.engine == "parking", isPaused: markers.paused, unread: markers.unseen)
                                         Text(row.status).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -749,16 +749,20 @@ enum PadLayout {
     }
 }
 
-private struct PadProviderLogo: View {
+struct PadProviderLogo: View {
     let engine: String
     var body: some View {
         let key = engine.lowercased() == "agent" ? "muse" : engine.lowercased()
         let provider = ["muse": "meta", "claude": "anthropic", "codex": "openai"][key] ?? key
-        let label = ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI"][key] ?? engine.capitalized
+        let label = ["muse": "Meta", "claude": "Anthropic", "codex": "OpenAI", "parking": "Parking Lot", "unassigned": "Choose a provider", "imported": "Imported · choose a provider"][key] ?? engine.capitalized
         let color: Color = key == "muse" ? Color(red: 4/255, green: 103/255, blue: 223/255) : key == "claude" ? Color(red: 217/255, green: 119/255, blue: 87/255) : .primary
         if !engine.isEmpty {
             Group {
-                if let url = Bundle.main.url(forResource: provider, withExtension: "png", subdirectory: "ProviderLogos"), let image = UIImage(contentsOfFile: url.path) {
+                if key == "parking" || key == "unassigned" {
+                    ParkingLotShoe()
+                } else if key == "imported" {
+                    Image(systemName: "tray.and.arrow.down").resizable().scaledToFit()
+                } else if let url = Bundle.main.url(forResource: provider, withExtension: "png", subdirectory: "ProviderLogos"), let image = UIImage(contentsOfFile: url.path) {
                     Image(uiImage: image).renderingMode(.template).resizable().scaledToFit()
                 } else {
                     Text(String(label.prefix(1))).font(.system(size: 14, weight: .bold))
@@ -792,12 +796,14 @@ struct PadRowMarker: View {
 struct PadSessionName: View {
     let title: String
     let isAgent: Bool
+    var isParkingLot = false
     var isPaused = false
     var unread = false
     var body: some View {
         HStack(spacing: 4) {
             Text(title).lineLimit(1).truncationMode(.tail).bold(unread).foregroundStyle(isPaused ? Color.red : Color.primary)
-            if isAgent { Text("🕵️").fixedSize().help("Agent session").accessibilityLabel("Agent") }
+            if isAgent { Text("😎").fixedSize().help("Agent session").accessibilityLabel("Agent") }
+            if isParkingLot { Text("🚗").fixedSize().help("Parking Lot").accessibilityLabel("Parking Lot") }
         }
     }
 }

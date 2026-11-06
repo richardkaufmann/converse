@@ -95,6 +95,8 @@ Real-device gates remain: BigPad installation, LAN permission denial/recovery, B
 
 ## Editable Parking Lot development preview
 
+The next mobile update matches the Mac’s lot car, shared blue shoe, agent marker and imported-provider icon. A disconnected lot with no unconfirmed changes resumes using its existing display claim; it does not take the lot from another viewer. Pending changes still require explicit recovery and never replay automatically.
+
 Private build 140 enables the native editor by default for Mac-hosted lots. The isolated `./iPad/test.sh --lot-editing` path enables it against a disposable Mac home and exercises ordered saves, image transfer, exclusive handoff and recovery. It includes per-level disclosure, outline numbering, text, comments, Done, tags, structural editing, Undo/Redo and `.converse` export. See [the preview notes](../docs/mobile-lot-editor-preview.md) for trial scope and remaining acceptance checks. Both the Mac home and mobile client must run 140; Windows 139 cannot view these exclusive lots.
 
 
