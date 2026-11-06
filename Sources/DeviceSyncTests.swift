@@ -800,6 +800,13 @@ func deviceFabricSelfTests(_ check: (Bool, String) -> Void) {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         check(services.allSatisfy { $0.homes.values.filter(\.online).count == 11 && $0.pairingPrompt == nil } && humanAdmissions == 22, "Twelve devices form one fabric with only eleven mutual admissions")
+        let versionEvidence = homes[0].installedVersionEvidence(localVersion: "9.9.9 (999)")
+        let pairedVersions = versionEvidence["pairedDevices"] as? [[String: Any]] ?? []
+        check((versionEvidence["thisDevice"] as? [String: Any])?["installedVersion"] as? String == "9.9.9 (999)" && pairedVersions.count == 11
+              && pairedVersions.allSatisfy { $0["installedVersion"] as? String == ConverseAbout.versionBuild && $0["connectedNow"] as? Bool == true && ($0["observedAt"] as? String).flatMap(ISO8601DateFormatter().date(from:)) != nil },
+              "Each paired device's authenticated hello reports its installed version and build with an observation time")
+        check(DeviceInstalledVersion(version: "0.5.22", build: nil, observedAt: Date()).versionBuild == nil && (try? JSONDecoder().decode(DeviceHello.self, from: Data(#"{"deviceID":"w","deviceName":"Windows","converseVersion":"0.5.22","protocolVersion":1,"capabilities":[]}"#.utf8)))?.converseBuild == nil,
+              "A hello without a build (older releases sent a placeholder version) is never read as an installed version")
         let session = Store.shared.create(Entry(name: "Fabric fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
         defer { Store.shared.sessions.removeAll { $0.id == session.id }; Store.shared.save() }
         session.title = "Fabric live session"

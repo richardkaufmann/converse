@@ -140,6 +140,9 @@ public sealed class DeviceHello
     [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";
     [JsonPropertyName("deviceName")] public string DeviceName { get; set; } = "";
     [JsonPropertyName("converseVersion")] public string ConverseVersion { get; set; } = "";
+    // Older releases omit the build (and sent a fixed placeholder version), so
+    // peers treat only a hello with a build as installed-version evidence.
+    [JsonPropertyName("converseBuild")] public string? ConverseBuild { get; set; }
     [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; set; } = 1;
     [JsonPropertyName("capabilities")] public string[] Capabilities { get; set; } = { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1" };
     [JsonPropertyName("listenPort")] public int? ListenPort { get; set; }

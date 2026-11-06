@@ -238,6 +238,7 @@ enum AgentPolicy {
                     "discord": discordBatch?.evidence as Any? ?? NSNull(),
                     "persistentNotes": current.workingMemory ?? "",
                     "converseHealth": session.supportAssistant ? store.converseHealth() : [:],
+                    "installedConverseVersions": service.installedVersionEvidence(),
                     "expectedParticipants": Array(Set(transcripts.compactMap { $0["id"] as? String } + (current.watchedParticipants ?? []).filter { reference in
                         guard let target = DeviceGlobalID(reference), let group = service.currentGroup?.id else { return false }
                         return service.acceptsParticipant(home: target.home, groupID: group)
