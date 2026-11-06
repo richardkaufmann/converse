@@ -103,7 +103,19 @@ final class ConfigurationAudit {
             try data.write(to: latest, options: [.atomic]); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: latest.path)
         } catch { failure("agent_recovery_snapshot_failed", error: error) }
     }
-    func willSave(_ sessions: [Session], data: Data, source: String) {
+    /// What the audit needs from the sessions, captured on the main thread so
+    /// the archive can be written in the background.
+    struct SaveSummary {
+        let agents: [UUID: AgentConfig]; let agentIDs: Set<UUID>; let sessionIDs: Set<UUID>; let missingAgentCount: Int
+        init(_ sessions: [Session]) {
+            agents = Dictionary(uniqueKeysWithValues: sessions.compactMap { s in s.agent.map { (s.id, $0) } })
+            agentIDs = Set(sessions.filter(\.isAgentSession).map(\.id)); sessionIDs = Set(sessions.map(\.id))
+            missingAgentCount = sessions.filter(\.needsAgentSetup).count
+        }
+    }
+    func willSave(_ sessions: [Session], data: Data, source: String) { willSave(SaveSummary(sessions), data: data, source: source) }
+    func didSave(_ sessions: [Session]) { didSave(SaveSummary(sessions)) }
+    func willSave(_ summary: SaveSummary, data: Data, source: String) {
         lock.lock(); defer { lock.unlock() }
         if stamp() != expectedStamp {
             let disk = try? Data(contentsOf: archive)
@@ -112,25 +124,24 @@ final class ConfigurationAudit {
             record("archive_changed_outside_this_store", ["source": source, "diskSHA256": disk.map(Self.digest) ?? "missing",
                 "diskConfiguredAgents": rows.filter { $0["agent"] is [String: Any] }.compactMap { ($0["id"] as? String).flatMap(UUID.init(uuidString:))?.uuidString }.sorted()])
         }
-        let current = Dictionary(uniqueKeysWithValues: sessions.compactMap { s in s.agent.map { (s.id, $0) } })
-        let currentIDs = Set(sessions.filter(\.isAgentSession).map(\.id))
+        let current = summary.agents, currentIDs = summary.agentIDs
         var changed = false
         for id in Set(known.keys).union(current.keys) where known[id] != current[id] {
             changed = true
             record("agent_configuration_save", ["sessionID": id.uuidString, "beforePresent": known[id] != nil, "afterPresent": current[id] != nil,
-                                                 "sessionStillExists": sessions.contains { $0.id == id }, "changedFields": Self.changedFields(known[id], current[id]), "source": source])
+                                                 "sessionStillExists": summary.sessionIDs.contains(id), "changedFields": Self.changedFields(known[id], current[id]), "source": source])
             if let previous = known[id] { snapshot(id, previous) }
             if let config = current[id] { snapshot(id, config) }
         }
         if changed || currentIDs != knownAgentIDs || Date().timeIntervalSince(lastCheckpoint) >= 30 {
-            record("archive_save_begin", ["source": source, "archiveSHA256": Self.digest(data), "sessionCount": sessions.count, "configuredAgentCount": current.count, "missingAgentCount": sessions.filter(\.needsAgentSetup).count])
+            record("archive_save_begin", ["source": source, "archiveSHA256": Self.digest(data), "sessionCount": summary.sessionIDs.count, "configuredAgentCount": current.count, "missingAgentCount": summary.missingAgentCount])
             lastCheckpoint = Date()
         }
     }
-    func didSave(_ sessions: [Session]) {
+    func didSave(_ summary: SaveSummary) {
         lock.lock(); defer { lock.unlock() }
-        let current = Dictionary(uniqueKeysWithValues: sessions.compactMap { s in s.agent.map { (s.id, $0) } })
+        let current = summary.agents
         if current != known { record("agent_configuration_save_committed", ["configuredAgents": current.keys.map(\.uuidString).sorted()]) }
-        known = current; knownAgentIDs = Set(sessions.filter(\.isAgentSession).map(\.id)); expectedStamp = stamp()
+        known = current; knownAgentIDs = summary.agentIDs; expectedStamp = stamp()
     }
 }

@@ -287,6 +287,50 @@ final class Session: ObservableObject, Identifiable {
     }
     var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize) }
 }
+/// Writes archives off the main thread: one serial queue, newest snapshot per
+/// folder wins, at most one background write per `minimumInterval`; checked
+/// saves and flushes write immediately, in order.
+final class ArchiveWriter {
+    static let shared = ArchiveWriter()
+    static var minimumInterval: TimeInterval = 1.0
+    /// One counter for every Store (main thread only), so a newer Store's
+    /// snapshot is never mistaken for an older one of the same folder.
+    static var generation = 0
+    private let queue = DispatchQueue(label: "local.richard.Converse.archive", qos: .userInitiated)
+    private struct Job { let generation: Int; let write: () throws -> Void }
+    private var pending: [String: Job] = [:], scheduled: Set<String> = [], lastWrite: [String: TimeInterval] = [:], written: [String: Int] = [:]
+    func submit(_ key: String, generation: Int, write: @escaping () throws -> Void) {
+        queue.async {
+            self.pending[key] = Job(generation: generation, write: write)
+            guard !self.scheduled.contains(key) else { return }
+            self.scheduled.insert(key)
+            let wait = max(0, Self.minimumInterval - (ProcessInfo.processInfo.systemUptime - (self.lastWrite[key] ?? 0)))
+            self.queue.asyncAfter(deadline: .now() + wait) { self.scheduled.remove(key); self.runPending(key) }
+        }
+    }
+    func writeNow(_ key: String, generation: Int, write: @escaping () throws -> Void) throws {
+        var failure: Error?
+        queue.sync {
+            if let job = pending[key], job.generation > generation { runPending(key) }
+            else { pending[key] = nil }
+            do { try run(key, Job(generation: generation, write: write)) } catch { failure = error }
+        }
+        if let failure { throw failure }
+    }
+    /// Writes a folder's pending snapshot now (reload, tests).
+    func flush(_ key: String) { queue.sync { runPending(key) } }
+    /// Writes every pending snapshot now (quit).
+    func flushAll() { queue.sync { for key in Array(pending.keys) { runPending(key) } } }
+    private func runPending(_ key: String) {
+        guard let job = pending.removeValue(forKey: key) else { return }
+        do { try run(key, job) } catch { NSLog("Save failed: %@", error.localizedDescription) }
+    }
+    private func run(_ key: String, _ job: Job) throws {
+        guard job.generation > (written[key] ?? 0) else { return }
+        try job.write()
+        written[key] = job.generation; lastWrite[key] = ProcessInfo.processInfo.systemUptime
+    }
+}
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil; var paneTextSize: Double? = nil }
 final class Store: ObservableObject {
     static func transcriptMessageNumbers(_ messages: [Message]) -> [UUID: Int] {
@@ -333,6 +377,8 @@ final class Store: ObservableObject {
         self.folder = folder ?? ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
         identityFolder = (folder != nil || ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil) ? self.folder.appendingPathComponent("SessionIdentity") : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".converse/sessions")
         configurationAudit = ConfigurationAudit(folder: self.folder)
+        // Another Store for this folder may still have a background save queued.
+        ArchiveWriter.shared.flush(self.folder.path)
         accounts = AccountProfile.defaults(dataFolder: self.folder)
         do {
             try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
@@ -390,6 +436,29 @@ final class Store: ObservableObject {
         let task = DispatchWorkItem { self.save(file: file, line: line, function: function) }; pendingSave = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
+    /// Captures the archive on the main thread (cheap: copy-on-write values)
+    /// and returns the expensive part, encoding and the atomic write, to run on
+    /// ArchiveWriter's queue.
+    private func archiveWrite(source: String) -> (generation: Int, write: () throws -> Void) {
+        ArchiveWriter.generation += 1
+        let generation = ArchiveWriter.generation
+        let archive = Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts, paneTextSize: paneTextSize == PaneTextSize.standard ? nil : paneTextSize)
+        let summary = ConfigurationAudit.SaveSummary(sessions)
+        let audit = configurationAudit, url = folder.appendingPathComponent("sessions.json")
+        return (generation, {
+            do {
+                let data = try JSONEncoder().encode(archive)
+                audit.willSave(summary, data: data, source: source)
+                try data.write(to: url, options: .atomic)
+                audit.didSave(summary)
+            } catch {
+                audit.failure("archive_save_failed", error: error, source: source)
+                throw error
+            }
+        })
+    }
+    /// Writes now and reports failure. Use where a caller must know the save
+    /// succeeded (it waits for the archive queue); ordinary saves use save().
     func saveChecked(file: String = #fileID, line: Int = #line, function: String = #function) throws {
         let source = "\(file):\(line) \(function)"
         let began = ProcessInfo.processInfo.systemUptime
@@ -397,19 +466,16 @@ final class Store: ObservableObject {
             let elapsed = ProcessInfo.processInfo.systemUptime - began
             if elapsed > 0.15 { NSLog("Converse slow archive save: %.0f ms at %@", elapsed * 1000, source) }
         }
-        do {
-            let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts, paneTextSize: paneTextSize == PaneTextSize.standard ? nil : paneTextSize))
-            configurationAudit.willSave(sessions, data: data, source: source)
-            try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
-            configurationAudit.didSave(sessions)
-        } catch {
-            configurationAudit.failure("archive_save_failed", error: error, source: source)
-            throw error
-        }
+        let job = archiveWrite(source: source)
+        try ArchiveWriter.shared.writeNow(folder.path, generation: job.generation, write: job.write)
     }
+    /// Saves without blocking the main thread: the newest snapshot is encoded
+    /// and written in the background, at most once per ArchiveWriter.minimumInterval.
+    /// (Rewriting a 16 MB archive on the main thread every couple of seconds
+    /// while sessions streamed made typing stutter; 2026-11-05.)
     func save(file: String = #fileID, line: Int = #line, function: String = #function) {
-        do { try saveChecked(file: file, line: line, function: function) }
-        catch { NSLog("Save failed: %@", error.localizedDescription) }
+        let job = archiveWrite(source: "\(file):\(line) \(function)")
+        ArchiveWriter.shared.submit(folder.path, generation: job.generation, write: job.write)
     }
     func create(_ entry: Entry, persist: Bool = true) -> Session {
         var entry = entry
@@ -3150,6 +3216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
+    func applicationWillTerminate(_ notification: Notification) {
+        Store.shared.save(); ArchiveWriter.shared.flushAll()
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitReady { return .terminateNow }
         if quitting { return .terminateCancel }

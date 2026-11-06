@@ -559,6 +559,7 @@ import Foundation
     check(answerRange.location != NSNotFound && responseView.textStorage?.attribute(.toolTip, at: answerRange.location, effectiveRange: nil) as? String != nil && responseView.string.contains(Store.delayLabel(response.delays?.first?.seconds ?? 0)),
           "Agent response body provides a timestamp hover and rendered delay hint")
     check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its scoreboard after the model response")
+    ArchiveWriter.shared.flushAll()
     let archive = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.workingMemory == "Keep release acceptance criteria", "Agent's learned human criteria survive archive reload beyond the recent conversation window")
     check(!archive.contains("isolated-test-key") && !AgentWidgetExport.html(agent).contains("isolated-test-key"), "Agent credentials never enter persisted sessions or widget exports")
@@ -726,16 +727,41 @@ import Foundation
 }
 
 
+func archiveWriterSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("archive-writer-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = Store(folder: root)
+    let session = store.create(Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"))
+    // A large transcript, like a long-running session.
+    session.messages = (0..<4000).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: String(repeating: "Streaming output line \($0). ", count: 40)) }
+    store.save(); ArchiveWriter.shared.flushAll()
+    let file = root.appendingPathComponent("sessions.json")
+    let before = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    let began = ProcessInfo.processInfo.systemUptime
+    for index in 0..<30 { session.draft = "draft \(index)"; store.save() }
+    let elapsed = ProcessInfo.processInfo.systemUptime - began
+    check(elapsed < 0.5, "Thirty saves of a large archive return quickly; encoding and writing happen off the main thread (\(Int(elapsed * 1000)) ms)")
+    let unchangedYet = ((try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) == before
+    check(unchangedYet, "A burst of saves is coalesced: nothing is written until the next background slot")
+    check(Store(folder: root).sessions.first { $0.id == session.id }?.draft == "draft 29", "A new Store for the folder sees the newest save (pending writes are flushed first)")
+    session.draft = "checked"
+    try? store.saveChecked()
+    let onDisk = (try? JSONDecoder().decode(Archive.self, from: Data(contentsOf: file)))?.sessions.first { $0.id == session.id }?.draft
+    check(onDisk == "checked", "saveChecked writes immediately and in order")
+}
+
 func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
+    archiveWriterSelfTests(check)
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("configuration-audit-" + UUID().uuidString)
     let store = Store(folder: root)
     let agent = store.createAgent(title: "private-title-canary")
     agent.agent?.objective = "private-objective-canary"
     agent.draft = "private-draft-canary"
-    store.save()
+    // Background saves coalesce; put the agent-present state on disk first.
+    store.save(); ArchiveWriter.shared.flushAll()
     let expected = agent.agent
     agent.agent = nil
-    store.save()
+    store.save(); ArchiveWriter.shared.flushAll()
     let directory = root.appendingPathComponent("Configuration Diagnostics")
     func events() -> String {
         ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
@@ -751,8 +777,9 @@ func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
         check(!rows.contains("private-objective-canary") && !rows.contains("private-draft-canary") && !rows.contains("private-title-canary"),
               "Configuration diagnostic events contain no objectives, titles or draft text")
         let archive = root.appendingPathComponent("sessions.json")
+        ArchiveWriter.shared.flushAll()
         var bytes = try Data(contentsOf: archive); bytes.append(10); try bytes.write(to: archive, options: .atomic)
-        store.save()
+        store.save(); ArchiveWriter.shared.flushAll()
         check(events().contains("archive_changed_outside_this_store"), "Configuration diagnostics detect an archive replaced by another writer")
         let reopened = Store(folder: root)
         check(reopened.sessions.first?.needsAgentSetup == true && events().contains("missingAgentConfigurations") && FileManager.default.fileExists(atPath: recovery.path),
