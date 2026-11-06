@@ -750,8 +750,31 @@ func archiveWriterSelfTests(_ check: (Bool, String) -> Void) {
     check(onDisk == "checked", "saveChecked writes immediately and in order")
 }
 
+func durableEnqueueSelfTests(_ check: (Bool, String) -> Void) {
+    // A switchboard message is on disk before its turn starts, even when
+    // background saves are spaced out.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("durable-enqueue-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = Store(folder: root)
+    let session = store.create(Entry(name: "Shell", command: "/bin/cat", directory: "~", engine: "claude"))
+    store.save(); ArchiveWriter.shared.flushAll()
+    let spacing = ArchiveWriter.minimumInterval; ArchiveWriter.minimumInterval = 30
+    defer { ArchiveWriter.minimumInterval = spacing }
+    session.queuePaused = true   // keep the provider from actually running in the test
+    store.enqueueSwitchboard(session, text: "durable-canary-message")
+    let deadline = Date().addingTimeInterval(5)
+    var onDisk = ""
+    while Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        onDisk = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
+        if onDisk.contains("durable-canary-message") { break }
+    }
+    check(onDisk.contains("durable-canary-message"), "A switchboard message is written to disk before its turn can start, without waiting for the one-second spacing")
+}
+
 func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
     archiveWriterSelfTests(check)
+    durableEnqueueSelfTests(check)
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("configuration-audit-" + UUID().uuidString)
     let store = Store(folder: root)
     let agent = store.createAgent(title: "private-title-canary")
