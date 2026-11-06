@@ -85,7 +85,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try png.write(to: url, options: .atomic)
         return url.path
     }
-    var exportMessages: [Message] {
+    var exportMessages: [Message] { Self.exportMessages(document) }
+    static func exportMessages(_ document: ParkingLotDocument) -> [Message] {
         let hierarchy = (try? ParkingLotTree.nodes(document.rows)) ?? [:]
         var counts: [UUID?: Int] = [:]
         return document.rows.map { row in

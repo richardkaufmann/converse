@@ -771,7 +771,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = InstalledVersion.Version, ConverseBuild = InstalledVersion.Build,
-        Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
+        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -1956,18 +1956,24 @@ public sealed partial class DeviceSyncService : IDisposable
         {
             case DeviceKind.FabricMembers:
             {
-                if (envelope.Payload is null
+                // Leave can clear CurrentGroup on another thread while this frame is merging.
+                // Keep the authenticated group scope stable so an in-flight roster cannot
+                // disconnect every socket before Leave broadcasts its removal tombstone.
+                var receivingGroup = CurrentGroup?.Id;
+                if (receivingGroup is null || envelope.Payload is null
                     || !peer.Hello.Capabilities.Contains("fabric-membership-v1")
-                    || !Trust.Devices.Any(d => d.DeviceID == peerHome && d.GroupID == CurrentGroup?.Id)) break;
+                    || !Trust.Devices.Any(d => d.DeviceID == peerHome && d.GroupID == receivingGroup)) break;
                 List<TrustedDevice> incoming;
                 try { incoming = DeviceJson.Decode<List<TrustedDevice>>(envelope.Payload); }
                 catch { peer.Client.Dispose(); return; }
-                incoming = incoming.Where(d => d.GroupID == CurrentGroup?.Id).ToList();
+                incoming = incoming.Where(d => d.GroupID == receivingGroup).ToList();
                 var wasRemoved = LocallyRemoved;
                 bool merged;
                 try { merged = Trust.Merge(incoming); }
                 catch { peer.Client.Dispose(); return; }
-                if (LocallyRemoved && !wasRemoved)
+                var removedByFrame = !wasRemoved && LocallyRemoved
+                    && incoming.Any(d => d.DeviceID == DeviceId && d.Removed == true);
+                if (removedByFrame)
                 {
                     // Freshly removed: leave quietly, park remotes, go dark.
                     GroupStore.Leave();
@@ -1976,7 +1982,8 @@ public sealed partial class DeviceSyncService : IDisposable
                     ServiceStatus = "Removed by a group member.";
                     Changed?.Invoke();
                 }
-                var active = Trust.Devices.Where(d => d.GroupID == CurrentGroup?.Id).Select(d => d.DeviceID).ToHashSet();
+                var active = removedByFrame ? new HashSet<string>()
+                    : Trust.Devices.Where(d => d.GroupID == receivingGroup).Select(d => d.DeviceID).ToHashSet();
                 foreach (var gone in _peers.Values
                     .Where(p => p is { TrustedReady: true, Hello: not null } && !active.Contains(p.Hello.DeviceID)).ToList())
                     Disconnect(gone);

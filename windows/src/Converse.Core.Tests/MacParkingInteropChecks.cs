@@ -30,6 +30,9 @@ internal static class MacParkingInteropChecks
             await viewer.AcquireRemoteAsync(lot.GlobalID);
             await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(lot.GlobalID)?.Engine == "parking", "Windows opens Mac Parking Lot snapshot");
             var snapshot = viewer.RemoteTranscripts[lot.GlobalID];
+            if (Environment.GetEnvironmentVariable("CONVERSE_LOT_READ_INTEROP") == "1" && snapshot.Epoch is not > 0)
+                throw new InvalidOperationException("Read-only lot did not receive an exclusive display epoch");
+            Console.WriteLine("PASS: Parking Lot display epoch=" + snapshot.Epoch);
             var hash = snapshot.Messages.SelectMany(m => m.ImageHashes).Single();
             var path = await viewer.DownloadBlobAsync(lot.GlobalID, hash);
             if (path is null || !DeviceBlob.Verify(await File.ReadAllBytesAsync(path), hash)) throw new InvalidOperationException("Mac Parking Lot image bytes did not download and verify");

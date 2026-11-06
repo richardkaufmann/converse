@@ -118,7 +118,7 @@ final class DeviceSyncService: ObservableObject {
     @Published var outbox: [DeviceOutboxRecord] = []
     @Published var blobReady: [String: Bool] = [:]
     @Published var blobCache: [String: URL] = [:]
-    // Enabled for Richard's private 140 trial. The override supports legacy interop fixtures.
+    // Mac-hosted editable lots are enabled; the override supports legacy interop fixtures.
     var editableLotsEnabled = ProcessInfo.processInfo.environment["CONVERSE_EDITABLE_LOTS"] != "0"
     @Published var lotEditors: [String: LotEditQueue] = [:]
     // Manual recovery only; never replay into a new authority epoch.
@@ -1335,7 +1335,7 @@ extension DeviceSyncService {
             guard let data = envelope.payload, let blob = try? JSONDecoder().decode(DeviceBlobPayload.self, from: data) else { return }
             let path: String
             if let lot = homeParkingLot(envelope) {
-                // Lot readers have a nonexclusive epoch-zero subscription, not a session lease.
+                // Legacy readers use epoch zero; current read-only viewers hold an exclusive lease.
                 // Never use the global blob cache to authorize access to another lot's images.
                 guard (editableLotsEnabled ? (envelope.epoch.map { leases?.validate(session: lot.id, device: peerHome, epoch: $0) == true } ?? false) : envelope.epoch == 0), peer.leasedSessions.contains(lot.id) else { return }
                 if let image = lot.document.rows.flatMap({ $0.images ?? [] }).first(where: { imageHash(path: $0) == blob.sha256Hex }) { path = image }
@@ -2421,8 +2421,9 @@ extension DeviceSyncService {
         #if os(macOS)
         if editableLotsEnabled, let lot = homeParkingLot(envelope) {
             let compatible = peer.hello?.capabilities.contains(LotEditing.capability) == true
+            let reader = peer.hello?.capabilities.contains(LotEditing.readOnlyCapability) == true
             if ["lease.acquire", "lease.resume"].contains(envelope.kind) {
-                guard compatible else {
+                guard compatible || reader else {
                     sendEnvelope(peer, DeviceEnvelope(kind: "lease.denied", boot: boot, sessionID: envelope.sessionID, payload: Data("Update Converse to open this Parking Lot.".utf8))); return true
                 }
                 if envelope.kind == "lease.resume", (leases?.epochs[lot.id] != envelope.epoch || Workspace.shared.placements[lot.id] != nil) {
@@ -2436,7 +2437,7 @@ extension DeviceSyncService {
                 return true
             }
             if envelope.kind == "lease.heartbeat" {
-                if let epoch = envelope.epoch, compatible,
+                if let epoch = envelope.epoch, compatible || reader,
                    lotTransfers[lot.id].map({ Date() < $0.renewUntil }) ?? true,
                    leases?.heartbeat(session: lot.id, device: device, epoch: epoch) == true {
                     sendEnvelope(peer, DeviceEnvelope(kind: "lot.lease.renewed", boot: boot, sessionID: envelope.sessionID, epoch: epoch))
@@ -2448,7 +2449,7 @@ extension DeviceSyncService {
                 peer.leasedSessions.remove(lot.id); publishSidebarIfChanged(); return true
             }
             if envelope.kind.hasPrefix("lot.") || ["blob.offer", "blob.chunk", "blob.complete", "blob.request"].contains(envelope.kind) {
-                guard compatible, let epoch = envelope.epoch, leases?.validate(session: lot.id, device: device, epoch: epoch) == true,
+                guard compatible || (reader && envelope.kind == "blob.request"), let epoch = envelope.epoch, leases?.validate(session: lot.id, device: device, epoch: epoch) == true,
                       envelope.boot == nil || envelope.boot == boot else { rejectLot(peer, envelope, "Parking Lot authority expired. No changes applied."); return true }
                 if envelope.kind.hasPrefix("lot."), envelope.boot != boot { rejectLot(peer, envelope, "Home restarted. Take the Parking Lot again."); return true }
                 do {
@@ -2536,7 +2537,8 @@ extension DeviceSyncService {
     }
     #if os(macOS)
     private func rejectLot(_ peer: DevicePeer, _ envelope: DeviceEnvelope, _ reason: String) {
-        sendEnvelope(peer, DeviceEnvelope(kind: "lot.rejected", boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: Data(reason.utf8)))
+        let kind = peer.hello?.capabilities.contains(LotEditing.capability) == true ? "lot.rejected" : "lease.denied"
+        sendEnvelope(peer, DeviceEnvelope(kind: kind, boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: Data(reason.utf8)))
     }
     private func lotSnapshot(_ lot: ParkingLotStore, epoch: UInt64, document: ParkingLotDocument? = nil) throws -> LotSnapshot {
         var wire = document ?? lot.document; wire.schemaVersion = ParkingLotDocument.currentSchemaVersion
@@ -2549,25 +2551,44 @@ extension DeviceSyncService {
         }
         return try LotSnapshot(globalID: DeviceGlobalID(home: identity!.deviceID, session: lot.id).string, homeBoot: boot, leaseEpoch: epoch, name: lot.name, document: wire)
     }
+    private func readOnlyLotEnvelope(_ lot: ParkingLotStore, epoch: UInt64, document: ParkingLotDocument? = nil) throws -> DeviceEnvelope {
+        let document = document ?? lot.document
+        let id = DeviceGlobalID(home: identity!.deviceID, session: lot.id).string
+        let payload = DeviceTranscriptPayload(globalID: id,
+            homeSeq: stateStore?.nextSeq() ?? 0, epoch: epoch, boot: boot,
+            messages: ParkingLotStore.exportMessages(document).map(wireMessage), total: document.rows.count,
+            draft: "", draftVersion: UInt64(max(0, document.revision)), busy: false,
+            status: "Parking Lot · read only", title: lot.name, engine: "parking")
+        let envelope = DeviceEnvelope(kind: "transcript.snapshot", homeSeq: payload.homeSeq, boot: boot,
+            sessionID: id, epoch: epoch, payload: try JSONEncoder().encode(payload))
+        _ = try DeviceFrame.encode(envelope)
+        return envelope
+    }
     private func sendLotSnapshot(_ peer: DevicePeer, lot: ParkingLotStore, force: Bool = false) {
         guard let device = peer.hello?.deviceID, let holder = leases?.holder(session: lot.id), holder.device == device,
-              peer.hello?.capabilities.contains(LotEditing.capability) == true else { return }
+              peer.hello?.capabilities.contains(LotEditing.capability) == true || peer.hello?.capabilities.contains(LotEditing.readOnlyCapability) == true else { return }
         do {
             let snapshot = try lotSnapshot(lot, epoch: holder.epoch)
             if !force && lotStreams[lot.id]?.lastSnapshot == snapshot.digest { return }
-            sendEnvelope(peer, try snapshot.envelope()); lotStreams[lot.id]?.lastSnapshot = snapshot.digest
+            if peer.hello?.capabilities.contains(LotEditing.capability) == true {
+                sendEnvelope(peer, try snapshot.envelope())
+            } else {
+                sendEnvelope(peer, try readOnlyLotEnvelope(lot, epoch: holder.epoch))
+            }
+            lotStreams[lot.id]?.lastSnapshot = snapshot.digest
         } catch { rejectLot(peer, DeviceEnvelope(kind: "lot.snapshot", sessionID: DeviceGlobalID(home: identity!.deviceID, session: lot.id).string, epoch: holder.epoch), error.localizedDescription) }
     }
     private func installLotGuard(_ lot: ParkingLotStore) {
         lot.authorityCheck = { [weak self, weak lot] in
             guard let self, let lot else { return }
-            if !self.lotWritePermit.contains(lot.id), self.remoteDisplayHolder(lot.id) != nil {
+            if !self.lotWritePermit.contains(lot.id), self.remoteDisplayHolder(lot.id) != nil, !self.lotHasReadOnlyHolder(lot.id) {
                 throw ParkingLotError.message("This Parking Lot is held on another device. Take it here before editing.")
             }
         }
         lot.snapshotCheck = { [weak self, weak lot] document in
             guard let self, let lot, let holder = self.leases?.holder(session: lot.id), holder.device != self.identity?.deviceID else { return }
             _ = try self.lotSnapshot(lot, epoch: holder.epoch, document: document).envelope()
+            if self.lotHasReadOnlyHolder(lot.id) { _ = try self.readOnlyLotEnvelope(lot, epoch: holder.epoch, document: document) }
         }
     }
     private func withLotPermit<T>(_ id: UUID, _ action: () throws -> T) rethrows -> T {
@@ -2580,6 +2601,9 @@ extension DeviceSyncService {
             guard (leases.epochs[lot.id] ?? 0) < UInt64.max else { throw ParkingLotError.message("Lot lease epoch exhausted.") }
             // Refuse an unsendable document before displacing anyone.
             _ = try lotSnapshot(lot, epoch: (leases.epochs[lot.id] ?? 0) + 1).envelope()
+            if peer.hello?.capabilities.contains(LotEditing.capability) != true {
+                _ = try readOnlyLotEnvelope(lot, epoch: (leases.epochs[lot.id] ?? 0) + 1)
+            }
             let grant = leases.acquire(session: lot.id, device: device)
             guard grant.granted else { throw ParkingLotError.message("Home could not persist the display lease.") }
             let id = DeviceGlobalID(home: identity!.deviceID, session: lot.id).string
@@ -2597,6 +2621,8 @@ extension DeviceSyncService {
         guard lotTransfers[lot.id] == nil else { lastOutcome = "Waiting for the other device to finish saving."; return }
         if lotProposalRequests[lot.id] != nil { finishLotProposal(lot.id, result: .failure(ParkingLotError.message("Review cancelled because the lot is moving."))) }
         if let holder = leases?.holder(session: lot.id), holder.device != identity?.deviceID, holder.device != target {
+            // A read-only viewer cannot have queued writes to drain.
+            if lotHasReadOnlyHolder(lot.id) { finish(); return }
             lotTransfers[lot.id] = LotTransfer(epoch: holder.epoch, renewUntil: Date().addingTimeInterval(3), finish: finish)
             if let peer = peers.values.first(where: { $0.trustedReady && $0.hello?.deviceID == holder.device }) {
                 sendEnvelope(peer, DeviceEnvelope(kind: "lot.handoff.prepare", boot: boot, sessionID: DeviceGlobalID(home: identity!.deviceID, session: lot.id).string, epoch: holder.epoch))
@@ -2677,7 +2703,14 @@ extension DeviceSyncService {
             sendBlobAck(peer, envelope: envelope, hash: blob.sha256Hex, stored: true, detail: "Stored for this lot.")
         }
     }
-    func lotRequiresHolderReview(_ id: UUID) -> Bool { editableLotsEnabled && remoteDisplayHolder(id) != nil }
+    private func lotHasReadOnlyHolder(_ id: UUID) -> Bool {
+        guard let holder = leases?.holder(session: id), holder.device != identity?.deviceID,
+              let peer = peers.values.first(where: { $0.trustedReady && $0.hello?.deviceID == holder.device }) else { return false }
+        return peer.hello?.capabilities.contains(LotEditing.readOnlyCapability) == true && peer.hello?.capabilities.contains(LotEditing.capability) != true
+    }
+    func lotRequiresHolderReview(_ id: UUID) -> Bool {
+        editableLotsEnabled && remoteDisplayHolder(id) != nil && !lotHasReadOnlyHolder(id)
+    }
     @MainActor func reviewOnLotHolder(_ edits: ParkingLotEdits, lot: ParkingLotStore, author: String, allowed: @escaping () -> Bool) async throws -> String {
         guard let holder = leases?.holder(session: lot.id), holder.device != identity?.deviceID,
               let peer = peers.values.first(where: { $0.trustedReady && $0.hello?.deviceID == holder.device }),

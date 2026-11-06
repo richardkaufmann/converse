@@ -97,6 +97,47 @@ async Task<bool> JoinPair(DeviceSyncService home, DeviceSyncService joiner, Func
     return done();
 }
 
+// Repeat the real Group-leave path independently when diagnosing network races.
+async Task CheckGroupLeave()
+{
+    var aRoot = Directory.CreateTempSubdirectory("converse-leavea-").FullName;
+    var bRoot = Directory.CreateTempSubdirectory("converse-leaveb-").FullName;
+    try
+    {
+        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
+        using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
+        a.PairingConfirmation = _ => Task.FromResult(true);
+        b.PairingConfirmation = _ => Task.FromResult(true);
+        await a.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
+        await b.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
+        // 30 s budget, same rule as the fence test below: Until exits
+        // early when green, so this only costs time on genuine failure.
+        async Task<bool> Until(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
+            return done();
+        }
+        Check(await JoinPair(a, b, () => b.Homes.GetValueOrDefault(a.DeviceId)?.Online == true), "Leave setup groups A with B");
+        await b.LeaveGroupAsync();
+        var removalArrived = await Until(() => a.Trust.Records.Any(d => d.DeviceID == b.DeviceId && d.Removed == true));
+        Check(removalArrived, "Leave tombstone reaches the member over the open socket");
+        if (!removalArrived) {
+            Console.WriteLine("Leave diagnostics: A group=" + a.CurrentGroup?.Id + "; B group=" + b.CurrentGroup?.Id
+                + "; A outcome=" + a.LastOutcome + "; B outcome=" + b.LastOutcome);
+            foreach (var service in new[] { a, b })
+                foreach (var record in service.Trust.Records)
+                    Console.WriteLine($"  {(service == a ? "A" : "B")} record={(record.DeviceID == a.DeviceId ? "A" : "B")} group={record.GroupID} generation={record.Generation} removed={record.Removed} issuer={record.ChangedBy}");
+        }
+        Check(await Until(() => !a.Homes.ContainsKey(b.DeviceId)), "Member drops the leaver's home on merge");
+    }
+    finally { Cleanup(aRoot); Cleanup(bRoot); }
+}
+if (args.Contains("--group-leave-only")) {
+    for (var iteration = 0; iteration < 10; iteration++) await CheckGroupLeave();
+    return failures == 0 ? 0 : 1;
+}
+
 if (args.Contains("--support-only")) { await AppSupportChecks.Run(Check); return failures == 0 ? 0 : 1; }
 
 Console.WriteLine("ChaCha20Poly1305 supported: " + ChaCha20Poly1305.IsSupported);
@@ -1906,35 +1947,7 @@ MdnsChecks.RunGroupDevices(Check);
     finally { Cleanup(aRoot); Cleanup(bRoot); }
 }
 
-// Leave broadcasts its tombstone under the previous group before any
-// disconnect, so members converge without a reconnect.
-{
-    var aRoot = Directory.CreateTempSubdirectory("converse-leavea-").FullName;
-    var bRoot = Directory.CreateTempSubdirectory("converse-leaveb-").FullName;
-    try
-    {
-        using var a = new DeviceSyncService(aRoot, new SessionStore(aRoot, new FakeRunner()), "A");
-        using var b = new DeviceSyncService(bRoot, new SessionStore(bRoot, new FakeRunner()), "B");
-        a.PairingConfirmation = _ => Task.FromResult(true);
-        b.PairingConfirmation = _ => Task.FromResult(true);
-        await a.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
-        await b.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
-        // 30 s budget, same rule as the fence test below: Until exits
-        // early when green, so this only costs time on genuine failure.
-        async Task<bool> Until(Func<bool> done)
-        {
-            var deadline = DateTime.UtcNow.AddSeconds(30);
-            while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
-            return done();
-        }
-        Check(await JoinPair(a, b, () => b.Homes.GetValueOrDefault(a.DeviceId)?.Online == true), "Leave setup groups A with B");
-        await b.LeaveGroupAsync();
-        Check(await Until(() => a.Trust.Records.Any(d => d.DeviceID == b.DeviceId && d.Removed == true)),
-            "Leave tombstone reaches the member over the open socket");
-        Check(await Until(() => !a.Homes.ContainsKey(b.DeviceId)), "Member drops the leaver's home on merge");
-    }
-    finally { Cleanup(aRoot); Cleanup(bRoot); }
-}
+await CheckGroupLeave();
 
 // Expiry closes the join, clears prompts and reviews, and stale approvals
 // admit nobody.

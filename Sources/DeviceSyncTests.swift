@@ -705,7 +705,8 @@ func runIPadHomeFixture() {
         let groupService = DeviceSyncService()
         try groupService.configureForTesting(folder: folder.appendingPathComponent("groups"))
         let editingLots = ProcessInfo.processInfo.environment["CONVERSE_LOT_EDIT_INTEROP"] == "1"
-        groupService.editableLotsEnabled = editingLots
+        let readOnlyLots = ProcessInfo.processInfo.environment["CONVERSE_LOT_READ_INTEROP"] == "1"
+        groupService.editableLotsEnabled = editingLots || readOnlyLots
         try groupService.enableGroupsForTesting(); groupService.createGroup(name: "Simulator Group")
         // Real read-only Parking Lot viewer fixture, isolated from the user's lots.
         let parking = try groupService.parkingLibrary.create(name: "Mobile Parking Lot fixture")

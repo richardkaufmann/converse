@@ -35,6 +35,30 @@ func lotTransportSelfTests(_ check: (Bool, String) -> Void) {
         let (old, oldFrames) = try peer("Old viewer", capable: false)
         home.handleEnvelope(old, DeviceEnvelope(kind: "lease.acquire", sessionID: id))
         check(try oldFrames().contains { $0.kind == "lease.denied" } && !old.leasedSessions.contains(lot.id), "Activated lot editing refuses old epoch-zero subscribers")
+        let readerLot = try home.parkingLibrary.create(name: "Read-only Windows fixture")
+        try readerLot.replaceUserRows([heading, row], revision: readerLot.document.revision)
+        let readerID = DeviceGlobalID(home: home.identity!.deviceID, session: readerLot.id).string
+        let (reader, readerFrames) = try peer("Windows reader", capable: false)
+        reader.hello!.capabilities.append(LotEditing.readOnlyCapability)
+        home.handleEnvelope(reader, DeviceEnvelope(kind: "lease.acquire", sessionID: readerID))
+        let readFrames = try readerFrames()
+        let readSnapshot = try JSONDecoder().decode(DeviceTranscriptPayload.self, from: readFrames.first { $0.kind == "transcript.snapshot" }!.payload!)
+        check(readSnapshot.epoch ?? 0 > 0 && readSnapshot.engine == "parking" && readSnapshot.messages.count == 2,
+              "A read-only Windows viewer gets a real exclusive lease and existing transcript-format rows")
+        check(!home.lotRequiresHolderReview(readerLot.id), "Read-only viewers do not receive an approval dialog they cannot answer")
+        let readerBefore = readerLot.document
+        home.handleEnvelope(reader, DeviceEnvelope(kind: "lot.edit", boot: readSnapshot.boot, sessionID: readerID, epoch: readSnapshot.epoch, payload: Data()))
+        check(try readerFrames().contains { $0.kind == "lease.denied" } && readerLot.document == readerBefore,
+              "The Mac rejects writes from read-only capability holders")
+        readerLot.update(row.id, text: "Approved on Mac")
+        check(readerLot.document.rows[1].text == "Approved on Mac", "Home-side approved updates do not wait for a read-only holder to drain")
+        let (readerReplacement, replacementFrames) = try peer("Another reader", capable: false)
+        readerReplacement.hello!.capabilities.append(LotEditing.readOnlyCapability)
+        home.handleEnvelope(readerReplacement, DeviceEnvelope(kind: "lease.acquire", sessionID: readerID))
+        check(try replacementFrames().contains { $0.kind == "transcript.snapshot" } && readerFrames().contains { $0.kind == "lease.stolen" },
+              "Taking from a read-only viewer parks it immediately without an editor drain timeout")
+        home.handleEnvelope(reader, DeviceEnvelope(kind: "lease.resume", sessionID: readerID, epoch: readSnapshot.epoch))
+        check(try readerFrames().contains { $0.kind == "lease.denied" }, "A reconnecting read-only viewer cannot steal a newer take")
         let (phone, frames) = try peer("iPhone")
         home.handleEnvelope(phone, DeviceEnvelope(kind: "lease.acquire", sessionID: id))
         let grantFrames = try frames()

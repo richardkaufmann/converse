@@ -5,6 +5,7 @@ import CryptoKit
 /// Unsupported versions are refused before a holder can rewrite a document.
 enum LotEditing {
     static let capability = "lot-edit-v1"
+    static let readOnlyCapability = "lot-read-v1"
     static let version = 1
     static let maximumPending = 100
     static let maximumFrameBytes = 4 * 1024 * 1024 - 1024
