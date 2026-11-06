@@ -1,9 +1,10 @@
-param([string]$OutputRoot='C:\dev\converse-round')
+param([string]$OutputRoot='C:\dev\converse-round', [ValidateSet('ARM64','x64')][string]$Architecture='ARM64')
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $version=Get-Content VERSION.json -Raw | ConvertFrom-Json
 $root=Join-Path $OutputRoot ([string]$version.build)
+$runtime=if ($Architecture -eq 'ARM64') {'win-arm64'} else {'win-x64'}
 New-Item -ItemType Directory -Force $root | Out-Null
 & dotnet run --project windows/src/Converse.Core.Tests -c Release *> (Join-Path $root 'core-tests.log')
 if ($LASTEXITCODE -ne 0) { throw 'Core tests failed; see core-tests.log' }
@@ -11,7 +12,7 @@ foreach($edition in @('production','demo')) {
     $out=Join-Path $root $edition
     if (Test-Path $out) { throw "Output exists; preserve it and choose another OutputRoot: $out" }
     $demo=if ($edition -eq 'demo') {'true'} else {'false'}
-    & dotnet build windows/src/Converse.Windows -t:Rebuild -c Release -p:Platform=ARM64 -p:RuntimeIdentifier=win-arm64 "-p:ConverseDemo=$demo" -o $out *> (Join-Path $root "$edition-build.log")
+    & dotnet build windows/src/Converse.Windows -t:Rebuild -c Release "-p:Platform=$Architecture" "-p:RuntimeIdentifier=$runtime" "-p:ConverseDemo=$demo" -o $out *> (Join-Path $root "$edition-build.log")
     if ($LASTEXITCODE -ne 0) { throw "$edition build failed" }
     $help=Get-Content (Join-Path $out 'Assets\help.json') -Raw | ConvertFrom-Json
     if ($help.appBuild -ne $version.build -or $help.appVersion -ne $version.version) { throw 'Help is missing or stale' }

@@ -938,8 +938,8 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
     check(!ParkingLotStore(folder: folder).hasUnseenChanges, "Reading the changed lot persists the cleared marker")
 }
 
-/// While a voice conversation about this lot is running, its controls live in the
-/// lot's own pane: the talk session itself is usually not shown in any pane.
+/// Voice controls and the last stop/failure stay in the lot's own pane because
+/// the idle Talk helper is hidden from the sidebar.
 struct ParkingLotTalkBar: View {
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var conversation = AgentConversation.shared
@@ -949,17 +949,22 @@ struct ParkingLotTalkBar: View {
         return sessions.first { $0.id == sessionID && $0.agent?.parkingLotTalkID == lot }
     }
     var body: some View {
-        if conversation.active, let session = Self.talkSession(for: lot.id, sessionID: conversation.sessionID, sessions: store.sessions) {
+        if conversation.statusPresented, let session = Self.talkSession(for: lot.id, sessionID: conversation.sessionID, sessions: store.sessions) {
             HStack(spacing: 8) {
-                Image(systemName: conversation.phase == .listening ? "mic.fill" : "speaker.wave.2.fill").foregroundStyle(.orange)
+                Image(systemName: !conversation.active ? "mic.slash" : conversation.phase == .listening ? "mic.fill" : "speaker.wave.2.fill").foregroundStyle(.orange)
                 Text(conversation.status.isEmpty ? "Talking about \u{201C}" + lot.name + "\u{201D}" : conversation.status)
-                    .font(.callout).lineLimit(2)
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
                     .help(conversation.lastHeard.isEmpty ? conversation.status : "Heard: " + conversation.lastHeard)
                 Spacer(minLength: 0)
-                Button("Stop talking") { conversation.stop() }
-                    .keyboardShortcut(.escape, modifiers: [])
-                    .accessibilityLabel("Stop talking about " + lot.name)
-                    .help("End the voice conversation and turn the microphone off. " + session.title + " keeps its transcript.")
+                if conversation.active {
+                    Button("Stop talking") { conversation.stop() }
+                        .keyboardShortcut(.escape, modifiers: [])
+                        .accessibilityLabel("Stop talking about " + lot.name)
+                        .help("End the voice conversation and turn the microphone off. " + session.title + " keeps its transcript.")
+                } else {
+                    Button("Retry") { conversation.start(session, store: store) }.disabled(lot.isReadOnly)
+                    Button("Dismiss") { conversation.dismissStatus() }
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Color.orange.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 6))

@@ -31,3 +31,9 @@ Editing is enabled by default; `CONVERSE_EDITABLE_LOTS=0` supports legacy intero
 The next mobile controls remove per-row circles, use row or selection ellipsis menus, and support two-finger text sizing. Lot cars, the blue shoe and agent markers match the Mac. A clean lot resumes conditionally after reconnect; unconfirmed edits require explicit recovery and never replay automatically.
 
 Physical iPhone acceptance is required for this release: editing, multi-selection, menus, pinch, rotation, background/foreground, network loss, and taking between Mac/iPad/iPhone. Simulator passes do not substitute for those checks. Pending edits are memory-only: a terminated mobile process cannot recover changes that never reached home. Wait for Saved on home before quitting, or copy unconfirmed text while the process is running.
+
+## Mobile entry controls
+
+New item… and New Heading… remain visible in the outline. Return creates an item, Command-Return adds a line, and entry menus provide insertion and Move to heading. A trackpad drag crossing an entry boundary selects a row range; within-entry dragging remains native text selection. Direct-touch selection remains available through Select. Outdent is disabled at the outermost item level.
+
+Atomic batch edits use edit protocol v2. Update the Mac home and mobile editor together; a v1 editor/home cannot take an editable lot from v2. Read-only Windows viewing keeps its existing read capability. A batch validates each ordinary operation, commits once, and permits one-step Undo; it cannot wrap an arbitrary row replacement.

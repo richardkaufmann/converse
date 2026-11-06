@@ -84,6 +84,12 @@ import AppKit
     talk.start(session, store: store)
     talk.audio.onFailure?("Synthetic transcription failure")
     check(!talk.active && talk.detail == "Synthetic transcription failure", "Transcription failure visibly ends hands-free mode with no retry loop")
+    check(talk.statusPresented && talk.sessionID == session.id && talk.status == "Synthetic transcription failure", "A stopped Talk helper retains its failure for the lot pane instead of silently hiding it")
+    talk.dismissStatus()
+    check(!talk.statusPresented && !talk.active, "Dismissing the stopped Talk message does not restart the microphone")
+    talk.start(session, store: store); talk.dismissStatus()
+    check(talk.active && talk.statusPresented, "An active Talk conversation cannot lose its Stop control through Dismiss")
+    talk.stop()
 
     let runtime = AgentRuntime()
     runtime.keyReader = { _ in "synthetic-test-key" }

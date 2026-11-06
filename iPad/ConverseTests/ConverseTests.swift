@@ -1455,6 +1455,10 @@ extension ConverseTests {
                 let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
                 attachment.name = "Editable lot \(Int(width)) \(style == .dark ? "dark" : "light")"; attachment.lifetime = .keepAlways; add(attachment)
                 XCTAssertTrue(Self.views(host.view).contains { ($0 as? UITextView)?.text == item.text || ($0 as? UITextField)?.text == item.text }, "Native editable text renders at phone and tablet sizes")
+                let pointerHost = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotPointerSelectionHost }.first)
+                let gestureHost = try XCTUnwrap(pointerHost.gesture.view)
+                XCTAssertTrue(Self.views(gestureHost).contains { ($0 as? UITextView)?.text == item.text }, "Pointer recognizer observes the editor, not only a decorative background sibling")
+                XCTAssertTrue(pointerHost.gesture.frames.keys.contains(child.id), "Pointer hit testing receives visible row geometry")
                 window.isHidden = true
             }
         }
@@ -1557,6 +1561,21 @@ extension ConverseTests {
         phone.acquireRemote(globalID: id)
         try await eventually("Park and retake preserve saved contents") { phone.lotCanEdit(id) && (phone.lotEditors[id]?.saved.leaseEpoch ?? 0) > moved.leaseEpoch }
         XCTAssertEqual(phone.lotEditors[id]?.saved.document, moved.document)
+        let returned = try LotEntryEditing.splitting(item.id, at: NSRange(location: (movedRow.text as NSString).length, length: 0), in: moved.document.rows)
+        try phone.editLot(id, operation: returned.operation)
+        do { try await eventually("Return-created item is saved by the actual Mac home") { phone.lotEditors[id]?.unconfirmedCount == 0 } }
+        catch {
+            XCTFail("Return save state: " + String(describing: phone.lotEditors[id]?.frozenReason) + " / " + String(describing: phone.lotNotices[id]) + " / " + phone.lastOutcome)
+            throw error
+        }
+        XCTAssertTrue(phone.lotEditors[id]?.saved.document.rows.contains { $0.id == returned.focus && $0.text.isEmpty } == true)
+        try phone.editLot(id, operation: LotOperation(kind: .indent, rowIDs: [returned.focus]))
+        try await eventually("Indent receives a home acknowledgement") { phone.lotEditors[id]?.unconfirmedCount == 0 }
+        XCTAssertEqual(phone.lotEditors[id]?.saved.document.rows.first { $0.id == returned.focus }?.parentID, item.id)
+        try phone.editLot(id, operation: LotOperation(kind: .outdent, rowIDs: [returned.focus]))
+        try await eventually("Outdent receives a home acknowledgement") { phone.lotEditors[id]?.unconfirmedCount == 0 }
+        XCTAssertEqual(phone.lotEditors[id]?.saved.document.rows.first { $0.id == returned.focus }?.parentID, movedRow.parentID)
+        XCTAssertEqual(phone.lotEditors[id]?.saved.document.rows.first { $0.id == item.id }, movedRow, "Return and indent/outdent preserve the parent's metadata and images")
     }
 }
 
@@ -1669,5 +1688,106 @@ extension ConverseTests {
             image.name = "Mac-matching mobile icons \(style == .dark ? "dark" : "light")"; image.lifetime = .keepAlways; add(image)
             window.isHidden = true
         }
+    }
+}
+
+
+extension ConverseTests {
+    func testMobileEntryCreationReturnAndOutdentBoundaries() throws {
+        let heading = ParkingLotRow(heading: true, text: "Hook")
+        let parent = ParkingLotRow(heading: false, text: "First 📽 item", notes: [ParkingLotNote(author: "Owner", text: "Keep")], parentID: heading.id, tag: .green)
+        let child = ParkingLotRow(heading: false, text: "Nested", parentID: parent.id)
+        let sibling = ParkingLotRow(heading: false, text: "Second", parentID: heading.id)
+        let nextHeading = ParkingLotRow(heading: true, text: "Later")
+        let rows = [heading, parent, child, sibling, nextHeading]
+        XCTAssertNil(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: false), "The Video lot's first item is already at the outermost item level")
+        let outdented = try LotOperation(kind: .outdent, rowIDs: [child.id]).applying(to: ParkingLotDocument(rows: rows), author: "iPhone")
+        XCTAssertEqual(outdented.rows[2].parentID, heading.id)
+        XCTAssertEqual(outdented.rows.map(\.id), rows.map(\.id))
+        let newItem = try LotEntryEditing.inserting(in: rows, heading: false, after: parent.id)
+        XCTAssertEqual(newItem.rows.map(\.id), [heading.id, parent.id, child.id, newItem.focus, sibling.id, nextHeading.id])
+        XCTAssertEqual(newItem.rows[3].parentID, heading.id)
+        let newHeading = try LotEntryEditing.inserting(in: rows, heading: true, after: child.id)
+        XCTAssertEqual(newHeading.rows.map(\.id), [heading.id, parent.id, child.id, sibling.id, newHeading.focus, nextHeading.id])
+        XCTAssertTrue(newHeading.rows[4].heading)
+        let sectionItem = try LotEntryEditing.inserting(in: rows, heading: false, after: nil, section: heading.id)
+        XCTAssertEqual(sectionItem.rows[4].id, sectionItem.focus)
+        XCTAssertEqual(sectionItem.rows[4].parentID, heading.id)
+        let enter = try LotEntryEditing.splitting(parent.id, at: NSRange(location: (parent.text as NSString).length, length: 0), in: rows)
+        XCTAssertEqual(enter.rows.map(\.id), [heading.id, parent.id, child.id, enter.focus, sibling.id, nextHeading.id])
+        XCTAssertEqual(enter.rows[1], parent); XCTAssertEqual(enter.rows[2], child)
+        XCTAssertEqual(enter.rows[3].text, "")
+        let headerReturn = try LotEntryEditing.splitting(heading.id, at: NSRange(location: 4, length: 0), in: rows)
+        XCTAssertEqual(headerReturn.rows[1].id, headerReturn.focus)
+        XCTAssertEqual(headerReturn.rows[1].parentID, heading.id)
+        let middle = try LotEntryEditing.splitting(parent.id, at: NSRange(location: 5, length: 0), in: rows)
+        XCTAssertEqual(middle.rows[1].text, "First")
+        XCTAssertEqual(middle.rows[3].text, " 📽 item")
+        XCTAssertEqual(middle.rows[1].notes, parent.notes); XCTAssertEqual(middle.rows[1].tag, parent.tag)
+        let beginning = try LotEntryEditing.splitting(parent.id, at: NSRange(location: 0, length: 0), in: rows)
+        XCTAssertEqual(beginning.rows[2], parent); XCTAssertEqual(beginning.rows[3], child)
+        XCTAssertEqual(beginning.focus, parent.id)
+        for edit in [newItem, newHeading, sectionItem, enter, headerReturn, middle, beginning] {
+            let saved = try edit.operation.applying(to: ParkingLotDocument(rows: rows), author: "iPhone")
+            func withoutEditor(_ rows: [ParkingLotRow]) -> [ParkingLotRow] {
+                rows.map { row in var row = row; row.editedBy = nil; return row }
+            }
+            XCTAssertEqual(withoutEditor(saved.rows), withoutEditor(edit.rows), "The operation sent home must create exactly the previewed outline, including split placement and metadata")
+        }
+        XCTAssertThrowsError(try LotEntryEditing.splitting(parent.id, at: NSRange(location: 100, length: 0), in: rows))
+    }
+    func testNativeMobileEntryReturnAndSoftLineBreak() throws {
+        var returned: NSRange?, typed: String?, deletedEmpty = false
+        let entry = LotEntryText(text: "First", font: .systemFont(ofSize: 17), color: .label, done: false,
+            editable: true, focused: false, caret: nil, identifier: "entry-test", changed: { typed = $0 },
+            focusChanged: { _ in }, returned: { returned = $0 }, emptyBackspace: { deletedEmpty = true })
+        let coordinator = entry.makeCoordinator(), view = LotEntryTextView()
+        view.text = entry.text; view.delegate = coordinator
+        XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 5, length: 0), replacementText: "\n"))
+        XCTAssertEqual(returned, NSRange(location: 5, length: 0)); XCTAssertNil(typed)
+        view.softReturn = true; returned = nil
+        XCTAssertTrue(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 5, length: 0), replacementText: "\n"))
+        XCTAssertNil(returned, "Command-Return stays inside the item")
+        view.softReturn = false
+        XCTAssertTrue(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 5, length: 0), replacementText: "pasted\ntext"), "Pasting multiline text is not interpreted as pressing Return")
+        view.onEmptyBackspace = entry.emptyBackspace; view.text = ""; view.deleteBackward()
+        XCTAssertTrue(deletedEmpty)
+    }
+}
+
+private final class LotTestPointerTouch: UITouch {
+    var point = CGPoint.zero
+    var inputType: UITouch.TouchType = .indirectPointer
+    override var type: UITouch.TouchType { inputType }
+    override func location(in view: UIView?) -> CGPoint { point }
+}
+private final class LotTestPointerEvent: UIEvent {
+    override var buttonMask: UIEvent.ButtonMask { .primary }
+}
+extension ConverseTests {
+    func testTrackpadDragCrossesRowsWithoutTakingWithinItemTextSelection() {
+        let ids = [UUID(), UUID(), UUID()]
+        let gesture = LotPointerRangeGesture()
+        let host = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 500)); host.addGestureRecognizer(gesture)
+        gesture.visible = ids
+        gesture.frames = [ids[0]: CGRect(x: 20, y: 20, width: 360, height: 80), ids[1]: CGRect(x: 20, y: 110, width: 360, height: 80), ids[2]: CGRect(x: 20, y: 200, width: 360, height: 80)]
+        gesture.viewport = { host.bounds }
+        var selected: Set<UUID> = []
+        gesture.select = { selected = $0 }
+        let touch = LotTestPointerTouch(), event = LotTestPointerEvent()
+        touch.point = CGPoint(x: 80, y: 40)
+        XCTAssertTrue(gesture.gestureRecognizer(gesture, shouldReceive: touch))
+        gesture.touchesBegan([touch], with: event)
+        touch.point.y = 70; gesture.touchesMoved([touch], with: event)
+        XCTAssertTrue(selected.isEmpty, "A pointer drag within one entry belongs to native text selection")
+        touch.point.y = 220; gesture.touchesMoved([touch], with: event)
+        XCTAssertEqual(selected, Set(ids), "Crossing entries selects every row between the pointer-down row and current row")
+        touch.point.y = 150; gesture.touchesMoved([touch], with: event)
+        XCTAssertEqual(selected, Set(ids.prefix(2)), "Reversing the same drag shrinks the range")
+        gesture.touchesEnded([touch], with: event)
+        touch.inputType = .direct
+        XCTAssertFalse(gesture.gestureRecognizer(gesture, shouldReceive: touch), "An ordinary finger drag remains scrolling or text selection")
+        touch.inputType = .indirectPointer; touch.point.x = 450
+        XCTAssertFalse(gesture.gestureRecognizer(gesture, shouldReceive: touch), "A pointer in a neighboring pane cannot start this lot's selection")
     }
 }

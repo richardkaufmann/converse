@@ -30,6 +30,23 @@ func lotEditingSelfTests(_ check: (Bool, String) -> Void) {
         let outdented = try LotOperation(kind: .outdent, rowID: second.id).applying(to: nested, author: "iPhone")
         check(outdented.rows.map(\.id) == document.rows.map(\.id) && outdented.rows[2].parentID == heading.id, "Outdent preserves sibling order and stable row IDs")
         refuses("A nested move cannot move its parent into its child") { _ = try LotOperation(kind: .move, rowID: first.id, parentID: second.id).applying(to: nested, author: "iPhone") }
+        let batch = LotOperation(kind: .batch, operations: [
+            LotOperation(kind: .setDone, rowID: first.id, done: true),
+            LotOperation(kind: .setTag, rowID: second.id, tag: .green),
+            LotOperation(kind: .appendComment, rowID: second.id, text: "Batch note", commentID: UUID())
+        ])
+        let batched = try batch.applying(to: document, author: "iPhone")
+        check(batched.revision == document.revision + 1 && batched.rows[1].isDone && batched.rows[2].tag == .green && batched.rows[2].notes?.last?.author == "iPhone", "Mobile batch validates each edit with home author and commits one revision")
+        refuses("A batch cannot smuggle an unrestricted row replacement past Undo validation") {
+            _ = try LotOperation(kind: .batch, operations: [LotOperation(kind: .replaceRows, rows: [])]).applying(to: document, author: "iPhone")
+        }
+        refuses("Nested batches are refused before recursive application") {
+            _ = try LotOperation(kind: .batch, operations: [batch]).applying(to: document, author: "iPhone")
+        }
+        refuses("A failed final batch operation rejects the entire edit") {
+            _ = try LotOperation(kind: .batch, operations: batch.operations! + [LotOperation(kind: .setDone, rowID: UUID(), done: true)]).applying(to: document, author: "iPhone")
+        }
+        check(!document.rows[1].isDone && document.revision == 7, "Failed batch leaves source rows and revision untouched")
         let comment = UUID()
         let commented = try LotOperation(kind: .appendComment, rowID: first.id, text: "New note", commentID: comment).applying(to: document, author: "iPad")
         check(commented.rows[1].notes?.last?.author == "iPad" && commented.rows[1].notes?.last?.id == comment, "New comments use home-selected author and supplied stable ID")

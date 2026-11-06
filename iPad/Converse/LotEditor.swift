@@ -37,7 +37,8 @@ struct EditableLotPane: View {
     @State private var error = ""
     @State private var fullImage: LotImageItem?
     @State private var exporting = false
-    @FocusState private var focus: UUID?
+    @State private var focus: UUID?
+    @State private var caretRequest: (UUID, Int)?
     init(id: String, pane: Int, model: PadModel, initialSelection: Set<UUID> = []) {
         self.id = id; self.pane = pane; self.model = model; service = model.service
         _selected = State(initialValue: initialSelection); _selecting = State(initialValue: !initialSelection.isEmpty)
@@ -58,26 +59,40 @@ struct EditableLotPane: View {
     }
     private var collapsed: Set<UUID> { model.lotCollapsed[id] ?? [] }
     private var visibleRows: [ParkingLotRow] {
-        rows.filter { row in
-            var parent = hierarchy[row.id]?.parentID
-            while let ancestor = parent { if collapsed.contains(ancestor) { return false }; parent = hierarchy[ancestor]?.parentID }
+        let tree = hierarchy, folded = collapsed
+        return rows.filter { row in
+            var parent = tree[row.id]?.parentID
+            while let ancestor = parent { if folded.contains(ancestor) { return false }; parent = tree[ancestor]?.parentID }
             return true
         }
     }
     var body: some View {
-        VStack(spacing: 0) {
+        let shown = visibleRows, tree = hierarchy, rowLabels = labels
+        let parents = Set(tree.values.compactMap(\.parentID))
+        let sectionEnds = sectionEnds(visible: shown)
+        return VStack(spacing: 0) {
             header
             Divider()
             status
             if editor != nil {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(visibleRows) { row in rowView(row) }
+                        ForEach(shown) { row in
+                            rowView(row, depth: tree[row.id]?.depth ?? 0, label: rowLabels[row.id], expandable: parents.contains(row.id))
+                            if let section = sectionEnds[row.id] {
+                                Button("New item…") { insert(heading: false, section: section) }
+                                    .foregroundStyle(.secondary).padding(.leading, 35).frame(minHeight: 36)
+                                    .disabled(!canEdit).accessibilityIdentifier("lot-new-item-" + section.uuidString)
+                            }
+                        }
+                        Button("New Heading…") { insert(heading: true, atEnd: true) }
+                            .foregroundStyle(.secondary).padding(.leading, 35).frame(minHeight: 44).disabled(!canEdit)
+                            .accessibilityIdentifier("lot-new-heading")
                         if rows.isEmpty { Text("Add a heading or item to start this Parking Lot.").foregroundStyle(.secondary).padding() }
                     }.scrollTargetLayout().padding(.horizontal, 10).padding(.vertical, 10)
                     .coordinateSpace(name: "lot-rows")
                     .onPreferenceChange(LotRowFrames.self) { rowFrames = $0 }
-                    .gesture(DragGesture(minimumDistance: 10, coordinateSpace: .named("lot-rows"))
+                    .highPriorityGesture(DragGesture(minimumDistance: 10, coordinateSpace: .global)
                         .onChanged { value in
                             guard selecting, canEdit else { return }
                             if dragStart == nil { dragStart = rowAt(value.startLocation); dragBase = selected }
@@ -85,7 +100,11 @@ struct EditableLotPane: View {
                                 selected = dragBase.union(LotMenuSelection.range(from: first, to: last, visible: visibleRows.map(\.id)))
                             }
                         }.onEnded { _ in dragStart = nil }, including: selecting ? .all : .subviews)
-                }.scrollPosition(id: $firstVisibleRow, anchor: .top).accessibilityIdentifier("lot-editor")
+                }
+                .background(LotPointerSelection(enabled: canEdit, frames: rowFrames, visible: visibleRows.map(\.id)) { ids in
+                    focus = nil; selecting = true; selected = ids
+                })
+                .scrollPosition(id: $firstVisibleRow, anchor: .top).accessibilityIdentifier("lot-editor")
                 Divider()
                 toolbar
             } else {
@@ -202,9 +221,7 @@ struct EditableLotPane: View {
             }.buttonStyle(.bordered).frame(minHeight: 44).padding(.horizontal, 10)
         }.disabled(!canEdit)
     }
-    @ViewBuilder private func rowView(_ row: ParkingLotRow) -> some View {
-        let depth = hierarchy[row.id]?.depth ?? 0
-        let expandable = (ParkingLotTree.range(row.id, in: rows)?.count ?? 0) > 1
+    @ViewBuilder private func rowView(_ row: ParkingLotRow, depth: Int, label: String?, expandable: Bool) -> some View {
         HStack(alignment: .top, spacing: 5) {
             if expandable {
                 Button { model.toggleLotHeading(id, heading: row.id) } label: {
@@ -213,7 +230,7 @@ struct EditableLotPane: View {
             } else { Color.clear.frame(width: 30, height: 1).accessibilityHidden(true) }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
-                if let label = labels[row.id] { Text(label).font(.system(size: model.textSize(pane))).monospacedDigit().foregroundStyle(.secondary) }
+                if let label { Text(label).font(.system(size: model.textSize(pane))).monospacedDigit().foregroundStyle(.secondary) }
                 if selecting {
                     Text(row.text.isEmpty ? (row.heading ? "Heading" : "Item") : row.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -221,11 +238,19 @@ struct EditableLotPane: View {
                         .foregroundStyle(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading))
                         .strikethrough(row.isDone)
                 } else {
-                    TextField(row.heading ? "Heading" : "Item", text: Binding(get: { rows.first(where: { $0.id == row.id })?.text ?? row.text }, set: { perform(LotOperation(kind: .setText, rowID: row.id, text: $0)) }), axis: .vertical)
-                        .font(.system(size: model.textSize(pane), weight: row.heading ? .semibold : .regular))
-                        .foregroundStyle(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading))
-                        .strikethrough(row.isDone).focused($focus, equals: row.id).disabled(!canEdit)
-                        .accessibilityIdentifier("lot-text-" + row.id.uuidString)
+                    LotEntryText(text: rows.first(where: { $0.id == row.id })?.text ?? row.text,
+                        font: .systemFont(ofSize: model.textSize(pane), weight: row.heading ? .semibold : .regular),
+                        color: UIColor(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading)),
+                        done: row.isDone, editable: canEdit, focused: focus == row.id,
+                        caret: caretRequest?.0 == row.id ? caretRequest?.1 : nil,
+                        identifier: "lot-text-" + row.id.uuidString,
+                        changed: { perform(LotOperation(kind: .setText, rowID: row.id, text: $0)) },
+                        focusChanged: { active in
+                            if active { focus = row.id; caretRequest = nil }
+                            else if focus == row.id { focus = nil }
+                        },
+                        returned: { range in splitEntry(row.id, at: range) },
+                        emptyBackspace: { removeEmptyEntry(row.id) })
                 }
                 }
                 if !(row.images ?? []).isEmpty { LotThumbnailStrip(hashes: row.images ?? [], images: service.blobCache, open: { fullImage = $0 }) }
@@ -251,7 +276,7 @@ struct EditableLotPane: View {
             entryActions(selected.isEmpty ? [row.id] : selected)
         }
         .accessibilityAddTraits(selected.contains(row.id) ? .isSelected : [])
-        .background(GeometryReader { geometry in Color.clear.preference(key: LotRowFrames.self, value: [row.id: geometry.frame(in: .named("lot-rows"))]) })
+        .background(GeometryReader { geometry in Color.clear.preference(key: LotRowFrames.self, value: [row.id: geometry.frame(in: .global)]) })
     }
     @ViewBuilder private func entryActions(_ ids: Set<UUID>) -> some View {
         let targets = rows.filter { ids.contains($0.id) }
@@ -273,8 +298,24 @@ struct EditableLotPane: View {
                 Button(tag.rawValue.capitalized) { performBatch(targets.map { LotOperation(kind: .setTag, rowID: $0.id, tag: tag) }) }
             }
         }
-        Button("Indent") { perform(LotOperation(kind: .indent, rowIDs: targets.map(\.id))) }.disabled(targets.contains(where: \.heading))
-        Button("Outdent") { perform(LotOperation(kind: .outdent, rowIDs: targets.map(\.id))) }.disabled(targets.contains(where: \.heading))
+        if let row = single {
+            Button("New item below") { insert(heading: false, after: row.id) }
+            Button("New heading below") { insert(heading: true, after: row.id) }
+        }
+        Button("Indent") { perform(LotOperation(kind: .indent, rowIDs: targets.map(\.id))) }
+            .disabled(ParkingLotTree.changingIndent(ids, in: rows, deeper: true) == nil)
+        Button("Outdent") { perform(LotOperation(kind: .outdent, rowIDs: targets.map(\.id))) }
+            .disabled(ParkingLotTree.changingIndent(ids, in: rows, deeper: false) == nil)
+        if !targets.contains(where: \.heading) {
+            Menu("Move to heading") {
+                ForEach(rows.filter(\.heading)) { heading in
+                    Button(heading.text.isEmpty ? "Untitled heading" : heading.text) {
+                        let roots = LotMenuSelection(ids: ids).roots(in: rows)
+                        performBatch(roots.map { LotOperation(kind: .move, rowID: $0.id, parentID: heading.id) })
+                    }.disabled(targets.allSatisfy { hierarchy[$0.id]?.parentID == heading.id })
+                }
+            }
+        }
         Button("Move…") { moving = LotMenuSelection(ids: ids) }
             .disabled(Set(targets.map(\.heading)).count > 1)
         Button("Add comment") { commentsFor = LotMenuSelection(ids: ids) }
@@ -296,11 +337,8 @@ struct EditableLotPane: View {
         rowFrames.first(where: { $0.value.minY <= point.y && point.y <= $0.value.maxY })?.key
     }
     private func performBatch(_ operations: [LotOperation]) {
-        guard let document = editor?.projected, !operations.isEmpty else { return }
-        do {
-            let changed = try LotMenuSelection.applying(operations, to: document, author: service.identity?.deviceName ?? "Mobile")
-            perform(LotOperation(kind: .replaceRows, rows: changed.rows))
-        } catch { self.error = error.localizedDescription }
+        guard !operations.isEmpty else { return }
+        perform(LotOperation(kind: .batch, operations: operations))
     }
     private func tagColor(_ tag: ParkingLotTag?, heading: Bool) -> Color {
         guard let tag else { return heading ? LotStyle.heading : .primary }
@@ -310,19 +348,49 @@ struct EditableLotPane: View {
             return UIColor(red: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: 1)
         })
     }
-    private func perform(_ operation: LotOperation, history: Bool = true) {
+    @discardableResult private func perform(_ operation: LotOperation, history: Bool = true) -> Bool {
         do {
             let before = rows
             let coalescing = operation.kind == .setText && editor?.pending.last?.kind == .setText && editor?.pending.last?.rowID == operation.rowID
             try service.editLot(id, operation: operation)
             if history && !coalescing { undo.append(before); if undo.count > 100 { undo.removeFirst() }; redo = [] }
-            error = ""
+            error = ""; return true
+        } catch { self.error = error.localizedDescription; return false }
+    }
+    private func sectionEnds(visible: [ParkingLotRow]) -> [UUID: UUID] {
+        var section: UUID?, lastBySection: [UUID: UUID] = [:]
+        for row in visible {
+            if row.heading { section = row.id }
+            if let section, !collapsed.contains(section) { lastBySection[section] = row.id }
+        }
+        return Dictionary(uniqueKeysWithValues: lastBySection.map { ($0.value, $0.key) })
+    }
+    private func insert(heading: Bool, after anchor: UUID? = nil, section: UUID? = nil, atEnd: Bool = false) {
+        do {
+            let edit = try LotEntryEditing.inserting(in: rows, heading: heading, after: atEnd ? nil : (anchor ?? focus), section: section)
+            applyEntryEdit(edit)
         } catch { self.error = error.localizedDescription }
     }
-    private func insert(heading: Bool) {
-        let parent = heading ? nil : (focus.flatMap { row in rows.first(where: { $0.id == row })?.heading == true ? row : hierarchy[row]?.parentID } ?? rows.last(where: \.heading)?.id)
-        let row = ParkingLotRow(heading: heading, text: "", parentID: parent)
-        perform(LotOperation(kind: .insert, row: row, parentID: parent)); focus = row.id
+    private func splitEntry(_ row: UUID, at range: NSRange) {
+        do { applyEntryEdit(try LotEntryEditing.splitting(row, at: range, in: rows)) }
+        catch { self.error = error.localizedDescription }
+    }
+    private func removeEmptyEntry(_ row: UUID) {
+        guard let index = rows.firstIndex(where: { $0.id == row }), rows[index].text.isEmpty,
+              (rows[index].notes ?? []).isEmpty, (rows[index].images ?? []).isEmpty,
+              ParkingLotTree.range(row, in: rows)?.count == 1 else { return }
+        let previous = index > 0 ? rows[index - 1] : nil
+        if perform(LotOperation(kind: .deleteSubtree, rowID: row)) {
+            focus = previous?.id
+            caretRequest = previous.map { ($0.id, ($0.text as NSString).length) }
+        }
+    }
+    private func applyEntryEdit(_ edit: LotEntryEditing.Result) {
+        if perform(edit.operation) {
+            selecting = false; selected = []; caretRequest = (edit.focus, edit.offset); focus = edit.focus
+            if let parent = (try? ParkingLotTree.nodes(edit.rows))?[edit.focus]?.parentID { model.lotCollapsed[id]?.remove(parent) }
+            firstVisibleRow = edit.focus
+        }
     }
     private func undoEdit() {
         guard editor?.unconfirmedCount == 0, let previous = undo.last else { return }; let current = rows
@@ -563,6 +631,210 @@ struct LotMenuSelection: Identifiable {
         }
     }
     static func applying(_ operations: [LotOperation], to document: ParkingLotDocument, author: String) throws -> ParkingLotDocument {
-        try operations.reduce(document) { try $1.applying(to: $0, author: author) }
+        try LotOperation(kind: .batch, operations: operations).applying(to: document, author: author)
     }
+}
+
+/// The same insertion positions as the Mac outline; every structural edit is
+/// submitted as one revision so Return and Undo cannot leave half an item.
+enum LotEntryEditing {
+    struct Result { var rows: [ParkingLotRow]; var focus: UUID; var offset: Int = 0; var operation: LotOperation }
+    static func inserting(in source: [ParkingLotRow], heading: Bool, after anchor: UUID?, section: UUID? = nil) throws -> Result {
+        var rows = try ParkingLotTree.normalized(source)
+        let tree = try ParkingLotTree.nodes(rows)
+        var index = rows.count, parent: UUID?
+        if let section, let range = ParkingLotTree.range(section, in: rows) {
+            index = range.upperBound; parent = section
+        } else if let anchor, let at = rows.firstIndex(where: { $0.id == anchor }) {
+            if heading {
+                let section = rows[...at].last(where: \.heading)?.id
+                index = section.flatMap { ParkingLotTree.range($0, in: rows)?.upperBound } ?? rows.count
+            } else {
+                index = ParkingLotTree.range(anchor, in: rows)?.upperBound ?? rows.count
+                parent = rows[at].heading ? anchor : tree[anchor]?.parentID
+            }
+        }
+        if !heading && parent == nil { parent = ParkingLotTree.parentForInsertion(at: index, in: rows, heading: false) }
+        let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parent)
+        rows.insert(row, at: index)
+        _ = try ParkingLotTree.nodes(rows)
+        let before = index + 1 < rows.count && (heading ? rows[index + 1].heading : tree[rows[index + 1].id]?.parentID == parent) ? rows[index + 1].id : nil
+        return Result(rows: rows, focus: row.id, operation: LotOperation(kind: .insert, row: row, before: before, parentID: row.parentID))
+    }
+    static func splitting(_ id: UUID, at selection: NSRange, in source: [ParkingLotRow]) throws -> Result {
+        var rows = try ParkingLotTree.normalized(source)
+        guard let index = rows.firstIndex(where: { $0.id == id }), selection.location != NSNotFound,
+              selection.location >= 0, selection.length >= 0, NSMaxRange(selection) <= (rows[index].text as NSString).length else {
+            throw ParkingLotError.message("The entry changed before Return. Try again.")
+        }
+        let original = rows[index], text = original.text as NSString
+        let prefix = text.substring(to: selection.location), suffix = text.substring(from: NSMaxRange(selection))
+        let parent = original.heading ? original.id : original.parentID
+        if selection.length == 0 && selection.location == 0 && !text.isEqual(to: "") && !original.heading {
+            let blank = ParkingLotRow(heading: false, text: "", parentID: original.parentID)
+            rows.insert(blank, at: index)
+            return Result(rows: rows, focus: original.id, operation: LotOperation(kind: .insert, row: blank, before: original.id, parentID: blank.parentID))
+        }
+        let destination = original.heading ? index + 1 : (ParkingLotTree.range(id, in: rows)?.upperBound ?? index + 1)
+        rows[index].text = prefix
+        let next = ParkingLotRow(heading: false, text: suffix, parentID: parent)
+        rows.insert(next, at: destination)
+        _ = try ParkingLotTree.nodes(rows)
+        let tree = try ParkingLotTree.nodes(rows)
+        let before = destination + 1 < rows.count && tree[rows[destination + 1].id]?.parentID == parent ? rows[destination + 1].id : nil
+        var operations: [LotOperation] = []
+        if prefix != original.text { operations.append(LotOperation(kind: .setText, rowID: id, text: prefix)) }
+        operations.append(LotOperation(kind: .insert, row: next, before: before, parentID: parent))
+        return Result(rows: rows, focus: next.id, operation: LotOperation(kind: .batch, operations: operations))
+    }
+}
+
+/// A real multiline native editor with an outline Return, instead of a SwiftUI
+/// vertical TextField that silently turns Return into a newline inside the row.
+struct LotEntryText: UIViewRepresentable {
+    var text: String
+    var font: UIFont
+    var color: UIColor
+    var done: Bool
+    var editable: Bool
+    var focused: Bool
+    var caret: Int?
+    var identifier: String
+    var changed: (String) -> Void
+    var focusChanged: (Bool) -> Void
+    var returned: (NSRange) -> Void
+    var emptyBackspace: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> LotEntryTextView {
+        let view = LotEntryTextView()
+        view.delegate = context.coordinator; view.isScrollEnabled = false
+        view.backgroundColor = .clear; view.textContainerInset = .zero; view.textContainer.lineFragmentPadding = 0
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+    func updateUIView(_ view: LotEntryTextView, context: Context) {
+        context.coordinator.parent = self
+        view.accessibilityIdentifier = identifier; view.isEditable = editable; view.isSelectable = editable
+        view.onEmptyBackspace = emptyBackspace
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .strikethroughStyle: done ? NSUnderlineStyle.single.rawValue : 0]
+        // Never replace marked text during an input-method composition.
+        if view.markedTextRange == nil {
+            let rendered = NSAttributedString(string: text, attributes: attributes)
+            if !view.attributedText.isEqual(to: rendered) {
+                let selection = view.selectedRange
+                view.attributedText = rendered
+                view.selectedRange = NSRange(location: min(selection.location, (text as NSString).length), length: min(selection.length, max(0, (text as NSString).length - min(selection.location, (text as NSString).length))))
+            }
+        }
+        view.typingAttributes = attributes; view.font = font
+        view.wantsFocus = focused && editable
+        if let caret, focused { view.selectedRange = NSRange(location: min(caret, (view.text as NSString).length), length: 0) }
+        if view.wantsFocus && !view.isFirstResponder && view.window != nil { view.becomeFirstResponder() }
+        if !view.wantsFocus && view.isFirstResponder { view.resignFirstResponder() }
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: LotEntryTextView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        return CGSize(width: width, height: max(font.lineHeight, uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height))
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: LotEntryText
+        init(_ parent: LotEntryText) { self.parent = parent }
+        func textViewDidBeginEditing(_ textView: UITextView) { parent.focusChanged(true) }
+        func textViewDidEndEditing(_ textView: UITextView) { parent.focusChanged(false) }
+        func textViewDidChange(_ textView: UITextView) { parent.changed(textView.text); textView.invalidateIntrinsicContentSize() }
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            guard parent.editable else { return false }
+            if text == "\n", (textView as? LotEntryTextView)?.softReturn != true, textView.markedTextRange == nil {
+                parent.returned(range); return false
+            }
+            return true
+        }
+    }
+}
+final class LotEntryTextView: UITextView {
+    var wantsFocus = false
+    var softReturn = false
+    var onEmptyBackspace: (() -> Void)?
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil && wantsFocus { becomeFirstResponder() }
+    }
+    override func deleteBackward() {
+        if text.isEmpty && isEditable { onEmptyBackspace?() } else { super.deleteBackward() }
+    }
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + [UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(softNewline))]
+    }
+    @objc private func softNewline() { softReturn = true; insertText("\n"); softReturn = false }
+}
+
+/// Watches primary-button pointer drags without claiming ordinary touch scrolls
+/// or within-row text selections. Only crossing a row boundary begins selection.
+struct LotPointerSelection: UIViewRepresentable {
+    var enabled: Bool
+    var frames: [UUID: CGRect]
+    var visible: [UUID]
+    var select: (Set<UUID>) -> Void
+    func makeUIView(context: Context) -> LotPointerSelectionHost { LotPointerSelectionHost() }
+    func updateUIView(_ view: LotPointerSelectionHost, context: Context) {
+        view.gesture.isEnabled = enabled
+        view.gesture.frames = frames; view.gesture.visible = visible; view.gesture.select = select
+        view.install()
+    }
+    static func dismantleUIView(_ view: LotPointerSelectionHost, coordinator: ()) { view.gesture.view?.removeGestureRecognizer(view.gesture) }
+}
+final class LotPointerSelectionHost: UIView {
+    let gesture = LotPointerRangeGesture()
+    override func didMoveToWindow() { super.didMoveToWindow(); install() }
+    override func didMoveToSuperview() { super.didMoveToSuperview(); install() }
+    func install() {
+        guard let window else { gesture.view?.removeGestureRecognizer(gesture); return }
+        gesture.viewport = { [weak self] in
+            guard let self, let window = self.window else { return .zero }
+            return self.convert(self.bounds, to: window)
+        }
+        // SwiftUI backgrounds have their own hosting branch. Observe at the
+        // window, restricted to this lot's viewport and measured row bounds.
+        if gesture.view !== window {
+            gesture.view?.removeGestureRecognizer(gesture); window.addGestureRecognizer(gesture)
+        }
+    }
+}
+final class LotPointerRangeGesture: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    var frames: [UUID: CGRect] = [:]
+    var visible: [UUID] = []
+    var select: ((Set<UUID>) -> Void)?
+    var viewport: (() -> CGRect)?
+    private var start: UUID?
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        delegate = self; allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        cancelsTouchesInView = true; delaysTouchesBegan = false; delaysTouchesEnded = false
+    }
+    convenience init() { self.init(target: nil, action: nil) }
+    private func row(at point: CGPoint) -> UUID? { visible.first { frames[$0]?.contains(point) == true } }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard touch.type == .indirectPointer, viewport?().contains(touch.location(in: view?.window)) == true else { return false }
+        var target = touch.view
+        while let current = target, current !== view {
+            if current is UIControl { return false }
+            target = current.superview
+        }
+        return true
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard touches.count == 1, let touch = touches.first, event.buttonMask.contains(.primary),
+              let first = row(at: touch.location(in: view?.window)) else { state = .failed; return }
+        start = first
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let start, let touch = touches.first, let last = row(at: touch.location(in: view?.window)) else { return }
+        if state == .possible && start == last { return }
+        state = state == .possible ? .began : .changed
+        select?(LotMenuSelection.range(from: start, to: last, visible: visible))
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = state == .possible ? .failed : .ended }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .cancelled }
+    override func reset() { start = nil; super.reset() }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
 }

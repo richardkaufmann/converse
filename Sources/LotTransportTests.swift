@@ -153,5 +153,25 @@ func lotTransportSelfTests(_ check: (Bool, String) -> Void) {
         let completed = pump { reviewResult != nil }
         let closed = try tabletFrames().contains { $0.kind == "lot.proposal.closed" }
         check(completed && closed && lot.document == approved, "Cancelling the requesting task closes holder review without applying changes")
+        let batchLot = try home.parkingLibrary.create(name: "Batch fixture")
+        try batchLot.replaceUserRows([heading, row], revision: batchLot.document.revision)
+        let batchID = DeviceGlobalID(home: home.identity!.deviceID, session: batchLot.id).string
+        let (batchPeer, batchFrames) = try peer("Batch phone")
+        home.handleEnvelope(batchPeer, DeviceEnvelope(kind: "lease.acquire", sessionID: batchID))
+        let initialBatch = try JSONDecoder().decode(LotSnapshot.self, from: batchFrames().first { $0.kind == "lot.snapshot" }!.payload!)
+        let batchOperation = LotOperation(kind: .batch, operations: [LotOperation(kind: .setDone, rowID: row.id, done: true), LotOperation(kind: .setTag, rowID: row.id, tag: .green)])
+        func sendBatch(_ operation: LotOperation, snapshot: LotSnapshot, sequence: UInt64) throws -> [DeviceEnvelope] {
+            let edit = try LotEdit(snapshot: snapshot, sequence: sequence, operation: operation)
+            home.handleEnvelope(batchPeer, DeviceEnvelope(kind: "lot.edit", boot: snapshot.homeBoot, sessionID: batchID, epoch: snapshot.leaseEpoch, payload: try LotEditing.encoded(edit)))
+            return try batchFrames()
+        }
+        guard let batchData = try sendBatch(batchOperation, snapshot: initialBatch, sequence: 1).first(where: { $0.kind == "lot.edit.ack" })?.payload else { throw ParkingLotError.message("Home refused ordinary batch actions.") }
+        let batchAck = try JSONDecoder().decode(LotEditAck.self, from: batchData)
+        check(batchLot.document.rows[1].isDone && batchLot.document.rows[1].tag == .green && batchLot.document.revision == initialBatch.document.revision + 1, "Home accepts validated mobile batch actions as one saved revision")
+        guard let undoData = try sendBatch(LotOperation(kind: .replaceRows, rows: initialBatch.document.rows), snapshot: batchAck.snapshot, sequence: 2).first(where: { $0.kind == "lot.edit.ack" })?.payload else { throw ParkingLotError.message("Home refused Undo of the batch.") }
+        let undoAck = try JSONDecoder().decode(LotEditAck.self, from: undoData)
+        check(batchLot.document.rows == initialBatch.document.rows, "One mobile Undo restores the complete batch")
+        let forged = LotOperation(kind: .batch, operations: [LotOperation(kind: .replaceRows, rows: [])])
+        check(try sendBatch(forged, snapshot: undoAck.snapshot, sequence: 3).contains { $0.kind == "lot.rejected" } && batchLot.document == undoAck.snapshot.document, "Home rejects batch-wrapped arbitrary replacement without changing saved data")
     } catch { check(false, "Lot transport fixture: " + error.localizedDescription) }
 }

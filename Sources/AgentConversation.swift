@@ -73,7 +73,12 @@ struct VoiceEndpointDetector {
     var stopPlayback: (() -> Void)?
     var resumeDelay: UInt64 = 500_000_000
     var active: Bool { phase != .stopped }
+    var statusPresented: Bool { sessionID != nil }
     var status: String { phase == .listening ? audio.status : detail }
+    func dismissStatus() {
+        guard !active else { return }
+        sessionID = nil
+    }
     func owns(_ session: Session) -> Bool { active && sessionID == session.id }
     func isVoiceTurn(_ session: Session, responseID: UUID) -> Bool { owns(session) && self.responseID == responseID }
     init() {

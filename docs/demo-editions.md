@@ -16,7 +16,7 @@ The desktop Demo editions use an available network port so they can run alongsid
 - Mac: `./scripts/build-round.sh mac`
 - iPhone/iPad archives: `./scripts/build-round.sh ios`. Both target phone and tablet. Archives are unsigned until export; export production and demo separately using their matching Apple app records.
 - Linux x64 and ARM64: `./scripts/build-round.sh linux`. Launch the demo using `./converse-demo serve`; leave that terminal open. This demo does not install or control the production systemd service.
-- Windows ARM64: `powershell -File windows/build-round.ps1`. The build performs core tests and emits a hash manifest for each edition. Generate `Assets/help.json` with `scripts/build-help.py` first if Python is unavailable on Windows.
+- Windows ARM64: `powershell -File windows/build-round.ps1`. For x64, use `powershell -File windows/build-round.ps1 -Architecture x64 -OutputRoot C:\dev\converse-round-x64`. The build performs core tests and emits a hash manifest for each edition. Generate `Assets/help.json` with `scripts/build-help.py` first if Python is unavailable on Windows.
 
 Artifacts are kept under `.build/round<build>` (Windows: `C:\dev\converse-round\<build>`). The normal release installer still waits for a normal quit. Demo installs must target **Converse Demo**, and must never replace production shortcuts or packages. A demo update preserves its demo progress, just as a normal update preserves production progress.
 

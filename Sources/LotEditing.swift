@@ -4,9 +4,9 @@ import CryptoKit
 /// Version covers every persisted row field, including tags and note/image metadata.
 /// Unsupported versions are refused before a holder can rewrite a document.
 enum LotEditing {
-    static let capability = "lot-edit-v1"
+    static let capability = "lot-edit-v2"
     static let readOnlyCapability = "lot-read-v1"
-    static let version = 1
+    static let version = 2
     static let maximumPending = 100
     static let maximumFrameBytes = 4 * 1024 * 1024 - 1024
     static func encoded<T: Encodable>(_ value: T) throws -> Data {
@@ -73,7 +73,7 @@ struct LotSnapshot: Codable, Equatable {
 }
 
 struct LotOperation: Codable, Equatable {
-    enum Kind: String, Codable { case setText, setDone, setTag, insert, insertSubtree, move, deleteSubtree, deleteSelection, indent, outdent, appendComment, removeComment, addImage, removeImage, replaceRows }
+    enum Kind: String, Codable { case batch, setText, setDone, setTag, insert, insertSubtree, move, deleteSubtree, deleteSelection, indent, outdent, appendComment, removeComment, addImage, removeImage, replaceRows }
     var kind: Kind
     var rowID: UUID? = nil
     var text: String? = nil
@@ -86,6 +86,7 @@ struct LotOperation: Codable, Equatable {
     var imageHash: String? = nil
     var rows: [ParkingLotRow]? = nil
     var rowIDs: [UUID]? = nil
+    var operations: [LotOperation]? = nil
 
     func applying(to document: ParkingLotDocument, author: String) throws -> ParkingLotDocument {
         var result = document
@@ -106,6 +107,18 @@ struct LotOperation: Codable, Equatable {
             return rows.count
         }
         switch kind {
+        case .batch:
+            guard let operations, !operations.isEmpty, operations.count <= 500,
+                  operations.allSatisfy({ $0.kind != .batch && $0.kind != .replaceRows }) else {
+                throw ParkingLotError.message("Choose up to 500 ordinary edits for one batch.")
+            }
+            var working = result
+            for operation in operations {
+                working = try operation.applying(to: working, author: author)
+                // Children validate normally, but the batch is one revision.
+                working.revision = result.revision
+            }
+            rows = working.rows
         case .setText, .setDone, .setTag:
             guard let index else { throw ParkingLotError.message("That Parking Lot entry no longer exists.") }
             if kind == .setText { guard let text else { throw ParkingLotError.message("Missing text.") }; rows[index].text = text }
