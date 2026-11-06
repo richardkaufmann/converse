@@ -167,17 +167,50 @@ enum ParkingLotTree {
                   let previous = rows[..<index].last(where: { !$0.heading && hierarchy[$0.id]?.parentID == node.parentID }) else { return nil }
             result[index].parentID = previous.id
         } else {
-            guard canOutdent(id, in: rows), let parent = node.parentID,
-                  let range = range(id, in: rows) else { return nil }
-            var moving = Array(result[range]); moving[0].parentID = hierarchy[parent]?.parentID
-            result.removeSubrange(range)
-            guard let parentRange = self.range(parent, in: result) else { return nil }
-            result.insert(contentsOf: moving, at: parentRange.upperBound)
+            // Outliner outdent: the row stays put and adopts its following
+            // siblings after its own children. No row moves.
+            guard canOutdent(id, in: rows), let parent = node.parentID else { return nil }
+            result[index].parentID = hierarchy[parent]?.parentID
+            for later in result.indices where later > index && hierarchy[rows[later].id]?.parentID == parent { result[later].parentID = id }
         }
         return (try? nodes(result)) == nil ? nil : result
     }
+    /// Moves an item's subtree before `destination` (nil: the end) at an outline
+    /// depth. Like an outliner drop, it may nest under the row before the drop
+    /// point or anything back out to the next row's level; nil keeps the row
+    /// before's level. Headings move whole sections between sections only.
+    static func moving(_ id: UUID, before destination: UUID?, depth: Int? = nil, in rows: [ParkingLotRow]) -> [ParkingLotRow]? {
+        guard let range = range(id, in: rows), let hierarchy = try? nodes(rows) else { return nil }
+        var moving = Array(rows[range]), remaining = rows
+        remaining.removeSubrange(range)
+        let index: Int
+        if destination == id { index = range.lowerBound }
+        else if let destination {
+            guard let found = remaining.firstIndex(where: { $0.id == destination }) else { return nil }
+            index = found
+        } else { index = remaining.count }
+        if moving[0].heading {
+            guard index == remaining.count || remaining[index].heading else { return nil }
+        } else {
+            guard let tree = try? nodes(remaining) else { return nil }
+            let previous = index > 0 ? remaining[index - 1] : nil
+            let previousDepth = previous.map { $0.heading ? 0 : tree[$0.id]?.depth ?? 1 } ?? 0
+            let base = hierarchy[id]?.depth ?? 1
+            let height = moving.map { (hierarchy[$0.id]?.depth ?? base) - base }.max() ?? 0
+            let next = index < remaining.count && !remaining[index].heading ? tree[remaining[index].id]?.depth ?? 1 : 1
+            let deepest = min(previousDepth + 1, maximumDepth - height)
+            guard next <= deepest else { return nil }
+            let wanted = min(max(depth ?? max(1, previousDepth), next), deepest)
+            var parent = previous?.id, level = previousDepth
+            while level >= wanted, let current = parent { parent = tree[current]?.parentID; level -= 1 }
+            moving[0].parentID = parent
+        }
+        remaining.insert(contentsOf: moving, at: index)
+        return (try? nodes(remaining)) == nil ? nil : remaining
+    }
     /// Selected descendants travel with their selected ancestor exactly once.
-    /// Reverse outdents so siblings retain their order after their parent.
+    /// Reverse outdents so each item adopts only the siblings after it that
+    /// are not themselves selected; selected siblings stay siblings.
     static func changingIndent(_ ids: Set<UUID>, in rows: [ParkingLotRow], deeper: Bool) -> [ParkingLotRow]? {
         guard !ids.isEmpty, let hierarchy = try? nodes(rows),
               ids.allSatisfy({ id in rows.contains { $0.id == id && !$0.heading } }) else { return nil }
