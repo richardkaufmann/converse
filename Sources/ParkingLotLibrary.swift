@@ -460,10 +460,20 @@ extension DeviceSyncService {
         }
         return (local + remote).sorted { ($0.home + $0.title + $0.id).localizedStandardCompare($1.home + $1.title + $1.id) == .orderedAscending }
     }
-    func publishedParkingLotLinks(_ id: UUID) -> [String] {
+    var availableParkingLotLinkIDs: Set<String> {
+        guard let home = localDeviceID else { return [] }
+        // Publishing needs membership only, not localized titles or sorting.
+        // Resolve the current Group once per snapshot, not once per lot/peer.
+        var ids = Set(participantStore.sessions.map { DeviceGlobalID(home: home, session: $0.id).string })
+        for host in participantHomes {
+            for row in host.rows where row.engine != "parking" && row.participantKind != "parkingLot" { ids.insert(row.globalID) }
+        }
+        return ids
+    }
+    func publishedParkingLotLinks(_ id: UUID, available: Set<String>? = nil) -> [String] {
         // Stale/deleted and previous-Group references remain editable locally,
         // but do not travel to the new Group or get rebound by display name.
-        let available = Set(parkingLotLinkTargets.map(\.id))
+        let available = available ?? availableParkingLotLinkIDs
         return parkingLibrary.links(id).filter { available.contains($0) }
     }
     func parkingLotDirectory(for sessionID: UUID, agent: AgentConfig? = nil, linkedOnly: Bool = false) -> [ParkingLotRoute] {

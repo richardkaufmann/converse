@@ -147,7 +147,7 @@ final class DeviceSyncService: ObservableObject {
     private var peers: [UUID: DevicePeer] = [:]
     private var heartbeatTimer: Timer?
     private var publishTimer: Timer?
-    private var lastSidebarJSON = ""
+    private var lastSidebarSnapshot: DeviceSidebarPayload?
     private var stagedBlobs: [String: Data] = [:]
     private var blobPaths: [String: String] = [:]
     private var downloadBuffers: [String: Data] = [:]
@@ -779,10 +779,11 @@ extension DeviceSyncService {
                              loopPaused: session.agent == nil ? nil : session.agentLoopPaused, pausedReason: session.pausedLoopReason, lastResponseAt: session.lastResponseAt,
                              shownOnHome: Workspace.shared.placements[session.id] == nil ? nil : true)
         }
+        let availableLotLinks = availableParkingLotLinkIDs
         let parkingRows = parkingLibrary.lots.filter(\.active).map { lot in
             DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot.id).string, sessionID: lot.id,
                              title: lot.name, assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "read only",
-                             status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false, messagingEnabled: false, participantKind: "parkingLot", linkedSessionIDs: publishedParkingLotLinks(lot.id))
+                             status: "Parking Lot · read only", busy: false, queued: 0, queuePaused: false, messagingEnabled: false, participantKind: "parkingLot", linkedSessionIDs: publishedParkingLotLinks(lot.id, available: availableLotLinks))
         }
         #else
         let parkingRows: [DeviceSidebarRow] = []
@@ -790,19 +791,26 @@ extension DeviceSyncService {
         #endif
         return DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: deviceName, homeSeq: stateStore?.state.homeSeq ?? 0, rows: rows + parkingRows)
     }
-    private func sendSidebar(to peer: DevicePeer) {
+    private func sendSidebar(to peer: DevicePeer, snapshot: DeviceSidebarPayload? = nil) {
         guard !groupsEnabled || (!peer.controlOnly && currentGroup != nil && !locallyRemoved) else { return }
-        guard let payload = try? JSONEncoder().encode(sidebarPayload()) else { return }
-        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.sidebarSnapshot.rawValue, homeSeq: stateStore?.nextSeq(), payload: payload))
+        var value = snapshot ?? sidebarPayload()
+        value.homeSeq = stateStore?.nextSeq() ?? value.homeSeq
+        guard let payload = try? JSONEncoder().encode(value) else { return }
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.sidebarSnapshot.rawValue, homeSeq: value.homeSeq, payload: payload))
     }
     func sidebarPayloadForTesting() -> DeviceSidebarPayload { sidebarPayload() }
     func publishSidebarForTesting() { publishSidebarIfChanged() }
     private func publishSidebarIfChanged() {
         guard started, peers.values.contains(where: { $0.trustedReady }) else { return }
-        let json = (try? JSONEncoder().encode(sidebarPayload())).flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        guard json != lastSidebarJSON else { return }
-        lastSidebarJSON = json
-        for peer in peers.values where peer.trustedReady { sendSidebar(to: peer) }
+        // Compare content, not a transport counter. Sending a snapshot itself
+        // advances homeSeq; including it caused another send on every idle poll.
+        // Equatable also avoids serializing JSON just to detect a change.
+        var snapshot = sidebarPayload()
+        snapshot.homeSeq = 0
+        guard snapshot != lastSidebarSnapshot else { return }
+        lastSidebarSnapshot = snapshot
+        // Build the shared rows once, instead of again for every connected peer.
+        for peer in peers.values where peer.trustedReady { sendSidebar(to: peer, snapshot: snapshot) }
     }
     #if os(macOS)
     func publishSwitchboardQueue(_ sessionID: UUID) {
@@ -1596,7 +1604,7 @@ extension DeviceSyncService {
         if let group = currentGroup { hints.merge(["group": group.id, "name": group.name, "creator": group.creator]) { _, new in new } }
         return NWListener.Service(name: (testingDiscoveryPrefix ?? "") + deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
     }
-    private func updateGroupAdvertisement() { listener?.service = groupAdvertisement(); lastSidebarJSON = "" }
+    private func updateGroupAdvertisement() { listener?.service = groupAdvertisement(); lastSidebarSnapshot = nil }
     var availableGroups: [ConverseGroup] {
         var groups = knownGroups.filter { !$0.dissolved }
         for device in discovered {
