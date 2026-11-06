@@ -224,7 +224,10 @@ struct JollyView: View {
             }
             Text("Leave a message for Jolly").font(.headline)
             Text("Delivered when Jolly checks the inbox. This does not push into the phone conversation.").font(.caption)
-            TextEditor(text: $message).frame(height: 80)
+            TextEditor(text: $message).padding(7).frame(height: 110)
+                .background(Color(nsColor: .textBackgroundColor))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary, lineWidth: 1))
+                .accessibilityLabel("Message for Jolly")
             HStack { Text("\(message.unicodeScalars.count)/500").font(.caption); Spacer(); Button("Leave message") {
                 do { try JollyRouter.send(message, store: store); message = ""; outcome = "Saved for Jolly to collect." }
                 catch { outcome = error.localizedDescription }

@@ -351,7 +351,7 @@ Monitoring does not submit issues or push code. To report a Converse bug, use [R
 
 This is optional and separate from the **Converse iPhone/iPad app**. Jolly is a conversational connector; the native Converse mobile app displays session panes. Connecting Jolly does not require changing an agent to a Meta reasoning model.
 
-**This integration still needs operator setup.** It requires a **bridge** (a small background service) on the Mac, an **HTTPS endpoint** (a secure web address the phone can reach), a **bearer token** (the secret that authorizes requests), and a **connector schema** (the description of available actions) loaded into the Meta Muse app. Opening **Converse → Jolly…** alone does not create that infrastructure. The current [bridge installer](scripts/install-jolly-bridge.py) is intended for an operator who has prepared the token and endpoint; it does not provision a tunnel or a Muse account.
+**This integration still needs operator setup.** It requires a **bridge** (a small background service) on the Mac, an **HTTPS endpoint** (a secure web address the phone can reach), a **bearer token** (the secret that authorizes requests), and a **connector schema** (the description of available actions) loaded into the Meta Muse app. Opening **Converse → Settings → Jolly** alone does not create that infrastructure. The current [bridge installer](scripts/install-jolly-bridge.py) is intended for an operator who has prepared the token and endpoint; it does not provision a tunnel or a Muse account.
 
 ### Preparing your own Jolly connection
 
@@ -370,13 +370,13 @@ Ask App Support to walk through this with the person administering your Mac. Fir
 
    Keep the process running for the first test, then have the operator arrange a persistent service. **Always set `--public-base` to your address**: the script’s current default is the developer’s endpoint, used for returned image links. The existing `install-jolly-bridge.py` is a migration helper and does not pass a custom public address; it is not a complete new-user installer. Do not run it unchanged for someone else’s endpoint.
 4. In Muse’s connector configuration, load `https://your-bridge.example/openapi.json` and set its server/base URL to your HTTPS address. The schema does not supply a server URL. Configure bearer authentication using your private token in the connector’s secure credential field. The schema names the integration **Ask Converse**.
-5. Open Converse, allow the intended agents in **Converse → Jolly…**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but art does not, check the public base address and tunnel image route.
+5. Open Converse, allow the intended agents in **Converse → Settings → Jolly**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but art does not, check the public base address and tunnel image route.
 
 Treat the bearer token as access to the enabled agents. Limit their scope before sharing the connector. Returned artwork uses opaque image URLs that can be retrieved without the bearer token; anyone with such a URL can view that image. To stop new agent requests, disable its Jolly access. To revoke the connector itself, stop the bridge or rotate the token and update the connector’s credential; disabling an agent does not erase saved replies or images.
 
 Once that bridge is configured:
 
-1. Open **Converse → Jolly…** and allow the local agents the phone may address.
+1. Open **Converse → Settings → Jolly** and allow the local agents the phone may address.
 2. Load or refresh the connector schema in Muse so it exposes **Ask Converse**.
 3. Ask it to list the available agents, then address one by exact name. If a choice is ambiguous, it should ask which one rather than broadcast.
 4. Confirm the request appears in the intended agent's conversation and the reply returns to the phone. Pending is not a completed answer.

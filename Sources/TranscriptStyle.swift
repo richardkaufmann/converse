@@ -21,11 +21,15 @@ struct TranscriptDisclosure {
             }
         }
         guard role == "assistant", case .command(let command) = SwitchboardCommand.trailing(text),
-              ["ask", "tell", "tell-urgently"].contains(command.command),
-              command.to != nil, command.text != nil,
+              ["ask", "tell", "tell-urgently", "parking-lot-edit"].contains(command.command),
               let opening = text.range(of: "```converse\n", options: .backwards) else { return nil }
         let fence = String(text[opening.lowerBound...])
-        guard let summary = TranscriptStyle.trafficSummary(fence, resolveName: resolveName) else { return nil }
+        let summary: String
+        if command.command == "parking-lot-edit", let edits = command.parkingLotEdits {
+            summary = "Parking Lot changes · \(edits.operations.count) operations · revision \(edits.revision)"
+        } else {
+            guard command.to != nil, command.text != nil, let value = TranscriptStyle.trafficSummary(fence, resolveName: resolveName) else { return nil }; summary = value
+        }
         return Self(prefix: String(text[..<opening.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines),
                     details: fence, summary: summary)
     }

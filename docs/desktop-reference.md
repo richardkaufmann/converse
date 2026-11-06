@@ -4,7 +4,7 @@ Detailed controls for readers who have completed the [getting-started walkthroug
 
 ## Use
 
-The Mac sidebar groups sessions by device, with an alphabetized, indented list under each bold green device heading. Offline devices have a lighter green heading and hide their sessions. Click the local device’s **+**, choose Claude, Codex or Muse, then choose a session name, working folder, and an existing login or **New login…**. A new login opens authentication in Terminal; finish there and return. Settings (**⌘,**) follows the same model → session → login structure, with advanced CLI configuration below each model.
+The Mac sidebar groups sessions by device, with an alphabetized, indented list under each bold green device heading. Offline devices have a lighter green heading and hide their sessions. Click the local device’s **+**, choose Claude, Codex or Muse, then choose a session name, working folder, and an existing login or **New login…**. A new login opens authentication in Terminal; finish there and return. Settings (**⌘,**) opens General first. Its sidebar also contains Jolly and New User Experience / Reset. General keeps the model → session → login controls, with advanced CLI configuration below each model.
 
 - **Return** sends, or queues the draft while a turn is active. Queue rows have **Inject now** to interrupt and send that message next. **Inject all** interrupts and sends the entire queue together in order, preserving attachments and the current draft. Escape has no send or interrupt binding. **⌘Return** inserts a newline; Shift-Return also works. These keys have the same meaning for all assistants.
 - Queued messages appear above the transcript, with Pause/Resume, Edit, and Clear controls. Stop pauses the queue; failures pause it too. Queued text and attachments survive relaunch, paused until you resume. You can keep editing a separate draft while the queue runs.
@@ -28,7 +28,7 @@ The sidebar gutter can be dragged down to 160 points wide. A compact provider-ic
 
 Click the **pin** to the left of **Conversation** to hide the sidebar. A small restore pin stays at the top-left of the conversation area. Click it again to restore your previous sidebar width, constrained by the space available. Each window has its own pin state. Hiding the sidebar leaves its displayed conversations and work running.
 
-**Converse → Setup…** reopens account and session setup. **Help → Converse Help…** opens searchable, selectable documentation built from this README and bundled with the app for offline use. Search matches topic titles and article text and highlights matches. Command-F focuses Help search when the Help window is active.
+**Converse → Settings → New User Experience / Reset** reopens the setup walkthrough. To reset this app profile, type `YES`, click **Reset on Quit**, then quit normally. You can cancel before quitting. The next launch backs up the profile before clearing its data and app-managed credentials; external CLI logins and project files stay untouched. **Help → Converse Help…** opens searchable, selectable documentation built from this README and bundled with the app for offline use. Search matches topic titles and article text and highlights matches. Command-F focuses Help search when the Help window is active.
 
 On Mac and Windows, drag files or folders from Finder or Explorer into a conversation pane to insert their full paths at the draft cursor (or at the end of the draft when reading history). Multiple paths are separated by spaces and quoted as needed. This inserts references without uploading or attaching the files; remote drafts label each reference `file from <device name>: <full path>` so its source is clear. Use Paste or Attach to include an image itself. iPad does not insert desktop paths.
 
@@ -126,3 +126,11 @@ Claude’s normal installed CLI login is kept distinct from an explicit `CLAUDE_
 Additional Codex and Claude accounts can be added, renamed, or pointed at existing CLI stores. New conversations take a snapshot of the account path. Changes in Settings leave existing conversations on their original paths. Account-directory overrides are applied after shell startup, and inherited API/OAuth token environment overrides are removed for explicitly selected accounts so they cannot silently use another account. The CLIs retain responsibility for authentication, keychain storage and permissions.
 
 Each distributed preview advances its visible patch version and build number (for example, **0.5.1 (26)** → **0.5.2 (27)**). Check **Converse → About Converse** on Mac or the **…** menu on iPad to identify the installed update. `VERSION.json` is the shared version source for both apps.
+
+## Transcript display and retention (Mac)
+
+In **Converse → Settings → General**, **Collapse Parking Lot data and outgoing messages** controls disclosure summaries. Expand the arrow to inspect the payload. Copy Message retains the complete original; folding does not delete transcript data or change assistant context.
+
+Select a local session under **Transcript limits** to set its age and message-count limits. Blank means **None**; defaults are no age limit and 1,000 messages. Each user prompt and each assistant response counts separately, so a pair counts as two. Either limit can remove an older prefix. A retained turn stays together and may exceed the limit. Unknown timestamps are not assumed to be old.
+
+Retention checks once a minute and skips sessions with active work, drafts, attachments awaiting submission, queued prompts, permission requests, handoffs or unanswered switchboard requests. It changes Converse's saved transcript; it does not remove attachment files or provider-owned history. Save changed limits before leaving the session picker.

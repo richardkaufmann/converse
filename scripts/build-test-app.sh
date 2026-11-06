@@ -34,4 +34,4 @@ fi
 codesign --verify --deep --strict "$destination"
 print -r -- "Installed $destination"
 print -r -- "Profile: ~/Library/Application Support/$name"
-print -r -- 'Use Reset TEST… in this app to restart NUX; normal launches preserve imports.'
+print -r -- 'Use Settings → New User Experience / Reset in this app to restart NUX; normal launches preserve imports.'

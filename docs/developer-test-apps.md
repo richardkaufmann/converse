@@ -13,6 +13,6 @@ Each seat has its own bundle/settings domain, Application Support folder, provid
 
 Codex TEST uses the original red Converse shoe icon so it is easy to distinguish from the blue production app in the Dock. The build script regenerates this icon on each update.
 
-Imports and settings persist across ordinary launches and updates. Use the app menu's **Reset TEST…**, confirm Reset and Quit, then reopen to test first run again. Reset backs up that TEST profile before clearing its files, saved app credentials, logins, and Group pairing. It does not touch project files, production, Demo, or another developer's TEST profile.
+Imports and settings persist across ordinary launches and updates. Choose **Converse → Settings → New User Experience / Reset**, type `YES`, and click **Reset on Quit**. Quit normally and reopen to test first run again. You can cancel the scheduled reset before quitting. Reset backs up that TEST profile before clearing its files, saved app credentials, logins, and Group pairing. It does not touch project files, production, Demo, or another developer's TEST profile.
 
 Re-run the script from the intended checkout whenever handing Richard an updated feature to try. It refuses to replace a running TEST app: quit only that TEST app, then retry. The production app can remain running. Previous TEST bundles are retained under `~/Library/Application Support/<Provider> Converse TEST Builds`; reset data backups are under `<Provider> Converse TEST Backups`. No production Dock target is changed.
