@@ -135,6 +135,33 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         let tested = Workspace(), window = WindowState(workspace: tested)
         tested.assign(other, to: window.id, pane: 1)
         check(!tested.paneIsAvailable(1, for: mine, in: window.id) && tested.paneIsAvailable(2, for: mine, in: window.id) && tested.paneIsAvailable(3, for: mine, in: window.id), "With one pane up, panes 2 and 3 are free for another session")
+        // Red P/X: decided from where else the session is displayed; 1/2/3 orange is unchanged.
+        let names = panes.names
+        let nobody = ShownElsewhere(window: ShownElsewhere.window(nil, here: here.id, names: names), device: ShownElsewhere.device(nil, me: "me") { _ in "iPad" })
+        check(!nobody.isShown && nobody.label == nil && nobody.help("Park") == "Park" && !PaneButton.showsElsewhere(shownElsewhere: nobody.isShown, rowHovered: true), "A session displayed nowhere else keeps normal P and X")
+        check(ShownElsewhere.window(PaneLocation(windowID: here.id, pane: 1), here: here.id, names: names) == nil && ShownElsewhere.device("me", me: "me") { _ in "This Mac" } == nil, "This window and this device never count as elsewhere")
+        let inWindow = ShownElsewhere(window: ShownElsewhere.window(PaneLocation(windowID: there.id, pane: 2), here: here.id, names: names))
+        check(inWindow.isShown && inWindow.label == "Shown in " + (names[there.id] ?? "?") && inWindow.help("Park") == inWindow.label! + "\nPark", "A session in another window here warns with that window's name")
+        check(PaneButton.showsElsewhere(shownElsewhere: inWindow.isShown, rowHovered: true) && !PaneButton.showsElsewhere(shownElsewhere: inWindow.isShown, rowHovered: false), "P and X turn red only while the row is hovered")
+        let device = ShownElsewhere(device: ShownElsewhere.device("win", me: "me") { $0 == "win" ? "Windows 11 (Parallels)" : nil })
+        check(device.label == "Shown on Windows 11 (Parallels)", "A session on another device warns with the device name")
+        check(ShownElsewhere(window: "Work", device: "Richard-Air").label == "Shown in Work · on Richard-Air", "A session in another window and on another device names both")
+        let unknown = ShownElsewhere(window: ShownElsewhere.window(PaneLocation(windowID: UUID(), pane: 1), here: here.id, names: names), device: ShownElsewhere.device("ghost", me: nil) { _ in "  " })
+        check(unknown.label == "Shown in another window · on another device", "Unknown window and device names fall back to another window and another device")
+        var remoteRow = DeviceSidebarRow(globalID: "home/x", sessionID: UUID(), title: "R", assistant: "Claude", engine: "claude", model: "m", effort: "e", access: "a", status: "Ready", busy: false, queued: 0, queuePaused: false)
+        let lookup: (String) -> String? = { ["home": "Richard-Air", "ipad": "iPad"][$0] }
+        check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == nil, "A remote session parked everywhere keeps normal P and X")
+        remoteRow.leaseHolder = "me"
+        check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == nil, "A remote session this device holds is not elsewhere")
+        remoteRow.leaseHolder = "home"
+        check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == nil, "The home's expiring local fence alone does not mark a remote session")
+        remoteRow.shownOnHome = true
+        check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == "Richard-Air", "A remote session shown on its home names the home")
+        remoteRow.shownOnHome = nil; remoteRow.leaseHolder = "ipad"
+        check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == "iPad", "A remote session another viewer holds names that viewer")
+        let decoded = try? JSONDecoder().decode(DeviceSidebarRow.self, from: Data(#"{"globalID":"h/x","sessionID":"\#(UUID().uuidString)","title":"T","assistant":"A","engine":"claude","model":"m","effort":"e","access":"a","status":"Ready","busy":false,"queued":0,"queuePaused":false}"#.utf8))
+        check(decoded != nil && decoded?.shownOnHome == nil, "Rows from older homes decode without the home display flag")
+        check(PaneButton.showsOpen(available: true, selected: false, stripHovered: true) && !PaneButton.showsOpen(available: true, selected: true, stripHovered: true) && !PaneButton.showsOpen(available: false, selected: false, stripHovered: true) && !PaneButton.showsOpen(available: true, selected: false, stripHovered: false), "Pane 1/2/3 orange logic is unchanged")
     }
     sidebarHoverSelfTests(check)
 }
@@ -198,6 +225,9 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
         func orange(_ index: Int) -> Bool { fill(index).map { $0.redComponent > 0.8 && $0.greenComponent > 0.45 && $0.greenComponent < 0.8 && $0.blueComponent < 0.5 } ?? false }
         func green(_ index: Int) -> Bool { fill(index).map { $0.greenComponent - $0.redComponent > 0.1 && $0.greenComponent - $0.blueComponent > 0.1 } ?? false }
         func orangePanes() -> Set<Int> { Set((1...3).filter { orange($0) }) }
+        // Red P/X carry a white label, so sample the fill's corner, clear of the glyph. Offscreen, red reads
+        // about (0.86, 0.47, 0.37) and orange (0.90, 0.67, 0.36): green separates them.
+        func red(_ index: Int) -> Bool { color(NSPoint(x: button(index).x - 7, y: button(index).y - 7)).map { $0.redComponent > 0.75 && $0.greenComponent < 0.56 && $0.blueComponent < 0.5 } ?? false }
         func close() { row?.closeDetails(); window.orderOut(nil); window.close() }
     }
     let workspace = Workspace(), state = WindowState(workspace: workspace), other = UUID()
@@ -237,8 +267,31 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     check(!hover.inside && !hover.overButtons, "Leaving the row clears all hover state")
     local.close()
 
+    // A session showing in another window: P and X red on row hover, 1/2/3 orange as before.
+    let elsewhereSpace = Workspace(), elsewhereState = WindowState(workspace: elsewhereSpace), otherWindow = WindowState(workspace: elsewhereSpace)
+    let shown = Session(entry: Entry(name: "Elsewhere", command: "claude", directory: "~", engine: "claude"))
+    shown.accountStatus = "test"
+    elsewhereSpace.assign(shown.id, to: otherWindow.id, pane: 1); elsewhereSpace.assign(other, to: elsewhereState.id, pane: 1)
+    let away = Harness(SidebarSession(session: shown, workspace: elsewhereSpace, state: elsewhereState, showsModel: false))
+    if let awayHover = away.row?.hoverState, away.strip != nil {
+        check(!away.red(0) && !away.red(4), "P and X are not red before the row is hovered")
+        away.move(to: away.name)
+        check(awayHover.inside && away.red(0) && away.red(4) && away.orangePanes().isEmpty, "Hovering a row shown in another window turns P and X red, not 1/2/3")
+        away.move(to: away.button(2))
+        check(away.red(0) && away.red(4) && away.orangePanes() == [2, 3], "Over the strip, free panes still turn orange beside the red P and X")
+        away.move(to: away.outside)
+        check(!away.red(0) && !away.red(4) && away.orangePanes().isEmpty, "Leaving the row restores P and X")
+        away.move(to: away.name)
+        check(away.tracked.count == 2 && away.rect(away.strip!).width == 98, "Red P and X never change the strip's layout")
+    } else { check(false, "Shown-elsewhere row hosts its trackers") }
+    away.close()
+    let soloSpace = Workspace(), homeOnly = Harness(SidebarSession(session: session, workspace: soloSpace, state: WindowState(workspace: soloSpace), showsModel: false))
+    homeOnly.move(to: homeOnly.name)
+    check(homeOnly.row?.hoverState?.inside == true && !homeOnly.red(0) && !homeOnly.red(4), "A row shown nowhere else keeps normal P and X on hover")
+    homeOnly.close()
+
     let remoteRow = DeviceSidebarRow(globalID: "home/" + UUID().uuidString, sessionID: UUID(), title: "Remote Hover", assistant: "Claude", engine: "claude", model: "m", effort: "e", access: "a", status: "Ready", busy: false, queued: 0, queuePaused: false)
-    let remote = Harness(RemoteSidebarRow(row: remoteRow, homeName: "Studio", online: true, showsModel: false, localPane: nil, freePanes: [2, 3], park: {}, assign: { _ in }))
+    let remote = Harness(RemoteSidebarRow(row: remoteRow, homeName: "Studio", online: true, showsModel: false, localPane: nil, freePanes: [2, 3], elsewhere: ShownElsewhere(device: "Studio"), park: {}, assign: { _ in }))
     guard let remoteHover = remote.row?.hoverState, remote.strip != nil else { check(false, "Remote sidebar row hosts its card anchor and pane strip tracker"); remote.close(); return }
     remote.move(to: remote.name); settle(0.6)
     check(remoteHover.wantsDetails && remote.cards.last?.contains("Remote Hover") == true, "Hovering a remote session's name opens its summary card")
@@ -247,5 +300,8 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     check(remote.orangePanes() == [2, 3] && remote.cards.isEmpty, "Hovering a remote row's strip shows its free panes orange without the card")
     remote.move(to: remote.name); settle(0.6)
     check(remote.orangePanes().isEmpty && remote.cards.count == 1, "Leaving a remote row's strip restores its name card")
+    check(remote.red(0) && remote.red(4), "A hovered remote row shown on its home turns P and X red")
+    remote.move(to: remote.outside)
+    check(!remote.red(0) && !remote.red(4), "Leaving a remote row restores P and X")
     remote.close()
 }
