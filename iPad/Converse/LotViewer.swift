@@ -20,6 +20,9 @@ struct LotViewerRow: Equatable, Identifiable {
     var images: [String]
     // Nil is the legacy flat format; nested Mac rows carry two spaces per level.
     var depth: Int? = nil
+    /// The label as the Mac wrote it ("3", "b", "ii"); nil for headings.
+    var label: String? = nil
+    var marker: String { label.map { $0 + "." } ?? number.map { "\($0)." } ?? "•" }
 }
 
 enum LotViewerEntry: Equatable, Identifiable {
@@ -46,14 +49,16 @@ enum LotViewerParser {
         let indentation = lines[0].prefix(while: { $0 == " " }).count
         guard indentation % 2 == 0, indentation <= 14 else { return nil }
         let first = String(lines[0].dropFirst(indentation))
-        var heading = false, number: Int?
+        var heading = false, number: Int?, label: String?
         var rest: Substring
         if first.hasPrefix("# "), indentation == 0 {
             heading = true; rest = first.dropFirst(2)
-        } else if let dot = first.range(of: ". "), !first[..<dot.lowerBound].isEmpty,
-                  first[..<dot.lowerBound].allSatisfy({ $0.isASCII && $0.isNumber }),
-                  let value = Int(first[..<dot.lowerBound]), value > 0 {
-            number = value; rest = first[dot.upperBound...]
+        } else if let dot = first.range(of: ". "), !first[..<dot.lowerBound].isEmpty, first[..<dot.lowerBound].count <= 8,
+                  first[..<dot.lowerBound].allSatisfy({ $0.isASCII && $0.isNumber }) || first[..<dot.lowerBound].allSatisfy({ $0.isASCII && $0.isLowercase }) {
+            // The Mac labels nested levels 1, 2, 3 → a, b, c → i, ii, iii (since 0.6.8).
+            let raw = String(first[..<dot.lowerBound])
+            if let value = Int(raw) { guard value > 0 else { return nil }; number = value }
+            label = raw; rest = first[dot.upperBound...]
         } else { return nil }
         var done = false
         if rest.hasPrefix(doneMarker) { done = true; rest = rest.dropFirst(doneMarker.count) }
@@ -74,7 +79,7 @@ enum LotViewerParser {
             }
         }
         return LotViewerRow(id: message.id, heading: heading, number: number, done: done, text: text.joined(separator: "\n"),
-                            comments: comments, images: message.imageHashes, depth: indentation == 0 ? nil : indentation / 2 + 1)
+                            comments: comments, images: message.imageHashes, depth: indentation == 0 ? nil : indentation / 2 + 1, label: label)
     }
     // "author: text", split at the first ": ". An author may contain a colon
     // that is not followed by a space (for example "Agent:Planner").
@@ -332,10 +337,10 @@ struct LotRowView: View {
                         Button(action: toggle) {
                             Image(systemName: collapsed ? "chevron.right" : "chevron.down").font(.caption2.weight(.semibold))
                         }.buttonStyle(.plain).accessibilityLabel(collapsed ? "Expand item" : "Collapse item")
-                        if !row.heading { Text(row.number.map { "\($0)." } ?? "•").font(.body.monospacedDigit()) }
+                        if !row.heading { Text(row.marker).font(.body.monospacedDigit()) }
                     }
                 } else {
-                    Text(row.number.map { "\($0)." } ?? "•").font(.body.monospacedDigit())
+                    Text(row.marker).font(.body.monospacedDigit())
                 }
             }
             .foregroundStyle(.secondary).frame(width: LotStyle.gutter, alignment: .trailing).accessibilityHidden(true)
@@ -366,7 +371,7 @@ struct LotRowView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel((row.number.map { "\($0). " } ?? "") + row.text)
+        .accessibilityLabel((row.label.map { $0 + ". " } ?? "") + row.text)
         .accessibilityAddTraits(row.heading ? [.isHeader, .isButton] : (expandable ? [.isButton] : []))
         .accessibilityValue(accessibilityValue)
         .accessibilityAction { if expandable { toggle() } }

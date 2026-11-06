@@ -614,11 +614,17 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(entries[index], .plain(messages[index]), "Malformed message \(index) renders as it arrived")
         }
         let nested = [lotMessage("# Plans"), lotMessage("1. Parent"),
-                      lotMessage("  1. Child\n     > Agent: Keep this"), lotMessage("    1. Grandchild"),
+                      lotMessage("  a. Child\n     > Agent: Keep this"), lotMessage("    i. Grandchild"),
                       lotMessage("2. Sibling")]
         let nestedEntries = LotViewerParser.entries(nested)
         guard case .row(let child) = nestedEntries[2] else { return XCTFail("Nested row did not parse") }
         XCTAssertEqual(child.depth, 2); XCTAssertEqual(child.comments, [LotViewerComment(author: "Agent", text: "Keep this")])
+        // The Mac labels nested levels a, b, c and i, ii, iii (0.6.8+); those must parse as rows, not plain text.
+        XCTAssertEqual(child.marker, "a.")
+        guard case .row(let grandchild) = nestedEntries[3] else { return XCTFail("Roman-numeral row did not parse") }
+        XCTAssertEqual(grandchild.marker, "i."); XCTAssertEqual(grandchild.depth, 3)
+        guard case .row(let deep) = LotViewerParser.entries([lotMessage("    xiv. Deep")])[0] else { return XCTFail("Multi-letter label did not parse") }
+        XCTAssertEqual(deep.marker, "xiv.")
         let collapsed = LotViewerParser.visible(nestedEntries, collapsed: [nested[1].id])
         XCTAssertEqual(collapsed.map(\.entry.id), [nested[0].id, nested[1].id, nested[4].id])
         XCTAssertEqual(collapsed[1].hidden, 2, "Collapsing an item hides its whole nested subtree")
