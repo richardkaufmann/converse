@@ -20,8 +20,13 @@ struct EditableLotPane: View {
     @ObservedObject private var service: DeviceSyncService
     @State private var selected = Set<UUID>()
     @State private var selecting = false
-    @State private var commentsFor: ParkingLotRow?
-    @State private var moving: ParkingLotRow?
+    @State private var selectionAnchor: UUID?
+    @State private var rowFrames: [UUID: CGRect] = [:]
+    @State private var dragStart: UUID?
+    @State private var dragBase = Set<UUID>()
+    @State private var firstVisibleRow: UUID?
+    @State private var commentsFor: LotMenuSelection?
+    @State private var moving: LotMenuSelection?
     @State private var photo: PhotosPickerItem?
     @State private var choosingPhoto = false
     @State private var imageRow: UUID?
@@ -33,8 +38,9 @@ struct EditableLotPane: View {
     @State private var fullImage: LotImageItem?
     @State private var exporting = false
     @FocusState private var focus: UUID?
-    init(id: String, pane: Int, model: PadModel) {
+    init(id: String, pane: Int, model: PadModel, initialSelection: Set<UUID> = []) {
         self.id = id; self.pane = pane; self.model = model; service = model.service
+        _selected = State(initialValue: initialSelection); _selecting = State(initialValue: !initialSelection.isEmpty)
     }
     private var editor: LotEditQueue? { service.lotEditors[id] }
     private var rows: [ParkingLotRow] { editor?.projected.rows ?? [] }
@@ -68,8 +74,18 @@ struct EditableLotPane: View {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(visibleRows) { row in rowView(row) }
                         if rows.isEmpty { Text("Add a heading or item to start this Parking Lot.").foregroundStyle(.secondary).padding() }
-                    }.padding(.horizontal, 10).padding(.vertical, 10)
-                }.accessibilityIdentifier("lot-editor")
+                    }.scrollTargetLayout().padding(.horizontal, 10).padding(.vertical, 10)
+                    .coordinateSpace(name: "lot-rows")
+                    .onPreferenceChange(LotRowFrames.self) { rowFrames = $0 }
+                    .gesture(DragGesture(minimumDistance: 10, coordinateSpace: .named("lot-rows"))
+                        .onChanged { value in
+                            guard selecting, canEdit else { return }
+                            if dragStart == nil { dragStart = rowAt(value.startLocation); dragBase = selected }
+                            if let first = dragStart, let last = rowAt(value.location) {
+                                selected = dragBase.union(LotMenuSelection.range(from: first, to: last, visible: visibleRows.map(\.id)))
+                            }
+                        }.onEnded { _ in dragStart = nil }, including: selecting ? .all : .subviews)
+                }.scrollPosition(id: $firstVisibleRow, anchor: .top).accessibilityIdentifier("lot-editor")
                 Divider()
                 toolbar
             } else {
@@ -79,7 +95,7 @@ struct EditableLotPane: View {
         }
         .background(Color(uiColor: .systemBackground))
         .sheet(item: $commentsFor) { row in commentSheet(row) }
-        .sheet(item: $moving) { row in moveSheet(row) }
+        .sheet(item: $moving) { selection in moveSheet(selection) }
         .sheet(isPresented: Binding(get: { service.lotProposals[id] != nil }, set: { if !$0 { service.decideLotProposal(id, approved: false) } })) {
             proposalSheet.interactiveDismissDisabled()
         }
@@ -112,6 +128,11 @@ struct EditableLotPane: View {
         }
         .onChange(of: service.lotProposals[id]?.id) { _, value in if value != nil { undo = []; redo = []; focus = nil } }
         .onChange(of: editor?.saved.leaseEpoch) { _, _ in undo = []; redo = []; selected = []; focus = nil }
+        .onChange(of: focus) { _, value in
+            if value != nil { model.cursorPane = pane } else { model.endedEditing(pane: pane) }
+        }
+        .onDisappear { model.endedEditing(pane: pane) }
+        .onChange(of: visibleRows.map(\.id)) { _, ids in selected.formIntersection(ids) }
         .onChange(of: canEdit) { _, editable in if !editable {
             focus = nil
             if pendingImage != nil || pendingPaste != nil { error = "The lot moved or paused before the attachment finished. Attach or paste it again when editing resumes." }
@@ -123,7 +144,14 @@ struct EditableLotPane: View {
             Text(String(pane + 1)).font(.caption.bold()).padding(6).background(.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
             Text(editor?.saved.name ?? service.remoteRow(globalID: id)?.title ?? "Parking Lot").font(.headline).lineLimit(1)
             Spacer()
-            Button(selecting ? "Done" : "Select") { selecting.toggle(); if !selecting { selected = [] } }.disabled(!canEdit)
+            if !selected.isEmpty {
+                Text("\(selected.count) selected").font(.caption).foregroundStyle(.secondary)
+                Menu { entryActions(selected) } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Actions for selected entries").disabled(!canEdit)
+            }
+            Button(selecting ? "Cancel" : "Select") {
+                focus = nil; selecting.toggle(); selected = []; selectionAnchor = nil
+            }.disabled(!canEdit)
             Button("P") { focus = nil; model.park(id) }.frame(minWidth: 44, minHeight: 44).accessibilityLabel("Save and park this lot")
         }.padding(.horizontal, 10)
     }
@@ -163,12 +191,6 @@ struct EditableLotPane: View {
                 } label: { Label("Outline", systemImage: "list.bullet.indent") }
                 Button { undoEdit() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(undo.isEmpty || editor?.unconfirmedCount != 0).accessibilityLabel("Undo lot edit").keyboardShortcut("z")
                 Button { redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(redo.isEmpty || editor?.unconfirmedCount != 0).accessibilityLabel("Redo lot edit").keyboardShortcut("z", modifiers: [.command, .shift])
-                if !selected.isEmpty {
-                    Button("Indent") { indentSelection(deeper: true) }
-                    Button("Outdent") { indentSelection(deeper: false) }
-                    Button("Copy") { copySelection(cut: false) }
-                    Button("Cut") { copySelection(cut: true) }
-                }
                 if let saved = editor?.saved {
                     Button { exporting = true } label: { Label("Export saved copy", systemImage: "square.and.arrow.up") }
                         .disabled(editor?.unconfirmedCount != 0)
@@ -181,50 +203,101 @@ struct EditableLotPane: View {
         let depth = hierarchy[row.id]?.depth ?? 0
         let expandable = (ParkingLotTree.range(row.id, in: rows)?.count ?? 0) > 1
         HStack(alignment: .top, spacing: 5) {
-            if selecting {
-                Button { if selected.contains(row.id) { selected.remove(row.id) } else { selected.insert(row.id) } } label: {
-                    Image(systemName: selected.contains(row.id) ? "checkmark.circle.fill" : "circle").frame(width: 44, height: 44)
-                }.disabled(!canEdit)
-            }
-            VStack(spacing: 0) {
-                if expandable {
-                    Button { model.toggleLotHeading(id, heading: row.id) } label: { Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").frame(width: 44, height: 44) }.accessibilityLabel("Collapse or expand entry")
-                } else if !row.heading {
-                    Button { perform(LotOperation(kind: .setDone, rowID: row.id, done: !row.isDone)) } label: { Image(systemName: row.isDone ? "checkmark.circle.fill" : "circle").frame(width: 44, height: 44) }.disabled(!canEdit).accessibilityLabel(row.isDone ? "Mark not done" : "Mark done")
-                }
-            }
+            if expandable {
+                Button { model.toggleLotHeading(id, heading: row.id) } label: {
+                    Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").frame(width: 30, height: 44)
+                }.accessibilityLabel("Collapse or expand entry")
+            } else { Color.clear.frame(width: 30, height: 1).accessibilityHidden(true) }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
-                if let label = labels[row.id] { Text(label).monospacedDigit().foregroundStyle(.secondary) }
-                TextField(row.heading ? "Heading" : "Item", text: Binding(get: { rows.first(where: { $0.id == row.id })?.text ?? row.text }, set: { perform(LotOperation(kind: .setText, rowID: row.id, text: $0)) }), axis: .vertical)
-                    .font(row.heading ? .headline : .body).foregroundStyle(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading))
-                    .strikethrough(row.isDone).focused($focus, equals: row.id).disabled(!canEdit)
-                    .accessibilityIdentifier("lot-text-" + row.id.uuidString)
+                if let label = labels[row.id] { Text(label).font(.system(size: model.textSize(pane))).monospacedDigit().foregroundStyle(.secondary) }
+                if selecting {
+                    Text(row.text.isEmpty ? (row.heading ? "Heading" : "Item") : row.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.system(size: model.textSize(pane), weight: row.heading ? .semibold : .regular))
+                        .foregroundStyle(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading))
+                        .strikethrough(row.isDone)
+                } else {
+                    TextField(row.heading ? "Heading" : "Item", text: Binding(get: { rows.first(where: { $0.id == row.id })?.text ?? row.text }, set: { perform(LotOperation(kind: .setText, rowID: row.id, text: $0)) }), axis: .vertical)
+                        .font(.system(size: model.textSize(pane), weight: row.heading ? .semibold : .regular))
+                        .foregroundStyle(row.isDone ? Color.secondary : tagColor(row.tag, heading: row.heading))
+                        .strikethrough(row.isDone).focused($focus, equals: row.id).disabled(!canEdit)
+                        .accessibilityIdentifier("lot-text-" + row.id.uuidString)
+                }
                 }
                 if !(row.images ?? []).isEmpty { LotThumbnailStrip(hashes: row.images ?? [], images: service.blobCache, open: { fullImage = $0 }) }
                 if let notes = row.notes, !notes.isEmpty {
-                    Button { commentsFor = row } label: { Label(notes.count == 1 ? "1 comment" : "\(notes.count) comments", systemImage: "text.bubble") }.font(.caption).frame(minHeight: 44)
+                    Button { commentsFor = LotMenuSelection(ids: [row.id]) } label: { Label(notes.count == 1 ? "1 comment" : "\(notes.count) comments", systemImage: "text.bubble") }.font(.caption).frame(minHeight: 44)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
-            Menu {
-                ForEach(Self.links(in: row.text), id: \.absoluteString) { url in Link("Open " + url.absoluteString, destination: url) }
-                Button(row.isDone ? "Mark not done" : "Mark done") { perform(LotOperation(kind: .setDone, rowID: row.id, done: !row.isDone)) }
-                Button("Add comment") { commentsFor = row }
-                Button("Indent") { perform(LotOperation(kind: .indent, rowID: row.id)) }
-                Button("Outdent") { perform(LotOperation(kind: .outdent, rowID: row.id)) }
-                Button("Move…") { moving = row }
-                Menu("Color") {
-                    Button("None") { perform(LotOperation(kind: .setTag, rowID: row.id)) }
-                    ForEach(ParkingLotTag.allCases, id: \.rawValue) { tag in Button(tag.rawValue.capitalized) { perform(LotOperation(kind: .setTag, rowID: row.id, tag: tag)) } }
-                }
-                Button("Add image…") { imageRow = row.id; choosingPhoto = true }
-                Button("Paste image") { if let png = UIPasteboard.general.image?.pngData() { do { try uploadImage(png, row: row.id) } catch { self.error = error.localizedDescription } } }
-                ForEach(row.images ?? [], id: \.self) { hash in Button("Remove image " + String(hash.prefix(6)), role: .destructive) { perform(LotOperation(kind: .removeImage, rowID: row.id, imageHash: hash)) } }
-                Button("Copy item and children") { selected = [row.id]; copySelection(cut: false) }
-                Button("Cut item and children") { selected = [row.id]; copySelection(cut: true) }
-                Button("Delete item and children", role: .destructive) { perform(LotOperation(kind: .deleteSubtree, rowID: row.id)) }
-            } label: { Image(systemName: "ellipsis.circle").frame(width: 44, height: 44) }.disabled(!canEdit)
+            if selected.isEmpty {
+                Menu { entryActions([row.id]) } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Actions for " + (row.text.isEmpty ? "entry" : row.text)).disabled(!canEdit)
+            }
         }.padding(.leading, CGFloat(min(6, max(0, depth - 1))) * 12).padding(.top, row.heading ? 10 : 0)
+        .padding(.vertical, 3)
+        .background(selected.contains(row.id) ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .gesture(TapGesture().onEnded { if canEdit { toggleSelection(row.id) } }, including: selecting ? .all : .subviews)
+        .contextMenu {
+            if selecting, let anchor = selectionAnchor {
+                Button("Select through this entry") {
+                    selected = LotMenuSelection.range(from: anchor, to: row.id, visible: visibleRows.map(\.id))
+                }
+            }
+            entryActions(selected.isEmpty ? [row.id] : selected)
+        }
+        .accessibilityAddTraits(selected.contains(row.id) ? .isSelected : [])
+        .background(GeometryReader { geometry in Color.clear.preference(key: LotRowFrames.self, value: [row.id: geometry.frame(in: .named("lot-rows"))]) })
+    }
+    @ViewBuilder private func entryActions(_ ids: Set<UUID>) -> some View {
+        let targets = rows.filter { ids.contains($0.id) }
+        let single = targets.count == 1 ? targets.first : nil
+        let allDone = targets.allSatisfy(\.isDone)
+        if selected.isEmpty {
+            Button("Select entry") { focus = nil; selecting = true; selected = ids; selectionAnchor = targets.first?.id }
+        } else {
+            Text("\(targets.count) selected")
+            Button("Select all") { selected = Set(visibleRows.map(\.id)) }
+            Button("Clear selection") { selected = []; selectionAnchor = nil }
+        }
+        Button(allDone ? "Mark not done" : "Mark done") {
+            performBatch(targets.map { LotOperation(kind: .setDone, rowID: $0.id, done: !allDone) })
+        }
+        Menu("Color") {
+            Button("None") { performBatch(targets.map { LotOperation(kind: .setTag, rowID: $0.id) }) }
+            ForEach(ParkingLotTag.allCases, id: \.rawValue) { tag in
+                Button(tag.rawValue.capitalized) { performBatch(targets.map { LotOperation(kind: .setTag, rowID: $0.id, tag: tag) }) }
+            }
+        }
+        Button("Indent") { perform(LotOperation(kind: .indent, rowIDs: targets.map(\.id))) }.disabled(targets.contains(where: \.heading))
+        Button("Outdent") { perform(LotOperation(kind: .outdent, rowIDs: targets.map(\.id))) }.disabled(targets.contains(where: \.heading))
+        Button("Move…") { moving = LotMenuSelection(ids: ids) }
+            .disabled(Set(targets.map(\.heading)).count > 1)
+        Button("Add comment") { commentsFor = LotMenuSelection(ids: ids) }
+        if let row = single {
+            Button("Add image…") { imageRow = row.id; choosingPhoto = true }
+            Button("Paste image") { if let png = UIPasteboard.general.image?.pngData() { do { try uploadImage(png, row: row.id) } catch { self.error = error.localizedDescription } } }
+            ForEach(row.images ?? [], id: \.self) { hash in Button("Remove image " + String(hash.prefix(6)), role: .destructive) { perform(LotOperation(kind: .removeImage, rowID: row.id, imageHash: hash)) } }
+            ForEach(Self.links(in: row.text), id: \.absoluteString) { url in Link("Open " + url.absoluteString, destination: url) }
+        }
+        Button("Copy with children") { copySelection(ids, cut: false) }
+        Button("Cut with children") { copySelection(ids, cut: true) }
+        Button("Delete with children", role: .destructive) { perform(LotOperation(kind: .deleteSelection, rowIDs: targets.map(\.id))) }
+    }
+    private func toggleSelection(_ id: UUID) {
+        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+        selectionAnchor = id
+    }
+    private func rowAt(_ point: CGPoint) -> UUID? {
+        rowFrames.first(where: { $0.value.minY <= point.y && point.y <= $0.value.maxY })?.key
+    }
+    private func performBatch(_ operations: [LotOperation]) {
+        guard let document = editor?.projected, !operations.isEmpty else { return }
+        do {
+            let changed = try LotMenuSelection.applying(operations, to: document, author: service.identity?.deviceName ?? "Mobile")
+            perform(LotOperation(kind: .replaceRows, rows: changed.rows))
+        } catch { self.error = error.localizedDescription }
     }
     private func tagColor(_ tag: ParkingLotTag?, heading: Bool) -> Color {
         guard let tag else { return heading ? LotStyle.heading : .primary }
@@ -258,18 +331,15 @@ struct EditableLotPane: View {
         do { try service.editLot(id, operation: LotOperation(kind: .replaceRows, rows: next)); redo.removeLast(); undo.append(current) }
         catch { self.error = error.localizedDescription }
     }
-    private func indentSelection(deeper: Bool) {
-        perform(LotOperation(kind: deeper ? .indent : .outdent, rowIDs: Array(selected)))
-    }
-    private func copySelection(cut: Bool) {
+    private func copySelection(_ ids: Set<UUID>, cut: Bool) {
         var indices = Set<Int>()
-        for row in selected { if let range = ParkingLotTree.range(row, in: rows) { indices.formUnion(range) } }
+        for row in ids { if let range = ParkingLotTree.range(row, in: rows) { indices.formUnion(range) } }
         let copy = indices.sorted().map { rows[$0] }
         guard !copy.isEmpty else { return }
         if let data = try? LotEditing.encoded(copy) {
             UIPasteboard.general.setItems([["app.kaoslabs.converse.lot-rows": data, "public.utf8-plain-text": Self.markdown(copy)]])
         }
-        if cut { perform(LotOperation(kind: .deleteSelection, rowIDs: Array(selected))); selected = [] }
+        if cut { perform(LotOperation(kind: .deleteSelection, rowIDs: Array(ids))); selected = [] }
     }
     private func paste() {
         guard canEdit, let authority = editor?.saved, pendingPaste == nil else { return }
@@ -301,33 +371,37 @@ struct EditableLotPane: View {
         guard let hash = service.sendRemoteBlob(globalID: id, data: png) else { throw ParkingLotError.message("Could not send the image to home.") }
         pendingImage = (row, hash, authority.leaseEpoch, authority.homeBoot)
     }
-    private func commentSheet(_ row: ParkingLotRow) -> some View {
-        LotCommentSheet(row: rows.first(where: { $0.id == row.id }) ?? row, enabled: canEdit, add: { text in
-            perform(LotOperation(kind: .appendComment, rowID: row.id, text: text, commentID: UUID()))
+    private func commentSheet(_ selection: LotMenuSelection) -> some View {
+        let targets = rows.filter { selection.ids.contains($0.id) }
+        let row = targets.count == 1 ? targets[0] : ParkingLotRow(heading: false, text: "\(targets.count) selected entries")
+        return LotCommentSheet(row: row, enabled: canEdit, add: { text in
+            performBatch(targets.map { LotOperation(kind: .appendComment, rowID: $0.id, text: text, commentID: UUID()) })
         }, remove: { note in
-            perform(LotOperation(kind: .removeComment, rowID: row.id, commentID: note))
+            if targets.count == 1 { perform(LotOperation(kind: .removeComment, rowID: row.id, commentID: note)) }
         })
     }
-    private func moveSheet(_ row: ParkingLotRow) -> some View {
-        let subtree = Set(ParkingLotTree.range(row.id, in: rows).map { rows[$0].map(\.id) } ?? [])
+    private func moveSheet(_ selection: LotMenuSelection) -> some View {
+        let roots = selection.roots(in: rows)
+        let row = roots.first ?? ParkingLotRow(heading: false, text: "")
+        let subtree = Set(roots.flatMap { root in ParkingLotTree.range(root.id, in: rows).map { rows[$0].map(\.id) } ?? [] })
         let candidates = rows.filter { !subtree.contains($0.id) }
         return NavigationStack {
             List {
                 Section("Before entry") {
                     ForEach(candidates.filter { row.heading ? $0.heading : !$0.heading }) { sibling in
                         Button(sibling.text.isEmpty ? "Untitled entry" : sibling.text) {
-                            perform(LotOperation(kind: .move, rowID: row.id, before: sibling.id, parentID: row.heading ? nil : hierarchy[sibling.id]?.parentID)); moving = nil
+                            performBatch(roots.map { LotOperation(kind: .move, rowID: $0.id, before: sibling.id, parentID: row.heading ? nil : hierarchy[sibling.id]?.parentID) }); moving = nil
                         }
                     }
                 }
                 if !row.heading {
                     Section("Inside entry") {
                         ForEach(candidates) { parent in
-                            Button(parent.text.isEmpty ? "Untitled entry" : parent.text) { perform(LotOperation(kind: .move, rowID: row.id, parentID: parent.id)); moving = nil }
+                            Button(parent.text.isEmpty ? "Untitled entry" : parent.text) { performBatch(roots.map { LotOperation(kind: .move, rowID: $0.id, parentID: parent.id) }); moving = nil }
                         }
                     }
                 }
-                Button(row.heading ? "End of lot" : "End of current level") { perform(LotOperation(kind: .move, rowID: row.id, parentID: row.heading ? nil : hierarchy[row.id]?.parentID)); moving = nil }
+                Button(row.heading ? "End of lot" : "End of current level") { performBatch(roots.map { LotOperation(kind: .move, rowID: $0.id, parentID: row.heading ? nil : hierarchy[row.id]?.parentID) }); moving = nil }
             }.navigationTitle("Move entry").toolbar { Button("Cancel") { moving = nil } }
         }
     }
@@ -461,5 +535,31 @@ private struct MobileLotExportSheet: View {
             } catch { self.error = error.localizedDescription }
             busy = false
         }
+    }
+}
+
+private struct LotRowFrames: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) { value.merge(nextValue()) { _, next in next } }
+}
+
+struct LotMenuSelection: Identifiable {
+    var id = UUID()
+    var ids: Set<UUID>
+    static func range(from first: UUID, to last: UUID, visible: [UUID]) -> Set<UUID> {
+        guard let a = visible.firstIndex(of: first), let b = visible.firstIndex(of: last) else { return [] }
+        return Set(visible[min(a,b)...max(a,b)])
+    }
+    func roots(in rows: [ParkingLotRow]) -> [ParkingLotRow] {
+        let nodes = (try? ParkingLotTree.nodes(rows)) ?? [:]
+        return rows.filter { row in
+            guard ids.contains(row.id) else { return false }
+            var parent = nodes[row.id]?.parentID
+            while let ancestor = parent { if ids.contains(ancestor) { return false }; parent = nodes[ancestor]?.parentID }
+            return true
+        }
+    }
+    static func applying(_ operations: [LotOperation], to document: ParkingLotDocument, author: String) throws -> ParkingLotDocument {
+        try operations.reduce(document) { try $1.applying(to: $0, author: author) }
     }
 }

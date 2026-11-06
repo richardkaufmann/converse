@@ -118,7 +118,7 @@ final class TailTextView: UITextView {
     func focusDraft() {
         guard isEditable else { return }
         selectedRange = NSRange(location: textStorage.length, length: 0)
-        typingAttributes = PadTranscript.draftAttributes((text as NSString).substring(from: min(historyLength, textStorage.length)))
+        typingAttributes = PadTranscript.draftAttributes((text as NSString).substring(from: min(historyLength, textStorage.length)), size: (delegate as? PadTranscript.Coordinator)?.parent.textSize ?? 16)
         revealEditedSelection()
     }
     func revealEditedSelection() {
@@ -309,6 +309,9 @@ struct PadTranscript: UIViewRepresentable {
     var didFocus: () -> Void = {}
     var phoneKeyboard: PhoneKeyboardController? = nil
     var keyboardSession: String = ""
+    var textSize: CGFloat = 16
+    var beganEditing: () -> Void = {}
+    var endedEditing: () -> Void = {}
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TailTextView {
         let view = TailTextView.native(); view.delegate = context.coordinator; view.font = .systemFont(ofSize: 16)
@@ -344,9 +347,28 @@ struct PadTranscript: UIViewRepresentable {
         let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
         let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
-        guard signature != c.signature || c.lastDraft != draft else { return }
+        let contentChanged = signature != c.signature || c.lastDraft != draft
+        guard contentChanged || c.textSize != textSize else { return }
         // Don't overwrite marked text while dictation/IME is composing.
         if view.markedTextRange != nil { return }
+        if !contentChanged {
+            // Pinching restyles the existing text. Do not parse the whole history
+            // again or replace its storage/Undo offsets at each size step.
+            let offset = view.contentOffset.y
+            let character = view.visibleCharacter()
+            let distance = character.map { view.lineTop(at: $0) - offset }
+            let selection = view.selectedRange
+            c.updating = true
+            Self.scaleFonts(view.textStorage, factor: textSize / c.textSize)
+            view.selectedRange = selection
+            view.typingAttributes = Self.draftAttributes(draft, size: textSize)
+            c.textSize = textSize
+            if c.follow.following && !c.explicitSelection { view.pendingViewport = .bottom }
+            else if let character, let distance { view.pendingViewport = .anchor(character, distance) }
+            else { view.pendingViewport = .offset(offset) }
+            view.setNeedsLayout(); view.layoutIfNeeded(); c.updating = false
+            return
+        }
         let addedImage = draftImageHashes.contains { !c.draftHashes.contains($0) }
         c.draftHashes = draftImageHashes
         let first = c.signature.isEmpty
@@ -424,6 +446,7 @@ struct PadTranscript: UIViewRepresentable {
         c.historyLength = result.length
         view.historyLength = result.length
         result.append(NSAttributedString(string: draft, attributes: Self.draftAttributes(draft)))
+        Self.scaleFonts(result, factor: textSize / 16)
         view.textStorage.setAttributedString(result)
         view.configureDraftImageButtons()
         if first { view.selectedRange = NSRange(location: result.length, length: 0) }
@@ -438,7 +461,7 @@ struct PadTranscript: UIViewRepresentable {
         }
         // Moving the selection can inherit the preceding summary's truncating
         // paragraph/link attributes, especially when the draft is empty.
-        view.typingAttributes = Self.draftAttributes(draft)
+        view.typingAttributes = Self.draftAttributes(draft, size: textSize)
         if nearBottom { view.pendingViewport = .bottom }
         else if let character = visibleCharacter, let distance = visibleDistance, let old = anchorMessage,
                 let new = c.messageRanges.first(where: { $0.id == old.id }) {
@@ -446,14 +469,20 @@ struct PadTranscript: UIViewRepresentable {
         } else { view.pendingViewport = .offset(previousOffset) }
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        c.signature = signature; c.lastDraft = draft
+        c.signature = signature; c.lastDraft = draft; c.textSize = textSize
         // History changes invalidate the undo stack's character offsets.
         // Clearing it also prevents undo from modifying protected history.
-        view.undoManager?.removeAllActions(); c.updating = false
+        if contentChanged { view.undoManager?.removeAllActions() }; c.updating = false
     }
-    static func draftAttributes(_ text: String) -> [NSAttributedString.Key: Any] {
+    static func scaleFonts(_ text: NSMutableAttributedString, factor: CGFloat) {
+        guard factor != 1 else { return }
+        text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            if let font = value as? UIFont { text.addAttribute(.font, value: font.withSize(font.pointSize * factor), range: range) }
+        }
+    }
+    static func draftAttributes(_ text: String, size: CGFloat = 16) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
-        return [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: PadPalette.draft(text), .paragraphStyle: paragraph]
+        return [.font: UIFont.systemFont(ofSize: size), .foregroundColor: PadPalette.draft(text), .paragraphStyle: paragraph]
     }
     static func separator() -> NSAttributedString { NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.label]) }
     // UIKit has no NSTextTable. Render tables as wrapping, labelled records
@@ -566,6 +595,7 @@ struct PadTranscript: UIViewRepresentable {
         var historyLength = 0
         var signature = ""
         var lastDraft = ""
+        var textSize: CGFloat = 16
         var messageRanges: [(id: UUID, range: NSRange)] = []
         var displayEpoch: UInt64?
         var draftHashes: [String] = []
@@ -581,10 +611,12 @@ struct PadTranscript: UIViewRepresentable {
             return parent.editable && (!view.explicitPhoneKeyboard || view.allowKeyboardActivation)
         }
         func textViewDidBeginEditing(_ textView: UITextView) {
+            parent.beganEditing()
             parent.didFocus()
             parent.phoneKeyboard?.beganEditing(parent.keyboardSession)
         }
         func textViewDidEndEditing(_ textView: UITextView) {
+            parent.endedEditing()
             parent.phoneKeyboard?.endedEditing(parent.keyboardSession)
         }
         func textViewDidChangeSelection(_ textView: UITextView) {
@@ -631,8 +663,8 @@ struct PadTranscript: UIViewRepresentable {
             // let a history link or a pasted clipping style enter the draft.
             let range = NSRange(location: historyLength, length: view.textStorage.length - historyLength)
             updating = true
-            view.textStorage.setAttributes(PadTranscript.draftAttributes(text), range: range)
-            view.typingAttributes = PadTranscript.draftAttributes(text)
+            view.textStorage.setAttributes(PadTranscript.draftAttributes(text, size: parent.textSize), range: range)
+            view.typingAttributes = PadTranscript.draftAttributes(text, size: parent.textSize)
             updating = false
             (view as? TailTextView)?.gutter.setNeedsDisplay()
             (view as? TailTextView)?.revealEditedSelection()

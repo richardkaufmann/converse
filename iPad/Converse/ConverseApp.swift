@@ -66,6 +66,7 @@ struct PadRoot: View {
     @State private var phoneSessionsShown = false
     @State private var phoneDestination: String?
     @State private var keyboardShown = false
+    @GestureState private var resizingText = false
     @ObservedObject private var phoneKeyboard: PhoneKeyboardController
     private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
     init(model: PadModel) { self.model = model; self.service = model.service; self.phoneKeyboard = model.phoneKeyboard }
@@ -136,6 +137,11 @@ struct PadRoot: View {
             }.background(Color(uiColor: .systemBackground))
             }
         }
+        .simultaneousGesture(MagnifyGesture(minimumScaleDelta: 0.04)
+            .updating($resizingText) { _, active, _ in active = true }
+            .onChanged { model.pinchText($0.magnification) }
+            .onEnded { model.pinchText($0.magnification); model.endTextPinch() })
+        .onChange(of: resizingText) { _, active in if !active { model.endTextPinch() } }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardShown = true }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardShown = false }
         .sheet(isPresented: $phoneSessionsShown, onDismiss: {
@@ -499,7 +505,8 @@ struct PadPane: View {
                               if let hash = existing ?? model.attach(id, data: bytes) { imageToolsHash = hash; imageTools = true }
                           }, didFocus: { model.focusedPane = pane; if UIDevice.current.userInterfaceIdiom == .phone { model.phoneKeyboard.select(id) } },
                           phoneKeyboard: UIDevice.current.userInterfaceIdiom == .phone ? model.phoneKeyboard : nil,
-                          keyboardSession: id)
+                          keyboardSession: id, textSize: model.textSize(pane),
+                          beganEditing: { model.cursorPane = pane }, endedEditing: { model.endedEditing(pane: pane) })
                 .overlay(alignment: .bottomTrailing) {
                     if let state = snapshot?.compaction, state.visible {
                         Button(state.title) { command(state.phase == "queued" ? "cancelCompact" : "compact") }

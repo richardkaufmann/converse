@@ -55,9 +55,13 @@ python3 iPad/distribute.py upload .build/Converse-iPad.xcarchive .build/iPadUplo
 
 `export` and `upload` use Xcode directly and do not need the Python cryptography package. Version/build numbers are preserved. API verification proves app access; a successful export separately proves signing access. Upload success still requires Apple processing before TestFlight availability. Never commit keys, tokens, or the local configuration; keep any credential backup separate from source archives.
 
+## Text size
+
+Pinch with two fingers to resize session text, drafts and editable Parking Lot entries. The pane with an active text cursor changes; with no text cursor, all panes change. Sizes stay between 12 and 32 points and are saved locally per pane. Ordinary two-finger scrolling does not change text size.
+
 ## Parking Lots
 
-Private build 140 supports native editing of Mac-hosted Parking Lots. Both the Mac and iPhone/iPad must run 140. Open the lot and take it here; the previous display parks, and ordered changes save back to the Mac. Per-entry arrows preserve nested collapse choices, while Outline → Collapse All shows only headings and Expand All opens every level. The entry menu provides text, Done, nesting, moving, comments, colors and images. Undo/Redo is scoped to the current take. Export saves a `.converse` file from the latest confirmed revision, with optional images and secret/personal-information scrubbing.
+Private build 140 supports native editing of Mac-hosted Parking Lots. Both the Mac and iPhone/iPad must run 140. Open the lot and take it here; the previous display parks, and ordered changes save back to the Mac. Per-entry arrows preserve nested collapse choices, while Outline → Collapse All shows only headings and Expand All opens every level. Each entry has an … menu for Done, nesting, moving, comments, colors and images. Tap Select, then tap rows or drag across a range; selected entries are highlighted and share one … menu in the header. Right-click or long-press opens the same actions. Done and colors apply only to selected rows; copy, cut, move and delete carry their children. Images and existing comments are managed on individual entries. Undo/Redo is scoped to the current take. Export saves a `.converse` file from the latest confirmed revision, with optional images and secret/personal-information scrubbing.
 
 Session and agent proposals pause typing and drain pending saves before showing an exact before/after approval sheet on the holding device. A disconnected editor freezes and offers manual Copy of unconfirmed text; taking again never automatically replays it. Windows 139 cannot open an exclusive lot. Mobile hosting and Mac remote-client editing are not part of this trial.
 

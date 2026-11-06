@@ -17,6 +17,7 @@ struct PadState: Codable {
     var sidebarHidden = false
     var drafts: [String: PadDraft] = [:]
     var defaultDeviceName: String? = nil
+    var paneTextSizes: [Double]? = nil
 }
 
 final class PadModel: ObservableObject {
@@ -31,6 +32,31 @@ final class PadModel: ObservableObject {
     @Published var newAgentHome: String?
     @Published var lineNumbers = true
     @Published var focusedPane = 0
+    @Published var cursorPane: Int?
+    private var pinchSizes: [Double]?
+    private var pinchPane: Int?
+    func textSize(_ pane: Int) -> CGFloat {
+        let sizes = state.paneTextSizes ?? [16, 16, 16]
+        return CGFloat(sizes.indices.contains(pane) ? min(32, max(12, sizes[pane])) : 16)
+    }
+    func pinchText(_ magnification: CGFloat) {
+        guard magnification.isFinite, magnification > 0 else { return }
+        if pinchSizes == nil {
+            pinchSizes = (0..<3).map { Double(textSize($0)) }
+            pinchPane = cursorPane
+        }
+        guard let baseline = pinchSizes else { return }
+        var sizes = (0..<3).map { Double(textSize($0)) }
+        for pane in sizes.indices where pinchPane == nil || pinchPane == pane {
+            sizes[pane] = min(32, max(12, (baseline[pane] * Double(magnification)).rounded()))
+        }
+        if sizes != state.paneTextSizes { state.paneTextSizes = sizes }
+    }
+    func endTextPinch() {
+        guard pinchSizes != nil else { return }
+        pinchSizes = nil; pinchPane = nil; persist()
+    }
+    func endedEditing(pane: Int) { if cursorPane == pane { cursorPane = nil } }
     // Parking Lot viewer state is local and in memory: what is shown, the
     // newest copy from home, and collapsed headings.
     @Published var lotViews: [String: LotViewerState] = [:]
@@ -91,7 +117,9 @@ final class PadModel: ObservableObject {
         assign(id, pane: pane)
     }
     func removePlacement(_ id: String) {
-        for index in state.placements.indices where state.placements[index] == id { state.placements[index] = nil }
+        for index in state.placements.indices where state.placements[index] == id {
+            state.placements[index] = nil; endedEditing(pane: index)
+        }
         persist()
     }
     func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id); lotViews.removeValue(forKey: id) }

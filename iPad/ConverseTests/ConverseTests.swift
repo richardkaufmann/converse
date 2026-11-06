@@ -1449,6 +1449,16 @@ extension ConverseTests {
                 window.isHidden = true
             }
         }
+        model.state.paneTextSizes = [24, 16, 16]
+        let selectionHost = UIHostingController(rootView: EditableLotPane(id: id, pane: 0, model: model, initialSelection: [item.id, child.id]).frame(width: 430))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let selectionWindow = UIWindow(windowScene: scene); selectionWindow.frame = CGRect(x: 0, y: 0, width: 430, height: 900)
+        selectionWindow.overrideUserInterfaceStyle = .light; selectionWindow.rootViewController = selectionHost; selectionWindow.makeKeyAndVisible()
+        selectionHost.view.frame = selectionWindow.bounds; selectionHost.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        let selectionImage = XCTAttachment(image: UIGraphicsImageRenderer(bounds: selectionWindow.bounds).image { _ in selectionWindow.drawHierarchy(in: selectionWindow.bounds, afterScreenUpdates: true) })
+        selectionImage.name = "Selected lot entries at 24pt"; selectionImage.lifetime = .keepAlways; add(selectionImage)
+        selectionWindow.isHidden = true
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Typed on phone"))
         let flight = try XCTUnwrap(service.lotEditors[id]?.inFlight)
         XCTAssertEqual(service.lotEditors[id]?.saved.document.revision, 12, "Optimistic typing does not claim a saved revision")
@@ -1563,5 +1573,63 @@ extension ConverseTests {
         XCTAssertFalse(viewer.lotBlobReady[sidebar[1].globalID]?.contains(hash) == true, "Previous-boot image receipt is ignored")
         viewer.handleEnvelope(peer, DeviceEnvelope(kind: "blob.ack", boot: 7, sessionID: sidebar[1].globalID, epoch: 2, payload: ack))
         XCTAssertEqual(viewer.lotBlobReady[sidebar[1].globalID], [hash])
+    }
+}
+
+extension ConverseTests {
+    func testTextPinchUsesCursorOrAllPanesAndPersistsWithoutChangingDrafts() throws {
+        let service = try service(), model = PadModel(service: service)
+        model.state.drafts["unchanged"] = PadDraft(text: "Keep my draft")
+        model.state.paneTextSizes = [16, 18, 20]
+        model.cursorPane = 1
+        model.pinchText(1.5)
+        XCTAssertEqual(model.state.paneTextSizes, [16, 27, 20])
+        model.pinchText(2)
+        XCTAssertEqual(model.state.paneTextSizes, [16, 32, 20], "Every update uses the gesture's initial sizes, not the previous update")
+        model.endTextPinch()
+        let restored = PadModel(service: service)
+        XCTAssertEqual(restored.state.paneTextSizes, [16, 32, 20])
+        XCTAssertEqual(restored.state.drafts["unchanged"]?.text, "Keep my draft")
+        model.cursorPane = nil; model.pinchText(0.5); model.endTextPinch()
+        XCTAssertEqual(model.state.paneTextSizes, [12, 16, 12])
+        let old = Data(#"{"placements":[null,null,null],"sidebarWidth":300,"sidebarHidden":false,"drafts":{}}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(PadState.self, from: old).paneTextSizes, "An existing scene loads without a migration or setup reset")
+    }
+
+    func testTextResizeKeepsCaretDraftAndFontTraits() throws {
+        let message = DeviceWireMessage(id: UUID(), role: "assistant", text: "A **bold** and *italic* message")
+        var parent = PadTranscript(messages: [message], draft: "Keep this draft", images: [:], editable: true, lineNumbers: true, edit: { _ in XCTFail("Zoom must not edit the draft") }, send: {}, attach: { _ in })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 430, height: 600)
+        let coordinator = parent.makeCoordinator(); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        view.selectedRange = NSRange(location: view.historyLength + 4, length: 3)
+        let original = view.textStorage.string, selection = view.selectedRange
+        parent.textSize = 24; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.textStorage.string, original); XCTAssertEqual(view.selectedRange, selection)
+        XCTAssertEqual((view.typingAttributes[.font] as? UIFont)?.pointSize, 24)
+        let bold = (original as NSString).range(of: "bold").location
+        let font = try XCTUnwrap(view.textStorage.attribute(.font, at: bold, effectiveRange: nil) as? UIFont)
+        XCTAssertEqual(font.pointSize, 24); XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.traitBold))
+        parent.textSize = 16; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.textStorage.string, original); XCTAssertEqual(view.selectedRange, selection)
+        XCTAssertEqual((view.textStorage.attribute(.font, at: bold, effectiveRange: nil) as? UIFont)?.pointSize, 16, "Restyling cannot compound the previous zoom")
+    }
+
+    func testLotSelectionRangesAndBatchActionsPreserveUnselectedRows() throws {
+        let heading = ParkingLotRow(heading: true, text: "Now")
+        let parent = ParkingLotRow(heading: false, text: "Parent", parentID: heading.id)
+        let child = ParkingLotRow(heading: false, text: "Child", parentID: parent.id)
+        let sibling = ParkingLotRow(heading: false, text: "Sibling", parentID: heading.id)
+        let doc = ParkingLotDocument(revision: 4, rows: [heading, parent, child, sibling])
+        XCTAssertEqual(LotMenuSelection.range(from: sibling.id, to: parent.id, visible: doc.rows.map(\.id)), [parent.id, child.id, sibling.id])
+        XCTAssertEqual(LotMenuSelection(ids: [parent.id, child.id, sibling.id]).roots(in: doc.rows).map(\.id), [parent.id, sibling.id], "Moving selected parents never moves a selected descendant twice")
+        let ops = [LotOperation(kind: .setDone, rowID: parent.id, done: true), LotOperation(kind: .setDone, rowID: sibling.id, done: true), LotOperation(kind: .setTag, rowID: parent.id, tag: .red)]
+        let changed = try LotMenuSelection.applying(ops, to: doc, author: "Tester")
+        XCTAssertTrue(changed.rows[1].isDone); XCTAssertTrue(changed.rows[3].isDone); XCTAssertEqual(changed.rows[1].tag, .red)
+        XCTAssertEqual(changed.rows[0], heading); XCTAssertEqual(changed.rows[2], child, "Done and color affect selected entries only, not their unselected children")
+        let atomic = try LotOperation(kind: .replaceRows, rows: changed.rows).applying(to: doc, author: "Tester")
+        XCTAssertEqual(atomic.revision, 5, "One batch is one home revision and one Undo action")
+        XCTAssertThrowsError(try LotMenuSelection.applying(ops + [LotOperation(kind: .setDone, rowID: UUID(), done: true)], to: doc, author: "Tester"))
+        XCTAssertFalse(doc.rows[1].isDone, "A failed batch leaves the source intact")
     }
 }
