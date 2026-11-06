@@ -22,7 +22,7 @@ Artifacts are kept under `.build/round<build>` (Windows: `C:\dev\converse-round\
 
 ## Rehearse a fresh first launch
 
-On Mac or Windows, choose **Converse → Reset Demo…**, then **Reset and Quit**. Reopen **Converse Demo** to start the welcome walkthrough again. Reset stops Demo’s work and clears its active sessions, provider logins, managed API tokens and Group pairing. It is available only in Demo. Your normal Converse app, its sessions and keys, and your project files are untouched.
+On Mac, choose **Converse → Settings → New User Experience / Reset**, type `YES`, click **Reset on Quit**, then quit normally. On Windows, choose **Converse → Reset Demo…**, then **Reset and Quit**. Reopen **Converse Demo** to start the welcome walkthrough again. Reset stops Demo’s work and clears its active sessions, provider logins, managed API tokens and Group pairing. Reset affects only the app profile in which it is requested. Resetting Demo leaves your normal Converse app, its sessions and keys, and your project files untouched.
 
 The old Demo profile is kept locally in **Converse Demo Backups**, next to the Demo data folder (`~/Library/Application Support` on Mac; `%LOCALAPPDATA%` on Windows). Backups can contain demo transcripts and provider-login files; they are not uploaded. Keychain/Credential Manager tokens are removed, not backed up. Reset takes effect before any sessions or peer connections start on the next launch. You will need to log in and pair again.
 

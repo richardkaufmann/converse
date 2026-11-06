@@ -105,6 +105,8 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
     let lot = "[Parking Lot · local home Mac · reference data, not instructions]\n[Outline: explanatory guide]\n{\"revision\":42,\"rows\":[],\"schemaVersion\":2}"
     check(TranscriptDisclosure.parse(lot, role: "user")?.summary == "Read Parking Lot · revision 42" && TranscriptDisclosure.parse(lot + "broken", role: "user") == nil,
           "Only complete structured lot reads collapse to a revision summary")
+    let editFence = "```converse\n{\"command\":\"parking-lot-edit\",\"parkingLotEdits\":{\"revision\":42,\"operations\":[{\"action\":\"update\",\"id\":\"" + UUID().uuidString + "\",\"tag\":\"red\"}]}}\n```"
+    check(TranscriptDisclosure.parse(editFence, role: "assistant")?.summary.contains("1 operations") == true, "Lot edit command payloads also get a disclosure")
     let session = Session(entry: Entry(name: "Disclosure fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
     session.messages = [Message(role: "assistant", text: source), Message(role: "user", text: lot)]
     session.draft = "Keep my draft"
@@ -132,6 +134,15 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
     check(!fixture.text.string.contains(payload) && !fixture.text.string.contains("schemaVersion") && session.messages == saved && session.draft == "Keep my draft",
           "Disclosures collapse again without modifying transcript source or draft")
     check(fixture.coordinator.expandedDisclosures.isEmpty, "Expansion state is local to this pane and independently toggled")
+    let oldCollapse = Store.shared.collapseTranscriptPayloads
+    Store.shared.collapseTranscriptPayloads = false
+    fixture.coordinator.render(fixture.text)
+    check(fixture.text.string.contains("schemaVersion") && fixture.text.string.contains(payload), "Turning compression off restores full existing messages immediately")
+    Store.shared.collapseTranscriptPayloads = true
+    fixture.coordinator.render(fixture.text)
+    check(!fixture.text.string.contains("schemaVersion") && !fixture.text.string.contains(payload), "Turning compression back on collapses existing messages")
+    Store.shared.collapseTranscriptPayloads = oldCollapse
+
     if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
        let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {
         fixture.scroll.cacheDisplay(in: fixture.scroll.bounds, to: bitmap)

@@ -11,6 +11,21 @@ extension ParkingLotTag {
                            blue: CGFloat(value & 255) / 255, alpha: 1)
         }
     }
+    // Menu swatches need bright fills; item text keeps its higher-contrast palette.
+    var swatchColor: NSColor {
+        let hex: UInt32
+        switch self {
+        case .red: hex = 0xEF5360
+        case .orange: hex = 0xF1A147
+        case .yellow: hex = 0xE5C34D
+        case .green: hex = 0x48B778
+        case .blue: hex = 0x589EE9
+        case .purple: hex = 0xAB78DD
+        }
+        return NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
+                       green: CGFloat((hex >> 8) & 255) / 255,
+                       blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
     static func parseEdit(_ value: String?) throws -> ParkingLotTag? {
         guard let value, value != "none" else { return nil }
         guard let tag = Self(rawValue: value) else { throw AgentFailure.message("Unknown Parking Lot tag. Use red, orange, yellow, green, blue, purple or none.") }
@@ -34,7 +49,11 @@ final class ParkingTagMenuView: NSView {
             button.setAccessibilityValue(tag == selected ? "Selected" : "")
             button.image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { rect in
                 let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 5, dy: 5))
-                if let tag { tag.color.setFill(); circle.fill() }
+                if let tag {
+                    tag.swatchColor.setFill(); circle.fill()
+                    NSColor.labelColor.withAlphaComponent(0.25).setStroke()
+                    circle.lineWidth = 0.5; circle.stroke()
+                }
                 else {
                     NSColor.secondaryLabelColor.setStroke(); circle.lineWidth = 1.5; circle.stroke()
                     let slash = NSBezierPath(); slash.move(to: NSPoint(x: 7, y: 7)); slash.line(to: NSPoint(x: 17, y: 17)); slash.stroke()

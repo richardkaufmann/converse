@@ -82,6 +82,7 @@ struct SavedSession: Codable {
     var teachingBannerDismissed: Int? = nil
     // This pane's text size; nil follows the global default.
     var textSize: Double? = nil
+    var transcriptLimits: TranscriptLimits? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -155,6 +156,7 @@ final class Session: ObservableObject, Identifiable {
     @Published var switchboardEnabled = false
     @Published var switchboardTeachingVersion: Int? = nil
     @Published var teachingBannerDismissed: Int? = nil
+    @Published var transcriptLimits = TranscriptLimits()
     @Published var textSize: Double? = nil
     var switchboardHandled: [UUID] = []
     @Published var switchboardObligations: [SwitchboardObligation] = []
@@ -268,6 +270,7 @@ final class Session: ObservableObject, Identifiable {
         switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
         switchboardTeachingVersion = saved.switchboardTeachingVersion ?? (saved.switchboardEnabled == true ? 1 : nil)
         teachingBannerDismissed = saved.teachingBannerDismissed; textSize = saved.textSize
+        transcriptLimits = saved.transcriptLimits ?? TranscriptLimits()
         switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
         switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
@@ -290,7 +293,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize, transcriptLimits: transcriptLimits) }
 }
 /// Writes archives off the main thread: one serial queue, newest snapshot per
 /// folder wins, at most one background write per `minimumInterval`; checked
@@ -367,6 +370,7 @@ final class Store: ObservableObject {
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
     @Published var setupCompleted = false
     // Session panes without their own size use this (View ▸ Bigger / Smaller).
+    @Published var collapseTranscriptPayloads = UserDefaults.standard.object(forKey: "collapseTranscriptPayloads") as? Bool ?? true { didSet { UserDefaults.standard.set(collapseTranscriptPayloads, forKey: "collapseTranscriptPayloads"); sessions.forEach { $0.objectWillChange.send() } } }
     @Published var paneTextSize = PaneTextSize.standard
     @Published var accounts: [AccountProfile] = []
     @Published var entries: [Entry] = []
@@ -2437,6 +2441,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var messageStarts: [UUID: Int] = [:]
         var expandedDisclosures: Set<UUID> = []
         private var disclosureNeedsRender = false
+        private var renderedCollapse: Bool?
+        private var disclosureCache: [UUID: (String, TranscriptDisclosure?)] = [:]
         var historyEnd = 0
         private(set) var historyBuildCount = 0
         /// Renders into a text view outside any window after its first render.
@@ -2581,7 +2587,9 @@ struct ScrollingConversation: NSViewRepresentable {
             let previous = renderedMessages
             let firstRender = previous == nil
             if !firstRender && text.window == nil { Self.detachedRenders += 1 }
-            let disclosureChanged = disclosureNeedsRender
+            let collapse = Store.shared.collapseTranscriptPayloads
+            let disclosureChanged = disclosureNeedsRender || (renderedCollapse != nil && renderedCollapse != collapse)
+            renderedCollapse = collapse
             disclosureNeedsRender = false
             var historyChanged = firstRender || disclosureChanged
             let restyle = !firstRender && renderedFontSize != text.fontSize
@@ -2622,6 +2630,8 @@ struct ScrollingConversation: NSViewRepresentable {
                 return
             }
             let messages = renderedMessages ?? []
+            let currentIDs = Set(messages.map(\.id))
+            disclosureCache = disclosureCache.filter { currentIDs.contains($0.key) }
             var common = 0
             if let previous {
                 while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
@@ -2646,8 +2656,16 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             @discardableResult func image(_ path: String) -> Bool {
                 guard let attachment = preparedImage(path) else { return false }
-                if document.length > 0 && !document.string.hasSuffix("\n") { append("\n") }
-                document.append(NSAttributedString(attachment: attachment)); return true
+                if document.length > 0 && !document.string.hasSuffix("\n") {
+                    let precedingStyle = document.attribute(.paragraphStyle, at: document.length - 1, effectiveRange: nil) as? NSParagraphStyle ?? paragraph
+                    append("\n", [.paragraphStyle: precedingStyle])
+                }
+                let imageStyle = paragraph.mutableCopy() as! NSMutableParagraphStyle
+                imageStyle.paragraphSpacingBefore = 8
+                imageStyle.paragraphSpacing = 8
+                let preview = NSMutableAttributedString(attachment: attachment)
+                preview.addAttributes(base.merging([.paragraphStyle: imageStyle]) { _, new in new }, range: NSRange(location: 0, length: preview.length))
+                document.append(preview); return true
             }
             text.messageLabels = []
             var messageNumber = max(0, session.messageNumberOffset)
@@ -2660,8 +2678,15 @@ struct ScrollingConversation: NSViewRepresentable {
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let body: NSMutableAttributedString
-                let disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveSessionName)
-                let trafficSummary = TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
+                let disclosure: TranscriptDisclosure?
+                if !collapse { disclosure = nil }
+                else if message.role != "assistant", let cached = disclosureCache[message.id], cached.0 == visible { disclosure = cached.1 }
+                else {
+                    disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveSessionName)
+                    // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
+                    if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
+                }
+                let trafficSummary = !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
                 if let disclosure {
                     body = disclosure.rendered(id: message.id, expanded: expandedDisclosures.contains(message.id), fontSize: text.fontSize, base: base)
                     markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
@@ -2740,7 +2765,11 @@ struct ScrollingConversation: NSViewRepresentable {
             historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
-                if image(path) { text.draftImages.append((document.length - 1, path)); append("\n") }
+                if image(path) {
+                    text.draftImages.append((document.length - 1, path))
+                    let imageStyle = document.attribute(.paragraphStyle, at: document.length - 1, effectiveRange: nil) as? NSParagraphStyle ?? paragraph
+                    append("\n", [.paragraphStyle: imageStyle])
+                }
             }
             text.inputStart = document.length
             let draftStyle: [NSAttributedString.Key: Any] = [.foregroundColor: TranscriptPalette.draft(session.draft)]
@@ -2972,7 +3001,7 @@ struct RootView: View {
                     Button("New window", systemImage: "macwindow.badge.plus") { AppDelegate.shared.newWindow() }
                     Spacer()
                     Text("\(workspace.names.count) window\(workspace.names.count == 1 ? "" : "s")").font(.caption)
-                    Button { state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
+                    Button { state.settingsCategory = .general; state.settings = true } label: { Image(systemName: "slider.horizontal.3") }.help("Settings")
                 }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.bottom, 6)
             }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -2993,19 +3022,18 @@ struct RootView: View {
             .help(state.sidebarCollapsed ? "Show conversations at the previous sidebar width" : "Minimize the conversation sidebar")
     }
 }
-struct SettingsView: View {
+struct ModelsSettingsView: View {
     @ObservedObject var store = Store.shared
     @ObservedObject var substitutions = TextSubstitutions.shared
     @ObservedObject var state: WindowState
     @StateObject private var flow = SettingsFlow()
-    @Environment(\.dismiss) var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Models & sessions").font(.title2.bold())
             Toggle("Text substitutions while typing", isOn: Binding(get: { substitutions.enabled }, set: { substitutions.changeFromUI($0) }))
                 .help("Turn :-) into 🙂 and --> into → after a space. Undo restores the literal text. Pasted text and Markdown code stay unchanged.")
             Text("Choose a model, create a session, then bind its login. Existing conversations keep their history and login.").font(.callout).foregroundStyle(.secondary)
-            ScrollView {
+            Group {
                 VStack(alignment: .leading, spacing: 20) {
                     ForEach(store.assistantFamilies, id: \.self) { engine in
                         VStack(alignment: .leading, spacing: 10) {
@@ -3052,10 +3080,8 @@ struct SettingsView: View {
                         Button(entry.name) { store.entries.append(entry); store.save() }
                     }
                 }
-                Spacer()
-                Button("Done") { store.save(); dismiss() }.keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 600, height: 580).onDisappear { store.save() }
+        }.onDisappear { store.save() }
             .sheet(item: $flow.request) { SessionSetupSheet(request: $0, state: state) }
     }
 }
@@ -3148,6 +3174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Store.shared.firstRun.linkLot(home: DeviceSyncService.shared.localDeviceID, library: .shared)
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
+        if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
+            Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Store.shared.trimIdleTranscripts() }
+        }
         if ProcessInfo.processInfo.environment["CONVERSE_QA_GROUPS"] == "1", ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, let state = windows.first?.1 {
             do {
                 let devices = DeviceSyncService.shared
@@ -3186,9 +3215,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let menu = NSMenu(); let app = NSMenuItem(); menu.addItem(app); let sub = NSMenu(); app.submenu = sub
         sub.addItem(withTitle: "About Converse", action: #selector(about), keyEquivalent: "")
         sub.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
-        sub.addItem(withTitle: "Setup…", action: #selector(showSetup), keyEquivalent: "")
-        if DemoReset.enabled { sub.addItem(withTitle: DemoReset.testName == nil ? "Reset Demo…" : "Reset TEST…", action: #selector(resetDemo), keyEquivalent: "") }
-        sub.addItem(withTitle: "Jolly…", action: #selector(showJolly), keyEquivalent: "")
         sub.addItem(withTitle: "New Agent…", action: #selector(newAgent), keyEquivalent: ""); sub.addItem(withTitle: "Converse Groups…", action: #selector(showDeviceConnect), keyEquivalent: ""); sub.addItem(.separator()); sub.addItem(withTitle: "Quit Converse", action: #selector(quitConverse(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "File"; menu.addItem(file); let f = NSMenu(title: "File"); file.submenu = f
         let new = NSMenuItem(title: "New", action: nil, keyEquivalent: ""); let choices = NSMenu(title: "New"); new.submenu = choices; f.addItem(new)
@@ -3247,9 +3273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc func showSettings() {
-        guard Store.shared.setupCompleted else { showSetup(); return }
         if windows.isEmpty { newWindow() }
-        (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settings = true
+        if let state = (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1 { state.settingsCategory = .general; state.settings = true }
     }
     @objc func showSetup() {
         if windows.isEmpty { newWindow() }
@@ -3257,7 +3282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
-    @objc func showJolly() { guard Store.shared.setupCompleted else { helpController.show(topic: "jolly-mac", query: ""); return }; MainActor.assumeIsolated { jollyController.show() } }
+    @objc func showJolly() { showSettings(); (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settingsCategory = .jolly }
     @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
@@ -3380,6 +3405,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow() }; return true }
     func applicationWillTerminate(_ notification: Notification) {
         Store.shared.save(); ArchiveWriter.shared.flushAll()
+        if ProfileResetState.shared.scheduled {
+            do { try ProfileReset.request(folder: Store.shared.folder, confirmation: "YES") }
+            catch { NSLog("Reset could not be scheduled: %@", error.localizedDescription) }
+        }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitReady { return .terminateNow }
@@ -3615,6 +3644,7 @@ func selfTest() {
     lotTransportSelfTests(check)
     lotPortableExportSelfTests(check)
     conversationLayoutSelfTests(check)
+    settingsSelfTests(check)
     sessionSettingsMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
@@ -3998,6 +4028,11 @@ func selfTest() {
         check(imageEditor.imageToolsItem(at: range.location, hasMetaKey: false)?.representedObject is NSImage, "Image tools target the clicked historical or draft attachment")
     }
     check(renderedImageLocations.count == 3 && imageEditor.imageToolsItem(at: imageEditor.inputStart) == nil, "Image menu is present for history and both draft images, never plain draft text")
+    if let path = ProcessInfo.processInfo.environment["CONVERSE_IMAGE_SPACING_PREVIEW"],
+       let bitmap = imageEditor.bitmapImageRepForCachingDisplay(in: imageEditor.bounds) {
+        imageEditor.cacheDisplay(in: imageEditor.bounds, to: bitmap)
+        try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    }
     if let location = renderedImageLocations.first {
         let menu = NSMenu()
         let unavailable = imageEditor.imageToolsItem(at: location, hasMetaKey: false)!
@@ -4207,6 +4242,15 @@ if CommandLine.arguments.contains("--provider-self-test") {
     providerSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }
     print("All provider checks passed"); exit(0)
 }
+if CommandLine.arguments.contains("--settings-preview") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil,
+          let directory = ProcessInfo.processInfo.environment["CONVERSE_SETTINGS_PREVIEW_DIR"] else { exit(2) }
+    do { try MainActor.assumeIsolated { try settingsPreview(directory: URL(fileURLWithPath: directory)) } } catch { fputs(error.localizedDescription, stderr); exit(1) }; exit(0)
+}
+if CommandLine.arguments.contains("--settings-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    settingsSelfTests { passed, label in print((passed ? "PASS: " : "FAIL: ") + label); if !passed { exit(1) } }; exit(0)
+}
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
 if let option = CommandLine.arguments.firstIndex(of: "--lot-disclosure-preview") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, CommandLine.arguments.indices.contains(option + 1) else { exit(2) }
@@ -4232,6 +4276,10 @@ if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == tr
         exit(1) // Never open a half-reset profile.
     }
 }
+do {
+    let folder = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Converse")
+    if try ProfileReset.consume(folder: folder, clearCredentials: ProfileReset.clearCredentials) != nil, let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+} catch { NSAlert(error: error).runModal(); exit(1) }
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate

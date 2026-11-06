@@ -107,6 +107,7 @@ final class Workspace: ObservableObject {
 final class WindowState: ObservableObject {
     let id: UUID
     let workspace: Workspace
+    @Published var settingsCategory: SettingsCategory = .general
     @Published var settings = false
     @Published var deviceConnect = false
     @Published var setup = false
