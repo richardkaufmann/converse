@@ -488,7 +488,8 @@ import Foundation
     runtime.ingestFileEvents(store: store)
     check(stimulated.pending.isEmpty && starts == 1, "Repeated external event IDs do not enqueue or start duplicate runs")
     store.enqueueSwitchboard(stimulated, text: "Another agent asks for work", hop: 1)
-    store.runNext(stimulated)
+    let enqueued = Date().addingTimeInterval(5)
+    while starts < 2 && Date() < enqueued { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     check(!stimulated.queuePaused && stimulated.pending.isEmpty && starts == 2 && stimulated.agent?.turnLimit == 1, "A separate incoming request receives a fresh activation without consuming future loop checks")
     stimulated.agent?.fileTriggers = false; stimulated.pending = []
     let expired = store.createAgent(title: "Expired tick fixture")
@@ -750,26 +751,154 @@ func archiveWriterSelfTests(_ check: (Bool, String) -> Void) {
     check(onDisk == "checked", "saveChecked writes immediately and in order")
 }
 
+/// Holds or fails archive writes for one folder (ArchiveWriter.beforeWrite).
+final class ArchiveTestGate {
+    private let condition = NSCondition()
+    private var held = false, failing = false
+    let key: String
+    init(key: String) { self.key = key }
+    func hold() { condition.lock(); held = true; condition.unlock() }
+    func release() { condition.lock(); held = false; condition.broadcast(); condition.unlock() }
+    func fail(_ value: Bool) { condition.lock(); failing = value; condition.unlock() }
+    func pass(_ key: String) throws {
+        guard key == self.key else { return }
+        condition.lock(); defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(10)
+        while held && condition.wait(until: deadline) {}
+        if failing { throw NSError(domain: "Converse", code: 28, userInfo: [NSLocalizedDescriptionKey: "Simulated full disk"]) }
+    }
+}
+
 func durableEnqueueSelfTests(_ check: (Bool, String) -> Void) {
-    // A switchboard message is on disk before its turn starts, even when
-    // background saves are spaced out.
+    func pump(_ seconds: TimeInterval = 5, until done: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    // flushThen reports whether the required snapshot reached disk.
+    let key = "flush-then-" + UUID().uuidString
+    var reported: [Bool] = []
+    ArchiveWriter.generation += 1
+    ArchiveWriter.shared.submit(key, generation: ArchiveWriter.generation) { throw NSError(domain: "Converse", code: 28) }
+    ArchiveWriter.shared.flushThen(key, atLeast: ArchiveWriter.generation) { reported.append($0) }
+    ArchiveWriter.generation += 1
+    ArchiveWriter.shared.submit(key, generation: ArchiveWriter.generation) {}
+    ArchiveWriter.shared.flushThen(key, atLeast: ArchiveWriter.generation) { reported.append($0) }
+    pump { reported.count == 2 }
+    check(reported == [false, true], "flushThen reports a failed write as not durable and a written snapshot as durable")
+
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("durable-enqueue-" + UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
     let store = Store(folder: root)
-    let session = store.create(Entry(name: "Shell", command: "/bin/cat", directory: "~", engine: "claude"))
+    let file = root.appendingPathComponent("sessions.json")
+    let session = store.createAgent(title: "Durable recipient")
+    // A large transcript, like a long-running session.
+    session.messages = (0..<4000).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: String(repeating: "Streaming output line \($0). ", count: 40)) }
+    var starts: [(text: String, onDisk: Bool)] = []
+    store.startAgentRun = { s, _ in
+        let text = s.messages.last { $0.role == "user" }?.text ?? ""
+        let disk = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        starts.append((text, disk.contains(text))); s.busy = true
+    }
     store.save(); ArchiveWriter.shared.flushAll()
     let spacing = ArchiveWriter.minimumInterval; ArchiveWriter.minimumInterval = 30
-    defer { ArchiveWriter.minimumInterval = spacing }
-    session.queuePaused = true   // keep the provider from actually running in the test
-    store.enqueueSwitchboard(session, text: "durable-canary-message")
-    let deadline = Date().addingTimeInterval(5)
-    var onDisk = ""
-    while Date() < deadline {
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        onDisk = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
-        if onDisk.contains("durable-canary-message") { break }
+    let gate = ArchiveTestGate(key: root.path)
+    ArchiveWriter.beforeWrite = { try gate.pass($0) }
+    defer {
+        gate.release(); gate.fail(false); ArchiveWriter.shared.flushAll()
+        ArchiveWriter.beforeWrite = nil; ArchiveWriter.minimumInterval = spacing
+        store.startAgentRun = nil; try? FileManager.default.removeItem(at: root)
     }
-    check(onDisk.contains("durable-canary-message"), "A switchboard message is written to disk before its turn can start, without waiting for the one-second spacing")
+    func reset() { pump(0.1); session.busy = false; session.pending = []; session.queuePaused = false; session.interrupted = false; session.resumeAfterInterrupt = false; starts = [] }
+
+    // (d) Normal path: enqueue returns without waiting for the write; the
+    // prompt is on disk strictly before its turn starts.
+    gate.hold()
+    let began = ProcessInfo.processInfo.systemUptime
+    store.enqueueSwitchboard(session, text: "durable-canary-normal")
+    let elapsed = ProcessInfo.processInfo.systemUptime - began
+    check(elapsed < 0.2, "Enqueueing a switchboard message returns without waiting for the archive write (\(Int(elapsed * 1000)) ms)")
+    pump(0.3)
+    check(starts.isEmpty && session.pending.count == 1, "A switchboard message does not start while its archive write is held")
+    gate.release()
+    pump { !starts.isEmpty }
+    check(starts.map(\.text) == ["durable-canary-normal"] && starts.allSatisfy(\.onDisk), "A switchboard message is on disk before its turn starts")
+    reset()
+
+    // (b) An already-busy turn finishes while the write is held: runNext must
+    // not consume the prompt until it is on disk.
+    session.busy = true
+    gate.hold()
+    store.enqueueSwitchboard(session, text: "durable-canary-busy")
+    pump(0.2)
+    session.busy = false; store.finishQueue(session, success: true)
+    pump(0.3)
+    check(starts.isEmpty && session.pending.first?.text == "durable-canary-busy", "A finishing turn's runNext does not consume a queued message that is still being written")
+    gate.release()
+    pump { !starts.isEmpty }
+    check(starts.map(\.text) == ["durable-canary-busy"] && starts.allSatisfy(\.onDisk), "The held message starts once its write completes, and it is on disk")
+    reset()
+
+    // Urgent: no interrupt before the message is durable.
+    session.busy = true
+    gate.hold()
+    store.enqueueSwitchboard(session, text: "durable-canary-urgent", urgent: true)
+    pump(0.3)
+    check(!session.interrupted, "An urgent message does not interrupt while its archive write is held")
+    gate.release()
+    pump { session.interrupted }
+    check(session.interrupted && session.resumeAfterInterrupt, "An urgent message interrupts once it is on disk")
+    reset()
+
+    // (a) A failed write never starts or interrupts; the queue pauses with a notice.
+    gate.fail(true)
+    store.enqueueSwitchboard(session, text: "durable-canary-failed")
+    pump { session.messages.last?.text == Store.undeliveredNotice }
+    pump(0.2)
+    check(starts.isEmpty && session.queuePaused && session.pending.first?.text == "durable-canary-failed" && session.messages.last?.text == Store.undeliveredNotice,
+          "A failed archive write keeps the message queued, starts nothing, pauses the queue and says why")
+    session.busy = true; session.queuePaused = false
+    store.enqueueSwitchboard(session, text: "durable-canary-failed-urgent", urgent: true)
+    pump { session.queuePaused }
+    pump(0.2)
+    check(!session.interrupted && starts.isEmpty, "A failed archive write never interrupts for an urgent message")
+    session.busy = false
+    gate.fail(false)
+    store.toggleQueue(session)
+    pump { starts.count == 1 }
+    session.busy = false; store.runNext(session)
+    pump { starts.count == 2 }
+    check(starts.map(\.text) == ["durable-canary-failed-urgent", "durable-canary-failed"] && starts.allSatisfy(\.onDisk) && session.awaitingDurability.isEmpty && session.durabilityFailed.isEmpty,
+          "Resume queue writes failed messages again and starts them once they are on disk")
+    reset()
+
+    // (c) Stale callbacks start nothing.
+    gate.hold()
+    store.enqueueSwitchboard(session, text: "durable-canary-removed")
+    session.pending.removeAll()
+    gate.release()
+    pump { session.awaitingDurability.isEmpty }
+    pump(0.2)
+    check(starts.isEmpty && !session.queuePaused && session.messages.last?.text != Store.undeliveredNotice, "A message removed before its write completes starts nothing")
+    reset()
+    gate.hold()
+    store.enqueueSwitchboard(session, text: "durable-canary-paused")
+    store.toggleQueue(session)
+    gate.release()
+    pump { session.awaitingDurability.isEmpty }
+    pump(0.2)
+    check(starts.isEmpty && session.queuePaused && session.pending.count == 1, "A queue paused before the write completes stays paused")
+    store.toggleQueue(session)
+    pump { !starts.isEmpty }
+    check(starts.map(\.text) == ["durable-canary-paused"], "Resuming that queue starts the durable message")
+    reset()
+    let closed = store.createAgent(title: "Closed recipient")
+    gate.hold()
+    store.enqueueSwitchboard(closed, text: "durable-canary-closed")
+    store.sessions.removeAll { $0 === closed }
+    gate.fail(true)
+    gate.release()
+    pump { closed.awaitingDurability.isEmpty }
+    pump(0.2)
+    check(starts.isEmpty && !closed.busy && closed.messages.last?.text != Store.undeliveredNotice, "A session closed before its write completes starts nothing and adds no notice")
 }
 
 func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {

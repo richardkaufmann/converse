@@ -40,6 +40,8 @@ struct PendingPrompt: Codable, Identifiable {
     var id = UUID()
     var text: String
     var images: [String]
+    /// This prompt and, after Inject all, the prompts combined into it.
+    var durabilityIDs: Set<UUID> { Set([id] + (components ?? []).map(\.id)) }
 }
 // Applied after login-shell startup, consistently for turns, catalog queries and login.
 // Credentials stay in CLI stores; Converse only retains a label and directory.

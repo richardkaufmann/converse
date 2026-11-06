@@ -60,13 +60,39 @@ extension Store {
         else { s.pending.append(prompt) }
         // Persist the sender's handled ID and recipient's pending input together,
         // before any provider can start. Restart restores pending input paused.
-        // The write happens off the main thread; the turn starts once it's on disk.
-        save()
-        ArchiveWriter.shared.flushThen(folder.path) { [weak self, weak s] in
+        persistBeforeRunning(s, ids: [prompt.id], urgent: urgent)
+    }
+    static let undeliveredNotice = "Converse couldn't save this message, so it hasn't been delivered yet. Resume queue to retry."
+    /// Writes the queue off the main thread and holds these prompts until the
+    /// snapshot containing them is on disk: runNext won't consume them
+    /// meanwhile. Then it starts (or, urgent, interrupts) as enqueueing did,
+    /// unless the prompt left the queue, the session closed or the queue was
+    /// paused. A failed write never starts: the queue pauses with a notice.
+    func persistBeforeRunning(_ s: Session, ids: Set<UUID>, urgent: Bool = false) {
+        s.awaitingDurability.formUnion(ids)
+        let generation = save()
+        ArchiveWriter.shared.flushThen(folder.path, atLeast: generation) { [weak self, weak s] durable in
             guard let self, let s else { return }
+            s.awaitingDurability.subtract(ids)
+            guard self.sessions.contains(where: { $0 === s }), s.pending.contains(where: { !$0.durabilityIDs.isDisjoint(with: ids) }) else { return }
+            guard durable else {
+                s.durabilityFailed.formUnion(ids); s.queuePaused = true
+                s.messages.append(Message(role: "notice", text: Store.undeliveredNotice))
+                if s.injectionTargetID != nil { s.injectionNotice = "Injection paused. Your prompt remains queued." }
+                self.save(); return
+            }
+            guard !s.queuePaused, !self.applicationQuitting else { return }
             if urgent && s.busy { s.resumeAfterInterrupt = true; self.interruptProcess(s) }
             else if !s.busy { self.runNext(s) }
         }
+    }
+    /// False while the head of the queue is still being written to disk. A
+    /// head whose write failed is written again (Resume queue retries it).
+    func headIsDurable(_ s: Session) -> Bool {
+        guard let ids = s.pending.first?.durabilityIDs, s.awaitingDurability.isDisjoint(with: ids) else { return s.pending.isEmpty }
+        let failed = s.durabilityFailed.intersection(ids)
+        guard failed.isEmpty else { s.durabilityFailed.subtract(failed); persistBeforeRunning(s, ids: failed); return false }
+        return true
     }
     func teachSwitchboard(_ s: Session) {
         s.switchboardEnabled = true; s.switchboardTeachingVersion = SwitchboardTeaching.version

@@ -165,6 +165,11 @@ final class Session: ObservableObject, Identifiable {
     var switchboardHop = 0
     var interrupted = false
     var resumeAfterInterrupt = false
+    // Queued prompt IDs whose archive write is still in flight, or failed
+    // (Resume queue writes them again). runNext holds either at the head of
+    // the queue. Transient: a restart restores pending input paused anyway.
+    var awaitingDurability: Set<UUID> = []
+    var durabilityFailed: Set<UUID> = []
     // An assistant response landed while this session sat in no local pane.
     // Transient presentation state: never archived, cleared on take (1/2/3).
     @Published var unseenResponse = false
@@ -296,6 +301,9 @@ final class ArchiveWriter {
     /// One counter for every Store (main thread only), so a newer Store's
     /// snapshot is never mistaken for an older one of the same folder.
     static var generation = 0
+    /// Self-tests only: runs on the archive queue before each write, to fail
+    /// it (throw) or hold the queue (wait).
+    static var beforeWrite: ((String) throws -> Void)?
     private let queue = DispatchQueue(label: "local.richard.Converse.archive", qos: .userInitiated)
     private struct Job { let generation: Int; let write: () throws -> Void }
     private var pending: [String: Job] = [:], scheduled: Set<String> = [], lastWrite: [String: TimeInterval] = [:], written: [String: Int] = [:]
@@ -318,10 +326,16 @@ final class ArchiveWriter {
         if let failure { throw failure }
     }
     /// Writes the folder's pending snapshot on the archive queue right away
-    /// (skipping the one-second spacing), then calls `then` on the main thread.
-    /// For work that must not start before its state is on disk.
-    func flushThen(_ key: String, then: @escaping () -> Void) {
-        queue.async { self.runPending(key); DispatchQueue.main.async(execute: then) }
+    /// (skipping the one-second spacing), then tells `then`, on the main
+    /// thread, whether the snapshot of `generation` or a newer one is on disk.
+    /// Any failed write leaves it false. For work that must not start before
+    /// its state is on disk.
+    func flushThen(_ key: String, atLeast generation: Int, then: @escaping (Bool) -> Void) {
+        queue.async {
+            self.runPending(key)
+            let durable = (self.written[key] ?? 0) >= generation
+            DispatchQueue.main.async { then(durable) }
+        }
     }
     /// Writes a folder's pending snapshot now (reload, tests).
     func flush(_ key: String) { queue.sync { runPending(key) } }
@@ -333,6 +347,7 @@ final class ArchiveWriter {
     }
     private func run(_ key: String, _ job: Job) throws {
         guard job.generation > (written[key] ?? 0) else { return }
+        try Self.beforeWrite?(key)
         try job.write()
         written[key] = job.generation; lastWrite[key] = ProcessInfo.processInfo.systemUptime
     }
@@ -479,9 +494,11 @@ final class Store: ObservableObject {
     /// and written in the background, at most once per ArchiveWriter.minimumInterval.
     /// (Rewriting a 16 MB archive on the main thread every couple of seconds
     /// while sessions streamed made typing stutter; 2026-11-05.)
-    func save(file: String = #fileID, line: Int = #line, function: String = #function) {
+    /// Returns the snapshot's generation, for ArchiveWriter.flushThen.
+    @discardableResult func save(file: String = #fileID, line: Int = #line, function: String = #function) -> Int {
         let job = archiveWrite(source: "\(file):\(line) \(function)")
         ArchiveWriter.shared.submit(folder.path, generation: job.generation, write: job.write)
+        return job.generation
     }
     func create(_ entry: Entry, persist: Bool = true) -> Session {
         var entry = entry
@@ -639,13 +656,13 @@ final class Store: ObservableObject {
         // A tick queued just before a window closes must not run after that
         // window (or after a changed restriction). Its persisted reservation is
         // retained conservatively; later human input is still allowed through.
-        while s.pending.first?.agentLoopTick == true,
+        while s.pending.first?.agentLoopTick == true, headIsDurable(s),
               (try? s.agent?.scheduleRule().permits(Date())) != true {
             s.pending.removeFirst()
             s.messages.append(Message(role: "notice", text: "Skipped a queued loop check outside its schedule. Its reserved turn remains counted; no catch-up run was started."))
             save()
         }
-        guard !s.pending.isEmpty else { return }
+        guard !s.pending.isEmpty, headIsDurable(s) else { return }
         if let next = s.pending.first, claudeLiveBlocks(s, images: next.images) {
             // Held until the live process exits; closing input lets it finish its tasks.
             s.claudeLive?.closeInput(); s.status = Store.claudeReadyStatus(s); return
