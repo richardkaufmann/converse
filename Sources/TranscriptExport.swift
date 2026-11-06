@@ -48,9 +48,28 @@ struct ExportSession: Identifiable {
         messages = []; remoteID = row.globalID; isParkingLot = row.engine == "parking"; engine = row.engine; isAgent = row.engine == "agent"
     }
     /// A copy with titles, text and lot rows scrubbed; images dropped unless included.
-    func scrubbed(_ scrubber: inout ExportScrubber, includeImages: Bool) -> ExportSession {
+    func scrubbed(_ scrubber: inout ExportScrubber, includeImages: Bool, structuredLots: Bool = false) -> ExportSession {
         var copy = self
         copy.title = scrubber.scrub(title); copy.provider = scrubber.scrub(provider)
+        if structuredLots, var document = lotDocument {
+            document.rows = document.rows.map { row in
+                var clean = row
+                clean.text = scrubber.scrub(row.text)
+                clean.editedBy = row.editedBy.map { scrubber.scrub($0) }
+                clean.notes = row.notes?.map { note in
+                    var note = note; note.author = scrubber.scrub(note.author); note.text = scrubber.scrub(note.text); return note
+                }
+                if !includeImages { clean.images = nil }
+                return clean
+            }
+            copy.lotDocument = document
+            // These messages only select the lot; the HTML renderer uses the
+            // sanitized document, never the original flattened message text.
+            copy.messages = messages.map { message in
+                var clean = message; clean.text = "Parking Lot"; clean.images = []; return clean
+            }
+            return copy
+        }
         copy.messages = messages.map { message in
             var clean = message; clean.text = scrubber.scrub(message.text); if !includeImages { clean.images = [] }; return clean
         }
@@ -288,9 +307,9 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
                         attachmentRoot: Store.shared.folder.appendingPathComponent("Attachments"), app: .current)
                     document = prepared.data; scrubber = prepared.scrubber
                 case .html, .text:
-                    if var active = scrubber { sessions = sessions.map { $0.scrubbed(&active, includeImages: withImages) }; scrubber = active }
+                    if var active = scrubber { sessions = sessions.map { $0.scrubbed(&active, includeImages: withImages, structuredLots: selection.format == .html) }; scrubber = active }
                     let text = selection.format == .html
-                        ? try TranscriptExport.html(sessions: sessions, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, imageData: { images[$0] ?? Self.imageData($0) })
+                        ? try TranscriptExport.html(sessions: sessions, order: selection.order, content: selection.content, lineNumbers: selection.lineNumbers, includeImages: withImages, imageData: { images[$0] ?? Self.imageData($0) })
                         : try TranscriptExport.text(sessions: sessions, order: selection.order, content: selection.content)
                     document = Data(text.utf8)
                 }
@@ -537,15 +556,58 @@ enum TranscriptExport {
         }
         return result
     }
+    /// Render the stored tree directly. Comments stay inside their owner and
+    /// never become extra numbered transcript messages.
+    static func lotHTML(_ document: ParkingLotDocument, includeImages: Bool, imageData: (String) -> Data?) throws -> String {
+        let nodes = try ParkingLotTree.nodes(document.rows)
+        let children = Dictionary(grouping: document.rows.filter { !$0.heading }, by: { nodes[$0.id]?.parentID })
+        func content(_ row: ParkingLotRow) -> String {
+            let text = inline(row.text).replacingOccurrences(of: "\n", with: "<br>")
+            var html = "<div class=\"lot-text\(row.isDone ? " done" : "")\">" + text + "</div>"
+            for note in row.notes ?? [] {
+                html += "<p class=\"lot-comment\"><em>" + escape(note.author) + ": " + inline(note.text).replacingOccurrences(of: "\n", with: "<br>") + "</em></p>"
+            }
+            if includeImages {
+                for path in row.images ?? [] {
+                    if let data = imageData(path) { html += "<img alt=\"Attached image\" src=\"data:image/png;base64," + data.base64EncodedString() + "\">" }
+                    else { html += "<p class=\"unavailable\">Attached image unavailable</p>" }
+                }
+            }
+            return html
+        }
+        func list(_ parent: UUID?, depth: Int) -> String {
+            guard let rows = children[parent], !rows.isEmpty else { return "" }
+            let type = ["1", "a", "i"][(max(1, depth) - 1) % 3]
+            return "<ol type=\"" + type + "\">" + rows.map { row in
+                "<li>" + content(row) + list(row.id, depth: depth + 1) + "</li>"
+            }.joined() + "</ol>"
+        }
+        var html = "<section class=\"parking-lot\">" + list(nil, depth: 1)
+        for heading in document.rows where heading.heading {
+            html += "<section class=\"lot-section\"><h3 class=\"\(heading.isDone ? "done" : "")\">" + inline(heading.text) + "</h3>"
+            var details = heading; details.text = ""
+            html += content(details) + list(heading.id, depth: 1) + "</section>"
+        }
+        return html + "</section>"
+    }
     static func html(sessions: [ExportSession], order: TranscriptExportOrder, content: TranscriptExportContent,
-                     lineNumbers: Bool, imageData: (String) -> Data? = { _ in nil }) throws -> String {
+                     lineNumbers: Bool, includeImages: Bool = true, imageData: (String) -> Data? = { _ in nil }) throws -> String {
         let selected = items(sessions: sessions, order: order, content: content)
         guard !selected.isEmpty else { throw error("There are no submitted messages matching these options.") }
         let date = DateFormatter(); date.dateStyle = .medium; date.timeStyle = .medium; date.timeZone = .current
         var body = ""; var number = 1; var previousSession: UUID?
-        func numberCell() -> String { defer { number += 1 }; return lineNumbers ? "<span class=\"ln\">\(number)</span>" : "" }
+        var renderedLots: Set<UUID> = [], numbering = lineNumbers
+        func numberCell() -> String { guard numbering else { return "" }; defer { number += 1 }; return "<span class=\"ln\">\(number)</span>" }
         func row(_ html: String, extra: String = "") -> String { "<div class=\"line \(extra)\">" + numberCell() + "<div class=\"text\">" + (html.isEmpty ? "&#160;" : html) + "</div></div>" }
         for item in selected {
+            if item.session.isParkingLot, let document = item.session.lotDocument {
+                guard renderedLots.insert(item.session.id).inserted else { continue }
+                body += "<h2 class=\"session\">" + escape(item.session.title) + "</h2>"
+                body += try lotHTML(document, includeImages: includeImages, imageData: imageData)
+                previousSession = item.session.id
+                continue
+            }
+            numbering = lineNumbers && !item.session.isParkingLot
             if order == .sequential && previousSession != item.session.id {
                 body += "<h2 class=\"session\">" + escape(item.session.title) + "<small>" + escape(item.session.provider) + "</small></h2>"
                 previousSession = item.session.id
@@ -554,7 +616,7 @@ enum TranscriptExport {
             let prompt = message.role == "user"
             let time = message.createdAt.map { date.string(from: $0) } ?? "Time unavailable"
             let label = (prompt ? "Prompt" : "Response") + " · " + item.session.title
-            body += "<article class=\"message \(prompt ? "prompt" : "response")\">"
+            body += "<article class=\"\(item.session.isParkingLot ? "parking-message" : "message") \(prompt ? "prompt" : "response")\">"
             if !item.session.isParkingLot { body += "<header><b>" + escape(label) + "</b><time>" + escape(time) + "</time></header>" }
             let lines = Store.visibleText(message.text).components(separatedBy: "\n")
             var index = 0
@@ -589,19 +651,20 @@ enum TranscriptExport {
                 else { body += row(inline(text)) }
                 index += 1
             }
-            for path in message.images {
+            for path in includeImages ? message.images : [] {
                 if let data = imageData(path) { body += row("<img alt=\"Attached image\" src=\"data:image/png;base64," + data.base64EncodedString() + "\">") }
                 else { body += row("<span class=\"unavailable\">Attached image unavailable</span>") }
             }
             body += "</article>"
         }
-        let untimed = selected.contains { $0.message.createdAt == nil }
+        let untimed = selected.contains { !$0.session.isParkingLot && $0.message.createdAt == nil }
         let note = untimed ? " Older messages without recorded times retain their session order after timed messages when interleaved." : ""
         return """
         <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
         <title>Converse Transcripts</title><style>
         *{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#222;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:auto;padding:40px 24px}h1{font-size:30px;margin:0}.summary{font-size:13px;color:#657083;margin:4px 0 30px}.session{margin:32px 0 12px;font-size:23px}.session small{display:block;font-size:13px;font-weight:400;color:#657083}.message{margin:0 0 22px;background:white;border:1px solid #dde3eb;border-radius:10px;overflow:hidden;break-inside:auto}.message header{display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e6eaf0;font-size:12px;color:#526174}.line{display:grid;grid-template-columns:\(lineNumbers ? "48px minmax(0,1fr)" : "minmax(0,1fr)")}.ln{background:white;color:#797979;text-align:right;font:11px/25.6px ui-monospace,monospace;padding:0 10px;user-select:none;border-right:1px solid #e6eaf0}.prompt .ln{background:#e0eeff}.text{padding:0 16px;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}.literal .text{font-style:italic}.message header+.line{padding-top:10px}.message .line:last-child{padding-bottom:10px}h1,h2,h3,h4,h5,h6,blockquote{white-space:normal}h1,h2,h3,h4,h5,h6{line-height:1.3;margin:8px 0}blockquote{margin:4px 0;border-left:3px solid #adbed6;padding-left:12px;color:#526174}code{font:14px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;background:#f1f4f8;border-radius:3px}.code-line .text{background:#f1f4f8;overflow-wrap:normal;overflow-x:auto}a{color:#175eba;text-decoration:underline}.list-item{white-space:normal;display:flex;gap:8px}.bullet{min-width:20px}img{max-width:100%;max-height:720px;object-fit:contain;margin:8px 0}.table-scroll{overflow-x:auto;padding:8px 0}table{border-collapse:collapse;width:100%}th,td{border:1px solid #dce3ed;padding:7px 12px;text-align:left;vertical-align:top}th{background:#f1f5fa}td.ln{width:48px}.unavailable{color:#7e6470;font-size:13px}hr{border:0;border-top:1px solid #ccd5e2}@media print{body{background:white}main{max-width:none;padding:0}.message{border-radius:0}.message header{break-after:avoid}tr,img{break-inside:avoid}}
+        .parking-lot{padding:0 4px}.lot-section{margin:24px 0}.lot-section h3{color:#163e74;font-size:19px}.parking-lot ol{padding-left:28px;margin:6px 0}.parking-lot li{padding-left:4px;margin:8px 0}.lot-text{white-space:pre-wrap;overflow-wrap:anywhere}.lot-comment{margin:4px 0;color:#596575;font-size:14px;overflow-wrap:anywhere}.done{color:#777;text-decoration:line-through}.parking-message .line{grid-template-columns:minmax(0,1fr)}
         </style></head><body><main><h1>Converse Transcripts</h1><p class="summary">\(sessions.count) session\(sessions.count == 1 ? "" : "s") · \(escape(content.rawValue)) · \(escape(order.rawValue)) · Times: \(escape(TimeZone.current.identifier)).\(escape(note))</p>\(body)</main></body></html>
         """
     }
