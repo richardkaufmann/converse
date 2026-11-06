@@ -137,6 +137,11 @@ public sealed partial class MainWindow : Window
         // PairingConfirmation callback stays for headless tests only.)
         _store.Changed += Refresh;
         _devices.Changed += Refresh;
+        Closed += (_, _) => {
+            _windowClosed = true;
+            _store.Changed -= Refresh;
+            _devices.Changed -= Refresh;
+        };
         _devices.RemoteViewDisplaced += globalId => DispatcherQueue.TryEnqueue(() =>
         {
             if (_devices.RemoteLeases.ContainsKey(globalId)) return; // already taken again
@@ -344,8 +349,12 @@ public sealed partial class MainWindow : Window
     }
 
 
+    private volatile bool _windowClosed;
     private void Refresh()
     {
+        // Draft flushes and already-queued callbacks can arrive during teardown.
+        // They may save state, but must not access the closed WinUI Window.Content.
+        if (_windowClosed) return;
         if (!DispatcherQueue.HasThreadAccess)
         {
             DispatcherQueue.TryEnqueue(Refresh);
