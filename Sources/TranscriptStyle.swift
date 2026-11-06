@@ -1,4 +1,5 @@
 import Foundation
+#if os(macOS)
 import AppKit
 
 /// Presentation only. The original message stays in the archive, model context,
@@ -52,6 +53,7 @@ struct TranscriptDisclosure {
         return body
     }
 }
+#endif
 
 // Keep destinations when a rich-text selection is pasted into a plain-text app.
 enum TranscriptClipboard {
