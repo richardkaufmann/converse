@@ -87,6 +87,10 @@ CONVERSE_APP_OUTPUT="$PWD/.build/PinAndHelp/Converse.app" ./build.sh
 
 Real-device gates remain: BigPad installation, LAN permission denial/recovery, Bonjour discovery across physical devices, background for 60 seconds, rotation during a lease, HEIC Photos import and Mac/Windows-home interoperability. A simulator run is not evidence that these physical-device checks passed.
 
+## Editable Parking Lot development preview
+
+The native editor is currently gated off by default. The isolated `./iPad/test.sh --lot-editing` path enables it against a disposable Mac home and exercises ordered saves, image transfer, exclusive handoff and recovery. It includes per-level disclosure, outline numbering, text, comments, Done, tags, structural editing, Undo/Redo and `.converse` export. See [the preview notes](../docs/mobile-lot-editor-preview.md) for activation prerequisites; the shipped viewer remains unchanged until those checks are complete.
+
 
 ## Agents (0.5.22)
 

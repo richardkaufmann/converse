@@ -25,6 +25,12 @@ info = {
     'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
     'UISupportedInterfaceOrientations~ipad': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
     'UIRequiresFullScreen': False,
+    'UTExportedTypeDeclarations': [{
+        'UTTypeIdentifier': 'local.richard.converse.export',
+        'UTTypeDescription': 'Converse Conversations',
+        'UTTypeConformsTo': ['public.json'],
+        'UTTypeTagSpecification': {'public.filename-extension': ['converse'], 'public.mime-type': ['application/vnd.converse+json']},
+    }],
 }
 if os.environ.get('CONVERSE_DEMO') == '1':
     if os.environ.get('PRODUCT_BUNDLE_IDENTIFIER') != 'app.kaoslabs.Converse.Demo':

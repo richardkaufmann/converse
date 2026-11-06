@@ -167,6 +167,7 @@ extension PadModel {
         }
     }
     func ensureLotSubscription(_ id: String) {
+        guard !service.editableLotsEnabled else { return } // Editing takes are always explicit.
         guard LotSubscription.shouldSubscribe(placed: state.placements.contains(id), isLot: isLotRow(id), suspended: lotSubscriptionsSuspended,
                                               homeReachable: service.lotHomeReachable(id), subscribed: service.remoteLeases[id] != nil,
                                               pending: service.lotSubscriptionPending(id)) else { return }
@@ -215,7 +216,7 @@ enum LotThumbnails {
 
 struct LotImageItem: Identifiable { var id: String; var url: URL }
 
-struct PadLotPane: View {
+struct LegacyPadLotPane: View {
     let id: String
     let pane: Int
     @ObservedObject var model: PadModel

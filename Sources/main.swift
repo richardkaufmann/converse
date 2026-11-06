@@ -3611,6 +3611,9 @@ func selfTest() {
     MainActor.assumeIsolated { firstRunSelfTests(check) }
     providerSelfTests(check)
     MainActor.assumeIsolated { textSubstitutionSelfTests(check) }
+    lotEditingSelfTests(check)
+    lotTransportSelfTests(check)
+    lotPortableExportSelfTests(check)
     conversationLayoutSelfTests(check)
     sessionSettingsMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
@@ -4205,6 +4208,17 @@ if CommandLine.arguments.contains("--provider-self-test") {
     print("All provider checks passed"); exit(0)
 }
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
+if let option = CommandLine.arguments.firstIndex(of: "--lot-disclosure-preview") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, CommandLine.arguments.indices.contains(option + 1) else { exit(2) }
+    do { try renderLotDisclosurePreview(to: URL(fileURLWithPath: CommandLine.arguments[option + 1])); exit(0) }
+    catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--lot-editing-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    lotEditingSelfTests(check); lotTransportSelfTests(check); lotPortableExportSelfTests(check); exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--self-test") { selfTest(); exit(0) }
 if Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true {
     let isolated = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview"))

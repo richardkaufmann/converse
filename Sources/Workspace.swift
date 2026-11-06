@@ -64,6 +64,7 @@ final class Workspace: ObservableObject {
     }
     func assign(_ sessionID: UUID, to windowID: UUID, pane: Int) {
         guard names[windowID] != nil, (1...3).contains(pane) else { return }
+        if DeviceSyncService.shared.prepareLocalLotTake(sessionID, finish: { [weak self] in self?.assign(sessionID, to: windowID, pane: pane) }) { return }
         let destination = PaneLocation(windowID: windowID, pane: pane)
         var next = placements.filter { $0.key != sessionID && $0.value != destination }
         next[sessionID] = destination; placements = next

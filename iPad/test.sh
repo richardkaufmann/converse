@@ -9,17 +9,23 @@ interop_port=0
 group_port=0
 fixture=""
 fixture_pid=""
+lot_editing=0
+test_selection=()
+if [[ "${1:-}" == --lot-editing ]]; then
+    lot_editing=1
+    test_selection=(-only-testing:ConverseTests/LotEditingTests -only-testing:ConverseTests/ConverseTests/testLotImageReceiptsAreScopedToLotAndAuthority -only-testing:ConverseTests/ConverseTests/testEditableLotTakeSaveAndPhonePadLayouts -only-testing:ConverseTests/ConverseTests/testEditableLotAcrossMacAndTwoMobileHolders)
+fi
 cleanup() {
     if [[ -n "$fixture" ]]; then touch "$fixture/data/stop"; fi
     if [[ -n "$fixture_pid" ]]; then wait "$fixture_pid" || true; fi
 }
 trap cleanup EXIT INT TERM
-if [[ "${1:-}" == --interop ]]; then
+if [[ "${1:-}" == --interop || "$lot_editing" == 1 ]]; then
     app="${CONVERSE_APP_OUTPUT:-$PWD/.build/PinAndHelp/Converse.app}"
     if [[ ! -x "$app/Contents/MacOS/Converse" ]]; then print -u2 'Build the isolated Mac app first. Set CONVERSE_APP_OUTPUT to its bundle.'; exit 2; fi
     fixture=$(mktemp -d /tmp/converse-ipad-interop.XXXXXX)
     mkdir -p "$fixture/data"
-    CONVERSE_TEST_COMMAND=isolated-fixture CONVERSE_DATA_DIR="$fixture/data" "$app/Contents/MacOS/Converse" --ipad-home-fixture > "$fixture/home.log" 2>&1 &
+    CONVERSE_LOT_EDIT_INTEROP="$lot_editing" CONVERSE_TEST_COMMAND=isolated-fixture CONVERSE_DATA_DIR="$fixture/data" "$app/Contents/MacOS/Converse" --ipad-home-fixture > "$fixture/home.log" 2>&1 &
     fixture_pid=$!
     for attempt in {1..200}; do
         if [[ -s "$fixture/data/port" ]]; then interop_port=$(cat "$fixture/data/port"); group_port=$(cat "$fixture/data/group-port"); break; fi
@@ -29,7 +35,7 @@ if [[ "${1:-}" == --interop ]]; then
     if [[ "$interop_port" == 0 ]]; then print -u2 'Isolated Mac home did not open its test port.'; exit 1; fi
     print "Isolated Mac home evidence: $fixture"
 fi
-TEST_RUNNER_CONVERSE_GROUP_PORT="$group_port" TEST_RUNNER_CONVERSE_INTEROP_PORT="$interop_port" TEST_RUNNER_CONVERSE_TEST_COMMAND=isolated-tests xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
+TEST_RUNNER_CONVERSE_LOT_EDIT_INTEROP="$lot_editing" TEST_RUNNER_CONVERSE_GROUP_PORT="$group_port" TEST_RUNNER_CONVERSE_INTEROP_PORT="$interop_port" TEST_RUNNER_CONVERSE_TEST_COMMAND=isolated-tests xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
     -destination "platform=iOS Simulator,id=$simulator" \
     -derivedDataPath .build/iPad CODE_SIGN_IDENTITY=- \
-    CONVERSE_INTEROP_PORT="$interop_port" test
+    CONVERSE_INTEROP_PORT="$interop_port" "${test_selection[@]}" test

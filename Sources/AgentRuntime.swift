@@ -291,7 +291,7 @@ enum AgentPolicy {
                     let id = edits.lotID ?? (allowedLots.count == 1 ? allowedLots[0].id : nil)
                     if let id, let lot = ParkingLotLibrary.shared.lot(id), allowedLots.contains(where: { $0.id == id }),
                        session.agent?.allows(local: id, home: service.localDeviceID) == true {
-                        if current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
+                        if service.lotRequiresHolderReview(lot.id) || current.parkingLotRequiresReview == true || AgentConversation.shared.isVoiceTurn(session, responseID: responseID) {
                             do {
                                 parkingOutcome = try await store.reviewParkingLotAsync(edits, session: session, lot: lot, allowed: {
                                     store.sessions.contains(where: { $0 === session }) && ParkingLotLibrary.shared.lot(id) === lot && session.agent?.allows(local: id, home: service.localDeviceID) == true

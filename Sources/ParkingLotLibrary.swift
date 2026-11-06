@@ -44,6 +44,7 @@ final class ParkingLotLibrary: ObservableObject {
         try save(records + [record]); cache[record.id] = lot; return lot
     }
     func rename(_ id: UUID, to name: String) throws {
+        try DeviceSyncService.shared.requireLocalLotManagement(id)
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, title.count <= 100, let index = records.firstIndex(where: { $0.id == id }) else { throw AgentFailure.message("Choose a name of 1–100 characters.") }
         var next = records; next[index].name = title; try save(next); cache[id]?.name = title
@@ -65,6 +66,8 @@ final class ParkingLotLibrary: ObservableObject {
         var next = records; next[index].confirmSessionEdits = value ? nil : false; try save(next)
     }
     func delete(_ id: UUID) throws {
+        try DeviceSyncService.shared.requireLocalLotManagement(id)
+        try DeviceSyncService.shared.fenceDeletedLot(id)
         guard let lot = lot(id), let record = records.first(where: { $0.id == id }) else { return }
         // Keep a recoverable copy, including the name, before removing the catalog entry.
         let trash = folder.appendingPathComponent("Deleted Parking Lots/" + id.uuidString + "-" + UUID().uuidString)

@@ -524,7 +524,7 @@ private var emptyPlaceholders: [String: UUID] = [:]
 final class ParkingOutlineText: NSTextView {
     var pointSize: CGFloat = 13
     var indentWidth: CGFloat { 20 * pointSize / 13 }
-    var gutterWidth: CGFloat { 36 * pointSize / 13 }
+    var gutterWidth: CGFloat { 48 * pointSize / 13 }
     static let headingColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 0.48, green: 0.75, blue: 1, alpha: 1)
@@ -822,14 +822,14 @@ final class ParkingOutlineText: NSTextView {
             }
             guard rect.intersects(dirtyRect) else { continue }
             let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-            let marker = entry.row.heading ? (owner.parent.collapsed.contains(entry.row.id) ? "›" : "⌄") : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
+            let marker = entry.row.heading ? "" : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
             let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: entry.row.tag?.color ?? NSColor.secondaryLabelColor]
             // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
             let markerX = entry.row.heading ? gutterWidth / 3 + offset : max(2, gutterWidth - 4 + offset - (marker as NSString).size(withAttributes: markerAttributes).width)
             (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
-            if entry.hasChildren && !entry.row.heading {
+            if (entry.hasChildren || entry.row.heading) && !entry.placeholder {
                 let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
-                (disclosure as NSString).draw(at: NSPoint(x: 2 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor])
+                (disclosure as NSString).draw(at: NSPoint(x: 3 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: pointSize, weight: .semibold), .foregroundColor: NSColor.labelColor])
             }
             if entry.placeholder {
                 ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
@@ -839,7 +839,8 @@ final class ParkingOutlineText: NSTextView {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let entry = owner?.projection.entries.first(where: { ($0.row.heading || $0.hasChildren) && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }),
-           !entry.placeholder, point.x < (entry.row.heading ? 32 : 12 + CGFloat(max(0, entry.depth - 1)) * indentWidth) {
+           !entry.placeholder, point.x >= CGFloat(max(0, entry.depth - 1)) * indentWidth,
+           point.x < 22 * pointSize / 13 + CGFloat(max(0, entry.depth - 1)) * indentWidth {
             owner?.toggle(entry.row.id); return
         }
         // Clicking a link follows it instead of placing the caret for editing;
@@ -923,6 +924,9 @@ final class ParkingOutlineText: NSTextView {
                 owner.parent.lot.setTag(entry.row.id, tag); owner.render()
             }
             menu.addItem(colors); menu.addItem(.separator())
+            if entry.row.heading || entry.hasChildren {
+                item(owner.parent.collapsed.contains(entry.row.id) ? "Expand this level" : "Collapse this level") { owner.toggle(entry.row.id) }
+            }
         }
         if let clickedLink {
             let (row, link, source) = clickedLink
@@ -1054,6 +1058,9 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
           && ParkingLotFolding(rows: foldRows, collapsed: reopenedHeading).hiddenCount == 3,
           "Opening one heading after Collapse All leaves its nested branches folded")
     let expandedProjection = ParkingOutline(rows: foldRows, collapsed: [], placeholders: &placeholders)
+    let partlyOpened = ParkingOutline(rows: foldRows, collapsed: reopenedHeading.subtracting([first.id]), placeholders: &placeholders)
+    check(partlyOpened.entries.filter { !$0.placeholder }.map(\.row.id) == [heading.id, first.id, nestedChild.id, second.id, other.id],
+          "Expanding a nested item reveals its immediate level while preserving its child's collapsed state")
     check(expandedProjection.entries.filter { !$0.placeholder }.map(\.row) == foldRows
           && ParkingLotFolding(rows: foldRows, collapsed: []).hiddenCount == 0,
           "Expand All restores every original row including comments and nested relationships")
@@ -1827,5 +1834,40 @@ extension ParkingOutlineText: PaneTextScalable {
         }
         updateCommentButtons(); needsDisplay = true
         UserDefaults.standard.set(Double(pointSize), forKey: ParkingLotTextScaling.key(owner.parent.lot.id))
+    }
+}
+
+/// Native offscreen fixture for checking the gutter at every nesting level.
+func renderLotDisclosurePreview(to output: URL) throws {
+    _ = NSApplication.shared
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-disclosure-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder)
+    let heading = ParkingLotRow(heading: true, text: "Future work")
+    let parent = ParkingLotRow(heading: false, text: "Editable Parking Lots", parentID: heading.id)
+    let child = ParkingLotRow(heading: false, text: "Mobile editing — expand this branch independently", parentID: parent.id)
+    let grandchild = ParkingLotRow(heading: false, text: "An item hidden inside the collapsed branch", parentID: child.id)
+    let sibling = ParkingLotRow(heading: false, text: "Another visible item", parentID: parent.id)
+    let other = ParkingLotRow(heading: true, text: "Another collapsed section")
+    let hidden = ParkingLotRow(heading: false, text: "Hidden section item", parentID: other.id)
+    lot.openStarter([heading, parent, child, grandchild, sibling, other, hidden])
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([child.id, other.id]), reorder: {}))
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 620, height: 280))
+    text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    text.isRichText = false; text.textContainerInset = NSSize(width: text.gutterWidth, height: 10)
+    text.textContainer?.containerSize = NSSize(width: 620 - 2 * text.gutterWidth, height: 280)
+    coordinator.render()
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    for name in [NSAppearance.Name.aqua, .darkAqua] {
+        text.appearance = NSAppearance(named: name)
+        var data: Data?
+        text.appearance?.performAsCurrentDrawingAppearance {
+            text.backgroundColor = .textBackgroundColor
+            if let rep = text.bitmapImageRepForCachingDisplay(in: text.bounds) {
+                text.cacheDisplay(in: text.bounds, to: rep); data = rep.representation(using: .png, properties: [:])
+            }
+        }
+        guard let data else { throw ParkingLotError.message("Could not render disclosure fixture.") }
+        try data.write(to: output.appendingPathComponent("lot-partial-collapse-" + name.rawValue + ".png"))
     }
 }

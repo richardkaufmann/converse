@@ -704,6 +704,8 @@ func runIPadHomeFixture() {
         try service.startNetworkForTesting()
         let groupService = DeviceSyncService()
         try groupService.configureForTesting(folder: folder.appendingPathComponent("groups"))
+        let editingLots = ProcessInfo.processInfo.environment["CONVERSE_LOT_EDIT_INTEROP"] == "1"
+        groupService.editableLotsEnabled = editingLots
         try groupService.enableGroupsForTesting(); groupService.createGroup(name: "Simulator Group")
         // Real read-only Parking Lot viewer fixture, isolated from the user's lots.
         let parking = try groupService.parkingLibrary.create(name: "Mobile Parking Lot fixture")
@@ -725,7 +727,7 @@ func runIPadHomeFixture() {
         var announced = false
         while Date() < deadline {
             _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
-            if Date().timeIntervalSince(lastParkingUpdate) >= 1 {
+            if !editingLots && Date().timeIntervalSince(lastParkingUpdate) >= 1 {
                 parkingUpdate += 1
                 parking.update(liveRow.id, text: "Live update \(parkingUpdate)")
                 lastParkingUpdate = Date()

@@ -340,9 +340,12 @@ extension Store {
     }
     @MainActor
     func reviewParkingLotAsync(_ edits: ParkingLotEdits, session: Session, lot: ParkingLotStore,
-                               window: NSWindow? = nil, requiresConfirmation: Bool = true, allowed: () -> Bool) async throws -> String {
+                               window: NSWindow? = nil, requiresConfirmation: Bool = true, allowed: @escaping () -> Bool) async throws -> String {
         try Task.checkCancellation()
         guard allowed() else { throw AgentFailure.message("Parking Lot access changed during this run.") }
+        if participantService.lotRequiresHolderReview(lot.id) {
+            return try await participantService.reviewOnLotHolder(edits, lot: lot, author: session.title, allowed: allowed)
+        }
         guard let summary = try parkingLotReviewSummary(edits, session: session, lot: lot) else { return "Parking Lot: no changes requested." }
         guard requiresConfirmation else { return try finishParkingLotReview(edits, session: session, lot: lot, approved: true, reviewed: false) }
         guard let parent = window ?? NSApp.mainWindow ?? AppDelegate.shared?.windows.first(where: { $0.0.isVisible })?.0 else {

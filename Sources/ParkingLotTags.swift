@@ -1,28 +1,7 @@
 import AppKit
 
-enum ParkingLotTag: String, Codable, CaseIterable {
-    case red, orange, yellow, green, blue, purple
+extension ParkingLotTag {
 
-    var lightHex: String {
-        switch self {
-        case .red: return "#B42332"
-        case .orange: return "#A34600"
-        case .yellow: return "#806000"
-        case .green: return "#16733D"
-        case .blue: return "#1762B8"
-        case .purple: return "#8045B5"
-        }
-    }
-    var darkHex: String {
-        switch self {
-        case .red: return "#FF8890"
-        case .orange: return "#FFB56B"
-        case .yellow: return "#E9CB65"
-        case .green: return "#79D99C"
-        case .blue: return "#83BBFF"
-        case .purple: return "#C7A0F5"
-        }
-    }
     var color: NSColor {
         NSColor(name: nil) { appearance in
             let hex = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? darkHex : lightHex

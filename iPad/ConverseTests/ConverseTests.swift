@@ -1409,3 +1409,159 @@ final class ConverseTests: XCTestCase {
     }
 
 }
+
+final class LotEditingTests: XCTestCase {
+    func testSharedLotEditingContract() {
+        lotEditingSelfTests { value, label in XCTAssertTrue(value, label) }
+    }
+}
+
+extension ConverseTests {
+    func testEditableLotTakeSaveAndPhonePadLayouts() async throws {
+        XCTAssertEqual(EditableLotPane.links(in: "https://example.com https://example.com file:///Users/someone/private.txt me@example.org").map(\.scheme), ["https", "mailto"], "Only explicit web and email links open on the viewing device; home file paths stay text")
+        let service = try service(); service.editableLotsEnabled = true
+        let model = PadModel(service: service)
+        service.deviceNameOverride = "iPhone"
+        let home = String(repeating: "e", count: 64), lot = UUID(), id = DeviceGlobalID(home: String(repeating: "e", count: 64), session: lot).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.hello!.capabilities.append(LotEditing.capability); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        let sidebar = DeviceSidebarRow(globalID: id, sessionID: lot, title: "Mobile Roadmap", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "edit", status: "Parking Lot", busy: false, queued: 0, queuePaused: false)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: [sidebar]))))
+        model.assign(id, pane: 0)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 9, sessionID: id, epoch: 4))
+        let heading = ParkingLotRow(heading: true, text: "Things to build")
+        let item = ParkingLotRow(heading: false, text: "Edit this item on your phone", notes: [ParkingLotNote(author: "Richard", text: "Keep my note")], parentID: heading.id, tag: .green)
+        let child = ParkingLotRow(heading: false, text: "Keep nested items with their parent", done: true, parentID: item.id)
+        let snapshot = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: "Mobile Roadmap", document: ParkingLotDocument(revision: 12, rows: [heading, item, child]))
+        service.handleEnvelope(peer, try snapshot.envelope())
+        XCTAssertTrue(service.lotCanEdit(id)); XCTAssertEqual(service.lotEditors[id]?.projected.rows.count, 3)
+        for width: CGFloat in [430, 1024] {
+            for style: UIUserInterfaceStyle in [.light, .dark] {
+                let host = UIHostingController(rootView: EditableLotPane(id: id, pane: 0, model: model).frame(width: width))
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: width, height: 900); window.overrideUserInterfaceStyle = style; window.rootViewController = host; window.makeKeyAndVisible()
+                host.view.frame = window.bounds; host.view.layoutIfNeeded()
+                try await Task.sleep(nanoseconds: 100_000_000)
+                let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+                attachment.name = "Editable lot \(Int(width)) \(style == .dark ? "dark" : "light")"; attachment.lifetime = .keepAlways; add(attachment)
+                XCTAssertTrue(Self.views(host.view).contains { ($0 as? UITextView)?.text == item.text || ($0 as? UITextField)?.text == item.text }, "Native editable text renders at phone and tablet sizes")
+                window.isHidden = true
+            }
+        }
+        try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Typed on phone"))
+        let flight = try XCTUnwrap(service.lotEditors[id]?.inFlight)
+        XCTAssertEqual(service.lotEditors[id]?.saved.document.revision, 12, "Optimistic typing does not claim a saved revision")
+        let result = try flight.operation.applying(to: snapshot.document, author: "iPhone")
+        let saved = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: snapshot.name, document: result)
+        let ack = LotEditAck(mutationID: flight.mutationID, sequence: flight.sequence, snapshot: saved)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+        XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0); XCTAssertEqual(service.lotEditors[id]?.saved.document.rows[1].text, "Typed on phone")
+        try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Unconfirmed words to recover"))
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.stolen", boot: 9, sessionID: id, epoch: 5))
+        XCTAssertFalse(service.lotCanEdit(id)); XCTAssertFalse(model.state.placements.contains(id))
+        XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Unconfirmed words to recover", "Displacement retains an explicit manual recovery copy")
+        model.assign(id, pane: 0)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 10, sessionID: id, epoch: 6))
+        let retaken = try LotSnapshot(globalID: id, homeBoot: 10, leaseEpoch: 6, name: saved.name, document: saved.document)
+        service.handleEnvelope(peer, try retaken.envelope())
+        XCTAssertTrue(service.lotCanEdit(id)); XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0)
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows[1].text, "Typed on phone", "A new take never replays unconfirmed edits")
+        XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Unconfirmed words to recover", "Recovery survives retake for manual copy")
+        try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Pending at background"))
+        service.suspendViewer()
+        XCTAssertFalse(service.lotCanEdit(id), "Backgrounding immediately ends editing authority")
+        XCTAssertNotNil(service.lotEditors[id]?.frozenReason)
+        XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Pending at background", "Pending text remains available for explicit Copy while the process lives")
+        XCTAssertThrowsError(try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Must not edit offline")))
+    }
+}
+
+extension ConverseTests {
+    func testEditableLotAcrossMacAndTwoMobileHolders() async throws {
+        guard ProcessInfo.processInfo.environment["CONVERSE_LOT_EDIT_INTEROP"] == "1",
+              let port = ProcessInfo.processInfo.environment["CONVERSE_GROUP_PORT"].flatMap(Int.init), port > 0 else {
+            throw XCTSkip("Requires the isolated editable-lot Mac fixture")
+        }
+        let phone = try service(), tablet = try service()
+        defer { phone.suspendViewer(); tablet.suspendViewer() }
+        for (viewer, name) in [(phone, "Editor phone"), (tablet, "Editor tablet")] {
+            viewer.editableLotsEnabled = true; viewer.deviceNameOverride = name
+            try viewer.enableGroupsForTesting(); try viewer.startNetworkForTesting()
+            viewer.joinGroupByAddress(host: "127.0.0.1", port: port)
+            try await eventually("Editor joins Mac group") { viewer.pairingPrompt != nil }
+            viewer.confirmPairing()
+            try await eventually("Editor discovers lot") { viewer.homes.values.flatMap(\.rows).contains { $0.engine == "parking" } }
+        }
+        let row = try XCTUnwrap(phone.homes.values.flatMap(\.rows).first { $0.engine == "parking" })
+        let id = row.globalID
+        phone.isPlaced = { $0 == id }; tablet.isPlaced = { $0 == id }
+        phone.acquireRemote(globalID: id)
+        try await eventually("Phone takes structured lot") { phone.lotCanEdit(id) }
+        let initial = try XCTUnwrap(phone.lotEditors[id]?.saved)
+        let item = try XCTUnwrap(initial.document.rows.first { !$0.heading })
+        let imageHash = try XCTUnwrap(item.images?.first)
+        try await eventually("Existing lot image downloads") { phone.blobCache[imageHash] != nil }
+        try phone.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Saved from the actual mobile binary"))
+        try phone.editLot(id, operation: LotOperation(kind: .setTag, rowID: item.id, tag: .purple))
+        try phone.editLot(id, operation: LotOperation(kind: .appendComment, rowID: item.id, text: "Mobile comment", commentID: UUID()))
+        try await eventually("Phone receives all home save acknowledgements") { phone.lotEditors[id]?.unconfirmedCount == 0 }
+        XCTAssertNil(phone.lotEditors[id]?.frozenReason)
+        let saved = try XCTUnwrap(phone.lotEditors[id]?.saved)
+        XCTAssertEqual(saved.document.revision, initial.document.revision + 3)
+        XCTAssertEqual(saved.document.rows.first { $0.id == item.id }?.notes?.last?.author, "Editor phone")
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { context in
+            UIColor.systemPurple.setFill(); context.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
+        }
+        let uploadedHash = try XCTUnwrap(phone.sendRemoteBlob(globalID: id, data: try XCTUnwrap(image.pngData())))
+        try await eventually("Home stores newly attached image") { phone.lotBlobReady[id]?.contains(uploadedHash) == true }
+        try phone.editLot(id, operation: LotOperation(kind: .addImage, rowID: item.id, imageHash: uploadedHash))
+        try await eventually("Image reference is saved after its bytes") { phone.lotEditors[id]?.unconfirmedCount == 0 }
+        // Take during an outstanding edit: the old holder must drain before the new grant.
+        try phone.editLot(id, operation: LotOperation(kind: .setDone, rowID: item.id, done: true))
+        tablet.acquireRemote(globalID: id)
+        try await eventually("Tablet takes after phone drain") { tablet.lotCanEdit(id) && phone.remoteLeases[id] == nil }
+        let moved = try XCTUnwrap(tablet.lotEditors[id]?.saved)
+        XCTAssertGreaterThan(moved.leaseEpoch, saved.leaseEpoch)
+        let movedRow = try XCTUnwrap(moved.document.rows.first { $0.id == item.id })
+        XCTAssertTrue(movedRow.isDone); XCTAssertEqual(movedRow.tag, .purple)
+        XCTAssertEqual(movedRow.text, "Saved from the actual mobile binary")
+        XCTAssertEqual(movedRow.images, (item.images ?? []) + [uploadedHash])
+        try await eventually("New holder downloads the newly attached image") { tablet.blobCache[uploadedHash] != nil }
+        XCTAssertFalse(phone.lotCanEdit(id))
+        tablet.releaseRemote(globalID: id)
+        phone.acquireRemote(globalID: id)
+        try await eventually("Park and retake preserve saved contents") { phone.lotCanEdit(id) && (phone.lotEditors[id]?.saved.leaseEpoch ?? 0) > moved.leaseEpoch }
+        XCTAssertEqual(phone.lotEditors[id]?.saved.document, moved.document)
+    }
+}
+
+extension ConverseTests {
+    func testLotImageReceiptsAreScopedToLotAndAuthority() throws {
+        let viewer = try service(); viewer.editableLotsEnabled = true
+        let home = String(repeating: "f", count: 64)
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test")
+        peer.hello!.capabilities.append(LotEditing.capability); peer.trustedReady = true; viewer.adoptPeerForTesting(peer)
+        let ids = [UUID(), UUID()]
+        let sidebar = ids.map { lot in DeviceSidebarRow(globalID: DeviceGlobalID(home: home, session: lot).string, sessionID: lot, title: "Lot", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "edit", status: "Parking Lot", busy: false, queued: 0, queuePaused: false) }
+        viewer.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: sidebar))))
+        for (index, row) in sidebar.enumerated() {
+            viewer.acquireRemote(globalID: row.globalID)
+            viewer.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 7, sessionID: row.globalID, epoch: UInt64(index + 1)))
+            let snapshot = try LotSnapshot(globalID: row.globalID, homeBoot: 7, leaseEpoch: UInt64(index + 1), name: "Lot", document: ParkingLotDocument(rows: [ParkingLotRow(heading: true, text: "Now")]))
+            viewer.handleEnvelope(peer, try snapshot.envelope())
+        }
+        let data = Data("identical image bytes in different lots".utf8)
+        let hash = try XCTUnwrap(viewer.sendRemoteBlob(globalID: sidebar[0].globalID, data: data))
+        XCTAssertEqual(viewer.sendRemoteBlob(globalID: sidebar[1].globalID, data: data), hash)
+        let ack = try JSONEncoder().encode(DeviceAckPayload(outcome: "stored", detail: hash + "|Stored"))
+        viewer.handleEnvelope(peer, DeviceEnvelope(kind: "blob.ack", boot: 7, sessionID: sidebar[0].globalID, epoch: 1, payload: ack))
+        XCTAssertEqual(viewer.lotBlobReady[sidebar[0].globalID], [hash])
+        XCTAssertFalse(viewer.lotBlobReady[sidebar[1].globalID]?.contains(hash) == true, "One lot's receipt cannot complete another lot's image upload")
+        viewer.handleEnvelope(peer, DeviceEnvelope(kind: "blob.ack", boot: 6, sessionID: sidebar[1].globalID, epoch: 2, payload: ack))
+        XCTAssertFalse(viewer.lotBlobReady[sidebar[1].globalID]?.contains(hash) == true, "Previous-boot image receipt is ignored")
+        viewer.handleEnvelope(peer, DeviceEnvelope(kind: "blob.ack", boot: 7, sessionID: sidebar[1].globalID, epoch: 2, payload: ack))
+        XCTAssertEqual(viewer.lotBlobReady[sidebar[1].globalID], [hash])
+    }
+}
