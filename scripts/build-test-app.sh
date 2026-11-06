@@ -31,7 +31,16 @@ if ! mv "$stage/$name.app" "$destination"; then
   [[ -z "${previous:-}" ]] || mv "$previous/$name.app" "$destination"
   exit 1
 fi
-codesign --verify --deep --strict "$destination"
+if ! codesign --verify --deep --strict "$destination"; then
+  mv "$destination" "$stage/Failed $name.app"
+  [[ -z "${previous:-}" ]] || mv "$previous/$name.app" "$destination"
+  print -u2 'Installed signature check failed; previous TEST restored.'
+  exit 1
+fi
+if [[ -n "${previous:-}" ]]; then
+  python3 scripts/archive-test-backup.py "$provider" "$previous/$name.app"
+fi
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$destination"
 print -r -- "Installed $destination"
 print -r -- "Profile: ~/Library/Application Support/$name"
 print -r -- 'Use Settings → New User Experience / Reset in this app to restart NUX; normal launches preserve imports.'
