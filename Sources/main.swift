@@ -1890,18 +1890,41 @@ final class ConversationTextView: NSTextView {
         if origin != scroll.contentView.bounds.origin { scroll.contentView.scroll(to: origin) }
         scroll.reflectScrolledClipView(scroll.contentView)
     }
-    /// The first character at the top of the visible transcript.
-    func topVisibleCharacter() -> Int? {
-        guard let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer, layout.numberOfGlyphs > 0 else { return nil }
-        let point = NSPoint(x: 1, y: max(0, scroll.contentView.bounds.minY - textContainerOrigin.y))
-        return layout.characterIndexForGlyph(at: layout.glyphIndex(for: point, in: container))
+    /// The text a size change keeps in place: the caret when it is on screen,
+    /// else the first fully visible character, and its line's viewport Y.
+    struct ResizeAnchor { let character: Int; let viewportY: CGFloat }
+    /// Top of the line holding a character; the caret after a final newline sits on the extra line.
+    func lineTop(forCharacter character: Int) -> CGFloat? {
+        guard let layout = layoutManager else { return nil }
+        let length = (string as NSString).length
+        layout.ensureLayout(forCharacterRange: NSRange(location: 0, length: min(length, character + 1)))
+        if character >= length, layout.extraLineFragmentRect.height > 0 { return layout.extraLineFragmentRect.minY + textContainerOrigin.y }
+        guard layout.numberOfGlyphs > 0 else { return nil }
+        let glyph = min(layout.glyphIndexForCharacter(at: min(character, length - 1)), layout.numberOfGlyphs - 1)
+        return layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY + textContainerOrigin.y
     }
-    func scrollCharacterToTop(_ character: Int) {
-        guard let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer, layout.numberOfGlyphs > 0 else { return }
-        layout.ensureLayout(for: container)
-        let glyph = layout.glyphIndexForCharacter(at: min(character, max(0, (string as NSString).length - 1)))
-        let line = layout.lineFragmentRect(forGlyphAt: min(glyph, layout.numberOfGlyphs - 1), effectiveRange: nil)
-        let bounds = NSRect(origin: NSPoint(x: scroll.contentView.bounds.minX, y: line.minY + textContainerOrigin.y), size: scroll.contentView.bounds.size)
+    func resizeAnchor() -> ResizeAnchor? {
+        guard let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer, layout.numberOfGlyphs > 0 else { return nil }
+        let visible = scroll.contentView.bounds
+        let caret = selectedRange().location
+        if caret != NSNotFound, let top = lineTop(forCharacter: caret) {
+            let height = caret >= (string as NSString).length && layout.extraLineFragmentRect.height > 0 ? layout.extraLineFragmentRect.height
+                : layout.lineFragmentRect(forGlyphAt: min(layout.glyphIndexForCharacter(at: min(caret, (string as NSString).length - 1)), layout.numberOfGlyphs - 1), effectiveRange: nil).height
+            if top + height / 2 >= visible.minY && top + height / 2 <= visible.maxY { return ResizeAnchor(character: caret, viewportY: top - visible.minY) }
+        }
+        var glyph = layout.glyphIndex(for: NSPoint(x: 1, y: max(0, visible.minY - textContainerOrigin.y)), in: container)
+        var line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        // A line cut off at the top is not fully visible; use the next one.
+        if line.minY + textContainerOrigin.y < visible.minY - 0.5 && line.maxY < layout.usedRect(for: container).maxY {
+            glyph = layout.glyphIndex(for: NSPoint(x: 1, y: line.maxY + 0.5), in: container)
+            line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        }
+        return ResizeAnchor(character: layout.characterIndexForGlyph(at: glyph), viewportY: line.minY + textContainerOrigin.y - visible.minY)
+    }
+    /// Puts the anchor's line back at the same viewport Y, as near as the document allows.
+    func restore(_ anchor: ResizeAnchor) {
+        guard let scroll = enclosingScrollView, let top = lineTop(forCharacter: anchor.character) else { return }
+        let bounds = NSRect(origin: NSPoint(x: scroll.contentView.bounds.minX, y: top - anchor.viewportY), size: scroll.contentView.bounds.size)
         scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
         scroll.reflectScrolledClipView(scroll.contentView)
     }
@@ -2349,7 +2372,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var historyEnd = 0
         private(set) var historyBuildCount = 0
         private(set) var lastReplacementStart = 0
-        var markdownCache: [UUID: (String, NSAttributedString)] = [:]
+        // Rendered Markdown and the pane size it was scaled to.
+        var markdownCache: [UUID: (String, NSAttributedString, CGFloat)] = [:]
         private let imageCache = NSCache<NSString, NSTextAttachment>()
         private(set) var imagePreparationCount = 0
         func preparedImage(_ path: String) -> NSTextAttachment? {
@@ -2378,6 +2402,10 @@ struct ScrollingConversation: NSViewRepresentable {
         var draftChanged: ((String) -> Void)?
         var resolveSessionName: (String) -> String? = { DeviceSyncService.shared.switchboardDisplayName($0) }
         init(_ session: Session) { self.session = session }
+        deinit {
+            pendingRestyle?.cancel()
+            if let hiddenRestyle { NotificationCenter.default.removeObserver(hiddenRestyle) }
+        }
         func submissionHandler(_ text: ConversationTextView, action: @escaping () -> Void) -> () -> Void {
             { [weak self, weak text] in
                 action()
@@ -2404,7 +2432,7 @@ struct ScrollingConversation: NSViewRepresentable {
             guard !rendering, let text = notification.object as? ConversationTextView else { return }
             session.draft = (text.string as NSString).substring(from: min(text.inputStart, (text.string as NSString).length))
             let length = (text.string as NSString).length
-            if length > text.inputStart { text.textStorage?.addAttributes([.foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle], range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
+            if length > text.inputStart { text.textStorage?.addAttributes([.font: text.bodyFont, .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle], range: NSRange(location: text.inputStart, length: length - text.inputStart)) }
             text.refreshDecorations()
             text.typingAttributes[.foregroundColor] = TranscriptPalette.draft(session.draft)
             text.fitDocumentHeight()
@@ -2421,6 +2449,52 @@ struct ScrollingConversation: NSViewRepresentable {
             if let url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
             return true
         }
+        private var lastRestyleAt: TimeInterval = -.infinity
+        private var pendingRestyle: DispatchWorkItem?
+        private var hiddenRestyle: NSObjectProtocol?
+        private(set) var restyleCount = 0
+        /// View ▸ Bigger/Smaller: scales the fonts already in the pane, keeps the
+        /// caret (else the first fully visible line) at the same height, and
+        /// keeps following the latest output. Repeats and covered windows wait.
+        func restyleInPlace(_ text: ConversationTextView) {
+            if let window = text.window, PaneTextSize.isHidden(window) {
+                guard hiddenRestyle == nil else { return }
+                hiddenRestyle = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self, weak text, weak window] _ in
+                    guard let self, let text, let window, !PaneTextSize.isHidden(window) else { return }
+                    if let observer = self.hiddenRestyle { NotificationCenter.default.removeObserver(observer) }
+                    self.hiddenRestyle = nil; self.render(text)
+                }
+                return
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastRestyleAt < PaneTextSize.repeatInterval {
+                guard pendingRestyle == nil else { return }
+                let work = DispatchWorkItem { [weak self, weak text] in
+                    guard let self, let text else { return }
+                    self.pendingRestyle = nil; self.render(text)
+                }
+                pendingRestyle = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + PaneTextSize.repeatInterval - (now - lastRestyleAt), execute: work)
+                return
+            }
+            pendingRestyle?.cancel(); pendingRestyle = nil
+            guard let storage = text.textStorage, let old = renderedFontSize else { return }
+            let anchor = text.resizeAnchor()
+            let nativeScroll = text.enclosingScrollView as? ConversationScrollView
+            let follow = nativeScroll?.prepareForRender(first: false) ?? false
+            rendering = true
+            storage.beginEditing()
+            PaneTextSize.scale(storage, by: text.fontSize / old)
+            storage.endEditing()
+            renderedFontSize = text.fontSize; restyleCount += 1
+            text.typingAttributes[.font] = text.bodyFont
+            text.fitDocumentHeight()
+            if follow, let nativeScroll { nativeScroll.followLatest() }
+            else if let anchor { text.restore(anchor) }
+            text.refreshDecorations(); text.refreshImageHover()
+            rendering = false
+            lastRestyleAt = ProcessInfo.processInfo.systemUptime
+        }
         func render(_ text: ConversationTextView) {
             let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
@@ -2431,12 +2505,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let previous = renderedMessages
             let firstRender = previous == nil
             var historyChanged = firstRender
-            // A text size change rebuilds every block at the new size and
-            // keeps the same text at the top of the pane.
             let restyle = !firstRender && renderedFontSize != text.fontSize
-            renderedFontSize = text.fontSize
-            if restyle { markdownCache = [:] }
-            let anchor = restyle ? text.topVisibleCharacter() : nil
             if seenMessagesRevision != session.messagesRevision {
                 let messages = session.displayedMessages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
                 historyChanged = previous != messages
@@ -2445,11 +2514,18 @@ struct ScrollingConversation: NSViewRepresentable {
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
             historyChanged = historyChanged || numberingChanged
             let contentChanged = historyChanged
-            historyChanged = historyChanged || restyle
             renderedMessageNumbers = session.messageNumbers; renderedMessageNumberOffset = session.messageNumberOffset
             let addedAttachment = session.attachments.contains { !renderedAttachments.contains($0) }
             let attachmentsChanged = renderedAttachments != session.attachments
             let current = text.textStorage?.mutableString ?? NSMutableString(string: text.string)
+            // Only the size changed: scale the existing text instead of rebuilding it.
+            if restyle && !contentChanged && !attachmentsChanged && current.length >= text.inputStart && current.substring(from: text.inputStart) == session.draft {
+                restyleInPlace(text); return
+            }
+            // A size change with new content rebuilds, keeping the same anchor.
+            let anchor = restyle ? text.resizeAnchor() : nil
+            renderedFontSize = text.fontSize
+            historyChanged = historyChanged || restyle
             if !historyChanged && !attachmentsChanged {
                 guard current.length >= text.inputStart, current.substring(from: text.inputStart) != session.draft else { return }
                 // External draft hydration/clear changes only the editable
@@ -2509,9 +2585,15 @@ struct ScrollingConversation: NSViewRepresentable {
                 if let summary = trafficSummary {
                     let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                     body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
-                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base))
+                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
                 } else if message.role == "assistant" {
-                    if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
+                    if let cached = markdownCache[message.id], cached.0 == visible {
+                        body = NSMutableAttributedString(attributedString: cached.1)
+                        if cached.2 != text.fontSize {
+                            PaneTextSize.scale(body, by: text.fontSize / cached.2)
+                            markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
+                        }
+                    }
                     else {
                         body = MarkdownText.render(visible)
                         PaneTextSize.scale(body, by: text.fontSize / CGFloat(PaneTextSize.standard))
@@ -2522,7 +2604,7 @@ struct ScrollingConversation: NSViewRepresentable {
                                 body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
                             }
                         }
-                        markdownCache[message.id] = (visible, NSAttributedString(attributedString: body))
+                        markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
                     }
                 } else { body = NSMutableAttributedString(string: visible, attributes: base) }
                 for mark in (trafficSummary == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
@@ -2616,7 +2698,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if let nativeScroll { nativeScroll.followLatest() }
                 else { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
             }
-            else if let anchor { text.scrollCharacterToTop(anchor) }
+            else if let anchor { text.restore(anchor) }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
@@ -2649,10 +2731,7 @@ struct Conversation: View {
                 Divider()
             }
             Divider()
-            if let banner = store.teachingBanner(session) {
-                TeachingBannerView(banner: banner, teach: { store.teachSwitchboard(session) }, dismiss: { store.dismissTeachingBanner(session) })
-                Divider()
-            }
+            SessionTeachingBanner(store: store, session: session)
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
@@ -3962,6 +4041,9 @@ func selfTest() {
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
     paneTextSizeSelfTests(check)
+    paneTextResizeSelfTests(check)
+    paneTextRoutingSelfTests(check)
+    teachingBannerRenderSelfTests(check)
     identitySelfTests(check)
     // Native approval UI runs after image fixtures that intentionally precede AppKit initialization.
     parkingLotReviewConnectivitySelfTests(check)
@@ -4010,6 +4092,19 @@ if CommandLine.arguments.contains("--conversation-layout-self-test") {
     var failures = 0
     conversationLayoutSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
     exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--pane-text-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    paneTextSizeSelfTests(check); paneTextResizeSelfTests(check); paneTextRoutingSelfTests(check); teachingBannerRenderSelfTests(check)
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--pane-text-benchmark") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    let timings = MainActor.assumeIsolated { paneTextResizeTimings() }
+    print(String(format: "First render: %.0f ms; resize steps: %@ ms", timings.first, timings.steps.map { String(format: "%.0f", $0) }.joined(separator: ", ")))
+    exit(0)
 }
 if CommandLine.arguments.contains("--pane-sizing-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }

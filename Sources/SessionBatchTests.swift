@@ -90,15 +90,15 @@ func paneTextSizeSelfTests(_ check: (Bool, String) -> Void) {
     for _ in 0..<30 { store.changeTextSize(.smaller, focused: nil) }
     check(store.paneTextSize == PaneTextSize.range.lowerBound && store.textSize(for: b) == PaneTextSize.range.lowerBound, "Smaller stops at 9 pt")
     check(PaneTextSize.clamp(40) == 28 && PaneTextSize.clamp(2) == 9 && PaneTextSize.bigger(16.5) == 18 && PaneTextSize.smaller(9) == 9, "Sizes clamp to 9–28 pt")
-    store.changeTextSize(.actual, focused: nil)
+    store.changeTextSize(.reset, focused: nil)
     store.changeTextSize(.bigger, focused: nil); store.changeTextSize(.bigger, focused: b)
-    store.changeTextSize(.actual, focused: b)
+    store.changeTextSize(.reset, focused: b)
     check(b.textSize == nil && store.textSize(for: b) == 18, "Actual Size on a focused pane returns it to the default")
     store.changeTextSize(.bigger, focused: a)
     let reloaded = Store(folder: root)
     check(reloaded.paneTextSize == 18 && reloaded.sessions.first { $0.id == a.id }?.textSize == 20 && reloaded.sessions.first { $0.id == b.id }?.textSize == nil,
           "The default and per-pane sizes survive relaunch")
-    store.changeTextSize(.actual, focused: nil)
+    store.changeTextSize(.reset, focused: nil)
     check(store.paneTextSize == 16 && a.textSize == nil && b.textSize == nil, "Actual Size with no focused pane resets every pane")
 
     // Focus: the session whose conversation text view holds the cursor.
@@ -129,8 +129,7 @@ func paneTextSizeSelfTests(_ check: (Bool, String) -> Void) {
     scroll.contentView.scroll(to: NSPoint(x: 0, y: text.frame.height / 2)); scroll.reflectScrolledClipView(scroll.contentView); scroll.recordScroll()
     let draftSelection = NSRange(location: text.inputStart + 3, length: 6)
     text.setSelectedRange(draftSelection)
-    let top = text.topVisibleCharacter() ?? -1
-    let topLine = (text.string as NSString).lineRange(for: NSRange(location: max(0, top), length: 0))
+    let anchor = text.resizeAnchor()
     let before = text.string
     store.changeTextSize(.bigger, focused: a); store.changeTextSize(.bigger, focused: a)
     text.fontSize = CGFloat(store.textSize(for: a))
@@ -138,8 +137,8 @@ func paneTextSizeSelfTests(_ check: (Bool, String) -> Void) {
     check(text.fontSize == 20 && font(at: 0)?.pointSize == 20 && abs((font(at: heading)?.pointSize ?? 0) - 21 * 20 / 16) < 0.01 && font(at: text.inputStart)?.pointSize == 20,
           "Bigger rescales the transcript, Markdown headings and the draft")
     check(text.string == before && a.draft == "My unsent draft" && text.selectedRange() == draftSelection, "Changing size keeps the draft and selection")
-    let newTop = text.topVisibleCharacter() ?? -1
-    check(NSLocationInRange(newTop, topLine) || abs(newTop - top) < 80, "Changing size keeps the same text at the top of the pane (\(top) → \(newTop))")
+    let moved = anchor.flatMap { anchor in text.lineTop(forCharacter: anchor.character).map { $0 - scroll.contentView.bounds.minY - anchor.viewportY } } ?? .infinity
+    check(abs(moved) <= 24, "Changing size keeps the same text at the same height in the pane (moved \(moved) pt)")
     check(text.typingAttributes[.font].flatMap { $0 as? NSFont }?.pointSize == 20, "New typing uses the pane size")
     window.contentView = nil
 }

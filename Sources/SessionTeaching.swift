@@ -40,6 +40,20 @@ extension Store {
     }
 }
 
+/// The pane's teaching banner, when its session should show one.
+struct SessionTeachingBanner: View {
+    @ObservedObject var store: Store
+    @ObservedObject var session: Session
+    var body: some View {
+        if let banner = store.teachingBanner(session) {
+            VStack(spacing: 0) {
+                TeachingBannerView(banner: banner, teach: { store.teachSwitchboard(session) }, dismiss: { store.dismissTeachingBanner(session) })
+                Divider()
+            }
+        }
+    }
+}
+
 struct TeachingBannerView: View {
     let banner: TeachingBanner
     let teach: () -> Void

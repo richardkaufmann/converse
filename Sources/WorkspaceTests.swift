@@ -231,6 +231,11 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
         // Red P/X carry a white label, so sample the fill's corner, clear of the glyph. Offscreen, red reads
         // about (0.86, 0.47, 0.37) and orange (0.90, 0.67, 0.36): green separates them.
         func red(_ index: Int) -> Bool { color(NSPoint(x: button(index).x - 7, y: button(index).y - 7)).map { $0.redComponent > 0.75 && $0.greenComponent < 0.56 && $0.blueComponent < 0.5 } ?? false }
+        func snapshot(_ path: String) {
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
         func close() { row?.closeDetails(); window.orderOut(nil); window.close() }
     }
     let workspace = Workspace(), state = WindowState(workspace: workspace), other = UUID()
@@ -275,7 +280,9 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     let shown = Session(entry: Entry(name: "Elsewhere", command: "claude", directory: "~", engine: "claude"))
     shown.accountStatus = "test"
     elsewhereSpace.assign(shown.id, to: otherWindow.id, pane: 1); elsewhereSpace.assign(other, to: elsewhereState.id, pane: 1)
-    let away = Harness(SidebarSession(session: shown, workspace: elsewhereSpace, state: elsewhereState, showsModel: false))
+    elsewhereSpace.rename(otherWindow.id, to: "Research")
+    let awayRow = SidebarSession(session: shown, workspace: elsewhereSpace, state: elsewhereState, showsModel: false)
+    let away = Harness(awayRow)
     if let awayHover = away.row?.hoverState, away.strip != nil {
         check(!away.red(0) && !away.red(4), "P and X are not red before the row is hovered")
         away.move(to: away.name)
@@ -286,8 +293,20 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
         check(!away.red(0) && !away.red(4) && away.orangePanes().isEmpty, "Leaving the row restores P and X")
         away.move(to: away.name)
         check(away.tracked.count == 2 && away.rect(away.strip!).width == 98, "Red P and X never change the strip's layout")
+        away.snapshot("/tmp/claude-px-elsewhere.png")
+        // SwiftUI keeps .help out of reach offscreen; check the exact value the row hands it.
+        check(awayRow.elsewhere.label == "Shown in Research" && awayRow.elsewhere.help("Park this session").hasPrefix("Shown in Research\n"),
+              "Window B's red P and X tooltips lead with “Shown in Research”, window A's name")
     } else { check(false, "Shown-elsewhere row hosts its trackers") }
     away.close()
+    // Window A shows it in pane 1: green wins, so P and X stay normal there.
+    let homeRow = SidebarSession(session: shown, workspace: elsewhereSpace, state: otherWindow, showsModel: false)
+    let home = Harness(homeRow)
+    home.move(to: home.name)
+    check(home.row?.hoverState?.inside == true && !home.red(0) && !home.red(4) && home.green(1), "In window A, which shows the session, hovering keeps P and X normal and pane 1 green")
+    check(!homeRow.elsewhere.isShown && homeRow.elsewhere.help("Park this session") == "Park this session", "Window A's P and X tooltips carry no shown-elsewhere warning")
+    home.snapshot("/tmp/claude-px-home.png")
+    home.close()
     let soloSpace = Workspace(), homeOnly = Harness(SidebarSession(session: session, workspace: soloSpace, state: WindowState(workspace: soloSpace), showsModel: false))
     homeOnly.move(to: homeOnly.name)
     check(homeOnly.row?.hoverState?.inside == true && !homeOnly.red(0) && !homeOnly.red(4), "A row shown nowhere else keeps normal P and X on hover")
