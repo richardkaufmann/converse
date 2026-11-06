@@ -78,6 +78,7 @@ struct ExportSession: Identifiable {
 }
 final class TranscriptExportSelection: ObservableObject {
     let sessions: [ExportSession]
+    let lotOnly: Bool
     @Published var selected: Set<UUID>
     @Published var order = TranscriptExportOrder.sequential
     @Published var content = TranscriptExportContent.both
@@ -97,7 +98,12 @@ final class TranscriptExportSelection: ObservableObject {
     @Published var endDate = Date()
     /// Converse format: each selected local session first writes a handoff note.
     @Published var includeHandoffs = false
-    init(sessions: [ExportSession]) { self.sessions = sessions; selected = Set(sessions.map(\.id)) }
+    init(sessions: [ExportSession], lotOnly: Bool = false) {
+        self.sessions = sessions
+        self.lotOnly = lotOnly && sessions.count == 1 && sessions[0].lotDocument != nil
+        selected = Set(sessions.map(\.id))
+        if self.lotOnly { lineNumbers = false }
+    }
     var exportsImages: Bool { includeImages && format != .text }
     var validDateRange: Bool { !limitDates || startDate < endDate }
     func inRange(_ message: Message) -> Bool {
@@ -145,6 +151,7 @@ struct TranscriptExportOptionsView: View {
     @ObservedObject var selection: TranscriptExportSelection
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !selection.lotOnly {
             HStack {
                 Text("Sessions and Parking Lots").fontWeight(.semibold)
                 Text("\(selection.selected.count) selected").foregroundStyle(.secondary)
@@ -178,17 +185,23 @@ struct TranscriptExportOptionsView: View {
             Picker("Include", selection: $selection.content) {
                 ForEach(TranscriptExportContent.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
+            }
             Picker("Format", selection: $selection.format) {
                 ForEach(TranscriptExportFormat.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
-            Toggle("Line numbers", isOn: $selection.lineNumbers).disabled(selection.format != .html)
+            if !selection.lotOnly {
+                Toggle("Line numbers", isOn: $selection.lineNumbers).disabled(selection.format != .html)
+            }
             HStack(spacing: 16) {
                 Toggle("Remove secrets and personal info", isOn: Binding(get: { selection.scrub }, set: { selection.scrub = $0; selection.scrubChosen = true }))
                     .help("Best-effort: replaces keys, tokens, passwords, email addresses, phone numbers, IP addresses, your name, home folder and this Group’s device names with placeholders such as [email 1].")
+                if !selection.lotOnly {
                 Toggle(selection.scrub ? "Include images (not scrubbed)" : "Include images", isOn: Binding(get: { selection.includeImages }, set: { selection.includeImages = $0; selection.imagesChosen = true }))
                     .disabled(selection.format == .text)
                     .help(selection.format == .text ? "Text exports list images by filename only." : selection.scrub ? "Images can’t be checked for private details. Leave this off unless you have looked at them." : "Embed pasted and generated images in the export.")
             }
+            }
+            if !selection.lotOnly {
             Toggle("Include handoff notes", isOn: $selection.includeHandoffs).disabled(selection.format != .converse)
                 .help("Before exporting, Converse asks each selected session’s assistant to write a handoff note (goals, decisions, current state, open items, gotchas, files). The note travels in the file, so whoever imports it can hand the conversation to any assistant. Agents, busy sessions and imports without a provider are skipped.")
             HStack(spacing: 8) {
@@ -201,13 +214,18 @@ struct TranscriptExportOptionsView: View {
             if !selection.validDateRange {
                 Text("The start must be before the end.").font(.caption).foregroundStyle(.red)
             }
+            }
             Text(caption).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if selection.order == .interleaved && selection.format != .converse && selection.includesUntimedMessages {
+            if !selection.lotOnly && selection.order == .interleaved && selection.format != .converse && selection.includesUntimedMessages {
                 Text("Older messages have no recorded times. They appear after timed messages in their original session order, labeled “Time unavailable.”").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }.padding(16).frame(width: 510)
     }
     private var caption: String {
+        if selection.lotOnly {
+            return selection.scrub ? "Exports this entire Parking Lot. Images are omitted when removing personal info."
+                : "Exports this entire Parking Lot, including comments and images (image names only in Text)."
+        }
         switch selection.format {
         case .html: return "Formatted HTML with embedded images. Parking Lots include every item. Drafts and tool activity are excluded."
         case .text: return "UTF-8 text preserves Markdown source; images are listed by filename. No line numbers, drafts or tool activity."
@@ -243,16 +261,17 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
     private var progressPanel: NSPanel?
     func showActivePanel() { (progressPanel ?? panel).makeKeyAndOrderFront(nil) }
     var completed: (() -> Void)?
-    init(sessions: [ExportSession]) { selection = TranscriptExportSelection(sessions: sessions); super.init() }
-    func show(for window: NSWindow?) {
-        panel.title = "Export Conversations"
+    init(sessions: [ExportSession], lotOnly: Bool = false) { selection = TranscriptExportSelection(sessions: sessions, lotOnly: lotOnly); super.init() }
+    func configurePanel() {
+        panel.title = selection.lotOnly ? "Export Parking Lot" : "Export Conversations"
         panel.prompt = "Export"
-        panel.nameFieldStringValue = "Converse Transcripts.html"
+        let title = selection.lotOnly ? selection.sessions[0].title.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") : "Converse Transcripts"
+        panel.nameFieldStringValue = TranscriptExportFormat.html.fileName(title)
         panel.allowedContentTypes = [.html]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         let view = NSHostingView(rootView: TranscriptExportOptionsView(selection: selection))
-        view.frame = NSRect(x: 0, y: 0, width: 510, height: 540)
+        view.frame = NSRect(x: 0, y: 0, width: 510, height: selection.lotOnly ? 135 : 540)
         panel.accessoryView = view
         panel.delegate = self
         formatObserver = selection.$format.removeDuplicates().sink { [weak self] format in
@@ -260,6 +279,9 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             panel.allowedContentTypes = [format.contentType]
             panel.nameFieldStringValue = format.fileName(panel.nameFieldStringValue)
         }
+    }
+    func show(for window: NSWindow?) {
+        configurePanel()
         let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
             guard response == .OK, let url = panel.url else { completed?(); return }
             exportTask = Task { @MainActor in
@@ -267,9 +289,9 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             let progress = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 120), styleMask: [.titled], backing: .buffered, defer: false)
             progressPanel = progress
             progress.isReleasedWhenClosed = false
-            progress.title = "Exporting conversations"
+            progress.title = selection.lotOnly ? "Exporting Parking Lot" : "Exporting conversations"
             progress.contentView = NSHostingView(rootView: VStack(spacing: 12) {
-                ProgressView("Preparing selected conversations…")
+                ProgressView(selection.lotOnly ? "Preparing Parking Lot…" : "Preparing selected conversations…")
                 if selection.format == .converse {
                     Button("Cancel") { self.exportTask?.cancel() }
                 }

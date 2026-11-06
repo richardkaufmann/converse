@@ -77,6 +77,18 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
         let child = ParkingLotRow(heading: false, text: "Nested [link](https://example.com)", images: ["fixture.png"], done: true, parentID: parent.id)
         lot.openStarter([heading, parent, child])
         let exportedLot = ExportSession(lot: lot)
+        let lotController = TranscriptExportController(sessions: [exportedLot], lotOnly: true)
+        lotController.configurePanel()
+        let lotSelection = lotController.selection
+        check(lotSelection.lotOnly && lotSelection.chosen.map(\.id) == [lot.id] && !lotSelection.lineNumbers
+              && !lotSelection.limitDates && !lotSelection.includeHandoffs && lotSelection.content == .both
+              && lotController.panel.title == "Export Parking Lot" && lotController.panel.nameFieldStringValue == "Parking Lot.html",
+              "Lot menu export fixes scope to this whole lot and configures a compact lot-named save panel")
+        lotSelection.format = .converse
+        check(lotSelection.scrub && !lotSelection.exportsImages, "Lot Converse export defaults to scrubbing with images omitted")
+        lotSelection.scrub = false; lotSelection.scrubChosen = true; lotSelection.format = .html
+        check(!lotSelection.scrub && lotSelection.exportsImages, "Lot export respects the explicit scrub choice across formats")
+        check(!TranscriptExportSelection(sessions: sessions).lotOnly, "Conversation exports retain their full selection controls")
         let outline = try TranscriptExport.html(sessions: [exportedLot], order: .sequential, content: .both, lineNumbers: true, imageData: { _ in png })
         check(outline.contains("<ol type=\"1\">") && outline.contains("<ol type=\"a\">")
               && outline.contains("<p class=\"lot-comment\"><em>Reviewer: Heading note</em></p>")
