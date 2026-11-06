@@ -38,6 +38,14 @@ struct RemoteHomeState: Equatable {
     var lastSeen: Date? = nil
 }
 
+/// What a paired device's authenticated hello reported about its own install.
+struct DeviceInstalledVersion: Equatable {
+    var version: String
+    var build: String?
+    var observedAt: Date
+    var versionBuild: String? { build.map { version + " (" + $0 + ")" } }
+}
+
 final class DevicePeer {
     let id = UUID()
     let connection: NWConnection
@@ -92,6 +100,9 @@ final class DeviceSyncService: ObservableObject {
     @Published var discovered: [DiscoveredDevice] = []
     @Published var trusted: [TrustedDevice] = []
     @Published var homes: [String: RemoteHomeState] = [:]
+    /// Last installed version each paired device reported after trust was
+    /// established, kept across disconnects for this launch only.
+    private(set) var installedVersions: [String: DeviceInstalledVersion] = [:]
     @Published var pairingPrompt: PairingPrompt?
     private var waitingPairings: [PairingPrompt] = []
     var pairingRequestCount: Int { waitingPairings.count + (pairingPrompt == nil ? 0 : 1) }
@@ -354,7 +365,7 @@ final class DeviceSyncService: ObservableObject {
     }
     private func helloPayload(_ peer: DevicePeer) -> Data {
         var hello = DeviceHello(deviceID: identity?.deviceID ?? "", deviceName: deviceName,
-                                converseVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development", listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
+                                converseVersion: ConverseAbout.version, converseBuild: ConverseAbout.build, listenPort: listener?.port.flatMap { $0.rawValue > 0 ? Int($0.rawValue) : nil })
         #if os(macOS)
         hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "image-segments-v1", "transcript-export-v1", "agent-art-direction-v1"])
         #endif
@@ -545,6 +556,7 @@ extension DeviceSyncService {
             disconnect(peer); return
         }
         peer.trustedReady = true
+        installedVersions[hello.deviceID] = DeviceInstalledVersion(version: hello.converseVersion, build: hello.converseBuild, observedAt: Date())
         if groupsEnabled {
             sendGroupState(peer)
             if peer.controlOnly { return }
@@ -575,6 +587,24 @@ extension DeviceSyncService {
     func displayName(for id: String, fallback: String? = nil) -> String {
         let record = trustStore?.devices.first { $0.deviceID == id && $0.groupID == currentGroup?.id }
         return record?.displayName ?? fallback ?? (id == identity?.deviceID ? deviceName : homes[id]?.deviceName ?? record?.name ?? String(id.prefix(8)))
+    }
+    /// Installed Converse versions for agents: this device's own build plus what
+    /// each paired device last reported in an authenticated hello. A device
+    /// that has not connected since launch, or whose release predates build
+    /// reporting, is marked unverified rather than guessed.
+    func installedVersionEvidence(localVersion: String = ConverseAbout.versionBuild, now: Date = Date()) -> [String: Any] {
+        let stamp = ISO8601DateFormatter()
+        let devices: [[String: Any]] = trusted.sorted { displayName(for: $0.deviceID) < displayName(for: $1.deviceID) }.map { device in
+            var item: [String: Any] = ["name": displayName(for: device.deviceID), "connectedNow": homes[device.deviceID]?.online == true]
+            if let observed = installedVersions[device.deviceID] {
+                item["installedVersion"] = observed.versionBuild ?? "unverified: this device's release does not report its build"
+                item["observedAt"] = stamp.string(from: observed.observedAt)
+            } else {
+                item["installedVersion"] = "unknown: not connected since this Converse started"
+            }
+            return item
+        }
+        return ["thisDevice": ["name": deviceName, "installedVersion": localVersion, "observedAt": stamp.string(from: now)], "pairedDevices": devices]
     }
     func canRenameDevice(_ id: String) -> Bool {
         currentGroup != nil && !locallyRemoved && trustStore?.devices.contains { $0.deviceID == id && $0.groupID == currentGroup?.id } == true

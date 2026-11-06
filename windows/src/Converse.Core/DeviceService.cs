@@ -752,9 +752,25 @@ public sealed partial class DeviceSyncService : IDisposable
         _ = BroadcastFabricAsync();
     }
 
+    // The bundled VERSION.json is the release identity shown in the title bar.
+    private static readonly (string Version, string? Build) InstalledVersion = ReadInstalledVersion();
+    private static (string, string?) ReadInstalledVersion()
+    {
+        foreach (var path in new[] { Path.Combine(AppContext.BaseDirectory, "Assets", "VERSION.json"), Path.Combine(AppContext.BaseDirectory, "VERSION.json") })
+        {
+            try
+            {
+                using var version = JsonDocument.Parse(File.ReadAllText(path));
+                return (version.RootElement.GetProperty("version").GetString() ?? "development", version.RootElement.GetProperty("build").ToString());
+            }
+            catch { }
+        }
+        return ("development", null);
+    }
+
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
-        DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = "0.5.22",
+        DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = InstalledVersion.Version, ConverseBuild = InstalledVersion.Build,
         Capabilities = new[] { "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,

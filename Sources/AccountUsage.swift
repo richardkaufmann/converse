@@ -62,6 +62,59 @@ struct AccountUsage: Codable, Equatable {
         }
         return result
     }
+    // Claude Code reports the same subscription windows two ways: the
+    // `get_usage` control request (percent, ISO reset) and each turn's
+    // `rate_limit_event` (fraction, epoch reset). API-key logins report none.
+    static let claudeWindows = [("five_hour", "Claude · 5h"), ("seven_day", "Claude · 1w"), ("seven_day_opus", "Opus · 1w"), ("seven_day_sonnet", "Sonnet · 1w")]
+    static func claudeLimits(_ usage: [String: Any], at: Date = Date()) -> AccountUsage? {
+        guard usage["rate_limits_available"] as? Bool == true, let windows = usage["rate_limits"] as? [String: Any] else { return nil }
+        var result = AccountUsage(observedAt: at)
+        for (key, name) in claudeWindows {
+            guard let window = windows[key] as? [String: Any], let limit = claudeLimit(name, percent: window["utilization"], reset: window["resets_at"]) else { continue }
+            result.limits.append(limit)
+            if window["locked_reason"] is String { result.notice = "Provider reports an account limit reached." }
+        }
+        for scoped in windows["model_scoped"] as? [[String: Any]] ?? [] {
+            guard let model = scoped["display_name"] as? String, !result.limits.contains(where: { $0.name == model + " · 1w" }),
+                  let limit = claudeLimit(model + " · 1w", percent: scoped["utilization"], reset: scoped["resets_at"]) else { continue }
+            result.limits.append(limit)
+        }
+        return result
+    }
+    static func claudeRateLimitEvent(_ info: [String: Any], at: Date = Date()) -> AccountUsage {
+        var result = AccountUsage(observedAt: at)
+        let windows = info["unifiedWindows"] as? [String: Any] ?? [:]
+        for (key, name) in claudeWindows {
+            guard let window = windows[key] as? [String: Any], let fraction = (window["utilization"] as? NSNumber)?.doubleValue,
+                  let limit = claudeLimit(name, percent: fraction * 100, reset: window["resetsAt"]) else { continue }
+            result.limits.append(limit)
+        }
+        // Older CLIs report only the window nearest its limit.
+        if result.limits.isEmpty, let type = info["rateLimitType"] as? String, let name = claudeWindows.first(where: { $0.0 == type })?.1,
+           let fraction = (info["utilization"] as? NSNumber)?.doubleValue, let limit = claudeLimit(name, percent: fraction * 100, reset: info["resetsAt"]) {
+            result.limits.append(limit)
+        }
+        if info["status"] as? String == "rejected" { result.notice = "Provider reports an account limit reached." }
+        return result
+    }
+    private static func claudeLimit(_ name: String, percent: Any?, reset: Any?) -> AccountLimit? {
+        guard let used = (percent as? NSNumber)?.doubleValue ?? (percent as? Double), used.isFinite, used >= 0 else { return nil }
+        let resetsAt: Date?
+        if let seconds = (reset as? NSNumber)?.doubleValue { resetsAt = seconds.isFinite && seconds > 0 ? Date(timeIntervalSince1970: seconds) : nil }
+        else if let text = reset as? String {
+            // Python-style microseconds; the system parser accepts milliseconds.
+            resetsAt = parseDate(text.replacingOccurrences(of: "(\\.\\d{3})\\d+", with: "$1", options: .regularExpression))
+        } else { resetsAt = nil }
+        return AccountLimit(name: name, usedPercent: min(100, used), resetsAt: resetsAt)
+    }
+    // A newer observation replaces only the windows it reports; turn context
+    // and the windows it omits stay as last measured.
+    func merging(_ newer: AccountUsage) -> AccountUsage {
+        var result = self
+        result.limits = limits.map { old in newer.limits.first { $0.name == old.name } ?? old } + newer.limits.filter { new in !limits.contains { $0.name == new.name } }
+        result.observedAt = newer.observedAt; result.notice = newer.notice
+        return result
+    }
     // The existing Muse CLI observer retains the original reset/observation text.
     // Only the numeric percentages are summarized; the full source stays visible.
     static func museLimits(_ text: String) -> [AccountLimit] {
@@ -150,6 +203,20 @@ func accountUsageSelfTests(_ check: (Bool, String) -> Void) {
     check(AccountUsage.codexLimits([:]).limits.isEmpty && AccountUsage.codexLimits(["rateLimits": ["primary": ["usedPercent": -5]]]).limits.isEmpty, "Missing or invalid quota stays unknown, not zero percent")
     let muse = AccountUsage.museLimits("Current 86% used · resets tomorrow\nWeekly 97% used · resets Friday\nas of Thursday (Muse)")
     check(muse.map(\.usedPercent) == [86, 97] && AccountUsage.museLimits("Muse has no observed account quota").isEmpty, "Muse account summary preserves current and weekly percentages; unavailable stays unknown")
+    // Claude Code 2.1 shapes: get_usage percent windows; rate_limit_event fractions.
+    let report: [String: Any] = ["rate_limits_available": true, "rate_limits": ["five_hour": NSNull(), "seven_day": ["utilization": 30, "resets_at": "2026-11-07T07:00:00.404638+00:00", "locked_reason": NSNull()], "seven_day_opus": ["utilization": 100, "resets_at": "2026-11-07T07:00:00+00:00", "locked_reason": "limit"], "model_scoped": [["display_name": "Opus", "utilization": 5], ["display_name": "Fable", "utilization": 0, "resets_at": "2026-11-07T07:00:00+00:00"]]]]
+    let claude = AccountUsage.claudeLimits(report, at: now)
+    check(claude?.limits.map(\.name) == ["Claude · 1w", "Opus · 1w", "Fable · 1w"] && claude?.limits.first?.usedPercent == 30 && claude?.limits.first?.resetsAt != nil && claude?.notice != nil,
+          "Claude usage report keeps weekly, per-model and locked windows with microsecond reset times")
+    check(AccountUsage.claudeLimits(["rate_limits_available": false, "rate_limits": [:]]) == nil && AccountUsage.claudeLimits([:]) == nil, "Claude API-key logins without subscription windows stay unknown")
+    let event = AccountUsage.claudeRateLimitEvent(["status": "allowed", "unifiedWindows": ["five_hour": ["utilization": 0.925, "resetsAt": now.timeIntervalSince1970 + 600], "seven_day": ["utilization": 0.29, "resetsAt": now.timeIntervalSince1970 + 9000]]], at: now)
+    check(event.limits.map(\.name) == ["Claude · 5h", "Claude · 1w"] && abs(event.limits[0].usedPercent - 92.5) < 0.01 && event.warning(now: now) && event.notice == nil, "Claude turn rate-limit fractions become percent windows with near-limit warning")
+    let legacyEvent = AccountUsage.claudeRateLimitEvent(["status": "rejected", "rateLimitType": "five_hour", "utilization": 1.0, "resetsAt": now.timeIntervalSince1970 + 60], at: now)
+    check(legacyEvent.limits.map(\.name) == ["Claude · 5h"] && legacyEvent.limits[0].usedPercent == 100 && legacyEvent.notice != nil, "Claude single-window rate-limit events and rejections are reported")
+    var held = AccountUsage(context: context, limits: claude?.limits ?? [], observedAt: now)
+    held = held.merging(event)
+    check(held.context == context && held.limits.map(\.name) == ["Claude · 1w", "Opus · 1w", "Fable · 1w", "Claude · 5h"] && held.limits[0].usedPercent.rounded() == 29 && held.notice == nil,
+          "A newer Claude observation replaces only its windows and keeps context and omitted windows")
     let legacy = try? JSONDecoder().decode(ToolStatus.self, from: Data("{\"model\":\"m\",\"effort\":\"e\",\"access\":\"a\",\"usage\":\"1 in / 2 out\"}".utf8))
     check(legacy != nil && legacy?.accountUsage == nil, "Account status opens older archives without telemetry")
     var status = ToolStatus(); status.accountUsage = limits; status.accountUsage?.context = context

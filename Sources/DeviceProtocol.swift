@@ -100,6 +100,10 @@ struct DeviceHello: Codable, Equatable {
     var deviceID: String
     var deviceName: String
     var converseVersion: String
+    /// Build number beside converseVersion. Older releases omit it (and some
+    /// sent a fixed placeholder version), so only a hello with a build counts
+    /// as installed-version evidence.
+    var converseBuild: String? = nil
     var protocolVersion = 1
     var capabilities: [String] = ["sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "switchboard-teach-v1", "converse-groups-v1"]
     var listenPort: Int? = nil

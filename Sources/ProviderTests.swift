@@ -145,10 +145,17 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         try! FileManager.default.createDirectory(atPath: accountDir, withIntermediateDirectories: true)
         let entry = Entry(name: "Fixture", command: "python3 " + ProviderCommand.quote(fixture) + " " + engine, directory: NSTemporaryDirectory(), engine: engine, accountID: "fixture", accountName: "Fixture", accountDirectory: accountDir)
         do {
-            let probe = try ProviderStatus.query(entry: entry, remoteID: engine == "codex" ? "fixture-thread" : nil)
+            let probe = try ProviderStatus.query(entry: entry, remoteID: engine == "codex" ? "fixture-thread" : nil, usage: true)
             check(probe.models.count == 2 && !probe.models[0].efforts.isEmpty && probe.account == accountDir, engine + " prompt-free catalog and account isolation")
             check(probe.status.model == (engine == "codex" ? "fixture-sol" : "fixture-opus") && !probe.access.isEmpty, engine + " resolved model and permission discovery")
             if engine == "codex" { check(probe.status.effort == "high", "Codex retained effort wins over config default") }
+            if engine == "claude" {
+                let limits = probe.status.accountUsage?.limits ?? []
+                check(limits.map(\.name) == ["Claude · 1w", "Fixture · 1w"] && limits.map(\.usedPercent) == [30, 12] && abs((limits.first?.resetsAt?.timeIntervalSince1970 ?? 0) - 1794034800.404) < 0.01,
+                      "Claude status probe reads weekly and model-scoped limits from get_usage")
+                let quiet = try ProviderStatus.query(entry: entry, remoteID: nil)
+                check(quiet.status.accountUsage == nil, "Claude status probe skips the usage read unless asked")
+            }
         } catch { check(false, engine + " catalog failed: " + error.localizedDescription) }
         let session = store.create(entry)
         session.choices = SessionChoices(model: engine == "codex" ? "fixture-sol" : "sonnet", effort: "high", access: engine == "codex" ? "read-only" : "manual")
@@ -162,6 +169,11 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         pump { !session.busy && session.pending.isEmpty }
         let answers = session.messages.filter { $0.role == "assistant" }.map(\.text)
         check(answers == ["partial", "answer: urgent", "answer: queued"] && session.draft == "keep draft", engine + " interruption waits for exit, resumes exact session, drains in order and preserves edited draft")
+        if engine == "claude" {
+            let limits = session.toolStatus.accountUsage?.limits ?? []
+            check(limits.map(\.name) == ["Claude · 5h", "Claude · 1w"] && limits.map { Int($0.usedPercent.rounded()) } == [7, 29] && limits[1].resetsAt == Date(timeIntervalSince1970: 1794034800),
+                  "Claude turns report 5-hour and weekly limits in the footer from rate_limit_event")
+        }
         session.draft = "slow"; store.submit(session)
         pump { session.messages.last?.text == "partial" }
         session.pending = [PendingPrompt(text: "first", images: []), PendingPrompt(text: "second", images: [])]

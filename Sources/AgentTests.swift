@@ -519,6 +519,7 @@ import Foundation
     // Real engine path, fake HTTP. No credentials, external requests or billable calls.
     runtime.keyReader = { _ in "isolated-test-key" }
     var requests: [URLRequest] = []
+    var modelReply = "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[],\"memory\":\"Keep release acceptance criteria\"}"
     recipient.messages.append(Message(role: "assistant", text: "private scope canary"))
     let currentWork = store.create(recipient.entry)
     currentWork.title = "Currently working fixture"; currentWork.busy = true; currentWork.status = "Working…"
@@ -531,7 +532,7 @@ import Foundation
         if path != "/v1/responses" { agent.agent?.watchedSessions.removeAll { $0 == recipient.id } } // Revoke scope while repository requests are in flight.
         var object: Any = [:]
         if path == "/v1/responses" {
-            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[],\"memory\":\"Keep release acceptance criteria\"}"]]]]]
+            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": modelReply]]]]]
         } else if path.contains("search/issues") { object = ["total_count": 0, "incomplete_results": false] }
         else if path.hasSuffix("/releases") || path.hasSuffix("/comments") { object = [] }
         else if path.hasSuffix("/views") { object = ["uniques": 7] }
@@ -599,6 +600,21 @@ import Foundation
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
     check(requestBody?["prompt_cache_key"] as? String == AgentInstructions.cacheKey(agent.id) && requestBody?["prompt_cache_retention"] as? String == "24h" && (requestBody?["instructions"] as? String)?.hasPrefix(AgentInstructions.staticRules) == true,
           "Real agent runtime sends its static instructions first with a per-agent prompt cache key")
+    let versions = evidenceInput?["installedConverseVersions"] as? [String: Any]
+    check((versions?["thisDevice"] as? [String: Any])?["installedVersion"] as? String == ConverseAbout.versionBuild && (versions?["thisDevice"] as? [String: Any])?["observedAt"] as? String != nil
+          && versions?["pairedDevices"] is [[String: Any]] && (requestBody?["instructions"] as? String)?.contains("installedConverseVersions is host-measured") == true,
+          "Agent runs receive this Mac's installed build and paired devices' reported versions, with instructions to verify install claims against them")
+    // Install advice repeated from old messages clears once the agent sees the
+    // measured versions and returns an empty attention.
+    agent.agent?.attention = "Quit Converse on Mac and Windows to install 138."
+    modelReply = "{\"reply\":\"\",\"attention\":\"\",\"tell\":[]}"
+    agent.busy = true
+    let clearingID = UUID(); agent.messages.append(Message(id: clearingID, role: "assistant", text: ""))
+    runtime.run(agent, store: store, responseID: clearingID)
+    let clearingDeadline = Date().addingTimeInterval(8)
+    while agent.busy && Date() < clearingDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    check(!agent.busy && agent.agent?.attention == "" && !agent.needsApproval, "An agent reply with an empty attention clears stale install advice")
+    modelReply = "{\"reply\":\"Measured progress\",\"attention\":\"Need a success criterion\",\"tell\":[],\"memory\":\"Keep release acceptance criteria\"}"
 
     // Clearing GitHub must not make an unrelated saved credential a runtime dependency.
     var noRepoSettings = agent.agent!.wire(home: localHome); noRepoSettings.repository = ""

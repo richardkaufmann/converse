@@ -200,8 +200,8 @@ struct ProviderSnapshot {
     var detail = ""
 }
 struct ProviderStatus {
-    static func query(entry: Entry, remoteID: String?) throws -> ProviderSnapshot {
-        if entry.engine == "claude" { return try claude(entry: entry, remoteID: remoteID) }
+    static func query(entry: Entry, remoteID: String?, usage: Bool = false) throws -> ProviderSnapshot {
+        if entry.engine == "claude" { return try claude(entry: entry, remoteID: remoteID, usage: usage) }
         let rpc = try ProviderProbeConnection(entry: entry, arguments: ["app-server"])
         _ = try rpc.rpc("initialize", ["clientInfo": ["name": "converse", "version": "0.5"], "capabilities": ["experimentalApi": true]])
         try rpc.write(["method": "initialized", "params": [:]])
@@ -268,7 +268,7 @@ struct ProviderStatus {
         try? file.seek(toOffset: size > 2_000_000 ? size - 2_000_000 : 0)
         return file.readDataToEndOfFile().split(separator: 10).compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
     }
-    static func claude(entry: Entry, remoteID: String?) throws -> ProviderSnapshot {
+    static func claude(entry: Entry, remoteID: String?, usage: Bool = false) throws -> ProviderSnapshot {
         let rpc = try ProviderProbeConnection(entry: entry, arguments: ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--no-session-persistence"])
         try rpc.write(["type": "control_request", "request_id": "converse-status", "request": ["subtype": "initialize"]])
         while true {
@@ -290,9 +290,21 @@ struct ProviderStatus {
                     if let message = object["message"] as? [String: Any], let model = message["model"] as? String, model != "<synthetic>" { result.status.model = model }
                 }
             }
+            // Optional telemetry must never make model/account discovery fail.
+            if usage, let report = try? claudeUsage(rpc) { result.status.accountUsage = AccountUsage.claudeLimits(report) }
             if !result.account.contains("@"), let email = try? claudeAccountEmail(entry: entry) { result.account = email }
             result.detail = "Model: \(result.status.model)\nEffort: \(result.status.effort)\nAccess: \(result.status.access)\nAccount: \(result.account)"
             return result
+        }
+    }
+    // The same subscription windows Claude's /usage shows. Older CLIs answer
+    // an unknown control request with an error, which leaves limits unknown.
+    static func claudeUsage(_ rpc: ProviderProbeConnection) throws -> [String: Any]? {
+        try rpc.write(["type": "control_request", "request_id": "converse-usage", "request": ["subtype": "get_usage"]])
+        while true {
+            let value = try rpc.read()
+            guard value["type"] as? String == "control_response", let response = value["response"] as? [String: Any], response["request_id"] as? String == "converse-usage" else { continue }
+            return response["subtype"] as? String == "success" ? response["response"] as? [String: Any] : nil
         }
     }
     static func claudeAccountEmail(entry: Entry) throws -> String? {
@@ -326,14 +338,16 @@ extension Session {
     }
 }
 extension Store {
-    func refreshProviderStatus(_ s: Session, completion: (() -> Void)? = nil) {
+    func refreshProviderStatus(_ s: Session, quota: Bool = false, completion: (() -> Void)? = nil) {
         guard !s.isAgentSession else { refreshStatus(s, completion: completion); return }
         if let completion { s.statusCallbacks.append(completion) }
         guard !s.probingStatus else { return }
         s.probingStatus = true
         let entry = s.entry, remoteID = s.remoteID
+        // Claude's usage read is a network call; turns report limits in between.
+        let fetchQuota = entry.engine == "claude" && (quota || s.quotaRefreshedAt.map { Date().timeIntervalSince($0) > 300 } ?? true)
         DispatchQueue.global(qos: .utility).async {
-            let result = Result { try ProviderStatus.query(entry: entry, remoteID: remoteID) }
+            let result = Result { try ProviderStatus.query(entry: entry, remoteID: remoteID, usage: fetchQuota) }
             DispatchQueue.main.async {
                 s.probingStatus = false
                 // An agent can finish configuration while an older probe is in flight.
@@ -349,7 +363,9 @@ extension Store {
                         s.modelChoices = snapshot.models; s.accessChoices = snapshot.access
                         s.toolStatus.model = snapshot.status.model; s.toolStatus.effort = snapshot.status.effort; s.toolStatus.access = snapshot.access.first { $0.id == snapshot.status.access }?.label ?? snapshot.status.access
                         s.toolStatus.approval = snapshot.status.approval
-                        if s.entry.engine != "claude" || snapshot.status.accountUsage != nil { s.toolStatus.accountUsage = snapshot.status.accountUsage }
+                        if s.entry.engine != "claude" { s.toolStatus.accountUsage = snapshot.status.accountUsage }
+                        else if let usage = snapshot.status.accountUsage { s.toolStatus.accountUsage = (s.toolStatus.accountUsage ?? AccountUsage()).merging(usage) }
+                        if fetchQuota { s.quotaRefreshedAt = Date() }
                         if let date = snapshot.status.accountUsage?.contextCompactedAt, date > (s.lastCompactedAt ?? .distantPast) { s.lastCompactedAt = date }
                         s.accountStatus = snapshot.account; s.toolStatus.account = snapshot.account; s.toolStatus.accountObservedAt = Date()
                         s.statusDetails = snapshot.detail; s.probeError = ""; s.needsSignIn = AccountLogin.requiresSignIn(snapshot.account)
@@ -719,6 +735,10 @@ extension Store {
             if counts.allSatisfy({ $0 >= 0 && $0 <= 1_000_000_000 }), usage["input_tokens"] is Int {
                 s.claudeLastContext = (model, counts.reduce(0, +))
             }
+        }
+        if event["type"] as? String == "rate_limit_event", let info = event["rate_limit_info"] as? [String: Any] {
+            let usage = AccountUsage.claudeRateLimitEvent(info)
+            if !usage.limits.isEmpty || usage.notice != nil { s.toolStatus.accountUsage = (s.toolStatus.accountUsage ?? AccountUsage()).merging(usage) }
         }
         if event["type"] as? String == "result", let last = s.claudeLastContext,
            let models = event["modelUsage"] as? [String: [String: Any]], let model = models[last.model],
