@@ -88,8 +88,13 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
     session.draft = "unsent draft"; session.attachments = ["/tmp/unsent.png"]
     var outcome: ProviderChangeOutcome?
     check(store.conversationChange(session, engine: "codex", accountID: codexLogin.id) == .provider && store.handoffAvailable(session), "A different assistant takes the handoff path, offered by default")
-    store.changeProvider(session, handoff: true, target: { (codex, codexLogin) }) { outcome = $0 }
+    let changeProgress = HandoffExportProgress()
+    store.changeProvider(session, handoff: true, progress: changeProgress, target: { (codex, codexLogin) }) { outcome = $0 }
+    check(changeProgress.lines.map(\.text) == ["Muse — " + session.title] && changeProgress.lines.first?.startedAt != nil && changeProgress.outcome == nil,
+          "Change Assistant shows the handoff progress line with the session title while the note is written")
     wait { outcome != nil }
+    check(changeProgress.outcome == .done && changeProgress.lines.map(\.text) == ["Muse: done"] && changeProgress.lines.first?.startedAt == nil,
+          "The Change Assistant progress ends done when the note arrives")
     let note = (try? String(contentsOf: store.handoffNoteURL(session), encoding: .utf8)) ?? ""
     let transcript = (try? String(contentsOf: store.handoffTranscriptURL(session), encoding: .utf8)) ?? ""
     check(outcome == .switched(note: true) && note.contains("handoff note for your successor") && !note.contains("[Converse: "),
@@ -165,6 +170,30 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
     wait({ finished }, seconds: 10)
     check(finished && cancelledToNil, "Cancel ends the handoff export at once, even while a turn is running")
     wait({ !session.busy }, seconds: 10)
+    // Change Assistant: the same progress, time limit and Cancel.
+    session.queuePaused = false; ProviderHandoff.exportNoteTimeout = 2
+    let timedChange = HandoffExportProgress()
+    var changeOutcome: ProviderChangeOutcome?
+    let changeStarted = Date()
+    store.changeProvider(session, handoff: true, progress: timedChange, target: { (codex, codexLogin) }) { changeOutcome = $0 }
+    check(timedChange.lines.first?.elapsed(at: Date().addingTimeInterval(65)) == "1:05", "The handoff progress line shows elapsed time")
+    wait({ changeOutcome != nil }, seconds: 10)
+    check(changeOutcome == .noteFailed(ProviderHandoff.timeoutReason) && timedChange.outcome == .timedOut && Date().timeIntervalSince(changeStarted) < 6 && session.entry.engine == "muse",
+          "A stalled Change Assistant handoff stops at the time limit and offers to switch without a note")
+    wait({ !session.busy }, seconds: 10)
+    check(!session.busy, "The timed-out handoff turn is stopped")
+    session.queuePaused = false; ProviderHandoff.exportNoteTimeout = 60
+    let cancelledChange = HandoffExportProgress()
+    changeOutcome = nil
+    store.changeProvider(session, handoff: true, progress: cancelledChange, target: { (codex, codexLogin) }) { changeOutcome = $0 }
+    wait({ session.busy }, seconds: 10)
+    let changeCancelAt = Date()
+    cancelledChange.cancel()
+    wait({ changeOutcome != nil }, seconds: 5)
+    check(changeOutcome == .noteFailed(ProviderHandoff.cancelReason) && cancelledChange.outcome == .cancelled && Date().timeIntervalSince(changeCancelAt) < 2 && session.entry.engine == "muse",
+          "Cancel ends the Change Assistant handoff at once and keeps the current assistant")
+    wait({ !session.busy }, seconds: 10)
+    check(!session.busy, "Cancel stops the Change Assistant handoff turn")
     session.entry.command = savedCommand; ProviderHandoff.exportNoteTimeout = savedTimeout; session.queuePaused = false
 
     // One serial queue per provider, the queues side by side. Slow stand-ins

@@ -291,9 +291,9 @@ struct SidebarSession: View {
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }
                 }
-                Button("Teach Converse Setup & Control") { Store.shared.teachAppSupport(session) }
+                Button("Teach Converse Setup & Control") { Store.shared.teachAppSupport(session) }.help(SwitchboardTeaching.controlHelp)
                 if session.supportTeachingVersion != nil { Button("Disable app control") { session.supportTeachingVersion = nil; Store.shared.save() } }
-                Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }
+                Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }.help(SwitchboardTeaching.talkHelp)
                 if session.switchboardEnabled { Button("Disable session messaging") { session.switchboardEnabled = false; Store.shared.save() } }
             }
             .alert("Close ‘\(session.title)’?", isPresented: closeBinding) {

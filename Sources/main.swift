@@ -75,6 +75,13 @@ struct SavedSession: Codable {
     var freshConversationID: UUID? = nil
     // The generated catch-up block in an imported session's unsent draft.
     var restoreContext: String? = nil
+    // The switchboard lesson version this session was taught. Older taught
+    // archives have none; they decode as version 1.
+    var switchboardTeachingVersion: Int? = nil
+    // The lesson version whose teaching banner the human dismissed.
+    var teachingBannerDismissed: Int? = nil
+    // This pane's text size; nil follows the global default.
+    var textSize: Double? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -146,6 +153,9 @@ final class Session: ObservableObject, Identifiable {
     @Published var pending: [PendingPrompt] = []
     @Published var queuePaused = false
     @Published var switchboardEnabled = false
+    @Published var switchboardTeachingVersion: Int? = nil
+    @Published var teachingBannerDismissed: Int? = nil
+    @Published var textSize: Double? = nil
     var switchboardHandled: [UUID] = []
     @Published var switchboardObligations: [SwitchboardObligation] = []
     var switchboardExpectations: [SwitchboardExpectation] = []
@@ -248,6 +258,8 @@ final class Session: ObservableObject, Identifiable {
         lastCompactedAt = saved.lastCompactedAt
         choices = saved.choices ?? SessionChoices()
         switchboardEnabled = saved.switchboardEnabled ?? false; switchboardHandled = saved.switchboardHandled ?? []
+        switchboardTeachingVersion = saved.switchboardTeachingVersion ?? (saved.switchboardEnabled == true ? 1 : nil)
+        teachingBannerDismissed = saved.teachingBannerDismissed; textSize = saved.textSize
         switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
         switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
@@ -270,9 +282,9 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize) }
 }
-struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil }
+struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil; var paneTextSize: Double? = nil }
 final class Store: ObservableObject {
     static func transcriptMessageNumbers(_ messages: [Message]) -> [UUID: Int] {
         var result: [UUID: Int] = [:], number = 0
@@ -286,6 +298,8 @@ final class Store: ObservableObject {
     static let importProviderNotice = "This conversation was imported. Choose a provider for it before sending; your draft is kept."
     @Published var lineNumbers = UserDefaults.standard.object(forKey: "lineNumbers") as? Bool ?? true { didSet { UserDefaults.standard.set(lineNumbers, forKey: "lineNumbers") } }
     @Published var setupCompleted = false
+    // Session panes without their own size use this (View ▸ Bigger / Smaller).
+    @Published var paneTextSize = PaneTextSize.standard
     @Published var accounts: [AccountProfile] = []
     @Published var entries: [Entry] = []
     @Published var sessions: [Session] = []
@@ -324,6 +338,7 @@ final class Store: ObservableObject {
             participantReceipts = archive.participantReceipts ?? []
             groupTellReceipts = archive.groupTellReceipts ?? []
             setupCompleted = archive.setupCompleted ?? true
+            paneTextSize = PaneTextSize.clamp(archive.paneTextSize ?? PaneTextSize.standard)
             entries = archive.entries; sessions = archive.sessions.map(Session.init)
             configurationAudit.loaded(sessions, data: archiveData)
             accounts = archive.accounts ?? accounts
@@ -379,7 +394,7 @@ final class Store: ObservableObject {
             if elapsed > 0.15 { NSLog("Converse slow archive save: %.0f ms at %@", elapsed * 1000, source) }
         }
         do {
-            let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts))
+            let data = try JSONEncoder().encode(Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts, paneTextSize: paneTextSize == PaneTextSize.standard ? nil : paneTextSize))
             configurationAudit.willSave(sessions, data: data, source: source)
             try data.write(to: folder.appendingPathComponent("sessions.json"), options: .atomic)
             configurationAudit.didSave(sessions)
@@ -1785,6 +1800,9 @@ final class ConversationTextView: NSTextView {
         }
     }
     override func layout() { super.layout(); layoutDraftImageButtons() }
+    // Point size of this pane's transcript and draft (View ▸ Bigger / Smaller).
+    var fontSize: CGFloat = CGFloat(PaneTextSize.standard)
+    var bodyFont: NSFont { .systemFont(ofSize: fontSize) }
     static let inputParagraphStyle: NSParagraphStyle = {
         let style = NSMutableParagraphStyle(); style.lineSpacing = 2; return style
     }()
@@ -1802,12 +1820,27 @@ final class ConversationTextView: NSTextView {
         if origin != scroll.contentView.bounds.origin { scroll.contentView.scroll(to: origin) }
         scroll.reflectScrolledClipView(scroll.contentView)
     }
+    /// The first character at the top of the visible transcript.
+    func topVisibleCharacter() -> Int? {
+        guard let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer, layout.numberOfGlyphs > 0 else { return nil }
+        let point = NSPoint(x: 1, y: max(0, scroll.contentView.bounds.minY - textContainerOrigin.y))
+        return layout.characterIndexForGlyph(at: layout.glyphIndex(for: point, in: container))
+    }
+    func scrollCharacterToTop(_ character: Int) {
+        guard let scroll = enclosingScrollView, let layout = layoutManager, let container = textContainer, layout.numberOfGlyphs > 0 else { return }
+        layout.ensureLayout(for: container)
+        let glyph = layout.glyphIndexForCharacter(at: min(character, max(0, (string as NSString).length - 1)))
+        let line = layout.lineFragmentRect(forGlyphAt: min(glyph, layout.numberOfGlyphs - 1), effectiveRange: nil)
+        let bounds = NSRect(origin: NSPoint(x: scroll.contentView.bounds.minX, y: line.minY + textContainerOrigin.y), size: scroll.contentView.bounds.size)
+        scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
     func focusInput() {
         explicitCursor = false
         window?.makeFirstResponder(self)
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         let color = TranscriptPalette.draft((string as NSString).substring(from: min(inputStart, (string as NSString).length)))
-        typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: color, .paragraphStyle: Self.inputParagraphStyle]
+        typingAttributes = [.font: bodyFont, .foregroundColor: color, .paragraphStyle: Self.inputParagraphStyle]
         insertionPointColor = color
         scrollRangeToVisible(selectedRange())
         updateInsertionPointStateAndRestartTimer(true)
@@ -1949,10 +1982,10 @@ final class ConversationTextView: NSTextView {
     func addTeachingItem(to menu: NSMenu) {
         guard teachSession != nil else { return }
         let item = NSMenuItem(title: "Teach Session To Talk To Other Sessions", action: #selector(teachConversation(_:)), keyEquivalent: "")
-        item.target = self; menu.addItem(.separator()); menu.addItem(item)
+        item.target = self; item.toolTip = SwitchboardTeaching.talkHelp; menu.addItem(.separator()); menu.addItem(item)
         if teachApp != nil {
             let support = NSMenuItem(title: "Teach Converse Setup & Control", action: #selector(teachAppConversation(_:)), keyEquivalent: "")
-            support.target = self; menu.addItem(support)
+            support.target = self; support.toolTip = SwitchboardTeaching.controlHelp; menu.addItem(support)
         }
     }
     func imageToolsItem(at character: Int, hasMetaKey: Bool? = nil) -> NSMenuItem? {
@@ -2148,6 +2181,8 @@ final class ConversationTextView: NSTextView {
 struct ScrollingConversation: NSViewRepresentable {
     @ObservedObject var session: Session
     var lineNumbers: Bool = true
+    // nil: the session's own size, else the global default.
+    var textSize: Double? = nil
     var inputEnabled: Bool = true
     var droppedFileSourceDevice: String? = nil
     var onTeachSwitchboard: (() -> Void)? = nil
@@ -2177,7 +2212,9 @@ struct ScrollingConversation: NSViewRepresentable {
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isAutomaticTextReplacementEnabled = false
         text.textContainerInset = NSSize(width: 12, height: 12)
-        text.font = .systemFont(ofSize: 16); text.backgroundColor = NSColor.textBackgroundColor
+        PaneTextSize.viewers.add(session)
+        text.fontSize = CGFloat(textSize ?? Store.shared.textSize(for: session))
+        text.font = text.bodyFont; text.backgroundColor = NSColor.textBackgroundColor
         text.delegate = context.coordinator
         text.setAccessibilityLabel("Conversation and message input. Return sends or queues. Command Return inserts a new line.")
         text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
@@ -2213,6 +2250,7 @@ struct ScrollingConversation: NSViewRepresentable {
         context.coordinator.draftChanged = onDraftChanged
         if let text = scroll.documentView as? ConversationTextView {
             text.droppedFileSourceDevice = droppedFileSourceDevice
+            text.fontSize = CGFloat(textSize ?? Store.shared.textSize(for: session))
             text.isEditable = inputEnabled
             text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
@@ -2240,6 +2278,7 @@ struct ScrollingConversation: NSViewRepresentable {
         var renderedMessageNumbers: [UUID: Int] = [:]
         var renderedMessageNumberOffset = 0
         var renderedAttachments: [String] = []
+        var renderedFontSize: CGFloat?
         var messageStarts: [UUID: Int] = [:]
         var historyEnd = 0
         private(set) var historyBuildCount = 0
@@ -2293,7 +2332,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 text.recordUserSelection()
             }
             guard let text = notification.object as? ConversationTextView, text.selectedRange().location >= text.inputStart else { return }
-            text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
+            text.typingAttributes = [.font: text.bodyFont, .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
         }
         func textDidChange(_ notification: Notification) {
             guard !rendering, let text = notification.object as? ConversationTextView else { return }
@@ -2326,6 +2365,12 @@ struct ScrollingConversation: NSViewRepresentable {
             let previous = renderedMessages
             let firstRender = previous == nil
             var historyChanged = firstRender
+            // A text size change rebuilds every block at the new size and
+            // keeps the same text at the top of the pane.
+            let restyle = !firstRender && renderedFontSize != text.fontSize
+            renderedFontSize = text.fontSize
+            if restyle { markdownCache = [:] }
+            let anchor = restyle ? text.topVisibleCharacter() : nil
             if seenMessagesRevision != session.messagesRevision {
                 let messages = session.displayedMessages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) }
                 historyChanged = previous != messages
@@ -2333,6 +2378,8 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
             historyChanged = historyChanged || numberingChanged
+            let contentChanged = historyChanged
+            historyChanged = historyChanged || restyle
             renderedMessageNumbers = session.messageNumbers; renderedMessageNumberOffset = session.messageNumberOffset
             let addedAttachment = session.attachments.contains { !renderedAttachments.contains($0) }
             let attachmentsChanged = renderedAttachments != session.attachments
@@ -2343,7 +2390,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 // tail. Native typing already changed it and returns above.
                 let selection = text.selectedRange(), offset = max(0, selection.location - text.inputStart)
                 rendering = true
-                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
+                let attrs: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: TranscriptPalette.draft(session.draft), .paragraphStyle: ConversationTextView.inputParagraphStyle]
                 text.textStorage?.replaceCharacters(in: NSRange(location: text.inputStart, length: current.length - text.inputStart), with: NSAttributedString(string: session.draft, attributes: attrs))
                 text.typingAttributes = attrs; text.undoManager?.removeAllActions()
                 if selection.location >= text.inputStart {
@@ -2358,7 +2405,7 @@ struct ScrollingConversation: NSViewRepresentable {
             if let previous {
                 while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
             }
-            let unchangedPrefix = firstRender ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
+            let unchangedPrefix = firstRender || restyle ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
             renderedAttachments = session.attachments
             historyBuildCount += 1
             let selection = text.selectedRange()
@@ -2368,10 +2415,10 @@ struct ScrollingConversation: NSViewRepresentable {
             let origin = scroll?.contentView.bounds.origin ?? .zero
             let nativeScroll = scroll as? ConversationScrollView
             let follow = (firstRender || historyChanged) && (nativeScroll?.prepareForRender(first: firstRender) ?? true)
-            if !firstRender && historyChanged { nativeScroll?.outputArrived() }
+            if !firstRender && contentChanged { nativeScroll?.outputArrived() }
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
-            let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
+            let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
             let document = NSMutableAttributedString(string: "")
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
@@ -2401,6 +2448,7 @@ struct ScrollingConversation: NSViewRepresentable {
                     if let cached = markdownCache[message.id], cached.0 == visible { body = NSMutableAttributedString(attributedString: cached.1) }
                     else {
                         body = MarkdownText.render(visible)
+                        PaneTextSize.scale(body, by: text.fontSize / CGFloat(PaneTextSize.standard))
                         let refs = TranscriptStyle.imageReferences(visible)
                         if !refs.isEmpty {
                             body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
@@ -2438,7 +2486,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
                 if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
                 if message.role == "user" {
-                    body.addAttribute(.font, value: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 16), toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
+                    body.addAttribute(.font, value: NSFontManager.shared.convert(text.bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
                 }
                 document.append(body)
                 if message.role == "user" || message.role == "assistant" {
@@ -2502,6 +2550,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if let nativeScroll { nativeScroll.followLatest() }
                 else { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
             }
+            else if let anchor { text.scrollCharacterToTop(anchor) }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
@@ -2534,6 +2583,10 @@ struct Conversation: View {
                 Divider()
             }
             Divider()
+            if let banner = store.teachingBanner(session) {
+                TeachingBannerView(banner: banner, teach: { store.teachSwitchboard(session) }, dismiss: { store.dismissTeachingBanner(session) })
+                Divider()
+            }
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
@@ -2555,7 +2608,7 @@ struct Conversation: View {
             SwitchboardStatusView(session: session)
             if session.supportAssistant && store.firstRun.record?.supportID == session.id { FirstRunPanel(guide: store.firstRun, login: store.firstRun.login, session: session) }
             if !session.pending.isEmpty { PendingMessagesView(session: session) }
-            ScrollingConversation(session: session, lineNumbers: store.lineNumbers)
+            ScrollingConversation(session: session, lineNumbers: store.lineNumbers, textSize: store.textSize(for: session))
                 .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: session.substitutionFeedback).padding(.trailing, 12).padding(.bottom, 80) }
                 .overlay(alignment: .bottomTrailing) {
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
@@ -2926,6 +2979,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let item = e.addItem(withTitle: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
             item.tag = Int(tag)
         }
+        let view = NSMenuItem(); view.title = "View"; menu.addItem(view); let v = NSMenu(title: "View"); view.submenu = v
+        // The pane with the text cursor, else every session pane.
+        for (title, action, key) in [("Bigger", #selector(biggerText(_:)), "+"), ("Smaller", #selector(smallerText(_:)), "-"), ("Actual Size", #selector(actualSizeText(_:)), "0")] {
+            v.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
+        }
+        // ⌘= (unshifted) also makes text bigger, as in other Mac apps.
+        let equals = v.addItem(withTitle: "Bigger", action: #selector(biggerText(_:)), keyEquivalent: "=")
+        equals.target = self; equals.isHidden = true; equals.allowsKeyEquivalentWhenHidden = true
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
@@ -3830,6 +3891,8 @@ func selfTest() {
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
+    sessionTeachingSelfTests(check)
+    paneTextSizeSelfTests(check)
     identitySelfTests(check)
     // Native approval UI runs after image fixtures that intentionally precede AppKit initialization.
     parkingLotReviewConnectivitySelfTests(check)

@@ -459,7 +459,7 @@ final class FirstRunGuide: ObservableObject {
     func teachIfNeeded(_ s: Session) -> String? {
         guard let record, s.id == record.codingID, record.teachCoding == true, !s.isAgentSession else { return nil }
         update { $0.teachCoding = false }
-        s.switchboardEnabled = true
+        s.switchboardEnabled = true; s.switchboardTeachingVersion = SwitchboardTeaching.version
         return store.switchboardTeaching(s, answering: true)
     }
     func loginAgain() {

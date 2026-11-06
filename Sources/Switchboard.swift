@@ -65,7 +65,7 @@ extension Store {
         else if !s.busy { DispatchQueue.main.async { self.runNext(s) } }
     }
     func teachSwitchboard(_ s: Session) {
-        s.switchboardEnabled = true
+        s.switchboardEnabled = true; s.switchboardTeachingVersion = SwitchboardTeaching.version
         enqueueSwitchboard(s, text: switchboardTeaching(s))
     }
     /// `answering`: the teaching rides with the user's first message, so the model answers it instead of acknowledging.
