@@ -300,6 +300,17 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let firstMarkerRow = try publishedRow(session.id)
         let homeResponse = session.messages.last { $0.role == "assistant" }?.createdAt
         check(homeResponse != nil && firstMarkerRow?.lastResponseAt == homeResponse && firstMarkerRow?.loopPaused == nil && firstMarkerRow?.pausedReason == nil, "Mac home sidebar carries lastResponseAt and no loop marker for ordinary sessions")
+        // Polling must not generate work just because the preceding send advanced
+        // the transport sequence. This used to republish indefinitely at 4 Hz.
+        let sidebarSequence = home.sidebarPayloadForTesting().homeSeq
+        captured = []
+        let idlePublishStarted = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<24 { home.publishSidebarForTesting() }
+        let idlePublishElapsed = ProcessInfo.processInfo.systemUptime - idlePublishStarted
+        let idleSidebarFrames = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.sidebarSnapshot.rawValue }
+        check(idleSidebarFrames.isEmpty && home.sidebarPayloadForTesting().homeSeq == sidebarSequence,
+              "Twenty-four unchanged sidebar polls send no snapshots and perform no sequence writes")
+        print("Sidebar idle probe: \(idleSidebarFrames.count) snapshots / 24 polls, \(String(format: "%.3f", idlePublishElapsed * 1000)) ms")
         let markerMessages = session.messages
         let freshAt = (homeResponse ?? Date()).addingTimeInterval(60)
         session.messages.append(Message(role: "assistant", text: "fresh answer", createdAt: freshAt))
