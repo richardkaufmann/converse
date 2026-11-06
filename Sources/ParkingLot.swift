@@ -551,7 +551,7 @@ enum ParkingLotTransfer {
     static func export(_ lot: ParkingLotStore) {
         guard let delegate = NSApp.delegate as? AppDelegate else { return }
         if let exporter = delegate.transcriptExporter { exporter.showActivePanel(); return }
-        let exporter = TranscriptExportController(sessions: [ExportSession(lot: lot)])
+        let exporter = TranscriptExportController(sessions: [ExportSession(lot: lot)], lotOnly: true)
         delegate.transcriptExporter = exporter
         exporter.completed = { [weak delegate] in delegate?.transcriptExporter = nil }
         exporter.show(for: NSApp.keyWindow)
