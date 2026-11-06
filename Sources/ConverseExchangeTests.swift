@@ -43,6 +43,12 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
     let package: ConverseExchange.Package
     do { package = try ConverseExchange.decode(data) } catch { check(false, "Converse decode failed: " + error.localizedDescription); return }
     check(package.document.parkingLots.first?.document.rows.last?.tag == .blue, "Color tags survive Converse package export and decode")
+    if let plainLot = try? sourceLibrary.create(name: "Plain"),
+       (try? plainLot.replaceUserRows([ParkingLotRow(heading: false, text: "Untagged")], revision: plainLot.document.revision)) != nil,
+       let plainData = try? ConverseExchange.export([ExportSession(lot: plainLot)], content: .both, scrubber: &noScrub, includeImages: false, imageData: images, now: when),
+       let plain = try? ConverseExchange.decode(plainData) {
+        check(plain.document.parkingLots.first?.document.schemaVersion == 2 && package.document.parkingLots.first?.document.schemaVersion == 3, "Exports stamp schema 3 only for tagged lots, so older importers accept untagged lots")
+    } else { check(false, "Untagged lot export must encode and decode") }
     let key = DeviceBlob.sha256Hex(png)
     check(package.document.sessions.count == 2 && package.document.parkingLots.count == 1 && package.document.attachments.keys.sorted() == [key] && package.images[key] != nil && !package.document.scrub.applied, "Converse export round-trips sessions, lots and one de-duplicated verified image")
     check(package.document.sessions[0].messages.count == 2 && ConverseExchange.date(package.document.sessions[0].messages[0].createdAt) == when && package.document.sessions[0].messages[1].createdAt == nil, "Message times round-trip; unknown legacy times stay unknown")

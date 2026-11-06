@@ -91,7 +91,8 @@ enum ConverseExchange {
                     row.images = keys.isEmpty ? nil : keys
                     return row
                 }
-                lots.append(LotRecord(exportID: UUID(), name: clean(session.title), document: ParkingLotDocument(revision: document.revision, rows: rows)))
+                // Untagged lots stay schema 2 so older importers still accept them.
+                lots.append(LotRecord(exportID: UUID(), name: clean(session.title), document: { var lotDocument = ParkingLotDocument(revision: document.revision, rows: rows); lotDocument.schemaVersion = rows.contains { $0.tag != nil } ? 3 : 2; return lotDocument }()))
                 continue
             }
             var messages: [MessageRecord] = []
