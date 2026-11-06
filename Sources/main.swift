@@ -1582,10 +1582,15 @@ final class MessageNumberRuler: NSRulerView {
         layout.ensureLayout(for: container)
         let string = text.string as NSString
         let origin = (scrollView?.contentView.frame.minY ?? 0) - (scrollView?.contentView.bounds.minY ?? 0) + text.textContainerOrigin.y
+        // Visit only blocks and labels near the dirty rect. A long transcript
+        // otherwise builds every label on each redraw, and a gutter drag
+        // redraws every frame.
+        let band = NSRect(x: 0, y: rect.minY - origin - 40, width: max(1, container.containerSize.width), height: rect.height + 80)
+        let visible = layout.characterRange(forGlyphRange: layout.glyphRange(forBoundingRect: band, in: container), actualGlyphRange: nil)
         // Shade the entire visual block, including wrapped lines and images,
         // rather than only the first numbered line of a submitted prompt.
         if !dark { TranscriptPalette.promptBackground.setFill() }
-        for block in (dark ? [] : text.userBlocks) where block.length > 0 && block.location < string.length {
+        for block in (dark ? [] : Self.slice(text.userBlocks, overlapping: visible)) where block.length > 0 && block.location < string.length {
             let end = min(NSMaxRange(block), string.length)
             let first = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
             let last = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: end - 1), effectiveRange: nil)
@@ -1599,7 +1604,7 @@ final class MessageNumberRuler: NSRulerView {
             TranscriptPalette.promptBackground.setFill()
             NSRect(x: bounds.minX, y: origin + first.minY, width: bounds.width, height: max(18, last.maxY - first.minY)).intersection(bounds).fill()
             TranscriptPalette.trafficBackground.setFill()
-            for block in text.trafficBlocks where block.length > 0 && block.location < string.length {
+            for block in Self.slice(text.trafficBlocks, overlapping: visible) where block.length > 0 && block.location < string.length {
                 let end = min(NSMaxRange(block), string.length)
                 let a = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: block.location), effectiveRange: nil)
                 let b = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: end - 1), effectiveRange: nil)
@@ -1611,7 +1616,7 @@ final class MessageNumberRuler: NSRulerView {
         let baseAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]
         // One label at the start of each rendered message. Paragraph breaks,
         // wrapping, images and the editable draft never consume numbers.
-        for message in text.messageLabels where message.location < string.length {
+        for message in Self.slice(text.messageLabels, from: visible) where message.location < string.length {
             let glyph = layout.glyphIndexForCharacter(at: message.location)
             let lineRect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let label = NSAttributedString(string: String(message.number), attributes: baseAttrs.merging([.foregroundColor: message.color]) { _, new in new })
@@ -1624,6 +1629,27 @@ final class MessageNumberRuler: NSRulerView {
                 }
             }
         }
+    }
+}
+
+extension MessageNumberRuler {
+    /// Sorted, non-overlapping blocks that intersect a character range.
+    static func slice(_ blocks: [NSRange], overlapping range: NSRange) -> ArraySlice<NSRange> {
+        let lower = firstIndex(blocks.count) { NSMaxRange(blocks[$0]) >= range.location }
+        let upper = firstIndex(blocks.count) { blocks[$0].location > NSMaxRange(range) }
+        return blocks[lower..<max(lower, upper)]
+    }
+    /// Labels sorted by location, from the one starting the visible line on.
+    static func slice(_ labels: [TranscriptMessageLabel], from range: NSRange) -> ArraySlice<TranscriptMessageLabel> {
+        let lower = max(0, firstIndex(labels.count) { labels[$0].location >= range.location } - 1)
+        let upper = firstIndex(labels.count) { labels[$0].location > NSMaxRange(range) }
+        return labels[lower..<max(lower, upper)]
+    }
+    /// The first index where a monotonic predicate holds, else count.
+    private static func firstIndex(_ count: Int, where holds: (Int) -> Bool) -> Int {
+        var low = 0, high = count
+        while low < high { let mid = (low + high) / 2; if holds(mid) { high = mid } else { low = mid + 1 } }
+        return low
     }
 }
 
@@ -1647,7 +1673,13 @@ final class ConversationScrollView: NSScrollView {
     private var tiling = false
     private var initialTailPending = false
     func revealInitialTail() { initialTailPending = true; needsLayout = true }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if initialTailPending { needsLayout = true } }
+    /// An update that arrived while detached; see ScrollingConversation.updateNSView.
+    var renderWhenAttached: (() -> Void)?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil, let render = renderWhenAttached { renderWhenAttached = nil; render() }
+        if initialTailPending { needsLayout = true }
+    }
     override func layout() {
         super.layout()
         guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
@@ -2370,6 +2402,17 @@ struct ScrollingConversation: NSViewRepresentable {
             text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
             text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
             if (text.loadImage == nil) != (Self.imageLoader(session) == nil) { text.loadImage = Self.imageLoader(session) }
+            // SwiftUI keeps updating panes it has already detached (a session
+            // moved to another pane). Rendering there lays out the whole
+            // history at a meaningless width, once per detached copy; catch up
+            // if the view is attached again instead.
+            if let conversation = scroll as? ConversationScrollView, scroll.window == nil {
+                conversation.renderWhenAttached = { [weak coordinator = context.coordinator, weak text] in
+                    if let coordinator, let text { coordinator.render(text); text.refreshDecorations() }
+                }
+                return
+            }
+            (scroll as? ConversationScrollView)?.renderWhenAttached = nil
             context.coordinator.render(text); text.refreshDecorations()
         }
     }
@@ -2394,6 +2437,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var messageStarts: [UUID: Int] = [:]
         var historyEnd = 0
         private(set) var historyBuildCount = 0
+        /// Renders into a text view outside any window after its first render.
+        static private(set) var detachedRenders = 0
         private(set) var lastReplacementStart = 0
         // Rendered Markdown and the pane size it was scaled to.
         var markdownCache: [UUID: (String, NSAttributedString, CGFloat)] = [:]
@@ -2527,6 +2572,7 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             let previous = renderedMessages
             let firstRender = previous == nil
+            if !firstRender && text.window == nil { Self.detachedRenders += 1 }
             var historyChanged = firstRender
             let restyle = !firstRender && renderedFontSize != text.fontSize
             if seenMessagesRevision != session.messagesRevision {
@@ -3648,6 +3694,12 @@ func selfTest() {
     styledSession.messages += [Message(role: "activity", text: "hidden tool output"), Message(role: "assistant", text: ""), Message(role: "notice", text: "Switchboard: queued"), Message(role: "assistant", text: "paragraph one\n\nparagraph two\n```swift\nlet n = 1\n```" )]
     styledCoordinator.render(styled)
     check(styled.messageLabels.map(\.number) == [1, 2, 3, 4], "Hidden activity and empty placeholders consume no numbers; visible notices and code blocks each consume one")
+    let rulerBlocks = [NSRange(location: 0, length: 10), NSRange(location: 20, length: 10), NSRange(location: 40, length: 10)]
+    let rulerLabels = [0, 18, 40, 60].enumerated().map { TranscriptMessageLabel(location: $0.element, number: $0.offset + 1, prompt: false) }
+    check(Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 25, length: 10))) == [rulerBlocks[1]] && Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 28, length: 15))) == Array(rulerBlocks[1...2]) && MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 51, length: 5)).isEmpty,
+          "The message gutter shades only prompt blocks that reach the visible text")
+    check(MessageNumberRuler.slice(rulerLabels, from: NSRange(location: 30, length: 15)).map(\.number) == [2, 3] && MessageNumberRuler.slice(rulerLabels, from: NSRange(location: 0, length: 5)).map(\.number) == [1],
+          "The message gutter draws only the numbers on or just above the visible text")
     check(styledSession.transcriptMessageNumbers().count == 4 && styledSession.transcriptMessageNumbers()[styledSession.messages.last!.id] == 4, "Home numbering matches visible message sequence")
     styledSession.messages[3].text = "new streamed response"; styledCoordinator.render(styled)
     check(styled.messageLabels.map(\.number) == [1, 2, 3, 4, 5] && styledSession.transcriptMessageNumbers()[styledSession.messages.last!.id] == 5, "An empty response gaining text refreshes numbering and the home cache")
