@@ -750,8 +750,86 @@ func archiveWriterSelfTests(_ check: (Bool, String) -> Void) {
     check(onDisk == "checked", "saveChecked writes immediately and in order")
 }
 
+func configurationAuditConcurrencyTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("configuration-audit-contention-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let locked = DispatchSemaphore(value: 0), updateReturned = DispatchSemaphore(value: 0), holderFinished = DispatchSemaphore(value: 0)
+    var returnedWhileLocked = false, changeWritesOffMain = true
+    let audit = ConfigurationAudit(folder: root, beforeEventWrite: { event in
+        if event == "held_io_fixture" {
+            locked.signal()
+            // Watchdog only: the assertion is semaphore ordering, not elapsed
+            // time. A synchronous regression cannot hang the full test suite.
+            returnedWhileLocked = updateReturned.wait(timeout: .now() + 10) == .success
+        } else if event == "agent_configuration_changed_in_memory" {
+            changeWritesOffMain = changeWritesOffMain && !Thread.isMainThread
+        }
+    })
+    DispatchQueue.global().async {
+        audit.record("held_io_fixture")
+        holderFinished.signal()
+    }
+    guard locked.wait(timeout: .now() + 10) == .success else {
+        updateReturned.signal()
+        check(false, "Configuration audit fixture acquires its I/O lock")
+        return
+    }
+    let id = UUID(), before = AgentConfig()
+    var after = before; after.lastOutcome = "synthetic runtime change"
+    let began = Date()
+    check(Thread.isMainThread, "Audit contention fixture updates configuration on the main thread")
+    audit.agentChanged(id: id, old: before, new: after)
+    var settings = after; settings.objective = "private-async-objective-canary"
+    audit.agentChanged(id: id, old: after, new: settings)
+    let returnedAt = Date()
+    updateReturned.signal()
+    check(holderFinished.wait(timeout: .now() + 10) == .success, "Audit I/O holder finishes after the update returns")
+    audit.willSave(ConfigurationAudit.SaveSummary([]), data: Data("{}".utf8), source: "contention_fixture")
+    check(returnedWhileLocked, "Main-thread agent changes return while audit I/O remains locked")
+    check(changeWritesOffMain, "Runtime and settings change events write off the main thread")
+    do {
+        let file = root.appendingPathComponent("Configuration Diagnostics/events-" + audit.runID + ".jsonl")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let rows = try text.split(separator: "\n").map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] }
+        let events = rows.filter { $0["event"] as? String == "agent_configuration_changed_in_memory" }
+        let formatter = ISO8601DateFormatter()
+        check(events.count == 2 && events.allSatisfy { row in
+            guard let at = (row["at"] as? String).flatMap(formatter.date(from:)) else { return false }
+            return row["mainThread"] as? Bool == true && at >= Date(timeIntervalSince1970: floor(began.timeIntervalSince1970)) && at <= returnedAt
+        }, "Deferred change records retain originating thread and event timestamps")
+        check(events.first?["changedFields"] as? [String] == ["lastOutcome"] && events.first?["stack"] == nil &&
+              events.last?["changedFields"] as? [String] == ["objective"] && (events.last?["stack"] as? [String])?.isEmpty == false,
+              "Deferred records preserve change order and capture caller stacks only for settings")
+        let lastChange = rows.lastIndex { $0["event"] as? String == "agent_configuration_changed_in_memory" }
+        let saveBegan = rows.firstIndex { $0["event"] as? String == "archive_save_begin" }
+        check(lastChange != nil && saveBegan != nil && lastChange! < saveBegan!, "Save audit barrier drains prior queued change records before archive bookkeeping")
+        check(!text.contains("private-async-objective-canary") && !text.contains("synthetic runtime change"), "Deferred diagnostics retain metadata without private configuration values")
+    } catch { check(false, "Deferred audit event fixture: \(error)") }
+
+    // Removal remains synchronous even when the removed configuration was
+    // never present in an archive. No flush or save is needed for recovery.
+    audit.agentChanged(id: id, old: settings, new: nil)
+    let recovery = audit.directory.appendingPathComponent("Agent Recovery/" + id.uuidString + "/latest.json")
+    let recovered = (try? Data(contentsOf: recovery)).flatMap { try? JSONDecoder().decode(AgentConfig.self, from: $0) }
+    check(recovered == settings, "Removing an unsaved configuration preserves recovery before returning")
+
+    // Informational synthetic benchmark: compare the removed foreground diff
+    // with the new enqueue path. No machine-dependent performance assertion.
+    var large = AgentConfig(); large.workingMemory = String(repeating: "synthetic audit payload ", count: 100_000)
+    var changed = large; changed.lastOutcome = "benchmark"
+    let baseline = ProcessInfo.processInfo.systemUptime
+    for _ in 0..<10 { _ = ConfigurationAudit.changedFields(large, changed) }
+    let diffTime = ProcessInfo.processInfo.systemUptime - baseline
+    let enqueue = ProcessInfo.processInfo.systemUptime
+    for _ in 0..<10 { audit.agentChanged(id: id, old: large, new: changed) }
+    let enqueueTime = ProcessInfo.processInfo.systemUptime - enqueue
+    audit.flushChanges()
+    print(String(format: "AUDIT SYNTHETIC: ten 2.3 MB config changes: foreground Codable diff %.2f ms; deferred enqueue %.2f ms", diffTime * 1000, enqueueTime * 1000))
+}
+
 func configurationAuditSelfTests(_ check: (Bool, String) -> Void) {
     archiveWriterSelfTests(check)
+    configurationAuditConcurrencyTests(check)
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("configuration-audit-" + UUID().uuidString)
     let store = Store(folder: root)
     let agent = store.createAgent(title: "private-title-canary")

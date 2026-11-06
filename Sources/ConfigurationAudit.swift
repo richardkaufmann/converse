@@ -8,6 +8,15 @@ final class ConfigurationAudit {
     let runID = UUID().uuidString
     private let archive: URL
     private let lock = NSRecursiveLock()
+    // Only in-memory change diagnostics use this queue. Recovery snapshots and
+    // archive commit bookkeeping retain their synchronous ordering.
+    private let changes = DispatchQueue(label: "local.richard.Converse.configuration-changes", qos: .utility)
+    // Injection point for deterministic contention tests; nil in the app.
+    private let beforeEventWrite: ((String) -> Void)?
+    private struct Origin {
+        let at = Date()
+        let mainThread = Thread.isMainThread
+    }
     private var known: [UUID: AgentConfig] = [:]
     private var knownAgentIDs: Set<UUID> = []
     private var expectedStamp: String?
@@ -15,7 +24,8 @@ final class ConfigurationAudit {
     private var reportedFailure = false
     private let limit: Int
     private var log: URL { directory.appendingPathComponent("events-" + runID + ".jsonl") }
-    init(folder: URL, limit: Int = 1_048_576) {
+    init(folder: URL, limit: Int = 1_048_576, beforeEventWrite: ((String) -> Void)? = nil) {
+        self.beforeEventWrite = beforeEventWrite
         directory = folder.appendingPathComponent("Configuration Diagnostics")
         archive = folder.appendingPathComponent("sessions.json")
         self.limit = limit
@@ -45,13 +55,17 @@ final class ConfigurationAudit {
         return Set(a.keys).union(b.keys).filter { !NSDictionary(dictionary: ["v": a[$0] ?? NSNull()]).isEqual(to: ["v": b[$0] ?? NSNull()]) }.sorted()
     }
     func record(_ event: String, _ details: [String: Any] = [:]) {
+        record(event, details, origin: Origin())
+    }
+    private func record(_ event: String, _ details: [String: Any], origin: Origin) {
         lock.lock(); defer { lock.unlock() }
+        beforeEventWrite?(event)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var row = details
-            row["event"] = event; row["at"] = ISO8601DateFormatter().string(from: Date())
+            row["event"] = event; row["at"] = ISO8601DateFormatter().string(from: origin.at)
             row["runID"] = runID; row["pid"] = ProcessInfo.processInfo.processIdentifier
-            row["mainThread"] = Thread.isMainThread
+            row["mainThread"] = origin.mainThread
             var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]); data.append(10)
             if let size = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size]) as? NSNumber, size.intValue + data.count > limit {
                 let previous = directory.appendingPathComponent("events-" + runID + "-previous.jsonl")
@@ -78,13 +92,45 @@ final class ConfigurationAudit {
                                   "missingAgentConfigurations": sessions.filter(\.needsAgentSetup).map { $0.id.uuidString }.sorted()])
         for (id, config) in known { snapshot(id, config) }
     }
+    // Match the settings that warrant a caller stack without encoding the
+    // runtime state (repository snapshots, working memory, event journals).
+    private static func settingsChanged(_ old: AgentConfig?, _ new: AgentConfig?) -> Bool {
+        old?.objective != new?.objective || old?.repository != new?.repository ||
+        old?.model != new?.model || old?.watchedSessions != new?.watchedSessions ||
+        old?.watchedParticipants != new?.watchedParticipants || old?.intervalSeconds != new?.intervalSeconds ||
+        old?.scheduleText != new?.scheduleText || old?.scheduleTimeZone != new?.scheduleTimeZone ||
+        old?.enabled != new?.enabled || old?.maxTurnsPerLoop != new?.maxTurnsPerLoop ||
+        old?.discordChannelID != new?.discordChannelID || old?.discordMentions != new?.discordMentions ||
+        old?.discordRead != new?.discordRead || old?.discord != new?.discord ||
+        old?.fileTriggers != new?.fileTriggers || old?.jollyAllowed != new?.jollyAllowed ||
+        old?.webSearch != new?.webSearch || old?.speak != new?.speak ||
+        old?.generateArt != new?.generateArt || old?.artDirection != new?.artDirection
+    }
     func agentChanged(id: UUID, old: AgentConfig?, new: AgentConfig?) {
-        let changed = Self.changedFields(old, new)
-        let settings: Set<String> = ["objective", "repository", "model", "watchedSessions", "watchedParticipants", "intervalSeconds", "scheduleText", "scheduleTimeZone", "enabled", "maxTurnsPerLoop", "discordChannelID", "discordMentions", "discordRead", "discord", "fileTriggers", "jollyAllowed", "webSearch", "speak", "generateArt", "artDirection"]
-        var detail: [String: Any] = ["sessionID": id.uuidString, "beforePresent": old != nil, "afterPresent": new != nil, "changedFields": changed]
-        if new == nil || !settings.isDisjoint(with: changed) { detail["stack"] = Array(Thread.callStackSymbols.prefix(18)) }
-        if let old, new == nil { snapshot(id, old) }
-        record(new == nil ? "agent_configuration_removed_in_memory" : "agent_configuration_changed_in_memory", detail)
+        let origin = Origin()
+        // Capture the originating caller, never the diagnostics worker's stack.
+        let stack = new == nil || Self.settingsChanged(old, new) ? Array(Thread.callStackSymbols.prefix(18)) : nil
+        let write = {
+            var detail: [String: Any] = ["sessionID": id.uuidString, "beforePresent": old != nil,
+                                        "afterPresent": new != nil, "changedFields": Self.changedFields(old, new)]
+            if let stack { detail["stack"] = stack }
+            self.record(new == nil ? "agent_configuration_removed_in_memory" : "agent_configuration_changed_in_memory", detail, origin: origin)
+        }
+        if new == nil {
+            // A removal must retain its last valid configuration before returning.
+            // Drain earlier diagnostics BEFORE taking the recovery/log lock.
+            flushChanges()
+            if let old { snapshot(id, old) }
+            write()
+        } else {
+            changes.async(execute: DispatchWorkItem(block: write))
+        }
+    }
+    /// Must be called without holding lock; queued records acquire it themselves.
+    /// Archive flushes also drain prior change diagnostics through willSave.
+    func flushChanges() {
+        dispatchPrecondition(condition: .notOnQueue(changes))
+        changes.sync {}
     }
     private func snapshot(_ id: UUID, _ config: AgentConfig) {
         lock.lock(); defer { lock.unlock() }
@@ -116,6 +162,7 @@ final class ConfigurationAudit {
     func willSave(_ sessions: [Session], data: Data, source: String) { willSave(SaveSummary(sessions), data: data, source: source) }
     func didSave(_ sessions: [Session]) { didSave(SaveSummary(sessions)) }
     func willSave(_ summary: SaveSummary, data: Data, source: String) {
+        flushChanges()
         lock.lock(); defer { lock.unlock() }
         if stamp() != expectedStamp {
             let disk = try? Data(contentsOf: archive)
