@@ -1,6 +1,6 @@
 # Mobile Parking Lot editor development preview
 
-This branch adds a native iPhone/iPad editor backed by a Mac home. Production activation remains off while the preview is verified. No release or installed production profile is changed by these tests.
+This branch adds a native iPhone/iPad editor backed by a Mac home. Richard authorized private build 140 with editing enabled by default for Mac-hosted lots on iPhone/iPad. Windows remains on 139 for this trial. Automated tests still use isolated data.
 
 ## Outline behavior
 
@@ -24,8 +24,8 @@ Run `CONVERSE_APP_OUTPUT="$PWD/.build/MobileLotCheck.app" CONVERSE_IPAD_SIMULATO
 
 The isolated `--lot-editing-self-test` Mac command covers the shared operation queue, transport fencing, duplicate receipts, drained holder review and mobile-export compatibility. Approval commits the exact preview document, including generated row/comment IDs. `--lot-disclosure-preview <output-directory>` captures the native Mac outline in light and dark appearances. Both commands require `CONVERSE_TEST_COMMAND` and an isolated `CONVERSE_DATA_DIR`.
 
-## Activation work still under review
+## Private trial scope and remaining checks
 
-The environment flag `CONVERSE_EDITABLE_LOTS=1` is for isolated testing only. Mac remote-viewer editing and Windows compatibility rollout are not enabled by this branch's default. Physical-device/background acceptance and review presentation for every field must be checked before a user-facing editor preview is enabled. Physical-device acceptance is currently blocked because BigPad is unavailable to Xcode; simulator tests do not replace background/network testing on a real device.
+Build 140 enables mobile editing by default; `CONVERSE_EDITABLE_LOTS=0` is an override for legacy interop fixtures. This trial covers Mac-hosted lots edited from iPhone/iPad. Mac remote-viewer editing and Windows compatibility rollout remain separate work. Richard accepted testing on his devices before completing the remaining acceptance checks. Physical-device acceptance is currently blocked because BigPad is unavailable to Xcode; simulator tests do not replace background/network testing on a real device.
 
-Before activation, complete Mac remote-client integration and the supported-client upgrade path, exercise holder review and attachment/caret behavior on a real device, and check background/foreground, silent partitions, interrupted uploads and rotation. Pending edits are intentionally memory-only; a terminated mobile process cannot recover edits that never reached home. The editor displays saved versus unconfirmed state and offers manual Copy recovery while running.
+Follow-up work includes Mac remote-client integration and the supported-client upgrade path. During this private trial, exercise holder review and attachment/caret behavior on a real device, and check background/foreground, silent partitions, interrupted uploads and rotation. Pending edits are intentionally memory-only; a terminated mobile process cannot recover edits that never reached home. The editor displays saved versus unconfirmed state and offers manual Copy recovery while running.

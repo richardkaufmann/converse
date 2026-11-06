@@ -118,8 +118,8 @@ final class DeviceSyncService: ObservableObject {
     @Published var outbox: [DeviceOutboxRecord] = []
     @Published var blobReady: [String: Bool] = [:]
     @Published var blobCache: [String: URL] = [:]
-    // Dormant until the Mac/mobile parity gate is complete. No old viewer is silently displaced.
-    var editableLotsEnabled = ProcessInfo.processInfo.environment["CONVERSE_EDITABLE_LOTS"] == "1"
+    // Enabled for Richard's private 140 trial. The override supports legacy interop fixtures.
+    var editableLotsEnabled = ProcessInfo.processInfo.environment["CONVERSE_EDITABLE_LOTS"] != "0"
     @Published var lotEditors: [String: LotEditQueue] = [:]
     // Manual recovery only; never replay into a new authority epoch.
     @Published var lotRecovery: [String: ParkingLotDocument] = [:]
@@ -211,6 +211,7 @@ final class DeviceSyncService: ObservableObject {
 
     // Isolated harness wiring without listener, browser, timers, or Keychain.
     func configureForTesting(folder: URL) throws {
+        editableLotsEnabled = false // Each editing fixture opts in explicitly.
         testFolder = folder
         #if os(macOS)
         parkingLibraryOverride = ParkingLotLibrary(folder: folder.appendingPathComponent("parking-test-profile"))

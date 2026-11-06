@@ -57,9 +57,11 @@ python3 iPad/distribute.py upload .build/Converse-iPad.xcarchive .build/iPadUplo
 
 ## Parking Lots
 
-Group members can open Mac-hosted Parking Lots as read-only panes on iPhone and iPad. The viewer draws numbered items, blue headings with collapse chevrons, grey struck-through done items, comment-count bubbles (tap to read) and item image thumbnails (tap for full size). Opening shows the latest copy; later Mac edits show a **Refresh** button instead of replacing what you are reading. The viewer renews its nonexclusive lot subscription on open, reconnect and foreground, so it never needs Take and never moves anything on the Mac. A row that does not parse is shown as plain text. Renames update the sidebar, and deleted lots disappear from it. Creation, editing and Talk remain on the Mac. Mobile viewers cannot send a draft or take an editing lease for a Parking Lot.
+Private build 140 supports native editing of Mac-hosted Parking Lots. Both the Mac and iPhone/iPad must run 140. Open the lot and take it here; the previous display parks, and ordered changes save back to the Mac. Per-entry arrows preserve nested collapse choices, while Outline → Collapse All shows only headings and Expand All opens every level. The entry menu provides text, Done, nesting, moving, comments, colors and images. Undo/Redo is scoped to the current take. Export saves a `.converse` file from the latest confirmed revision, with optional images and secret/personal-information scrubbing.
 
-`./iPad/test.sh --interop` exercises the real isolated Mac Group connection, including Parking Lot discovery, opening, attached-image transfer, live updates, the Refresh flow, subscription renewal and reopening. Set `CONVERSE_APP_OUTPUT` to the built Mac app and `CONVERSE_IPAD_SIMULATOR` to an iPad or iPhone simulator UUID. The snapshot tests also verify read-only behavior, rename and deletion. Simulator results do not replace physical-device discovery and reconnect testing.
+Session and agent proposals pause typing and drain pending saves before showing an exact before/after approval sheet on the holding device. A disconnected editor freezes and offers manual Copy of unconfirmed text; taking again never automatically replays it. Windows 139 cannot open an exclusive lot. Mobile hosting and Mac remote-client editing are not part of this trial.
+
+`./iPad/test.sh --lot-editing` exercises an isolated Mac home, two mobile identities, pending-edit handoff, image transfer, save acknowledgement, recovery and native layouts. The legacy `--interop` fixture retains coverage of old read-only subscriptions. Set `CONVERSE_APP_OUTPUT` to the built Mac app and `CONVERSE_IPAD_SIMULATOR` to an owned simulator UUID.
 
 ## Use
 
@@ -89,7 +91,7 @@ Real-device gates remain: BigPad installation, LAN permission denial/recovery, B
 
 ## Editable Parking Lot development preview
 
-The native editor is currently gated off by default. The isolated `./iPad/test.sh --lot-editing` path enables it against a disposable Mac home and exercises ordered saves, image transfer, exclusive handoff and recovery. It includes per-level disclosure, outline numbering, text, comments, Done, tags, structural editing, Undo/Redo and `.converse` export. See [the preview notes](../docs/mobile-lot-editor-preview.md) for activation prerequisites; the shipped viewer remains unchanged until those checks are complete.
+Private build 140 enables the native editor by default for Mac-hosted lots. The isolated `./iPad/test.sh --lot-editing` path enables it against a disposable Mac home and exercises ordered saves, image transfer, exclusive handoff and recovery. It includes per-level disclosure, outline numbering, text, comments, Done, tags, structural editing, Undo/Redo and `.converse` export. See [the preview notes](../docs/mobile-lot-editor-preview.md) for trial scope and remaining acceptance checks. Both the Mac home and mobile client must run 140; Windows 139 cannot view these exclusive lots.
 
 
 ## Agents (0.5.22)
