@@ -56,6 +56,16 @@ import SwiftUI
     let session = store.supportSession()
     check(store.supportSession() === session && store.sessions.count == 1, "Support onboarding creates exactly one welcome session")
     check(!store.setupCompleted && session.supportTeachingVersion == nil && !session.switchboardEnabled, "Support is gated before a verified model response")
+    // Setup & Control is hidden from users: only App Support holds it, kept current after setup.
+    let ordinary = store.create(Entry(name: "Claude", command: "claude", directory: "~", engine: "claude"), persist: false)
+    ordinary.supportTeachingVersion = 3
+    store.refreshAppSupportTeaching()
+    check(ordinary.supportTeachingVersion == nil && session.supportTeachingVersion == nil, "Only App Support can hold Setup & Control, and not before setup is verified")
+    store.setupCompleted = true; session.supportTeachingVersion = 1
+    store.refreshAppSupportTeaching()
+    check(session.supportTeachingVersion == AppSupport.version, "After setup, Converse keeps App Support's Setup & Control lesson current with no teaching turn")
+    store.setupCompleted = false; session.supportTeachingVersion = nil
+    store.sessions.removeAll { $0 === ordinary }
     check(AppSupport.welcome.contains("[README](converse-help://readme)") && AppSupport.welcome.contains("[Discord](converse-help://discord)") && AppSupport.welcome.contains("[Home Assistant](converse-help://home-assistant)") && AppSupport.welcome.contains("[Connect the Meta Muse iPhone app](converse-help://muse-iphone)"), "Support welcome links to Home Assistant and the other connector guides")
     let help = try! HelpBook.load()
     check(AppSupport.guideTopics.values.allSatisfy { id in help.topics.contains { $0.id == id } } && AppSupport.guideTopics.keys.allSatisfy { AppSupport.welcome.contains("converse-help://" + $0) }, "All three support getting-started links resolve to bundled Help topics")

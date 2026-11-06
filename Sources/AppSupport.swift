@@ -153,6 +153,14 @@ extension Store {
         session.messages = [Message(role: "assistant", text: AppSupport.welcome)]
         save(); return session
     }
+    /// App Support always knows the current Setup & Control lesson once setup is
+    /// verified; nothing to teach by hand. Other sessions never hold app control.
+    func refreshAppSupportTeaching() {
+        for s in sessions {
+            if s.supportAssistant { if setupCompleted || s.supportTeachingVersion != nil { s.supportTeachingVersion = AppSupport.version } }
+            else { s.supportTeachingVersion = nil }
+        }
+    }
     func teachAppSupport(_ session: Session) {
         session.supportTeachingVersion = AppSupport.version
         save()

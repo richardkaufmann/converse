@@ -248,7 +248,10 @@ final class Session: ObservableObject, Identifiable {
     init(_ saved: SavedSession) {
         createdAt = saved.createdAt ?? Date(); titleUpdatedAt = saved.titleUpdatedAt ?? saved.createdAt ?? Date()
         id = saved.id; entry = saved.entry; title = saved.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New conversation" : saved.title; messages = saved.messages; agent = saved.agent
-        supportTeachingVersion = saved.supportTeachingVersion; supportAssistant = saved.supportAssistant ?? false
+        supportAssistant = saved.supportAssistant ?? false
+        // Setup & Control belongs to App Support alone (Richard, 2026-11-05);
+        // Store.refreshAppSupportTeaching keeps it current after setup.
+        supportTeachingVersion = supportAssistant ? saved.supportTeachingVersion : nil
         clearedThroughMessageID = saved.clearedThroughMessageID
         unseenResponse = saved.unseenResponse ?? false
         handoffPending = saved.handoffPending ?? (saved.importedTranscriptPending == true ? HandoffPending(from: nil, note: false) : nil)
@@ -365,6 +368,7 @@ final class Store: ObservableObject {
             entries = SetupCatalog.entries
         }
         for session in sessions { attachIdentity(session); importResponseImages(session) }
+        refreshAppSupportTeaching()
         // Replace a sender's stale "failed"/"processing" receipt for replies reclassified on load.
         for session in sessions where session.switchboardObligations.contains(where: { $0.state == "interrupted" }) { refreshSwitchboardReceipts(session) }
         if !sessions.isEmpty { save() }
@@ -1983,10 +1987,6 @@ final class ConversationTextView: NSTextView {
         guard teachSession != nil else { return }
         let item = NSMenuItem(title: "Teach Session To Talk To Other Sessions", action: #selector(teachConversation(_:)), keyEquivalent: "")
         item.target = self; item.toolTip = SwitchboardTeaching.talkHelp; menu.addItem(.separator()); menu.addItem(item)
-        if teachApp != nil {
-            let support = NSMenuItem(title: "Teach Converse Setup & Control", action: #selector(teachAppConversation(_:)), keyEquivalent: "")
-            support.target = self; support.toolTip = SwitchboardTeaching.controlHelp; menu.addItem(support)
-        }
     }
     func imageToolsItem(at character: Int, hasMetaKey: Bool? = nil) -> NSMenuItem? {
         guard let storage = textStorage, character >= 0, character < storage.length,

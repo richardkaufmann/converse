@@ -67,10 +67,9 @@ struct TeachingBannerView: View {
 struct TeachingExplanation: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Two lessons you can give a session").font(.headline)
+            Text("Teaching a session").font(.headline)
             Text("**Talk To Other Sessions** shows this session how to message your other sessions — “tell Muse the build is green”, “ask Codex what it changed” — and how to read and edit your Parking Lots. Teaching sends one visible message and the session answers briefly.")
-            Text("**Setup & Control** lets a session operate Converse itself for you: create sessions, agents and Parking Lots, or change settings. App Support already has it; ordinary sessions normally don’t need it.")
-            Text("Both are in the session’s right-click menu. When Converse changes a lesson, this banner turns yellow so you can re-teach.").foregroundStyle(.secondary)
+            Text("It’s in the session’s right-click menu. When Converse changes the lesson, this banner turns yellow so you can re-teach. App Support needs no teaching: Converse keeps it up to date.").foregroundStyle(.secondary)
         }.font(.callout).fixedSize(horizontal: false, vertical: true)
     }
 }
