@@ -71,6 +71,30 @@ func transcriptExportSelfTests(_ check: (Bool, String) -> Void) {
     cancelling?.cancel()
     check(cancellationFinished && cancelled, "Cancelling a Converse export interrupts background preparation and returns no document")
     do {
+        let lot = ParkingLotStore(folder: Store.shared.folder.appendingPathComponent("Outline Export QA"))
+        let heading = ParkingLotRow(heading: true, text: "Plan <safe>", notes: [ParkingLotNote(author: "Reviewer", text: "Heading note")])
+        let parent = ParkingLotRow(heading: false, text: "First **bold** item", notes: [ParkingLotNote(author: "Author", text: "Write to test@example.com")], parentID: heading.id)
+        let child = ParkingLotRow(heading: false, text: "Nested [link](https://example.com)", images: ["fixture.png"], done: true, parentID: parent.id)
+        lot.openStarter([heading, parent, child])
+        let exportedLot = ExportSession(lot: lot)
+        let outline = try TranscriptExport.html(sessions: [exportedLot], order: .sequential, content: .both, lineNumbers: true, imageData: { _ in png })
+        check(outline.contains("<ol type=\"1\">") && outline.contains("<ol type=\"a\">")
+              && outline.contains("<p class=\"lot-comment\"><em>Reviewer: Heading note</em></p>")
+              && outline.contains("lot-text done") && outline.contains("Plan &lt;safe&gt;")
+              && !outline.contains("class=\"ln\"") && !outline.contains("<article") && outline.contains("data:image/png;base64,"),
+              "Lot HTML is a semantic nested outline with italic owned comments, Done styling and images, without transcript cards or gutters")
+        let excluded = try TranscriptExport.html(sessions: [exportedLot], order: .sequential, content: .both, lineNumbers: false, includeImages: false, imageData: { _ in png })
+        check(!excluded.contains("<img") && !excluded.contains("Attached image unavailable"), "Exclude images also excludes structured lot images and placeholders")
+        var scrubber = ExportScrubber(context: ExportScrubber.Context())
+        let sanitized = exportedLot.scrubbed(&scrubber, includeImages: false, structuredLots: true)
+        let safe = try TranscriptExport.html(sessions: [sanitized], order: .sequential, content: .both, lineNumbers: true)
+        check(!safe.contains("test@example.com") && !safe.contains("fixture.png") && !safe.contains("<img"),
+              "Structured lot exports scrub comments and never fall back to the original unsanitized rows")
+        let mixed = try TranscriptExport.html(sessions: [exportedLot] + sessions, order: .interleaved, content: .both, lineNumbers: true)
+        check(mixed.components(separatedBy: "<section class=\"parking-lot\">").count == 2
+              && mixed.contains("class=\"ln\"") && mixed.contains("<article class=\"message"),
+              "Mixed interleaved exports render each lot once while retaining conversation cards and line numbers")
+        try outline.write(to: Store.shared.folder.appendingPathComponent("ParkingLotQA.html"), atomically: true, encoding: .utf8)
         let plain = try TranscriptExport.text(sessions: sessions, order: .interleaved, content: .responses)
         check(plain.contains("**Bold**") && plain.contains("[Attached image: fixture.png]") && plain.contains("Time unavailable") && !plain.contains("Prompt beta") && !plain.contains("<article") && !plain.contains("class=\"ln\"") && !plain.contains("DO NOT EXPORT"), "Text export preserves original Markdown and image labels with no HTML, generated line numbers, prompts or private drafts")
         let textFile = Store.shared.folder.appendingPathComponent("ExportQA.txt")

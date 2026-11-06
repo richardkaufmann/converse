@@ -491,6 +491,23 @@ struct ParkingLotEditor: NSViewRepresentable {
             render()
         }
         func changeIndent(_ id: UUID, deeper: Bool) {
+            if let text, text.selectedRange().length > 0 {
+                let selection = text.selectedRange()
+                let entries = projection.entries.filter { entry in
+                    !entry.placeholder && (NSIntersectionRange(entry.range, selection).length > 0 ||
+                        (entry.range.length == 0 && NSLocationInRange(entry.range.location, selection)))
+                }
+                guard !entries.isEmpty else { NSSound.beep(); return }
+                let ids = Set(entries.map { $0.row.id })
+                guard parent.lot.changeIndent(ids, deeper: deeper) else { NSSound.beep(); return }
+                render()
+                let moved = projection.entries.filter { ids.contains($0.row.id) }
+                if let first = moved.first, let last = moved.last {
+                    text.setSelectedRange(NSRange(location: first.range.location,
+                        length: NSMaxRange(last.range) - first.range.location))
+                }
+                return
+            }
             let offset = projection.entries.first(where: { $0.row.id == id }).map { entry in
                 max(0, min(entry.range.length, (text?.selectedRange().location ?? entry.range.location) - entry.range.location))
             } ?? 0
@@ -988,6 +1005,7 @@ private final class ParkingMenuAction: NSObject {
 }
 
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
+    parkingMultiSelectionSelfTests(check)
     let heading = ParkingLotRow(heading: true, text: "Converse")
     let first = ParkingLotRow(heading: false, text: "Fix scrolling", notes: [.init(author: "Reviewer", text: "Keep this comment")])
     let second = ParkingLotRow(heading: false, text: "Improve pairing")
@@ -1325,6 +1343,38 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
         check(lot.document.rows.suffix(2).map(\.id) == [target, newID], "A session can add an identified heading and refer to it later in the same transaction")
     } catch { check(false, "Outline batch reorganization: " + error.localizedDescription) }
     check(store.switchboardTeaching(session).contains("Converse or KAOS") && store.switchboardTeaching(session).contains("Confirm the proposed reorganization"), "General session teaching includes contextual organization and user confirmation")
+}
+
+private func parkingMultiSelectionSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-selection-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder)
+    let h = ParkingLotRow(heading: true, text: "Section")
+    let a = ParkingLotRow(heading: false, text: "Anchor", parentID: h.id)
+    let b = ParkingLotRow(heading: false, text: "First 🦊", parentID: h.id)
+    let child = ParkingLotRow(heading: false, text: "Collapsed child", parentID: b.id)
+    let c = ParkingLotRow(heading: false, text: "Second", parentID: h.id)
+    lot.openStarter([h, a, b, child, c])
+    let before = lot.document.rows
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([b.id]), reorder: {}))
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+    text.owner = coordinator; text.delegate = coordinator; coordinator.text = text; coordinator.render()
+    let start = coordinator.projection.entries.first { $0.row.id == b.id }!.range.location
+    let end = NSMaxRange(coordinator.projection.entries.first { $0.row.id == c.id }!.range)
+    text.setSelectedRange(NSRange(location: start, length: end - start))
+    func tab(_ modifiers: NSEvent.ModifierFlags) {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+            timestamp: 0, windowNumber: 0, context: nil, characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!
+        text.keyDown(with: event)
+    }
+    tab([])
+    check(lot.document.rows.first { $0.id == b.id }?.parentID == a.id
+          && lot.document.rows.first { $0.id == c.id }?.parentID == a.id
+          && lot.document.rows.contains(child) && text.selectedRange().length > 0,
+          "Native Tab indents every selected visible item, keeps hidden descendants, and retains selection")
+    tab(.shift)
+    check(lot.document.rows == before && text.selectedRange().length > 0,
+          "Native Shift-Tab immediately reverses the selected batch without losing selection")
 }
 
 func parkingLinkEditorSelfTests(_ check: (Bool, String) -> Void) {

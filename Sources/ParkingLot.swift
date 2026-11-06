@@ -147,6 +147,27 @@ enum ParkingLotTree {
         }
         return (try? nodes(result)) == nil ? nil : result
     }
+    /// Selected descendants travel with their selected ancestor exactly once.
+    /// Reverse outdents so siblings retain their order after their parent.
+    static func changingIndent(_ ids: Set<UUID>, in rows: [ParkingLotRow], deeper: Bool) -> [ParkingLotRow]? {
+        guard !ids.isEmpty, let hierarchy = try? nodes(rows),
+              ids.allSatisfy({ id in rows.contains { $0.id == id && !$0.heading } }) else { return nil }
+        let roots = rows.filter { row in
+            guard ids.contains(row.id) else { return false }
+            var parent = hierarchy[row.id]?.parentID
+            while let id = parent {
+                if ids.contains(id) { return false }
+                parent = hierarchy[id]?.parentID
+            }
+            return true
+        }.map(\.id)
+        var result = rows
+        for id in deeper ? roots : Array(roots.reversed()) {
+            guard let next = changingIndent(id, in: result, deeper: deeper) else { return nil }
+            result = next
+        }
+        return result
+    }
 }
 struct ParkingLotEdits: Decodable {
     struct Operation: Decodable {
@@ -179,11 +200,16 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     @Published private(set) var active = false
     @Published var error = ""
     @Published private(set) var readOnlyReason: String?
+    @Published private(set) var lastSeenRevision = 0
+    var hasUnseenChanges: Bool { active && document.revision > lastSeenRevision }
+    private var viewers: Set<UUID> = []
+    private let seenFile: URL
     var isReadOnly: Bool { readOnlyReason != nil }
     private let file: URL
     let attachmentFolder: URL
     init(folder: URL, id: UUID = ParkingLotStore.id, name: String = "Parking Lot") {
         self.id = id; self.name = name
+        seenFile = folder.appendingPathComponent("ParkingLot Seen/" + id.uuidString + ".json")
         attachmentFolder = folder.appendingPathComponent("Attachments/" + id.uuidString)
         file = id == Self.id ? folder.appendingPathComponent("parking-lot.json") : folder.appendingPathComponent("ParkingLots/" + id.uuidString + ".json")
         if FileManager.default.fileExists(atPath: file.path) {
@@ -200,7 +226,20 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                 readOnlyReason = self.error
             }
         }
+        lastSeenRevision = (try? JSONDecoder().decode(Int.self, from: Data(contentsOf: seenFile))) ?? document.revision
+        if active { saveSeenRevision() }
     }
+    private func saveSeenRevision() {
+        do {
+            try FileManager.default.createDirectory(at: seenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(lastSeenRevision).write(to: seenFile, options: .atomic)
+        } catch { NSLog("Could not save Parking Lot reading position: %@", error.localizedDescription) }
+    }
+    func beginViewing(_ viewer: UUID) {
+        viewers.insert(viewer)
+        if lastSeenRevision != document.revision { lastSeenRevision = document.revision; saveSeenRevision() }
+    }
+    func endViewing(_ viewer: UUID) { viewers.remove(viewer) }
     private func requireWritable() throws {
         if let readOnlyReason { throw AgentFailure.message(readOnlyReason) }
     }
@@ -268,6 +307,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             if group { undoManager.setActionName("Edit Parking Lot"); undoManager.endUndoGrouping() }
         }
         document = next; active = true; error = ""
+        if !viewers.isEmpty { lastSeenRevision = next.revision }
+        saveSeenRevision()
     }
     private func restoreUndo(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
         guard document.rows == expected else { error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
@@ -303,8 +344,17 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         undoManager.setActionName(actionName)
     }
     @discardableResult func changeIndent(_ id: UUID, deeper: Bool) -> Bool {
-        guard !isReadOnly, let rows = ParkingLotTree.changingIndent(id, in: document.rows, deeper: deeper) else { return false }
-        commit(rows); return true
+        changeIndent([id], deeper: deeper)
+    }
+    @discardableResult func changeIndent(_ ids: Set<UUID>, deeper: Bool) -> Bool {
+        guard !isReadOnly, let rows = ParkingLotTree.changingIndent(ids, in: document.rows, deeper: deeper) else { return false }
+        undoManager.beginUndoGrouping()
+        defer { undoManager.endUndoGrouping() }
+        do {
+            try replaceUserRows(rows, revision: document.revision)
+            undoManager.setActionName(deeper ? "Indent Items" : "Outdent Items")
+            return true
+        } catch { self.error = "Parking Lot was not saved: " + error.localizedDescription; return false }
     }
     func update(_ id: UUID, text: String) {
         var rows = document.rows
@@ -459,7 +509,13 @@ struct ParkingLotSidebar: View {
     }
     var body: some View {
         HStack(spacing: 6) {
-            Color.clear.frame(width: 12, height: 12).accessibilityHidden(true)
+            Group {
+                if lot.hasUnseenChanges {
+                    Text("👀").font(.system(size: 10)).fixedSize()
+                        .help("This Parking Lot changed while it was not displayed. Open it to read the changes.")
+                        .accessibilityLabel("Unseen Parking Lot changes")
+                } else { Color.clear.accessibilityHidden(true) }
+            }.frame(width: 12, height: 12)
             Button { show() } label: {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -503,6 +559,7 @@ enum ParkingLotTransfer {
 }
 
 struct ParkingLotView: View {
+    @State private var viewerID = UUID()
     @ObservedObject var lot: ParkingLotStore
     @ObservedObject var workspace: Workspace
     let pane: Int
@@ -697,6 +754,8 @@ struct ParkingLotView: View {
                 Button("Talk…") { talking = true }.disabled(lot.isReadOnly)
             }.padding(8)
         }.frame(minWidth: PaneSizing.minimumPane, maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
+            .onAppear { lot.beginViewing(viewerID) }
+            .onDisappear { lot.endViewing(viewerID) }
             .background(ParkingLotUndoAnchor(lot: lot, focus: undoFocus).frame(width: 0, height: 0))
             .sheet(isPresented: $talking) { ParkingLotTalkView(lot: lot) }
     }
@@ -709,6 +768,7 @@ private struct ParkingLotFrames: PreferenceKey {
 }
 
 func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
+    parkingLotPolishSelfTests(check)
     check((1...3).map { ParkingLotTree.label($0, depth: 1) } == ["1", "2", "3"] && (1...3).map { ParkingLotTree.label($0, depth: 2) } == ["a", "b", "c"]
           && [1, 2, 3, 4, 9, 14].map { ParkingLotTree.label($0, depth: 3) } == ["i", "ii", "iii", "iv", "ix", "xiv"] && ParkingLotTree.label(2, depth: 4) == "2"
           && ParkingLotTree.letters(27) == "aa" && ParkingLotTree.letters(26) == "z", "Outline labels go 1, a, i by level, then repeat")
@@ -911,6 +971,46 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     try? Data("broken".utf8).write(to: corrupt.appendingPathComponent("parking-lot.json"))
     let broken = ParkingLotStore(folder: corrupt); broken.open()
     check(!broken.error.isEmpty && (try? String(contentsOf: corrupt.appendingPathComponent("parking-lot.json"))) == "broken", "Unreadable Parking Lot data is reported and never silently replaced")
+}
+
+private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-polish-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder)
+    let h = ParkingLotRow(heading: true, text: "Heading")
+    let a = ParkingLotRow(heading: false, text: "Anchor", parentID: h.id)
+    let b = ParkingLotRow(heading: false, text: "First 🦊", parentID: h.id)
+    let child = ParkingLotRow(heading: false, text: "Hidden child", notes: [ParkingLotNote(author: "Tester", text: "Keep")], parentID: b.id)
+    let c = ParkingLotRow(heading: false, text: "Second", done: true, parentID: h.id)
+    lot.openStarter([h, a, b, child, c])
+    let before = lot.document.rows
+    check(lot.changeIndent([b.id, child.id, c.id], deeper: true)
+          && lot.document.rows.first { $0.id == b.id }?.parentID == a.id
+          && lot.document.rows.first { $0.id == c.id }?.parentID == a.id
+          && lot.document.rows.first { $0.id == child.id } == child,
+          "Batch indent keeps selected siblings together and carries selected descendants once")
+    lot.undoManager.undo()
+    check(lot.document.rows == before, "One Undo restores the entire multi-item indentation")
+    lot.undoManager.redo()
+    check(lot.changeIndent([b.id, c.id], deeper: false) && lot.document.rows == before,
+          "Batch outdent preserves sibling order, comments, Done and descendant identities")
+    let revision = lot.document.revision
+    check(!lot.changeIndent([a.id, c.id], deeper: true) && lot.document.revision == revision && lot.document.rows == before,
+          "An impossible batch is refused atomically instead of indenting only some items")
+    check(!lot.changeIndent([h.id, b.id], deeper: true), "A selection containing a heading cannot accidentally nest the heading")
+    let viewer = UUID(), otherViewer = UUID()
+    lot.beginViewing(viewer)
+    check(!lot.hasUnseenChanges, "Opening a lot clears its unseen-change marker")
+    lot.update(b.id, text: "Visible change")
+    check(!lot.hasUnseenChanges, "Edits received while a lot is displayed do not raise an unseen marker")
+    lot.beginViewing(otherViewer); lot.endViewing(viewer)
+    lot.update(b.id, text: "Still visible")
+    check(!lot.hasUnseenChanges, "A view handoff retains visibility while another lot view exists")
+    lot.endViewing(otherViewer); lot.update(b.id, text: "Parked change")
+    check(lot.hasUnseenChanges && ParkingLotStore(folder: folder).hasUnseenChanges,
+          "Parked changes raise an eyeball that survives restarting the app")
+    lot.beginViewing(viewer)
+    check(!ParkingLotStore(folder: folder).hasUnseenChanges, "Reading the changed lot persists the cleared marker")
 }
 
 /// While a voice conversation about this lot is running, its controls live in the
