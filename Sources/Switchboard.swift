@@ -60,9 +60,13 @@ extension Store {
         else { s.pending.append(prompt) }
         // Persist the sender's handled ID and recipient's pending input together,
         // before any provider can start. Restart restores pending input paused.
+        // The write happens off the main thread; the turn starts once it's on disk.
         save()
-        if urgent && s.busy { s.resumeAfterInterrupt = true; interruptProcess(s) }
-        else if !s.busy { DispatchQueue.main.async { self.runNext(s) } }
+        ArchiveWriter.shared.flushThen(folder.path) { [weak self, weak s] in
+            guard let self, let s else { return }
+            if urgent && s.busy { s.resumeAfterInterrupt = true; self.interruptProcess(s) }
+            else if !s.busy { self.runNext(s) }
+        }
     }
     func teachSwitchboard(_ s: Session) {
         s.switchboardEnabled = true; s.switchboardTeachingVersion = SwitchboardTeaching.version

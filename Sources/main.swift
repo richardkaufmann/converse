@@ -317,6 +317,12 @@ final class ArchiveWriter {
         }
         if let failure { throw failure }
     }
+    /// Writes the folder's pending snapshot on the archive queue right away
+    /// (skipping the one-second spacing), then calls `then` on the main thread.
+    /// For work that must not start before its state is on disk.
+    func flushThen(_ key: String, then: @escaping () -> Void) {
+        queue.async { self.runPending(key); DispatchQueue.main.async(execute: then) }
+    }
     /// Writes a folder's pending snapshot now (reload, tests).
     func flush(_ key: String) { queue.sync { runPending(key) } }
     /// Writes every pending snapshot now (quit).
