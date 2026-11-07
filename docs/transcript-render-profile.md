@@ -1,8 +1,9 @@
 # Transcript render investigation (Mac 149)
 
-This branch is a diagnostic experiment based on release/149 `1dc455d`, not a
-performance fix or a release candidate. The installed app and frozen release
-worktrees are unchanged. No personal transcript content is included.
+The original diagnostic commit is `b4ac0cc`, based on release/149 `1dc455d`.
+The follow-up branch `codex/transcript-prepared-cache` adds a candidate
+optimization. The installed app and frozen release worktrees are unchanged.
+No personal transcript content is included.
 
 ## Observed capture
 
@@ -55,15 +56,73 @@ replacing only its changed suffix. This explains a repeatable scaling cost in
 the synthetic test. It does not establish which substep caused the real
 one-second stall. Full-window scrolling and editing acceptance are still needed.
 
-Next: measure the history-preparation substeps, then evaluate reusing unchanged
-prepared blocks. Preserve dynamic session labels, disclosure changes, images,
-copy content, timestamps, selection and draft-relative caret positions. Compare
-the same fixtures before and after; repeat the real multi-pane typing capture.
+The candidate below targets that repeated preparation. Further work must
+preserve dynamic session labels, disclosure changes, images, copy content,
+timestamps, selection and draft-relative caret positions. Compare the same
+fixtures before and after; repeat the real multi-pane typing capture.
+
+## Prepared-message cache candidate
+
+The follow-up replaces the Markdown-only cache with immutable prepared message
+bodies and their full Copy Message representations. The cache key includes the
+complete message (including delays, role and timestamp), font size, collapse
+and expansion state, and date environment. Name lookups used to prepare a
+summary are recorded and rechecked before reuse, including unresolved names.
+Locale preference notifications invalidate prepared timestamps even when the
+locale identifier stays the same. Removed messages are pruned from the cache.
+Images still use the existing file-metadata-aware attachment preparation path.
+
+The native document and message metadata are still assembled on an update;
+this change skips repeated Markdown, delay-marker, link and tooltip formatting
+for unchanged messages. It does not eliminate all work proportional to history
+size, or make first-time rendering incremental.
+
+Set `CONVERSE_RENDER_PROFILE_LONG=1` on the same benchmark command for a
+1,200-message fixture with four times the text per message and 400 delay
+markers. This resembles the observed text volume and delay-marker count, but
+does not reproduce the user's content, images, window geometry or concurrent
+activity. It is an additional workload check, not a substitute for a real
+typing and scrolling capture.
+
+Final candidate benchmark results (three final-message updates per size):
+
+| Messages | Baseline total stages | Candidate total stages | Candidate history preparation |
+| --- | --- | --- | --- |
+| 100 | 27–29 ms | 3.9–4.5 ms | 1.9–2.1 ms |
+| 600 | 91–94 ms | 18.6–18.9 ms | 8.6–8.7 ms |
+| 1,200 | 190–323 ms | 34.8–36.1 ms | 16.0–16.3 ms |
+
+The larger fixture takes **118–126 ms** per update: preparation 43–48 ms,
+replacement stage 73–76 ms, explicit layout about 1 ms. The replacement stage
+includes prefix comparison and selection/typing-attribute maintenance, not
+only the native storage call. There is no matched baseline run for this larger
+fixture, so do not report an improvement ratio for it. Its first render takes
+about 2.6 seconds. This leaves significant work at large history sizes and is
+not evidence that the user's stutter is completely fixed.
 
 ## Validation
 
-The diagnostic build succeeds. The existing conversation-layout self-test
-passes, including draft hydration, changed-tail replacement, hidden activity,
-selection, copying and following behavior. This branch has not had a full
-release gate. Raw local output is in `.build/render-profile/` (`baseline.log`,
-`sampled-run.log`, `synthetic.sample.txt`, `layout-tests.log`, `build.log`).
+The candidate build succeeds. The conversation-layout self-test passes,
+including fresh-render comparisons, draft hydration, changed-tail replacement,
+hidden activity, selection, copying and following behavior.
+
+The first full Mac gate failed at `A duplicate no-op Inject all command ID
+is answered from its receipt, never applied twice` in unchanged
+`DeviceSyncTests.swift:522–524`. Its handle was lost after interruption; the
+captured FAIL is retained and has not been attributed to the renderer.
+
+A subsequent diagnostic build and complete `./test.sh` run both exited 0.
+Temporary logging around that same assertion captured identical JSON bytes
+on the two sends, followed by `completed / Already recorded on home.`;
+messages were unchanged and the session was not interrupted. The logging
+patch is retained locally and removed from the proposed change. This pass
+does not explain the earlier failure. Command retry binding is under separate
+review; no assertion was relaxed.
+
+Raw local output is in `.build/render-profile/`: `baseline.log`,
+`cache-final-baseline.log`, `cache-long.log`, `sampled-run.log`,
+`synthetic.sample.txt`, `cache-final-layout.log`, `cache-full-tests.log`,
+`gate-failure.txt`, `retry-diagnostic-tests.log`,
+`retry-diagnostic-result.json`, and the build logs. The focused layout suite
+passed 78 checks. No installed-app acceptance or cross-platform release-gate
+claim is made for this Mac renderer candidate.
