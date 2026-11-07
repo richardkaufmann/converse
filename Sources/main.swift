@@ -26,6 +26,8 @@ struct Message: Codable, Identifiable, Equatable {
     var finalReply: String? = nil
     // Older archives have no message times. Leave those unknown on decode.
     var createdAt: Date? = Date()
+    // Came from a .converse file. Its text never captures files from this Mac.
+    var imported: Bool? = nil
 }
 struct ToolStatus: Codable {
     var model = "not reported"

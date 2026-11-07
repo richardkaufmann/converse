@@ -175,8 +175,11 @@ struct TranscriptImageReference {
     var url: URL
 }
 extension TranscriptStyle {
+    // Captions stop at any bracket, and caption and target are bounded and
+    // never backtrack, so each `!` costs a few steps even on long nested or
+    // unclosed lines. A bracket inside a caption means it is not an image.
     static func localImageReferences(_ text: String) -> [TranscriptImageReference] {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|(file://[^\r\n\)]+|[^\s\)]+))\s*\)"#)
+        let expression = try! NSRegularExpression(pattern: #"!\[([^\[\]\r\n]{0,512}+)\]\(\s*(?:<([^>\r\n]{1,4096})>|(file://[^\r\n\)]{1,4096}|[^\s\)]{1,4096}+))\s*\)"#)
         var result: [TranscriptImageReference] = [], offset = 0
         var fence: String?
         for line in text.components(separatedBy: "\n") {
@@ -201,7 +204,7 @@ extension TranscriptStyle {
         return result
     }
     static func imageReferences(_ text: String) -> [TranscriptImageReference] {
-        let regex = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)"#)
+        let regex = try! NSRegularExpression(pattern: #"!\[([^\[\]\r\n]{0,512}+)\]\(\s*(?:<([^>\r\n]{1,4096})>|([^\s\)]{1,4096}+))\s*\)"#)
         var result: [TranscriptImageReference] = [], offset = 0
         var fence: String?
         for line in text.components(separatedBy: "\n") {
@@ -226,17 +229,32 @@ extension TranscriptStyle {
     // Web images are never fetched unasked. Until the reader loads one, show
     // its caption and full URL as an ordinary link so the destination is plain.
     static func imageLinks(_ text: String) -> String {
-        let result = NSMutableString(string: text)
         // A failed local capture must not collapse silently to just its alt text.
         // This is display-only: the original reference remains retryable on disk.
         let references = imageReferences(text) + localImageReferences(text).map {
             TranscriptImageReference(range: $0.range, caption: "Image not displayed" + ($0.caption.isEmpty ? "" : ": " + $0.caption), url: $0.url)
         }
-        for ref in references.sorted(by: { $0.range.location > $1.range.location }) {
+        return splice(text, references.map { ref in
             var label = ""
             for character in ref.url.absoluteString { if "\\`*_[]<>~".contains(character) { label.append("\\") }; label.append(character) }
-            result.replaceCharacters(in: ref.range, with: (ref.caption.isEmpty ? "" : ref.caption + ": ") + "[" + label + "](" + ref.url.absoluteString + ")")
+            return (ref.range, (ref.caption.isEmpty ? "" : ref.caption + ": ") + "[" + label + "](" + ref.url.absoluteString + ")")
+        })
+    }
+    // Replaces ranges found in `text` in one forward pass. Separate scans can
+    // overlap (a spaced file:// reference may enclose a web image), so the
+    // earliest, then longest, range wins and any range it touches is dropped.
+    // Ranges outside the text are ignored rather than raising.
+    static func splice(_ text: String, _ replacements: [(range: NSRange, with: String)]) -> String {
+        let source = text as NSString
+        let result = NSMutableString()
+        var cursor = 0
+        for item in replacements.sorted(by: { $0.range.location != $1.range.location ? $0.range.location < $1.range.location : $0.range.length > $1.range.length })
+        where item.range.location >= cursor && item.range.length > 0 && item.range.location <= source.length && item.range.length <= source.length - item.range.location {
+            result.append(source.substring(with: NSRange(location: cursor, length: item.range.location - cursor)))
+            result.append(item.with)
+            cursor = NSMaxRange(item.range)
         }
+        result.append(source.substring(from: cursor))
         return result as String
     }
 }

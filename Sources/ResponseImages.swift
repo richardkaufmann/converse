@@ -67,12 +67,10 @@ extension Store {
         let working = URL(fileURLWithPath: NSString(string: session.entry.directory).expandingTildeInPath).standardizedFileURL
         if working.path != "/" && working.path != NSHomeDirectory() { roots.append(working) }
         var changed = false
-        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].text.contains("![") {
+        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].imported != true && session.messages[index].text.contains("![") {
             let items = ResponseImages.capture(session.messages[index].text, roots: roots, destination: output)
             guard !items.isEmpty else { continue }
-            let text = NSMutableString(string: session.messages[index].text)
-            for item in items.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-            session.messages[index].text = text as String
+            session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, items.map { ($0.range, $0.caption) })
             for item in items where !session.messages[index].images.contains(item.file.path) { session.messages[index].images.append(item.file.path) }
             changed = true
         }
@@ -100,9 +98,7 @@ extension Store {
                 do {
                     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     try png.write(to: file, options: .atomic)
-                    let text = NSMutableString(string: session.messages[index].text)
-                    for item in refs.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-                    session.messages[index].text = text as String
+                    session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, refs.map { ($0.range, $0.caption) })
                     if !session.messages[index].images.contains(file.path) { session.messages[index].images.append(file.path) }
                 } catch { session.messages.append(Message(role: "notice", text: "Image could not be saved. Its link remains available.")) }
             case .failure:
@@ -203,6 +199,56 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         let unavailable = MarkdownText.render("![Missing](" + spaced.absoluteString + ")")
         check(unavailable.string.contains("Image not displayed") && unavailable.string.contains("full%20page.png"), "Uncaptured local images retain an explicit fallback path")
         check(ConverseExchange.neutralizeLocalImages("![Raw](file://" + spaced.path + ")").hasPrefix("[Raw]"), "Imported raw-space local embeds remain neutralized")
+        for planted in ["!![x](/tmp/a.png)", "!!![x](/tmp/a.png)", "!!!!![x](file:///tmp/a.png)", "!![x](< /tmp/a.png>)", "!![x](FILE:///tmp/a.png) !![y](/tmp/b.png)"] {
+            let neutral = ConverseExchange.neutralizeLocalImages(planted)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.contains("[x]("), "Stacked image markers cannot rebuild a local embed: " + planted)
+        }
+        // A hostile import with long marker runs must stay linear: whole runs go at once.
+        for target in ["(/tmp/nonexistent.png)", "(~/a.png)", "(file:///tmp/a.png)", "(relative.png)"] {
+            let hostile = String(repeating: "!", count: 20_000) + "[x]" + target
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(hostile)
+            // Relative paths were never local embeds and stay as written.
+            let neutralized = target == "(relative.png)" ? neutral == hostile : neutral.hasPrefix("[x]")
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutralized && Date().timeIntervalSince(started) < 0.5, "20,000 stacked image markers are handled in one bounded pass: " + target)
+        }
+        let fencedExample = "```\n![![x](/tmp/code-example.png)\n```\n" + String(repeating: "![", count: 3) + "x](/tmp/nonexistent.png)"
+        let fencedNeutral = ConverseExchange.neutralizeLocalImages(fencedExample)
+        check(TranscriptStyle.localImageReferences(fencedNeutral).isEmpty && fencedNeutral.hasPrefix("```\n![[x](/tmp/code-example.png)\n```\n"), "Nested-marker cleanup only edits lines the fence-aware scan flags")
+        // Rejecting long nested or unclosed lines must stay bounded too.
+        for tail in ["x](https://example.com/w.png)", "x](relative.png)", "x(/tmp/a.png", "x](/tmp/a.png)"] {
+            let line = String(repeating: "![", count: 10_000) + tail
+            let started = Date()
+            let local = TranscriptStyle.localImageReferences(line), web = TranscriptStyle.imageReferences(line)
+            let neutral = ConverseExchange.neutralizeLocalImages(line)
+            check(Date().timeIntervalSince(started) < 0.5 && TranscriptStyle.localImageReferences(neutral).isEmpty && local.count <= 1 && web.count <= 1, "10,000 nested image openers are scanned in bounded time: " + tail)
+        }
+        check(TranscriptStyle.imageReferences("![" + String(repeating: "a", count: 600) + "](https://example.com/w.png)").isEmpty && TranscriptStyle.imageReferences("![Chart](https://example.com/w.png)").count == 1, "Image captions longer than 512 characters are not treated as images")
+        check(TranscriptStyle.localImageReferences("![![x](/tmp/a.png)").count == 1 && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages("![![x](/tmp/a.png)")).isEmpty, "A nested local embed is still found and neutralized")
+        // Nested opening markers once needed one round per level; any depth now goes in one pass.
+        for depth in [2, 6, 10, 100, 5_000] {
+            let nestedImport = String(repeating: "![", count: depth) + "x](/tmp/nonexistent.png)\n![web](https://example.com/w.png)"
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(nestedImport)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.hasSuffix("\n![web](https://example.com/w.png)") && Date().timeIntervalSince(started) < 0.5, "Nested image markers cannot keep a local embed: depth \(depth)")
+        }
+        check(TranscriptStyle.splice("abc", [(NSRange(location: Int.max - 1, length: 5), "X"), (NSRange(location: 1, length: Int.max), "Y"), (NSRange(location: 4, length: 0), "Z")]) == "abc", "Splice ignores malformed ranges without overflowing")
+        let mixed = ConverseExchange.neutralizeLocalImages("![web](https://example.com/w.png)\n!![local](/tmp/a.png) ![two](https://example.com/v.png)")
+        check(mixed == "![web](https://example.com/w.png)\n[local](/tmp/a.png) ![two](https://example.com/v.png)" && TranscriptStyle.imageReferences(mixed).count == 2, "Neutralizing local embeds leaves web images intact")
+        // Separate web and local scans can enclose one another; rendering must never raise.
+        let nested = "![a](file:///x ![](https://y.co/i.png" + String(repeating: " ", count: 40) + ")"
+        let nestedRefs = TranscriptStyle.imageReferences(nested).map(\.range) + TranscriptStyle.localImageReferences(nested).map(\.range)
+        check(nestedRefs.count == 2 && nestedRefs.contains { outer in nestedRefs.contains { $0 != outer && NSIntersectionRange($0, outer).length > 0 } }, "Nested image fixture really produces overlapping references")
+        let nestedOutput = TranscriptStyle.imageLinks(nested)
+        check(nestedOutput.hasPrefix("Image not displayed: a: [") && !nestedOutput.contains("!["), "An image reference enclosing another renders once without raising")
+        let nestedRender = MarkdownText.render(nested + "\nafter").string
+        check(nestedRender.hasPrefix("Image not displayed: a: ") && nestedRender.trimmingCharacters(in: .newlines).hasSuffix("after"), "Overlapping image references render through Markdown")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 4), "X"), (NSRange(location: 2, length: 1), "Y")]) == "aXf", "Splice keeps the outer of nested ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 2, length: 3), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXdef", "Splice keeps the earlier of partly overlapping ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 2), "X"), (NSRange(location: 1, length: 2), "Y")]).count == 5, "Splice applies identical ranges once")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 3, length: 2), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXYf", "Splice applies adjacent ranges in order")
+        check(TranscriptStyle.splice("abc", [(NSRange(location: 2, length: 9), "X"), (NSRange(location: 9, length: 1), "Y"), (NSRange(location: 0, length: 1), "Z")]) == "Zbc", "Splice ignores ranges beyond the text")
+        check(TranscriptStyle.imageLinks("See ![one](https://example.com/1.png) and ![](https://example.com/2.png)\n![three](/tmp/missing-3.png)") == "See one: [https://example.com/1.png](https://example.com/1.png) and [https://example.com/2.png](https://example.com/2.png)\nImage not displayed: three: [file:///tmp/missing-3.png](file:///tmp/missing-3.png)", "Single and multiple image fallbacks render as before")
         if let fixture = ProcessInfo.processInfo.environment["CONVERSE_RESPONSE_IMAGE_FIXTURE"] {
             let file = URL(fileURLWithPath: fixture)
             let captured = ResponseImages.capture("![Full-page regression](" + file.absoluteString + ")", roots: [file.deletingLastPathComponent()], destination: output)
