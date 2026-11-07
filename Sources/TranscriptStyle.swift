@@ -242,7 +242,7 @@ extension TranscriptStyle {
         let result = NSMutableString()
         var cursor = 0
         for item in replacements.sorted(by: { $0.range.location != $1.range.location ? $0.range.location < $1.range.location : $0.range.length > $1.range.length })
-        where item.range.location >= cursor && item.range.length > 0 && NSMaxRange(item.range) <= source.length {
+        where item.range.location >= cursor && item.range.length > 0 && item.range.location <= source.length && item.range.length <= source.length - item.range.location {
             result.append(source.substring(with: NSRange(location: cursor, length: item.range.location - cursor)))
             result.append(item.with)
             cursor = NSMaxRange(item.range)

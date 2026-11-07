@@ -203,6 +203,16 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             let neutral = ConverseExchange.neutralizeLocalImages(planted)
             check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.contains("[x]("), "Stacked image markers cannot rebuild a local embed: " + planted)
         }
+        // A hostile import with long marker runs must stay linear: whole runs go at once.
+        for target in ["(/tmp/nonexistent.png)", "(~/a.png)", "(file:///tmp/a.png)", "(relative.png)"] {
+            let hostile = String(repeating: "!", count: 20_000) + "[x]" + target
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(hostile)
+            // Relative paths were never local embeds and stay as written.
+            let neutralized = target == "(relative.png)" ? neutral == hostile : neutral.hasPrefix("[x]")
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutralized && Date().timeIntervalSince(started) < 0.5, "20,000 stacked image markers are handled in one bounded pass: " + target)
+        }
+        check(TranscriptStyle.splice("abc", [(NSRange(location: Int.max - 1, length: 5), "X"), (NSRange(location: 1, length: Int.max), "Y"), (NSRange(location: 4, length: 0), "Z")]) == "abc", "Splice ignores malformed ranges without overflowing")
         let mixed = ConverseExchange.neutralizeLocalImages("![web](https://example.com/w.png)\n!![local](/tmp/a.png) ![two](https://example.com/v.png)")
         check(mixed == "![web](https://example.com/w.png)\n[local](/tmp/a.png) ![two](https://example.com/v.png)" && TranscriptStyle.imageReferences(mixed).count == 2, "Neutralizing local embeds leaves web images intact")
         // Separate web and local scans can enclose one another; rendering must never raise.

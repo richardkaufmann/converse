@@ -176,16 +176,24 @@ enum ConverseExchange {
     }
     /// Local image embeds in imported text become ordinary links, so Converse
     /// never copies a file from this Mac into the imported conversation.
-    /// Removing one `!` can expose another (`!![x](/a.png)`), so repeat until
-    /// nothing the transcript would capture as a local image remains.
+    /// A whole run of `!` goes at once (`!![x](/a.png)` must not re-arm), and
+    /// anything else the capture parser would still take loses its run too.
+    /// Matches start only at a run's first `!` and never backtrack into it,
+    /// so a long run that isn't a local embed costs one linear scan. Runs are
+    /// maximal, so a second pass finds nothing new; the cap bounds hostile input.
     static func neutralizeLocalImages(_ text: String) -> String {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
-        var result = text, previous: String
-        repeat {
-            previous = result
-            result = expression.stringByReplacingMatches(in: result, range: NSRange(location: 0, length: (result as NSString).length), withTemplate: "[$1]($2")
-            result = TranscriptStyle.splice(result, TranscriptStyle.localImageReferences(result).map { (NSRange(location: $0.range.location, length: 1), "") })
-        } while result != previous
+        let expression = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
+        var result = expression.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
+        for _ in 0..<4 {
+            let references = TranscriptStyle.localImageReferences(result)
+            if references.isEmpty { break }
+            let source = result as NSString
+            result = TranscriptStyle.splice(result, references.map { reference in
+                var start = reference.range.location
+                while start > 0 && source.character(at: start - 1) == 0x21 { start -= 1 }
+                return (NSRange(location: start, length: reference.range.location - start + 1), "")
+            })
+        }
         assert(TranscriptStyle.localImageReferences(result).isEmpty)
         return result
     }
