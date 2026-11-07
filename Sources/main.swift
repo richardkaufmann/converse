@@ -2510,13 +2510,13 @@ struct ScrollingConversation: NSViewRepresentable {
         private(set) var lastReplacementStart = 0
         private struct PreparedMessage {
             let message: Message
-            let fontSize: CGFloat
+            var fontSize: CGFloat
             let collapse: Bool
             let expanded: Bool
             let dateEnvironment: String
             let resolvedNames: [(String, String?)]
-            let body: NSAttributedString
-            let formattedCopy: NSAttributedString?
+            var body: NSAttributedString
+            var formattedCopy: NSAttributedString?
             let traffic: Bool
         }
         // Per-pane and pruned to displayed history; retained bodies are immutable.
@@ -2668,10 +2668,25 @@ struct ScrollingConversation: NSViewRepresentable {
                                     bodyFont: NSFont, collapse: Bool, dateEnvironment: String,
                                     base: [NSAttributedString.Key: Any]) -> PreparedMessage {
             let expanded = expandedDisclosures.contains(message.id)
-            if let cached = preparedMessages[message.id], cached.message == message,
-               cached.fontSize == fontSize, cached.collapse == collapse,
+            if var cached = preparedMessages[message.id], cached.message == message,
+               cached.collapse == collapse,
                cached.expanded == expanded, cached.dateEnvironment == dateEnvironment,
                cached.resolvedNames.allSatisfy({ resolveSessionName($0.0) == $0.1 }) {
+                // Bigger/Smaller already scaled the visible storage. On the next
+                // content update, scale the retained bodies instead of parsing
+                // the entire history again. Copies remain immutable and private
+                // to this pane; attachments use the separate image cache.
+                if cached.fontSize != fontSize {
+                    func scaled(_ value: NSAttributedString) -> NSAttributedString {
+                        let copy = NSMutableAttributedString(attributedString: value)
+                        PaneTextSize.scale(copy, by: fontSize / cached.fontSize)
+                        return NSAttributedString(attributedString: copy)
+                    }
+                    cached.body = scaled(cached.body)
+                    cached.formattedCopy = cached.formattedCopy.map(scaled)
+                    cached.fontSize = fontSize
+                    preparedMessages[message.id] = cached
+                }
                 return cached
             }
             var resolvedNames: [(String, String?)] = []
@@ -3627,6 +3642,17 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.render(text); compareCold("collapse disabled")
     Store.shared.collapseTranscriptPayloads = true
     coordinator.render(text); compareCold("collapse restored")
+    let preparedBeforeZoom = coordinator.messagePreparationCount
+    text.fontSize += 2
+    coordinator.render(text)
+    check(coordinator.messagePreparationCount == preparedBeforeZoom, "Bigger restyles without preparing history")
+    session.messages.append(Message(role: "assistant", text: "Output after Bigger **keeps** cached history"))
+    coordinator.render(text); compareCold("append after Bigger")
+    check(coordinator.messagePreparationCount == preparedBeforeZoom + 1, "First content update after Bigger prepares only the new message")
+    text.fontSize -= 2
+    session.messages.append(Message(role: "user", text: "Prompt alongside Smaller"))
+    coordinator.render(text); compareCold("append alongside Smaller")
+    check(coordinator.messagePreparationCount == preparedBeforeZoom + 2, "Size and content changing together reuse unchanged prepared messages")
     text.fontSize += 4
     session.messages[0].text += " Font change"
     coordinator.render(text); compareCold("font and history changed")
