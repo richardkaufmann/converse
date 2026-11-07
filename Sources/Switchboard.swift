@@ -252,7 +252,7 @@ extension Store {
                     if request.command == "parking-lot-edit", let edits = request.parkingLotEdits,
                        s.agent == nil, !s.supportAutonomous, parkingLotReviewConfirm == nil {
                         let hop = s.switchboardHop + 1
-                        note("Parking Lot review pending.")
+                        note(library.confirmsSessionEdits(id) ? "Parking Lot review pending." : "Parking Lot edit in progress.")
                         save()
                         Task { @MainActor in
                             let result: String
