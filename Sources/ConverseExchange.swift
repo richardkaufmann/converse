@@ -176,26 +176,33 @@ enum ConverseExchange {
     }
     /// Local image embeds in imported text become ordinary links, so Converse
     /// never copies a file from this Mac into the imported conversation.
-    /// A whole run of `!` goes at once (`!![x](/a.png)` must not re-arm), and
-    /// anything else the capture parser would still take loses its run too.
-    /// Matches start only at a run's first `!` and never backtrack into it,
-    /// so a long run that isn't a local embed costs one linear scan. Runs are
-    /// maximal, so a second pass finds nothing new; the cap bounds hostile input.
+    /// Matches start only at a run's first `!` and never backtrack into it, so
+    /// a whole run (`!![x](/a.png)`) goes at once in one linear scan. Any line
+    /// the capture parser would still take (nested `![![x](/a.png)`, relative
+    /// file URLs) then loses every image marker, which no later pass can undo
+    /// because the parser needs `![` and references never span lines.
     static func neutralizeLocalImages(_ text: String) -> String {
-        let expression = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
-        var result = expression.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
-        for _ in 0..<4 {
-            let references = TranscriptStyle.localImageReferences(result)
-            if references.isEmpty { break }
-            let source = result as NSString
-            result = TranscriptStyle.splice(result, references.map { reference in
-                var start = reference.range.location
-                while start > 0 && source.character(at: start - 1) == 0x21 { start -= 1 }
-                return (NSRange(location: start, length: reference.range.location - start + 1), "")
-            })
+        let embed = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
+        let marker = try! NSRegularExpression(pattern: #"(?<!!)!++\["#)
+        let result = embed.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
+        let remaining = TranscriptStyle.localImageReferences(result)
+        guard !remaining.isEmpty else { return result }
+        // Pick lines from the whole-text scan, which knows code fences; a line
+        // parsed alone would lose that context and edit code examples.
+        var lineStart = 0, affected = Set<Int>()
+        let lines = result.components(separatedBy: "\n")
+        var starts: [Int] = []
+        for line in lines { starts.append(lineStart); lineStart += (line as NSString).length + 1 }
+        for reference in remaining {
+            var low = 0, high = starts.count - 1
+            while low < high { let mid = (low + high + 1) / 2; if starts[mid] <= reference.range.location { low = mid } else { high = mid - 1 } }
+            affected.insert(low)
         }
-        assert(TranscriptStyle.localImageReferences(result).isEmpty)
-        return result
+        let neutral = lines.enumerated().map { index, line in
+            affected.contains(index) ? marker.stringByReplacingMatches(in: line, range: NSRange(location: 0, length: (line as NSString).length), withTemplate: "[") : line
+        }.joined(separator: "\n")
+        assert(TranscriptStyle.localImageReferences(neutral).isEmpty)
+        return neutral
     }
     static func unique(_ name: String, among taken: Set<String>, limit: Int) -> String {
         guard taken.contains(name) else { return name }

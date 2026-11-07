@@ -212,6 +212,16 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             let neutralized = target == "(relative.png)" ? neutral == hostile : neutral.hasPrefix("[x]")
             check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutralized && Date().timeIntervalSince(started) < 0.5, "20,000 stacked image markers are handled in one bounded pass: " + target)
         }
+        let fencedExample = "```\n![![x](/tmp/code-example.png)\n```\n" + String(repeating: "![", count: 3) + "x](/tmp/nonexistent.png)"
+        let fencedNeutral = ConverseExchange.neutralizeLocalImages(fencedExample)
+        check(TranscriptStyle.localImageReferences(fencedNeutral).isEmpty && fencedNeutral.hasPrefix("```\n[![x](/tmp/code-example.png)\n```\n"), "Nested-marker cleanup only edits lines the fence-aware scan flags")
+        // Nested opening markers once needed one round per level; any depth now goes in one pass.
+        for depth in [2, 6, 10, 100, 5_000] {
+            let nestedImport = String(repeating: "![", count: depth) + "x](/tmp/nonexistent.png)\n![web](https://example.com/w.png)"
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(nestedImport)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.hasSuffix("\n![web](https://example.com/w.png)") && Date().timeIntervalSince(started) < 0.5, "Nested image markers cannot keep a local embed: depth \(depth)")
+        }
         check(TranscriptStyle.splice("abc", [(NSRange(location: Int.max - 1, length: 5), "X"), (NSRange(location: 1, length: Int.max), "Y"), (NSRange(location: 4, length: 0), "Z")]) == "abc", "Splice ignores malformed ranges without overflowing")
         let mixed = ConverseExchange.neutralizeLocalImages("![web](https://example.com/w.png)\n!![local](/tmp/a.png) ![two](https://example.com/v.png)")
         check(mixed == "![web](https://example.com/w.png)\n[local](/tmp/a.png) ![two](https://example.com/v.png)" && TranscriptStyle.imageReferences(mixed).count == 2, "Neutralizing local embeds leaves web images intact")
