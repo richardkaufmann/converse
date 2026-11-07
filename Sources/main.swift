@@ -2508,8 +2508,27 @@ struct ScrollingConversation: NSViewRepresentable {
         /// Renders into a text view outside any window after its first render.
         static private(set) var detachedRenders = 0
         private(set) var lastReplacementStart = 0
-        // Rendered Markdown and the pane size it was scaled to.
-        var markdownCache: [UUID: (String, NSAttributedString, CGFloat)] = [:]
+        private struct PreparedMessage {
+            let message: Message
+            let fontSize: CGFloat
+            let collapse: Bool
+            let expanded: Bool
+            let dateEnvironment: String
+            let resolvedNames: [(String, String?)]
+            let body: NSAttributedString
+            let formattedCopy: NSAttributedString?
+            let traffic: Bool
+        }
+        // Per-pane and pruned to displayed history; retained bodies are immutable.
+        private var preparedMessages: [UUID: PreparedMessage] = [:]
+        private var formattingObserver: NSObjectProtocol?
+        private static let renderProfilingEnabled = {
+            let environment = ProcessInfo.processInfo.environment
+            return environment["CONVERSE_RENDER_PROFILE"] == "1"
+                && environment["CONVERSE_TEST_COMMAND"] != nil && environment["CONVERSE_DATA_DIR"] != nil
+        }()
+        private(set) var messagePreparationCount = 0
+        var cachedPreparedMessageCount: Int { preparedMessages.count }
         private let imageCache = NSCache<NSString, NSTextAttachment>()
         private(set) var imagePreparationCount = 0
         func preparedImage(_ path: String) -> NSTextAttachment? {
@@ -2537,9 +2556,17 @@ struct ScrollingConversation: NSViewRepresentable {
         var rendering = false
         var draftChanged: ((String) -> Void)?
         var resolveSessionName: (String) -> String? = { DeviceSyncService.shared.switchboardDisplayName($0) }
-        init(_ session: Session) { self.session = session }
+        init(_ session: Session) {
+            self.session = session
+            super.init()
+            // A 12/24-hour preference change can retain the same locale ID.
+            formattingObserver = NotificationCenter.default.addObserver(forName: NSLocale.currentLocaleDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.preparedMessages.removeAll()
+            }
+        }
         deinit {
             pendingRestyle?.cancel()
+            if let formattingObserver { NotificationCenter.default.removeObserver(formattingObserver) }
             if let hiddenRestyle { NotificationCenter.default.removeObserver(hiddenRestyle) }
         }
         func submissionHandler(_ text: ConversationTextView, action: @escaping () -> Void) -> () -> Void {
@@ -2637,12 +2664,107 @@ struct ScrollingConversation: NSViewRepresentable {
             rendering = false
             lastRestyleAt = ProcessInfo.processInfo.systemUptime
         }
+        private func prepareMessage(_ message: Message, visible: String, fontSize: CGFloat,
+                                    bodyFont: NSFont, collapse: Bool, dateEnvironment: String,
+                                    base: [NSAttributedString.Key: Any]) -> PreparedMessage {
+            let expanded = expandedDisclosures.contains(message.id)
+            if let cached = preparedMessages[message.id], cached.message == message,
+               cached.fontSize == fontSize, cached.collapse == collapse,
+               cached.expanded == expanded, cached.dateEnvironment == dateEnvironment,
+               cached.resolvedNames.allSatisfy({ resolveSessionName($0.0) == $0.1 }) {
+                return cached
+            }
+            var resolvedNames: [(String, String?)] = []
+            let resolveName: (String) -> String? = { [self] id in
+                let name = resolveSessionName(id)
+                resolvedNames.append((id, name))
+                return name
+            }
+            messagePreparationCount += 1
+            let body: NSMutableAttributedString
+            let disclosure: TranscriptDisclosure?
+            if !collapse { disclosure = nil }
+            else if message.role != "assistant", let cached = disclosureCache[message.id], cached.0 == visible { disclosure = cached.1 }
+            else {
+                disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveName)
+                // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
+                if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
+            }
+            let trafficSummary = !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveName)
+            if let disclosure {
+                body = disclosure.rendered(id: message.id, expanded: expanded, fontSize: fontSize, base: base)
+            } else if let summary = trafficSummary {
+                let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
+            } else if message.role == "assistant" {
+                body = MarkdownText.render(visible)
+                PaneTextSize.scale(body, by: fontSize / CGFloat(PaneTextSize.standard))
+                let refs = TranscriptStyle.imageReferences(visible)
+                if !refs.isEmpty {
+                    body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                        guard let url = value as? URL, let ref = refs.first(where: { $0.url == url }) else { return }
+                        body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
+                    }
+                }
+            } else { body = NSMutableAttributedString(string: visible, attributes: base) }
+            // Copy keeps the full source/Markdown without inserted delay labels,
+            // matching the existing Copy Message representation.
+            let assistantCopy: NSAttributedString? = message.role == "assistant"
+                ? (disclosure != nil || trafficSummary != nil
+                   ? NSAttributedString(string: visible, attributes: base)
+                   : NSAttributedString(attributedString: body)) : nil
+            for mark in (trafficSummary == nil && disclosure == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
+                let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
+                let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
+                let at = min(renderedOffset, body.length)
+                body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
+            }
+            if let detector = linkDetector {
+                let value = body.string as NSString
+                for match in detector.matches(in: body.string, range: NSRange(location: 0, length: value.length)) {
+                    if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
+                }
+            }
+            if let timestamp = message.createdAt {
+                let hint = "Recorded " + timestamp.formatted(date: .abbreviated, time: .standard)
+                var ranges: [NSRange] = []
+                body.enumerateAttribute(.toolTip, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                    if value == nil { ranges.append(range) }
+                }
+                for range in ranges { body.addAttribute(.toolTip, value: hint, range: range) }
+            }
+            let contentLength = TranscriptStyle.blockContentLength(body.string)
+            body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+            let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
+            if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            if message.role == "user" {
+                body.addAttribute(.font, value: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
+            }
+            let formattedCopy: NSAttributedString?
+            if message.role == "user" || message.role == "assistant" {
+                formattedCopy = disclosure != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? assistantCopy! : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+            } else { formattedCopy = nil }
+            let result = PreparedMessage(message: message, fontSize: fontSize, collapse: collapse,
+                                         expanded: expanded, dateEnvironment: dateEnvironment,
+                                         resolvedNames: resolvedNames, body: NSAttributedString(attributedString: body),
+                                         formattedCopy: formattedCopy, traffic: traffic)
+            preparedMessages[message.id] = result
+            return result
+        }
         func render(_ text: ConversationTextView) {
             defer { CharacterLatencyProbe.shared.bind(text, session: session) }
             let measurement = PerformanceCapture.shared.begin()
             defer { PerformanceCapture.shared.end(.transcriptRender, measurement) }
             let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
+            let profile = Self.renderProfilingEnabled
+            var checkpoint = began
+            func stage(_ label: String) {
+                guard profile else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                print(String(format: "PROFILE %@ %.3f ms", label, (now - checkpoint) * 1000))
+                checkpoint = now
+            }
             defer {
                 let elapsed = ProcessInfo.processInfo.systemUptime - began
                 if elapsed > 0.15 { NSLog("Converse slow transcript render: %.0f ms, %d messages, %d prepared images", elapsed * 1000, session.messages.count, imagePreparationCount) }
@@ -2695,6 +2817,7 @@ struct ScrollingConversation: NSViewRepresentable {
             let messages = renderedMessages ?? []
             let currentIDs = Set(messages.map(\.id))
             disclosureCache = disclosureCache.filter { currentIDs.contains($0.key) }
+            preparedMessages = preparedMessages.filter { currentIDs.contains($0.key) }
             var common = 0
             if let previous {
                 while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
@@ -2713,6 +2836,7 @@ struct ScrollingConversation: NSViewRepresentable {
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
+            stage("prepare")
             let document = NSMutableAttributedString(string: "")
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
@@ -2736,80 +2860,19 @@ struct ScrollingConversation: NSViewRepresentable {
             text.trafficBlocks = []
             text.copyBlocks = []
             messageStarts = [:]
+            let dateEnvironment = Locale.current.identifier + "|" + TimeZone.current.identifier
             for message in messages {
                 messageStarts[message.id] = document.length
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
-                let body: NSMutableAttributedString
-                let disclosure: TranscriptDisclosure?
-                if !collapse { disclosure = nil }
-                else if message.role != "assistant", let cached = disclosureCache[message.id], cached.0 == visible { disclosure = cached.1 }
-                else {
-                    disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveSessionName)
-                    // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
-                    if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
-                }
-                let trafficSummary = !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
-                if let disclosure {
-                    body = disclosure.rendered(id: message.id, expanded: expandedDisclosures.contains(message.id), fontSize: text.fontSize, base: base)
-                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
-                } else if let summary = trafficSummary {
-                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
-                    body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
-                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
-                } else if message.role == "assistant" {
-                    if let cached = markdownCache[message.id], cached.0 == visible {
-                        body = NSMutableAttributedString(attributedString: cached.1)
-                        if cached.2 != text.fontSize {
-                            PaneTextSize.scale(body, by: text.fontSize / cached.2)
-                            markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
-                        }
-                    }
-                    else {
-                        body = MarkdownText.render(visible)
-                        PaneTextSize.scale(body, by: text.fontSize / CGFloat(PaneTextSize.standard))
-                        let refs = TranscriptStyle.imageReferences(visible)
-                        if !refs.isEmpty {
-                            body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
-                                guard let url = value as? URL, let ref = refs.first(where: { $0.url == url }) else { return }
-                                body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
-                            }
-                        }
-                        markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
-                    }
-                } else { body = NSMutableAttributedString(string: visible, attributes: base) }
-                for mark in (trafficSummary == nil && disclosure == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
-                    let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
-                    let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
-                    let at = min(renderedOffset, body.length)
-                    body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
-                }
-                if let detector = linkDetector {
-                    let value = body.string as NSString
-                    for match in detector.matches(in: body.string, range: NSRange(location: 0, length: value.length)) {
-                        if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
-                    }
-                }
-                if let timestamp = message.createdAt {
-                    let hint = "Recorded " + timestamp.formatted(date: .abbreviated, time: .standard)
-                    var ranges: [NSRange] = []
-                    body.enumerateAttribute(.toolTip, in: NSRange(location: 0, length: body.length)) { value, range, _ in
-                        if value == nil { ranges.append(range) }
-                    }
-                    for range in ranges { body.addAttribute(.toolTip, value: hint, range: range) }
-                }
-                let contentLength = TranscriptStyle.blockContentLength(body.string)
-                body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+                let prepared = prepareMessage(message, visible: visible, fontSize: text.fontSize,
+                                              bodyFont: text.bodyFont, collapse: collapse,
+                                              dateEnvironment: dateEnvironment, base: base)
+                let body = prepared.body, traffic = prepared.traffic
                 if body.length == 0 && message.images.isEmpty { continue }
                 let start = document.length
-                let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
-                if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
-                if message.role == "user" {
-                    body.addAttribute(.font, value: NSFontManager.shared.convert(text.bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
-                }
                 document.append(body)
-                if message.role == "user" || message.role == "assistant" {
-                    let formatted = disclosure != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? markdownCache[message.id]!.1 : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+                if let formatted = prepared.formattedCopy {
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }
@@ -2825,6 +2888,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
+            stage("assemble-history")
             historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
@@ -2864,7 +2928,9 @@ struct ScrollingConversation: NSViewRepresentable {
                 text.setSelectedRange(NSRange(location: start, length: min(selection.length, document.length - start)))
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
+            stage("replace-storage")
             text.layoutManager?.ensureLayout(for: text.textContainer!)
+            stage("ensure-layout")
             text.fitDocumentHeight()
             if addedAttachment {
                 nativeScroll?.jumpToLatest()
@@ -2883,7 +2949,9 @@ struct ScrollingConversation: NSViewRepresentable {
             if let storage = text.textStorage {
                 text.hasImageLinks = (prefix > 0 && text.hasImageLinks) || ConversationTextView.containsImageLinks(storage, in: NSRange(location: prefix, length: max(0, min(text.inputStart, storage.length) - prefix)))
             }
+            stage("height-scroll")
             text.refreshDecorations(); text.refreshImageHover()
+            stage("decorations")
             rendering = false
         }
     }
@@ -3507,7 +3575,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
+    let session = Session(entry: Entry(name: "Prepared history QA", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
+    let outgoing = "Summary **kept visible**\n\n```converse\n{\"command\":\"tell\",\"to\":\"" + UUID().uuidString + "\",\"text\":\"Review this\"}\n```"
+    session.messages = [Message(role: "user", text: "Unicode é😀 and https://example.com"),
+                        Message(role: "assistant", text: "**Bold** and [a link](https://example.com/path)\nSecond line", delays: [DelayMark(offset: 8, seconds: 3)]),
+                        Message(role: "assistant", text: outgoing)]
+    let text = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    let coordinator = ScrollingConversation.Coordinator(session)
+    coordinator.resolveSessionName = { _ in "Peer" }
+    coordinator.render(text)
+    func compareCold(_ label: String) {
+        let original = session.messages
+        let cold = ConversationTextView(frame: text.frame)
+        cold.fontSize = text.fontSize
+        let fresh = ScrollingConversation.Coordinator(session)
+        fresh.resolveSessionName = coordinator.resolveSessionName
+        fresh.expandedDisclosures = coordinator.expandedDisclosures
+        fresh.render(cold)
+        check(text.textStorage!.isEqual(to: cold.textStorage!) && text.inputStart == cold.inputStart,
+              "Prepared history matches fresh text and attributes: " + label)
+        let copiesMatch = text.copyBlocks.count == cold.copyBlocks.count && zip(text.copyBlocks, cold.copyBlocks).allSatisfy {
+            $0.range == $1.range && $0.source == $1.source && $0.formatted.isEqual(to: $1.formatted)
+        }
+        check(copiesMatch && session.messages == original, "Prepared history preserves full Copy Message and archive: " + label)
+    }
+    session.messages.append(Message(role: "assistant", text: "New **output**"))
+    coordinator.render(text)
+    check(coordinator.messagePreparationCount == 4, "Appending output prepares only the new message")
+    compareCold("append")
+    session.messages[1].delays = [DelayMark(offset: 15, seconds: 12)]
+    session.messages[1].createdAt = Date(timeIntervalSince1970: 1)
+    coordinator.render(text); compareCold("delay and timestamp changed")
+    session.messages[0].role = "assistant"
+    coordinator.render(text); compareCold("role changed with unchanged text")
+    coordinator.resolveSessionName = { _ in "Renamed peer" }
+    session.messages.append(Message(role: "user", text: "Following prompt"))
+    coordinator.render(text); compareCold("resolved name changed")
+    let oldCollapse = Store.shared.collapseTranscriptPayloads
+    defer { Store.shared.collapseTranscriptPayloads = oldCollapse }
+    Store.shared.collapseTranscriptPayloads = true
+    coordinator.render(text)
+    let disclosureID = session.messages[2].id
+    if let at = text.string.range(of: "▸ ") {
+        let offset = (text.string as NSString).range(of: String(text.string[at])).location
+        _ = coordinator.textView(text, clickedOnLink: URL(string: "converse-disclosure://" + disclosureID.uuidString)!, at: offset)
+    }
+    check(coordinator.expandedDisclosures.contains(disclosureID), "Cached disclosure can expand through its native link")
+    compareCold("disclosure expanded")
+    Store.shared.collapseTranscriptPayloads = false
+    coordinator.render(text); compareCold("collapse disabled")
+    Store.shared.collapseTranscriptPayloads = true
+    coordinator.render(text); compareCold("collapse restored")
+    text.fontSize += 4
+    session.messages[0].text += " Font change"
+    coordinator.render(text); compareCold("font and history changed")
+    session.messages.removeFirst(2)
+    coordinator.render(text); compareCold("history trimmed")
+    check(coordinator.cachedPreparedMessageCount == session.messages.count, "Trimming releases prepared entries for removed messages")
+    NotificationCenter.default.post(name: NSLocale.currentLocaleDidChangeNotification, object: nil)
+    let preparedBeforeLocaleChange = coordinator.messagePreparationCount
+    session.messages.append(Message(role: "user", text: "After date-format preference change"))
+    coordinator.render(text); compareCold("locale preference notification")
+    check(coordinator.messagePreparationCount - preparedBeforeLocaleChange == session.messages.count,
+          "Locale preference changes reprepare retained timestamp tooltips")
+}
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    conversationPreparedCacheSelfTests(check)
     let performanceSession = Session(entry: Entry(name: "Typing QA", command: "false", directory: "/tmp", engine: "claude"))
     performanceSession.messages = (0..<600).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Message \($0): " + String(repeating: "Retained history with **formatting**. ", count: 8)) }
     let performanceText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
@@ -3527,6 +3661,7 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     let previousPrefix = performanceCoordinator.messageStarts[performanceSession.messages.last!.id]!
     performanceSession.messages[performanceSession.messages.count - 1].text += " Streamed suffix."
     performanceCoordinator.render(performanceText)
+    check(performanceCoordinator.messagePreparationCount == 601, "A streamed suffix prepares only one of 600 retained messages")
     check(performanceCoordinator.historyBuildCount == 2 && performanceCoordinator.lastReplacementStart == previousPrefix && performanceText.string.contains("Streamed suffix."), "Streaming replaces the changed message suffix while retaining preceding native layout")
     performanceSession.messages.append(Message(role: "activity", text: "hidden tool status"))
     performanceCoordinator.render(performanceText)
@@ -4300,6 +4435,33 @@ if CommandLine.arguments.contains("--groups-self-test") {
     var failures = 0
     converseGroupSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
     exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--transcript-render-profile") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    let longHistory = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_LONG"] == "1"
+    for count in (longHistory ? [1200] : [100, 600, 1200]) {
+        let session = Session(entry: Entry(name: "Synthetic render profile", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
+        session.messages = (0..<count).map { index in
+            let role = index % 2 == 0 ? "user" : "assistant"
+            let source = "Message \(index): " + String(repeating: "Retained history with **formatting** and https://example.com/a. ", count: longHistory ? 32 : 8)
+            let delays: [DelayMark]? = longHistory && role == "assistant" && index % 3 != 0
+                ? [DelayMark(offset: (source as NSString).length / 2, seconds: 3)] : nil
+            return Message(role: role, text: source, delays: delays)
+        }
+        let text = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let coordinator = ScrollingConversation.Coordinator(session)
+        text.delegate = coordinator
+        print("CASE \(count) initial")
+        coordinator.render(text)
+        for update in 1...3 {
+            session.messages[session.messages.count - 1].text += " Streamed suffix."
+            print("CASE \(count) suffix \(update)")
+            coordinator.render(text)
+        }
+    }
+    exit(0)
 }
 if CommandLine.arguments.contains("--conversation-layout-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
