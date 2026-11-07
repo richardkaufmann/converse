@@ -183,7 +183,7 @@ final class CharacterLatencyProbe {
     }
 
     func received(_ object: [String: Any], session: Session) {
-        guard session.id == outputID, !finished,
+        guard started, !finished, session.id == outputID,
               let probe = object["character_probe"] as? [String: Any],
               let sequence = probe["sequence"] as? Int, sequence == output.count, sequence < count,
               let scheduled = probe["scheduled"] as? Double,
@@ -194,7 +194,7 @@ final class CharacterLatencyProbe {
     }
 
     func didDraw(_ view: ConversationTextView, dirty: NSRect) {
-        guard !finished, let session = (view.delegate as? ScrollingConversation.Coordinator)?.session,
+        guard started, !finished, let session = (view.delegate as? ScrollingConversation.Coordinator)?.session,
               session.id == inputID || session.id == outputID,
               let window = view.window, window.isVisible, !window.isMiniaturized,
               window.occlusionState.contains(.visible),
