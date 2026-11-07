@@ -189,7 +189,7 @@ struct ParkingLotEditor: NSViewRepresentable {
     var reorder: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
+        let scroll = ParkingLotScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
         let text = ParkingOutlineText(frame: .zero)
         text.isRichText = false; text.allowsUndo = true; text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isAutomaticTextReplacementEnabled = false
@@ -560,6 +560,8 @@ final class ParkingOutlineText: NSTextView {
         }
     }
     override func layout() {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextLayout, measurement) }
         super.layout(); updateCommentButtons()
         // Resizes land here after the container tracks the new width, so
         // image spacing follows live resizes. render()'s width guard keeps
@@ -607,6 +609,8 @@ final class ParkingOutlineText: NSTextView {
     }
     @objc func redo(_ sender: Any?) { immediateSubstitution = nil; undoManager?.redo(); owner?.render() }
     override func insertText(_ value: Any, replacementRange: NSRange) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextInsertion, measurement) }
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
         super.insertText(value, replacementRange: replacementRange)
@@ -652,6 +656,9 @@ final class ParkingOutlineText: NSTextView {
         return super.validateUserInterfaceItem(item)
     }
     override func keyDown(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .lotKeyDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotKeyHandling, measurement) }
         if event.keyCode == 48, !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option),
            let owner, let index = owner.projection.index(at: selectedRange().location) {
             let entry = owner.projection.entries[index]
@@ -1869,5 +1876,14 @@ func renderLotDisclosurePreview(to output: URL) throws {
         }
         guard let data else { throw ParkingLotError.message("Could not render disclosure fixture.") }
         try data.write(to: output.appendingPathComponent("lot-partial-collapse-" + name.rawValue + ".png"))
+    }
+}
+
+final class ParkingLotScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .lotScrollDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotScrollHandling, measurement) }
+        super.scrollWheel(with: event)
     }
 }

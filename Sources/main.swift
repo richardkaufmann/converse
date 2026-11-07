@@ -3210,7 +3210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        PerformanceCapture.shared.configure(folder: Store.shared.folder, enabled: ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1" || UserDefaults.standard.bool(forKey: "performanceCapture"))
+        PerformanceCapture.shared.configure(folder: Store.shared.folder, enabled: ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1")
         AppDelegate.shared = self
         Store.shared.chooseImportProvider = { [weak self] in self?.chooseLogin($0) }
         Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }

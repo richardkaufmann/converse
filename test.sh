@@ -16,6 +16,7 @@ python3 Tests/install_shortcut_test.py
 python3 Tests/install_supersede_test.py
 python3 Tests/test_backup_archive_test.py
 python3 Tests/help_content_test.py
+python3 Tests/performance_summary_test.py
 python3 Tests/jolly_bridge_test.py
 python3 Tests/linux_join_helper_test.py
 printf 'Isolated test data: %s\n' "$test_dir"

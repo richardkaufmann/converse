@@ -46,16 +46,15 @@ extension Store {
 }
 
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case general = "General", jolly = "Jolly", welcome = "New User Experience / Reset"
+    case general = "General", debug = "Debug", jolly = "Jolly", welcome = "New User Experience / Reset"
     var id: String { rawValue }
-    var icon: String { switch self { case .general: return "gearshape"; case .jolly: return "bubble.left.and.bubble.right"; case .welcome: return "sparkles" } }
+    var icon: String { switch self { case .general: return "gearshape"; case .debug: return "waveform.path.ecg"; case .jolly: return "bubble.left.and.bubble.right"; case .welcome: return "sparkles" } }
 }
 struct SettingsView: View {
     @ObservedObject var state: WindowState
     @ObservedObject var store = Store.shared
     @Environment(\.dismiss) private var dismiss
     @State private var sessionID: UUID?
-    @State private var performanceCapture = PerformanceCapture.shared.enabled
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
@@ -93,21 +92,10 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                             Divider()
                             ModelsSettingsView(state: state)
-                            Divider()
-                            Text("Responsiveness diagnostics").font(.headline)
-                            Toggle("Record performance timings", isOn: $performanceCapture)
-                                .onChange(of: performanceCapture) { value in
-                                    UserDefaults.standard.set(value, forKey: "performanceCapture")
-                                    PerformanceCapture.shared.configure(folder: store.folder, enabled: value)
-                                }
-                            Text("Records UI delays, typing, rendering, saves and sidebar updates on this Mac. No message text, key characters or credentials. The bounded capture updates every five seconds; starting a new capture replaces the previous one.")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("Show performance capture") {
-                                if let file = PerformanceCapture.shared.file { NSWorkspace.shared.activateFileViewerSelecting([file]) }
-                            }
 
                         }.padding(22)
                     }
+                case .debug: PerformanceDebugView()
                 case .jolly: JollyView()
                 case .welcome: ResetSettingsView(state: state)
                 }
@@ -296,5 +284,94 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
                 }
             }
         }
+    }
+}
+
+final class PerformanceDebugState: ObservableObject {
+    static let shared = PerformanceDebugState()
+    @Published var enabled = false
+    @Published var delay = 5.0
+    @Published var duration = 30.0
+    @Published private(set) var busy = false
+    @Published private(set) var status = "Ready to capture."
+    @Published private(set) var file: URL?
+    @Published var exportError: String?
+    private let run = PerformanceCaptureRun()
+    private var request = 0
+    func go(folder: URL) {
+        guard enabled, !busy else { return }
+        request += 1; let token = request
+        busy = true; file = nil; exportError = nil
+        status = "Starting in \(Int(delay)) seconds. Switch back to the pane you want to test."
+        run.start(folder: folder, delay: delay, duration: duration) { [weak self] state in
+            guard let self, self.request == token else { return }
+            switch state {
+            case .waiting: break
+            case .recording: self.status = "Recording for \(Int(self.duration)) seconds. Use Converse normally."
+            case .complete(let file): self.file = file; self.busy = false; self.status = "Capture complete. Ready to export."
+            case .failed(let message): self.busy = false; self.status = message
+            case .cancelled: self.busy = false; self.status = "Capture cancelled."
+            }
+        }
+    }
+    func cancel(folder: URL) {
+        request += 1
+        busy = false; status = "Capture cancelled."
+        run.cancel(folder: folder) { _ in }
+    }
+    func export() {
+        guard let file, !busy else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Converse-performance.json"
+        panel.title = "Export performance capture"
+        let token = request
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let data = try Data(contentsOf: file)
+                    try data.write(to: destination, options: .atomic)
+                    DispatchQueue.main.async { if self.request == token { self.status = "Capture exported." } }
+                } catch {
+                    DispatchQueue.main.async { if self.request == token { self.exportError = "Could not export: " + error.localizedDescription } }
+                }
+            }
+        }
+    }
+}
+struct PerformanceDebugView: View {
+    @ObservedObject private var capture = PerformanceDebugState.shared
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("Debug").font(.title2.bold())
+            Toggle("Enable performance telemetry", isOn: $capture.enabled)
+                .onChange(of: capture.enabled) { _, enabled in
+                    if !enabled && capture.busy { capture.cancel(folder: Store.shared.folder) }
+                }
+            Text("Capture typing, rendering, saving and main-thread delays locally. Nothing is uploaded. Captures contain timings and app version, not conversations, key characters or credentials.")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Start in \(Int(capture.delay)) seconds").monospacedDigit()
+                Slider(value: $capture.delay, in: 0...60, step: 1).accessibilityLabel("Start delay in seconds")
+                Text("Run for \(Int(capture.duration)) seconds").monospacedDigit()
+                Slider(value: $capture.duration, in: 5...300, step: 5).accessibilityLabel("Capture duration in seconds")
+            }.disabled(!capture.enabled || capture.busy)
+            HStack(spacing: 14) {
+                Button("Go") { capture.go(folder: Store.shared.folder) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(!capture.enabled || capture.busy)
+                Button("Export") { capture.export() }
+                    .disabled(capture.file == nil || capture.busy)
+                if capture.busy {
+                    Button("Cancel") { capture.cancel(folder: Store.shared.folder) }
+                }
+            }
+            Text(capture.status).foregroundStyle(.secondary).accessibilityIdentifier("performanceCaptureStatus")
+            if let error = capture.exportError { Text(error).foregroundStyle(.red) }
+            Text("You can close Settings during the capture. Recording stops automatically. Go starts a fresh capture.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
     }
 }
