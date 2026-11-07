@@ -33,7 +33,8 @@ internal static class AppSupportChecks
             foreach (var engine in new[] { "claude", "codex" })
             {
                 var runner = new SupportRunner(); var store = new SessionStore(Path.Combine(root, engine), runner);
-                store.AgentRun = (s, prompt, images) => { runner.Prompts.Add(prompt); s.Messages.Add(new ChatMessage { Role = "assistant", Text = "Welcome to Converse! " + AppSupportTeaching.Invitation }); s.Busy = false; store.Save(); return Task.CompletedTask; };
+                var human = TurnAuthority.Foreground();
+                store.AgentRun = (s, prompt, images, _) => { runner.Prompts.Add(prompt); s.Messages.Add(new ChatMessage { Role = "assistant", Text = "Welcome to Converse! " + AppSupportTeaching.Invitation }); s.Busy = false; store.Save(); return Task.CompletedTask; };
                 var setup = new SupportSetup(store); var session = setup.Session();
                 check(store.Sessions.Count == 1 && session.Title == AppSupportTeaching.Title && !session.MessagingEnabled, engine + " starts with one unprivileged App Support session");
                 session.Draft = "Do not send before login"; store.Submit(session);
@@ -65,42 +66,39 @@ internal static class AppSupportChecks
                 check(!session.DisplayedMessages.Any() && session.Messages.Count == count && session.Attachments.Count == 1 && session.Pending.Count == 1, "/clear preserves context, images and queued work");
                 session.Draft = "/unclear"; store.Submit(session); check(session.DisplayedMessages.Count() == count, "/unclear restores history");
                 var create = JsonNode.Parse("""{"command":"app-control","action":"create-agent","title":"Test Steward","objective":"Report progress"}""")!.AsObject();
-                var result = AppSupportActions.Execute(store, session, create, null);
+                var result = AppSupportActions.Execute(store, session, human, create, null);
                 var agent = store.Sessions.Single(s => s.Agent is not null && !s.SupportAssistant);
                 check(result.Contains("Created paused") && !agent.Agent!.Settings.Enabled && !agent.Agent.Settings.GenerateArt && !agent.Agent.Settings.Speak && agent.Agent.Settings.Watched.Count == 0, "App control creates an inert, scoped agent without paid work");
-                AppSupportActions.Execute(store, session, create, null);
+                AppSupportActions.Execute(store, session, human, create, null);
                 check(store.Sessions.Count(s => s.Agent is not null && !s.SupportAssistant) == 1, "Repeated create does not duplicate an agent");
                 check(agent.Agent!.Settings.Model == session.Agent!.Settings.Model, "New agent inherits the verified onboarding provider");
                 var codingCommand = new JsonObject { ["command"] = "app-control", ["action"] = "create-session", ["provider"] = engine, ["title"] = "My project", ["directory"] = store.Folder };
-                var codingResult = AppSupportActions.Execute(store, session, codingCommand, null);
+                var codingResult = AppSupportActions.Execute(store, session, human, codingCommand, null);
                 var coding = store.Sessions.Single(s => s.Title == "My project");
                 check(codingResult.Contains(coding.Id.ToString()) && coding.Entry.AccountDirectory == session.Entry.AccountDirectory && !coding.Busy, "Support creates an idle coding session sharing the verified login");
-                AppSupportActions.Execute(store, session, codingCommand, null);
+                AppSupportActions.Execute(store, session, human, codingCommand, null);
                 check(store.Sessions.Count(s => s.Title == "My project") == 1, "Repeated coding session request is idempotent");
                 var normal = store.Create(store.Entries.First(e => e.Engine == engine));
                 check(normal.Entry.AccountDirectory == session.Entry.AccountDirectory, "Ordinary new sessions reuse onboarding login");
                 var restoredStore = new SessionStore(store.Folder, runner);
                 check(restoredStore.Create(restoredStore.Entries.First(e => e.Engine == engine)).Entry.AccountDirectory == session.Entry.AccountDirectory, "Verified login preference survives restart");
                 codingCommand["directory"] = Path.Combine(store.Folder, "missing");
-                check(Rejected(() => AppSupportActions.Execute(store, session, codingCommand, null)), "Missing project folder rejected");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, codingCommand, null)), "Missing project folder rejected");
                 agent.Title = AppSupportTeaching.Title; agent.Agent!.Settings.Enabled = true; agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.TurnLimit = 2;
                 normal.Busy = true;
                 check(store.QuitActivity() == (1, 1), "Ordinary running sessions and scheduled agents still warn, even when named App Support");
                 normal.Busy = false; agent.Agent.Settings.Enabled = false;
                 var configure = new JsonObject { ["command"] = "app-control", ["action"] = "configure-agent", ["target"] = agent.Id.ToString(), ["repository"] = "not a repository" };
                 var old = JsonSerializer.Serialize(agent.Agent);
-                check(Rejected(() => AppSupportActions.Execute(store, session, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");
                 var bug = new JsonObject { ["command"] = "app-control", ["action"] = "report-bug", ["title"] = "Fixture", ["body"] = "Only this description" };
-                check(AppSupportActions.Execute(store, session, bug, null) == "UI", "Report prepares native review without Discord or credentials");
-                session.ActiveBackground = true;
-                check(Rejected(() => AppSupportActions.Execute(store, session, bug, null)), "Background agents cannot open bug report submission");
-                session.ActiveBackground = false;
-                session.ActiveBackground = true;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "Background and forwarded turns cannot configure the app");
-                session.ActiveBackground = false; session.ActiveAppControlDepth = 8;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "App operation chains have a bounded turn limit");
-                session.ActiveAppControlDepth = 0; session.SupportTeachingVersion = null;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "Revoking teaching removes app-control access");
+                check(AppSupportActions.Execute(store, session, human, bug, null) == "UI", "Report prepares native review without Discord or credentials");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { Background = true }, bug, null)), "Background agents cannot open bug report submission");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { Background = true }, create, null))
+                    && Rejected(() => AppSupportActions.Execute(store, session, human with { Hop = 1 }, create, null)), "Background and forwarded turns cannot configure the app");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { AppControlDepth = AppSupportActions.MaxDepth }, create, null)), "App operation chains have a bounded turn limit");
+                session.SupportTeachingVersion = null;
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, create, null)), "Revoking teaching removes app-control access");
             }
             {
                 var store = new SessionStore(Path.Combine(root, "native-agent"));
@@ -117,7 +115,7 @@ internal static class AppSupportChecks
                     if (explicitAction) reply["appControl"] = new JsonObject { ["command"] = "app-control", ["action"] = "inspect" };
                     return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
                 };
-                store.AppSupportRequest = (_, command) => { calls++; return Task.CompletedTask; };
+                store.AppSupportRequest = (_, command, _) => { calls++; return Task.CompletedTask; };
                 session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 0 && instructions.Contains("optional appControl object"), "Native-agent teaching preserves JSON format and never executes prose commands");
                 check(instructions.Contains("Never search the web for bare") && instructions.Contains("site:github.com/richardkaufmann/converse") && instructions.Contains("no relevant result is found"), "Previously taught agents receive current scoped research policy on their next request");

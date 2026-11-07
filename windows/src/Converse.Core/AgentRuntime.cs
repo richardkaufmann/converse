@@ -306,7 +306,7 @@ public sealed class AgentRuntime
         catch { result["releaseError"] = "Latest published release unavailable."; }
         return result;
     }
-    public async Task RunAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
+    public async Task RunAsync(ChatSession session, string prompt, IReadOnlyList<string> images, TurnAuthority authority)
     {
         if (_stopping || session.Busy || session.Agent is not { } config) return;
         session.Busy = true; session.Interrupted = false; session.Status = "Agent thinking…";
@@ -337,7 +337,7 @@ public sealed class AgentRuntime
             evidence = evidence.Where(e => session.Agent!.Settings.Watched.Contains(e.GlobalID) && DeviceGlobalID.Parse(e.GlobalID) is { } r && (r.Home == _devices.DeviceId || _devices.IsParticipantAllowed(r.Home, group))).ToList();
             var budget = 120000;
             foreach (var item in evidence) foreach (var m in item.Messages) { m.Text = m.Text[..Math.Min(m.Text.Length, Math.Max(0, budget))]; budget -= m.Text.Length; }
-            var refresh = !session.ActiveAgentLoopTick || config.Widget is null || config.LoopsSinceScoreboard >= Math.Max(1, config.Settings.ScoreboardEveryLoops ?? 1) - 1;
+            var refresh = !authority.AgentLoopTick || config.Widget is null || config.LoopsSinceScoreboard >= Math.Max(1, config.Settings.ScoreboardEveryLoops ?? 1) - 1;
             var repositoryEvidence = await RepositoryEvidence(config.Settings.Repository, token);
             var haScope = config.Settings;
             var homeAssistant = haScope.HomeAssistantRead == true
@@ -430,18 +430,18 @@ public sealed class AgentRuntime
                     catch { session.Messages.Add(new ChatMessage { Role = "notice", Text = AgentArtPolicy.Unavailable, CreatedAt = DateTime.UtcNow }); }
                 }
             }
-            else if (session.ActiveAgentLoopTick) config.LoopsSinceScoreboard++;
+            else if (authority.AgentLoopTick) config.LoopsSinceScoreboard++;
             // Side effects never fail a completed run: report and finish.
             foreach (var tell in (reply["tell"] as JsonArray ?? new()).OfType<JsonObject>().Take(2))
             {
                 var target = Clip(tell["to"], 200); var content = Clip(tell["text"], 8000);
-                try { if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, target, content, tell["replyExpected"]?.GetValue<bool>() == true, suppliedReply: tell["inReplyTo"] is JsonValue correlation && correlation.TryGetValue<string>(out var suppliedID) ? suppliedID : null); }
+                try { if (content.Length > 0 && config.Settings.Watched.Contains(target)) await _devices.SendAgentTellAsync(session, authority, target, content, tell["replyExpected"]?.GetValue<bool>() == true, suppliedReply: tell["inReplyTo"] is JsonValue correlation && correlation.TryGetValue<string>(out var suppliedID) ? suppliedID : null); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception e) { session.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard: tell was not delivered: " + AgentRunFailure.Describe(e), CreatedAt = DateTime.UtcNow }); }
             }
             if (reply["appControl"] is JsonObject operation && _store.AppSupportRequest is { } handler)
             {
-                try { await handler(session, operation); }
+                try { await handler(session, operation, authority); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception e) { session.Messages.Add(new ChatMessage { Role = "notice", Text = "App action did not complete: " + AgentRunFailure.Describe(e), CreatedAt = DateTime.UtcNow }); }
             }

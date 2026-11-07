@@ -10,6 +10,8 @@ static class SwitchboardSupervisionChecks
         while (!done() && DateTime.UtcNow < deadline) await Task.Delay(25);
         return done();
     }
+    // A finished reply from a human-started turn.
+    static void Reply(SessionStore store, ChatSession source, string reply) => store.FinalParticipantReply!(source, reply, TurnAuthority.Foreground());
 
     // Models garble request UUIDs (observed: first 8 hex digits intact, the rest
     // invented). A reply must never be dropped for a bad inReplyTo.
@@ -27,7 +29,7 @@ static class SwitchboardSupervisionChecks
             string ID(ChatSession s) => new DeviceGlobalID(home.DeviceId, s.Id).ToString();
             async Task<Guid> Ask(ChatSession from)
             {
-                await home.SendAgentTellAsync(from, ID(answerer), "Question", replyExpected: true);
+                await home.SendAgentTellAsync(from, TurnAuthority.Foreground(), ID(answerer), "Question", replyExpected: true);
                 return answerer.SwitchboardObligations.Last(o => o.Kind == "request").Id;
             }
             // Request IDs are random; pin their prefixes so the fixtures are deterministic.
@@ -45,43 +47,43 @@ static class SwitchboardSupervisionChecks
             string LastNotice() => answerer.Messages.LastOrDefault(m => m.Role == "notice")?.Text ?? "";
 
             var exact = await Ask(asker);
-            await home.SendAgentTellAsync(answerer, ID(asker), "Exact answer", inReplyTo: exact);
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Exact answer", inReplyTo: exact);
             check(Request(exact).State == "resolved" && Answered(exact) && Delivered("Exact answer", exact) && !LastNotice().Contains("reply ID"),
                 "Exact inReplyTo resolves the request without a correction notice");
 
             var decoy = Pin(await Ask(asker), "aaaaaaaa");
             var real = Pin(await Ask(asker), "cde10dc4");
-            await home.SendAgentTellAsync(answerer, ID(asker), "APPROVE", suppliedReply: "CDE10DC4-2353-4A2F-81AC-35BE0DF9701F");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "APPROVE", suppliedReply: "CDE10DC4-2353-4A2F-81AC-35BE0DF9701F");
             check(Request(real).State == "resolved" && Request(real).ReplyDeliveryID is not null && Answered(real) && Request(decoy).ReplyDeliveryID is null && !Answered(decoy) &&
                 Delivered("APPROVE", real) && LastNotice() == $"Switchboard: reply ID corrected to {real} (supplied CDE10DC4-2353-4A2F-81AC-35BE0DF9701F)",
                 "Garbled inReplyTo with a matching 8-digit prefix is corrected to the right open request");
 
-            await home.SendAgentTellAsync(answerer, ID(asker), "Decoy answer", suppliedReply: "DEADBEEF-1111-4111-8111-111111111111");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Decoy answer", suppliedReply: "DEADBEEF-1111-4111-8111-111111111111");
             check(Request(decoy).ReplyDeliveryID is not null && Answered(decoy) && Delivered("Decoy answer", decoy) && LastNotice().Contains($"corrected to {decoy}"),
                 "Garbled inReplyTo is corrected to the single open request from that session");
 
             var first = Pin(await Ask(asker), "11111111"); var second = Pin(await Ask(asker), "22222222");
-            await home.SendAgentTellAsync(answerer, ID(asker), "Ambiguous answer", suppliedReply: "99999999-0000-4000-8000-000000000000");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Ambiguous answer", suppliedReply: "99999999-0000-4000-8000-000000000000");
             check(Request(first).ReplyDeliveryID is null && Request(second).ReplyDeliveryID is null && !Answered(first) && !Answered(second) &&
                 Delivered("Ambiguous answer", null) && LastNotice().Contains("matched no open request from Asker") && LastNotice().EndsWith("delivered as a plain tell."),
                 "Ambiguous garbled inReplyTo delivers a plain tell without resolving anything");
-            await home.SendAgentTellAsync(answerer, ID(asker), "Close first", inReplyTo: first);
-            await home.SendAgentTellAsync(answerer, ID(asker), "Close second", inReplyTo: second);
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Close first", inReplyTo: first);
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Close second", inReplyTo: second);
 
-            await home.SendAgentTellAsync(answerer, ID(asker), "Nothing open", suppliedReply: "cde10dc4-0000-4000-8000-000000000000");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Nothing open", suppliedReply: "cde10dc4-0000-4000-8000-000000000000");
             check(Delivered("Nothing open", null) && LastNotice().Contains("matched no open request"),
                 "With no open requests a garbled inReplyTo still delivers as a plain tell");
 
             var foreign = Pin(await Ask(other), "77777777");
             var own = Pin(await Ask(asker), "33333333");
-            await home.SendAgentTellAsync(answerer, ID(asker), "Scoped answer", suppliedReply: "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Scoped answer", suppliedReply: "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
             check(Request(own).ReplyDeliveryID is not null && Request(foreign).ReplyDeliveryID is null && !other.SwitchboardExpectations.Single(e => e.Id == foreign).Answered && Delivered("Scoped answer", own),
                 "Correction considers only requests from the addressed session");
-            await home.SendAgentTellAsync(answerer, ID(asker), "Other only", suppliedReply: "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+            await home.SendAgentTellAsync(answerer, TurnAuthority.Foreground(), ID(asker), "Other only", suppliedReply: "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
             check(Request(foreign).ReplyDeliveryID is null && Delivered("Other only", null), "A prefix match from a different session is never borrowed");
 
             var pending = Pin(await Ask(asker), "44444444");
-            store.FinalParticipantReply!(answerer, "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "tell", to = asker.Id.ToString(), text = "Fenced answer", inReplyTo = "44444444" }) + "\n```");
+            Reply(store, answerer, "```converse\n" + System.Text.Json.JsonSerializer.Serialize(new { command = "tell", to = asker.Id.ToString(), text = "Fenced answer", inReplyTo = "44444444" }) + "\n```");
             await Eventually(() => Delivered("Fenced answer", pending));
             check(Delivered("Fenced answer", pending) && Answered(pending) && LastNotice().Contains("supplied 44444444)"),
                 "A truncated non-UUID inReplyTo in a fenced command is corrected and delivered");
@@ -121,21 +123,21 @@ static class SwitchboardSupervisionChecks
             check(DeviceSyncService.ParseTrailingSwitchboardReply("See:\n```swift\nlet x = 1\n```\nSending.\n" + Tell("x")).Command is not null, "An earlier non-command code block does not block a trailing command");
             check(DeviceSyncService.ParseTrailingSwitchboardReply("Opening.\n```converse\n{\"command\":\"app-control\",\"action\":\"inspect\"}\n```") is { Command: null, Rejection: null }, "Trailing app-control keeps the whole-reply App Support rule");
 
-            store.FinalParticipantReply!(source, "Sending this to Reviewer now.\n\n" + Tell("Trailing hello"));
+            Reply(store, source, "Sending this to Reviewer now.\n\n" + Tell("Trailing hello"));
             check(await Eventually(() => Delivered("Trailing hello")), "Windows/Linux session delivers a tell that follows a line of prose");
-            store.FinalParticipantReply!(source, Tell("Whole hello"));
+            Reply(store, source, Tell("Whole hello"));
             check(await Eventually(() => Delivered("Whole hello")), "Windows/Linux whole-reply fences still deliver");
             var pending = target.Pending.Count; var before = Notices();
-            store.FinalParticipantReply!(source, "Here it is:\n" + Tell("Followed") + "\nLet me know.");
+            Reply(store, source, "Here it is:\n" + Tell("Followed") + "\nLet me know.");
             check(await Eventually(() => Notices() == before + 1) && target.Pending.Count == pending &&
                 LastNotice() == "Switchboard: a converse command in this reply was not run because text follows it. Nothing was sent. Ask the session to resend the command as the last thing in its reply.",
                 "Windows/Linux fence followed by prose is not run and adds one notice");
-            store.FinalParticipantReply!(source, "A:\n" + Tell("One") + "\nB:\n" + Tell("Two"));
+            Reply(store, source, "A:\n" + Tell("One") + "\nB:\n" + Tell("Two"));
             check(await Eventually(() => Notices() == before + 2) && target.Pending.Count == pending && LastNotice().Contains("several command blocks"),
                 "Windows/Linux reply with several fences is not run and adds one notice");
             source.MessagingEnabled = false;
-            store.FinalParticipantReply!(source, "Sending:\n" + Tell("Untaught") + "\nmore");
-            store.FinalParticipantReply!(source, "Sending:\n" + Tell("Untaught"));
+            Reply(store, source, "Sending:\n" + Tell("Untaught") + "\nmore");
+            Reply(store, source, "Sending:\n" + Tell("Untaught"));
             await Task.Delay(200);
             check(target.Pending.Count == pending && Notices() == before + 2, "Windows/Linux untaught sessions ignore non-whole fences silently");
             check(SwitchboardInstructions.ConversationPolicy.Contains("last thing in your reply (one per reply)") && !SwitchboardInstructions.ConversationPolicy.Contains("ENTIRE"), "Windows/Linux conversation policy teaches the trailing command rule");
@@ -206,7 +208,7 @@ static class SwitchboardSupervisionChecks
             async Task Command(string action, int count)
             {
                 var body = System.Text.Json.JsonSerializer.Serialize(new { command = action, to = answerer.Id.ToString(), text = "Question", replyExpected = false });
-                store.FinalParticipantReply!(asker, "```converse\n" + body + "\n```");
+                Reply(store, asker, "```converse\n" + body + "\n```");
                 await Eventually(() => answerer.Pending.Count >= count);
             }
             await Command("tell", 1);
@@ -221,18 +223,18 @@ static class SwitchboardSupervisionChecks
             a.QueuePaused = b.QueuePaused = true;
             a.Draft = "A draft"; b.Draft = "B draft";
             string ID(ChatSession s) => new DeviceGlobalID(home.DeviceId, s.Id).ToString();
-            await home.SendAgentTellAsync(a, ID(b), "Question", replyExpected: true);
+            await home.SendAgentTellAsync(a, TurnAuthority.Foreground(), ID(b), "Question", replyExpected: true);
             var request = b.SwitchboardObligations.Single();
             check(request.Kind == "request" && b.Pending.Single().Text.Contains("inReplyTo") && a.SwitchboardExpectations.Single().Id == request.Id,
                 "Tracked tell records correlated obligation and reply instructions");
-            await home.SendAgentTellAsync(b, ID(answerer), "Wrong", inReplyTo: Guid.NewGuid());
+            await home.SendAgentTellAsync(b, TurnAuthority.Foreground(), ID(answerer), "Wrong", inReplyTo: Guid.NewGuid());
             check(request.ReplyDeliveryID is null && !a.SwitchboardExpectations.Single().Answered && answerer.Pending.Last().Text.Contains("Wrong") && !answerer.Pending.Last().Text.Contains("[Reply to request"),
                 "Unrelated reply ID cannot satisfy another session's request; message still delivered as a plain tell");
-            await home.SendAgentTellAsync(b, ID(a), "Answer", inReplyTo: request.Id);
+            await home.SendAgentTellAsync(b, TurnAuthority.Foreground(), ID(a), "Answer", inReplyTo: request.Id);
             check(a.SwitchboardExpectations.Single().Answered && request.State == "resolved", "Authenticated correlated reply closes request");
             a.Pending.Clear(); b.Pending.Clear(); a.SwitchboardObligations.Clear(); b.SwitchboardObligations.Clear();
-            await home.SendAgentTellAsync(a, ID(b), "Awaiting you");
-            await home.SendAgentTellAsync(b, ID(a), "Awaiting you too");
+            await home.SendAgentTellAsync(a, TurnAuthority.Foreground(), ID(b), "Awaiting you");
+            await home.SendAgentTellAsync(b, TurnAuthority.Foreground(), ID(a), "Awaiting you too");
             var now = DateTime.UtcNow;
             a.Busy = b.Busy = true;
             home.SuperviseSwitchboard(now);
@@ -297,7 +299,7 @@ static class SwitchboardSupervisionChecks
             {
                 // An interrupted attempt may have queued a directory without the lot.
                 while (asker.Pending.Count > beforeDirectory) asker.Pending.RemoveAt(asker.Pending.Count - 1);
-                store.FinalParticipantReply!(asker, "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```");
+                Reply(store, asker, "```converse\n{\"command\":\"parking-lot-list\",\"linkedOnly\":true}\n```");
                 return asker.Pending.Count == beforeDirectory + 1 && asker.Pending.Last().Text.Contains("Linked Mac lot");
             }), "Windows session command returns linked lot discovery");
             asker.Agent = new AgentConfig();
@@ -316,8 +318,8 @@ static class SwitchboardSupervisionChecks
             // Cross-home tells silently skip targets whose row is not yet
             // messaging-enabled, so wait for exactly that precondition.
             await Until(() => home.Homes.GetValueOrDefault(peerHome.DeviceId)?.Rows.Any(r => r.GlobalID == remoteID && r.MessagingEnabled == true) == true && peerHome.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == ID(a) && r.MessagingEnabled == true) == true);
-            await home.SendAgentTellAsync(a, remoteID, "Across homes");
-            await peerHome.SendAgentTellAsync(remote, ID(a), "Back across homes");
+            await home.SendAgentTellAsync(a, TurnAuthority.Foreground(), remoteID, "Across homes");
+            await peerHome.SendAgentTellAsync(remote, TurnAuthority.Foreground(), ID(a), "Back across homes");
             check(await Until(() => a.Pending.Count == 1 && remote.Pending.Count == 1 &&
                 a.Messages.Any(m => m.Text.StartsWith("Switchboard: queued →") && m.Text.EndsWith("Across homes")) &&
                 remote.Messages.Any(m => m.Text.StartsWith("Switchboard: queued →") && m.Text.EndsWith("Back across homes"))), "Mutual ordinary tells arrive and are acknowledged on both homes");
@@ -338,10 +340,10 @@ static class SwitchboardSupervisionChecks
             home.SuperviseSwitchboard(DateTime.UtcNow); peerHome.SuperviseSwitchboard(DateTime.UtcNow);
             check(!a.Interrupted && !remote.Interrupted, "Remote mutual recovery never repeats on the other home");
             var remoteAsk = Guid.Empty;
-            await peerHome.SendAgentTellAsync(remote, ID(a), "Remote question", replyExpected: true);
+            await peerHome.SendAgentTellAsync(remote, TurnAuthority.Foreground(), ID(a), "Remote question", replyExpected: true);
             await Until(() => (remoteAsk = a.SwitchboardObligations.ToArray().LastOrDefault(o => o.Kind == "request" && o.Source == remoteID)?.Id ?? Guid.Empty) != Guid.Empty);
             var remoteGarbled = remoteAsk.ToString()[..8] + "-2353-4a2f-81ac-35be0df9701f";
-            await home.SendAgentTellAsync(a, remoteID, "Remote APPROVE", suppliedReply: remoteGarbled);
+            await home.SendAgentTellAsync(a, TurnAuthority.Foreground(), remoteID, "Remote APPROVE", suppliedReply: remoteGarbled);
             check(remoteAsk != Guid.Empty && await Until(() => remote.Pending.ToArray().Any(p => p.Text.Contains("Remote APPROVE") && p.Text.Contains($"[Reply to request {remoteAsk}]")) &&
                 remote.SwitchboardExpectations.ToArray().Any(e => e.Id == remoteAsk && e.Answered)) && a.Messages.ToArray().Any(m => m.Text == $"Switchboard: reply ID corrected to {remoteAsk} (supplied {remoteGarbled})"),
                 "Garbled reply to a remote home's request is corrected before crossing devices");

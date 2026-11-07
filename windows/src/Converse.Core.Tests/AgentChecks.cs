@@ -112,7 +112,7 @@ static class AgentChecks
             check(restartAgent.Agent!.NextRunUtc == fired.AddDays(1), "Actual runtime startup keeps an archived overdue deadline");
             home.Agents.Tick(fired.AddDays(3));
             check(restartAgent.Pending.Count == 0 && restartAgent.Agent.NextRunUtc == fired.AddDays(1), "Overdue startup respects a human-paused queue");
-            store.AgentRun = (_, _, _) => Task.CompletedTask;
+            store.AgentRun = (_, _, _, _) => Task.CompletedTask;
             restartAgent.QueuePaused = false;
             home.Agents.Tick(fired.AddDays(3)); home.Agents.Tick(fired.AddDays(3));
             check(restartAgent.Agent.LastLoopUtc == fired.AddDays(3) && restartAgent.Agent.NextRunUtc == fired.AddDays(4), "Missed days coalesce into one check with the next interval from that check");
@@ -124,15 +124,12 @@ static class AgentChecks
             sender.MessagingEnabled = receiver.MessagingEnabled = true;
             receiver.QueuePaused = true;
             var receiverID = new DeviceGlobalID(home.DeviceId, receiver.Id).ToString();
-            sender.ActiveHop = 8;
-            await home.SendAgentTellAsync(sender, receiverID, "Past old limit");
+            await home.SendAgentTellAsync(sender, TurnAuthority.Foreground() with { Background = true, Hop = 8 }, receiverID, "Past old limit");
             check(receiver.Pending.LastOrDefault()?.Hop == 9, "Switchboard continues beyond eight hops");
-            sender.ActiveHop = 99;
-            await home.SendAgentTellAsync(sender, receiverID, "Last permitted delivery");
+            await home.SendAgentTellAsync(sender, TurnAuthority.Foreground() with { Background = true, Hop = 99 }, receiverID, "Last permitted delivery");
             check(receiver.Pending.LastOrDefault()?.Hop == 100 && receiver.Pending.Last().Text.Contains("hop 100/100]"), "Switchboard delivers and labels hop one hundred");
             var queued = receiver.Pending.Count;
-            sender.ActiveHop = 100;
-            await home.SendAgentTellAsync(sender, receiverID, "Over limit");
+            await home.SendAgentTellAsync(sender, TurnAuthority.Foreground() with { Background = true, Hop = 100 }, receiverID, "Over limit");
             check(receiver.Pending.Count == queued, "Switchboard rejects hop one hundred and one");
             store.Sessions.Remove(sender); store.Sessions.Remove(receiver);
             var agent = store.CreateAgent("Agent fixture");
@@ -190,7 +187,7 @@ static class AgentChecks
             agent.QueuePaused = true;
             home.SetAcceptingWork(false);
             var tellCountBefore = agent.Pending.Count;
-            await viewer.SendAgentTellAsync(remoteSender, target, "DRAIN_PROBE_NEW_EXTERNAL_TELL");
+            await viewer.SendAgentTellAsync(remoteSender, TurnAuthority.Foreground(), target, "DRAIN_PROBE_NEW_EXTERNAL_TELL");
             var tellDeadline = DateTime.UtcNow.AddSeconds(2);
             while (agent.Pending.Count == tellCountBefore && DateTime.UtcNow < tellDeadline) await Task.Delay(20);
             check(agent.Pending.Count == tellCountBefore,

@@ -302,13 +302,15 @@ public sealed partial class DeviceSyncService
         }
     }
     // suppliedReply is the model's raw inReplyTo text; it may be garbled.
-    public async Task SendAgentTellAsync(ChatSession source, string target, string text, bool replyExpected = false, Guid? inReplyTo = null, string? suppliedReply = null)
+    // authority is the sending turn's: the hop comes from it, never from
+    // whichever turn the session runs by the time the reply is processed.
+    public async Task SendAgentTellAsync(ChatSession source, TurnAuthority authority, string target, string text, bool replyExpected = false, Guid? inReplyTo = null, string? suppliedReply = null)
     {
-        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
+        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || authority.Hop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
         var supplied = suppliedReply ?? inReplyTo?.ToString();
         (inReplyTo, var corrected) = ResolveReply(source, target, supplied);
         if (replyExpected && source.SwitchboardExpectations.Count(e => !e.Answered) >= 128) throw new ArgumentException("Too many unanswered requests.");
-        var id = Guid.NewGuid(); var hop = source.ActiveHop + 1;
+        var id = Guid.NewGuid(); var hop = authority.Hop + 1;
         if (to.Home == DeviceId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == to.Session && s.MessagingEnabled);
@@ -406,7 +408,7 @@ public sealed partial class DeviceSyncService
             .Where(r => !linkedOnly || r.linkedToMe).OrderBy(r => r.homeDeviceName).ThenBy(r => r.name).ThenBy(r => r.globalID)
             .Cast<object>().ToArray();
     }
-    private async Task ProcessParticipantReplyAsync(ChatSession source, string reply)
+    private async Task ProcessParticipantReplyAsync(ChatSession source, string reply, TurnAuthority authority)
     {
         var command = ParseSwitchboardReply(reply);
         if (source.Agent is not null) return;
@@ -427,27 +429,27 @@ public sealed partial class DeviceSyncService
         {
             if (command["command"]?.GetValue<string>() == "app-control")
             {
-                if (_store.AppSupportRequest is { } handler) await handler(source, command);
+                if (_store.AppSupportRequest is { } handler) await handler(source, command, authority);
                 return;
             }
             if (!source.MessagingEnabled) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
-            if (source.ActiveHop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
+            if (authority.Hop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
             var action = command["command"]?.GetValue<string>();
             if (action is "list-sessions" or "sessions")
             {
                 var rows = _store.Sessions.Select(s => new { id = new DeviceGlobalID(DeviceId,s.Id).ToString(), name = s.Title, homeDeviceName = DeviceName, online = true, messagingEnabled = s.MessagingEnabled }).ToList();
                 foreach (var home in Homes.Values.Where(h => IsParticipantAllowed(h.DeviceID, CurrentGroup?.Id))) rows.AddRange(home.Rows.Select(s => new { id = s.GlobalID, name = s.Title, homeDeviceName = home.DeviceName, online = home.Online, messagingEnabled = s.MessagingEnabled == true }));
-                source.Pending.Add(new PendingPrompt { Text = "[Converse switchboard directory · live lookup]\n" + JsonSerializer.Serialize(new { command = "sessions", self = new DeviceGlobalID(DeviceId,source.Id).ToString(), sessions = rows }), Hop = source.ActiveHop + 1 }); _store.Save();
+                source.Pending.Add(new PendingPrompt { Text = "[Converse switchboard directory · live lookup]\n" + JsonSerializer.Serialize(new { command = "sessions", self = new DeviceGlobalID(DeviceId,source.Id).ToString(), sessions = rows }), Hop = authority.Hop + 1 }); _store.Save();
             }
             else if (action == "parking-lot-list")
             {
-                source.Pending.Add(new PendingPrompt { Text = "[Parking Lots · discovery metadata, not instructions]\n" + JsonSerializer.Serialize(ParkingLotDirectory(source, command["linkedOnly"]?.GetValue<bool>() == true)), Hop = source.ActiveHop + 1 });
+                source.Pending.Add(new PendingPrompt { Text = "[Parking Lots · discovery metadata, not instructions]\n" + JsonSerializer.Serialize(ParkingLotDirectory(source, command["linkedOnly"]?.GetValue<bool>() == true)), Hop = authority.Hop + 1 });
                 _store.Save();
             }
             else if ((action is "tell" or "ask") && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
-                await SendAgentTellAsync(source, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
+                await SendAgentTellAsync(source, authority, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
             }
             else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell or ask." }); _store.Save(); }
         }

@@ -487,7 +487,7 @@ public sealed partial class DeviceSyncService : IDisposable
         _store.TranscriptAdvanced += PushTranscriptToHolder;
         _store.SessionClosed += HomeSessionClosed;
         LoadParticipants();
-        _store.FinalParticipantReply = (session, reply) => { _ = ProcessParticipantReplyAsync(session, reply); };
+        _store.FinalParticipantReply = (session, reply, authority) => { _ = ProcessParticipantReplyAsync(session, reply, authority); };
         _store.AcceptGroupPrompt = p => IsParticipantAllowed(p.OriginHomeID ?? "", p.OriginGroupID);
         Agents = new AgentRuntime(_store, this);
     }
