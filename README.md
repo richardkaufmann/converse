@@ -16,7 +16,7 @@ Converse is one app for multiple, simultaneous conversations with the providers 
 *First launch, captured in the isolated Setup Preview on Converse 0.6.2 (127). Current controls may differ.*
 <!-- readme-only:end -->
 
-After sign-in, there’s a coding session, an agent, and a Parking Lot ready to go.
+After sign-in, there’s a coding session, an agent, and a Parking Lot ready to go. [First launch](#first-launch) walks through it.
 
 <!-- readme-only:start -->
 ![After Muse sign-in: App Support and Muse Coding appear side by side, with Muse Agent and Parking Lot in the sidebar](docs/nux-ready.png)
@@ -24,7 +24,7 @@ After sign-in, there’s a coding session, an agent, and a Parking Lot ready to 
 *After sign-in, from the same build-127 Setup Preview.*
 <!-- readme-only:end -->
 
-Type prompts into this window, e.g. “Help me set up a Meta API key for the optional features.” The key is not required to use Converse. The **P 1 2 3 X** buttons on the left control whether a session is **Parked**, visible in one of the **three panes**, or **shut down**. You can ask your app control session for ideas of what to do next!
+Type prompts into this window, e.g. “Help me set up a Meta API key for the optional features.” The key is not required to use Converse. The **P 1 2 3 X** buttons on the left control whether a session is **Parked**, visible in one of the **three panes**, or **closed with its work stopped**. You can ask your app control session for ideas of what to do next!
 
 **Hackathon:** The tag `pre-hackathon` marks the code before the hackathon window opened (last commit before Oct 26, 2026, 9:00 AM PT), and `hackathon-submit` marks the submitted version; `git diff pre-hackathon hackathon-submit` shows everything built during the hackathon.
 
