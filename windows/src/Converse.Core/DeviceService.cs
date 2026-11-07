@@ -1804,7 +1804,10 @@ public sealed partial class DeviceSyncService : IDisposable
         var session = HomeSession(envelope);
         if (session is null || envelope.CommandID is not { } commandId || envelope.Payload is null || peer.Hello is null) return;
         var command = DeviceJson.Decode<DeviceCommandPayload>(envelope.Payload);
-        if (!await RequireLeaseAsync(peer, envelope, session)) return;
+        // Teaching needs no display lease, as on the Mac home: a viewer that
+        // advertises switchboard-teach-v1 sends it with epoch 0.
+        var teaching = command.Action == "teachSwitchboard" && envelope.Epoch == 0 && peer.Hello.Capabilities.Contains("switchboard-teach-v1");
+        if (!teaching && !await RequireLeaseAsync(peer, envelope, session)) return;
         var payloadHash = DeviceBlob.Sha256Hex(envelope.Payload);
         if (!_commands.Begin(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash))
         {
@@ -1813,7 +1816,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 "Already recorded on home.", envelope.Epoch);
             return;
         }
-        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer" };
+        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
         if (!known.Contains(command.Action))
         {
             _commands.MarkFailed(commandId);
@@ -1824,14 +1827,14 @@ public sealed partial class DeviceSyncService : IDisposable
         // management and settings remain available so active work can finish.
         // The shared admission guard spans the rest of this command so the
         // final quiescence decision cannot miss in-flight work.
-        if (!AcceptingWork && command.Action is "submit" or "inject" or "injectAll" or "resumeQueue")
+        if (!AcceptingWork && command.Action is "submit" or "inject" or "injectAll" or "resumeQueue" or "teachSwitchboard")
         {
             _commands.MarkFailed(commandId);
             await SendAckAsync(peer, commandId, envelope.SessionID, "failed",
                 "This home is draining for an update. Nothing was submitted.", envelope.Epoch);
             return;
         }
-        var startsWork = command.Action is "submit" or "inject" or "injectAll" or "resumeQueue";
+        var startsWork = command.Action is "submit" or "inject" or "injectAll" or "resumeQueue" or "teachSwitchboard";
         if (startsWork && !TryBeginExternalWork())
         {
             _commands.MarkFailed(commandId);
