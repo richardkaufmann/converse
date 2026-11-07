@@ -489,7 +489,7 @@ public sealed class SessionStore
     public string? InjectPending(ChatSession session, Guid? id = null)
     {
         if (session.Pending.Count == 0)
-            return "Inject not applied: the queue is already empty. Nothing was sent.";
+            return id is null ? InjectNothingQueued : InjectItemGone;
         if (id is null && session.Pending.Count > 1)
         {
             // Mac sanitizeGroupQueue parity: check each part's Group sender
@@ -528,7 +528,7 @@ public sealed class SessionStore
         {
             var target = session.Pending.FirstOrDefault(p => p.Id == id);
             if (target is null)
-                return "Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.";
+                return InjectItemGone;
             session.Pending.Remove(target);
             session.Pending.Insert(0, target);
         }
@@ -537,6 +537,13 @@ public sealed class SessionStore
         else RunNext(session);
         return null;
     }
+
+    // Mac injectNothingQueued/injectItemGone parity: automatic dequeue can
+    // win the race with an inject request. These results are quiet no-ops,
+    // not failures: nothing is interrupted, sent again or noted.
+    public const string InjectNothingQueued = "Queue already empty; nothing to inject.";
+    public const string InjectItemGone = "That message already started or was removed. Nothing was injected.";
+    public static bool InjectIsNoOp(string? result) => result is InjectNothingQueued or InjectItemGone;
 
     public const string QueuedMessageGone = "That message already started or was removed. Nothing else changed.";
 

@@ -1384,6 +1384,8 @@ public sealed partial class DeviceSyncService : IDisposable
         return expired.Count > 0;
     }
 
+    // Completed acks leave the outbox; tests read their receipt detail here.
+    internal event Action<Guid, DeviceAckPayload>? AckReceivedForTest;
     internal void ExpireJoinForTest(Guid requestId)
     {
         if (_sponsoredRequests.TryGetValue(requestId, out var live))
@@ -1921,6 +1923,9 @@ public sealed partial class DeviceSyncService : IDisposable
             case "effort": session.Choices.Effort = command.Effort; _store.Save(); break;
             case "access": session.Choices.Access = command.Access; _store.Save(); break;
         }
+        // Automatic dequeue won the race: the inject completes as a no-op.
+        var completion = "Applied once on home.";
+        if (SessionStore.InjectIsNoOp(failure)) { completion = failure!; failure = null; }
         if (failure is not null)
         {
             _commands.MarkFailed(commandId);
@@ -1929,7 +1934,7 @@ public sealed partial class DeviceSyncService : IDisposable
             return;
         }
         _commands.MarkCompleted(commandId);
-        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
+        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", completion, envelope.Epoch);
         await SendTranscriptAsync(peer, session);
         }
         finally { if (startsWork) EndExternalWork(); }
@@ -2139,6 +2144,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (envelope.CommandID is { } ackId && envelope.SessionID is { } ackSession &&
                     DeviceGlobalID.Parse(ackSession)?.Home == peerHome && envelope.Payload is not null)
                 {
+                    if (AckReceivedForTest is { } observe) observe(ackId, DeviceJson.Decode<DeviceAckPayload>(envelope.Payload));
                     var record = _outbox.Records.FirstOrDefault(r => r.CommandID == ackId);
                     if (record is null || record.SessionID != ackSession) break;
                     if (envelope.Epoch is null || (envelope.Epoch != record.Epoch && RemoteLeases.GetValueOrDefault(ackSession) != envelope.Epoch)) break;

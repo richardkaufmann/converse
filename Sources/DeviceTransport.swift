@@ -1005,6 +1005,7 @@ extension DeviceSyncService {
         let store = Store.shared
         var asyncSetting = false
         var failure: String?
+        var completion = "Applied once on home."
         switch command.action {
         case "teachSwitchboard": store.teachSwitchboard(session)
         case "submit" where session.isUnboundImport:
@@ -1056,6 +1057,8 @@ extension DeviceSyncService {
             }
         default: break
         }
+        // Automatic dequeue won the race: the inject completes as a no-op.
+        if Store.injectIsNoOp(failure), let detail = failure { completion = detail; failure = nil }
         if let failure {
             do { try commandStore.markFailed(id: commandID) }
             catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Nothing was injected, but home could not record the failure. Check home before retrying.", epoch: envelope.epoch); return }
@@ -1070,7 +1073,7 @@ extension DeviceSyncService {
         do { try commandStore.markCompleted(id: commandID) }
         catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Applied on home but completion was not recorded. Check home; do not resend.", epoch: envelope.epoch); return }
         sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "completed",
-                detail: "Applied once on home.", epoch: envelope.epoch)
+                detail: completion, epoch: envelope.epoch)
         sendTranscript(to: peer, sessionID: session.id); publishSidebarIfChanged()
     }
     #endif

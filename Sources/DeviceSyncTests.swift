@@ -479,7 +479,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             return try capturedEnvelopes().first { $0.commandID == id && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
         }
         let staleInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: UUID()))
-        check(staleInject?.outcome == "failed" && staleInject?.detail?.contains("no longer available") == true && session.pending.map(\.id) == [queuedA.id, queuedB.id], "Stale Inject now reports failure and leaves other queued items untouched")
+        check(staleInject?.outcome == "completed" && staleInject?.detail == Store.injectItemGone && session.pending.map(\.id) == [queuedA.id, queuedB.id] && !session.interrupted, "Stale Inject reports the item is gone as a quiet no-op and leaves other queued items untouched")
         session.changingSetting = true
         let settingInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
         session.changingSetting = false
@@ -492,9 +492,40 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(otherInject?.outcome == "failed" && otherInject?.detail?.contains("already being injected") == true && session.pending.first?.id == queuedB.id, "A different injection during interruption cannot be falsely acknowledged or displace the first intent")
         let repeatedInject = try injectAck(DeviceCommandPayload(action: "inject", pendingID: queuedB.id))
         check(repeatedInject?.outcome == "completed" && session.pending.map(\.id) == [queuedB.id, queuedA.id], "Repeated injection of the same queued item is idempotent while stopping")
-        session.pending = []; session.interrupted = false; session.resumeAfterInterrupt = false
-        let emptyInject = try injectAck(DeviceCommandPayload(action: "injectAll"))
-        check(emptyInject?.outcome == "failed" && emptyInject?.detail?.contains("already empty") == true, "Empty queue injection returns an honest failure with nothing submitted")
+        session.pending = []; session.interrupted = false; session.resumeAfterInterrupt = false; session.injectionTargetID = nil
+        // Inject all with items still queued merges, interrupts and completes as before.
+        let mergeA = PendingPrompt(text: "merge a", images: []), mergeB = PendingPrompt(text: "merge b", images: [])
+        session.pending = [mergeA, mergeB]
+        let mergedInject = try injectAck(DeviceCommandPayload(action: "injectAll"))
+        check(mergedInject?.outcome == "completed" && mergedInject?.detail == "Applied once on home." && session.pending.count == 1 && session.pending.first?.text == "merge a\n\nmerge b"
+              && session.interrupted && session.resumeAfterInterrupt && session.injectionAll, "Inject all with queued items still merges and interrupts the running turn")
+        session.pending = []; session.interrupted = false; session.resumeAfterInterrupt = false; session.injectionTargetID = nil; session.injectionAll = false; session.injectionNotice = ""
+        // Automatic dequeue wins the race: the last queued prompt starts just
+        // before Inject all arrives. The command completes as a quiet no-op.
+        let last = PendingPrompt(text: "last queued", images: [])
+        session.pending = [last]
+        session.pending.removeFirst(); session.messages.append(Message(role: "user", text: last.text)) // runNext started it.
+        let messagesBefore = session.messages.map(\.id)
+        func raceInject(_ command: DeviceCommandPayload, commandID: UUID) throws -> (ack: DeviceAckPayload?, snapshot: DeviceTranscriptPayload?) {
+            captured = []
+            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: granted?.epoch, payload: try JSONEncoder().encode(command)))
+            let frames = try capturedEnvelopes()
+            return (frames.first { $0.commandID == commandID && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) },
+                    frames.first { $0.kind == DeviceMessageKind.transcriptSnapshot.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) })
+        }
+        let raceID = UUID()
+        let emptyInject = try raceInject(DeviceCommandPayload(action: "injectAll"), commandID: raceID)
+        check(emptyInject.ack?.outcome == "completed" && emptyInject.ack?.detail == Store.injectNothingQueued && emptyInject.snapshot?.pending.isEmpty == true,
+              "Inject all after automatic dequeue started the last prompt completes as a quiet no-op and refreshes the queue")
+        check(session.messages.map(\.id) == messagesBefore && !session.interrupted && !session.resumeAfterInterrupt && session.injectionTargetID == nil && session.pending.isEmpty && session.busy,
+              "Inject all on an emptied queue appends no notice, never interrupts the running turn and sends nothing again")
+        let duplicateRace = try raceInject(DeviceCommandPayload(action: "injectAll"), commandID: raceID)
+        check(duplicateRace.ack?.outcome == "completed" && duplicateRace.ack?.detail == "Already recorded on home." && session.messages.map(\.id) == messagesBefore && !session.interrupted,
+              "A duplicate no-op Inject all command ID is answered from its receipt, never applied twice")
+        let startedInject = try raceInject(DeviceCommandPayload(action: "inject", pendingID: last.id), commandID: UUID())
+        check(startedInject.ack?.outcome == "completed" && startedInject.ack?.detail == Store.injectItemGone && session.messages.map(\.id) == messagesBefore && !session.interrupted,
+              "Inject now for a message that already started reports it is gone without a notice or interrupt")
+        session.messages.removeAll { $0.text == last.text && $0.role == "user" }
         // Remove one queued message: exactly that entry leaves; the others keep
         // order and provenance, and obligations stay as Clear queue leaves them.
         check(home.helloCapabilitiesForTesting(peer).contains(DeviceSyncService.queueRemoveCapability), "Mac home advertises single queued-message removal")
@@ -667,6 +698,13 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             }
             if let failedRecord = viewer.outbox.first(where: { $0.commandID == injectID }) { viewer.discardOutbox(failedRecord) }
         }
+        // A no-op Inject all (automatic dequeue won the race) leaves nothing alarming on the viewer.
+        if let noOpID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "injectAll")) {
+            let noOp = try JSONEncoder().encode(DeviceAckPayload(outcome: "completed", detail: Store.injectNothingQueued, epoch: 4))
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: noOpID, epoch: 4, payload: noOp))
+            check(viewer.completedCommands.contains(noOpID) && !viewer.outbox.contains { $0.commandID == noOpID } && !viewer.lastOutcome.hasPrefix("failed") && viewer.remoteLeases[gid] == 4,
+                  "A quiet no-op Inject all releases the queue intent without a failure status or lease change")
+        } else { check(false, "Viewer sends Inject all after the previous queue intent resolved") }
         var queueDecoder = DeviceFrameDecoder()
         for frame in viewerSent { _ = try queueDecoder.append(homeKeys2.receiver.decrypt(frame)) }
         viewerSent = []
