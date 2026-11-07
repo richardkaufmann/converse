@@ -908,6 +908,45 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(messages[0].text, "Prompt" + tail)
         }
     }
+    func testMessageNumbersIgnoreDraftNewlinesAndPreserveHomeOrdinals() async throws {
+        var first = DeviceWireMessage(id: UUID(), role: "user", text: "First paragraph\n\nSecond paragraph", messageNumber: 41)
+        var second = DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply\nwith another line", messageNumber: 42)
+        let hidden = DeviceWireMessage(id: UUID(), role: "activity", text: "Working")
+        let empty = DeviceWireMessage(id: UUID(), role: "assistant", text: "")
+        var parent = PadTranscript(messages: [first, hidden, empty, second], draft: "Draft\n\nmore draft", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: { XCTFail("Newline must not send") }, attach: { _ in })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 500, height: 500)
+        let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [41, 42])
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 500, height: 500)
+        let controller = UIViewController(); controller.view = view; window.rootViewController = controller
+        window.makeKeyAndVisible(); defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(250)); view.layoutIfNeeded()
+        let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+        screenshot.name = "Message numbers leave multiline drafts unnumbered"; screenshot.lifetime = .keepAlways; add(screenshot)
+        let locations = view.messageLabels.map(\.location)
+        view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+        view.hardwareReturn(modifiers: .shift); view.hardwareReturn(modifiers: .command)
+        XCTAssertEqual(view.messageLabels.map(\.number), [41, 42], "Draft newlines do not create new message numbers")
+        XCTAssertEqual(view.messageLabels.map(\.location), locations)
+        XCTAssertTrue(view.textStorage.string.hasSuffix("\n\n"))
+        let older = DeviceWireMessage(id: UUID(), role: "assistant", text: "Older message", messageNumber: 40)
+        parent.messages = [older, first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [40, 41, 42], "Loading earlier history preserves existing numbers")
+        first.messageNumber = 51; second.messageNumber = 52
+        parent.messages = [first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [51, 52], "Number-only home updates invalidate the display cache")
+        first.messageNumber = nil; second.messageNumber = nil
+        parent.messages = [first, hidden, empty, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [1, 2], "Older homes still number visible messages, not lines")
+        first.messageNumber = Int.max
+        parent.messages = [first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [Int.max, Int.max], "An extreme home ordinal cannot overflow")
+        parent.messages = []; parent.update(view, coordinator: coordinator)
+        XCTAssertTrue(view.messageLabels.isEmpty, "An unsent draft has no message number")
+    }
+
     func testDraftImageRemoveButtonPreservesHistoryAndText() throws {
         let service = try service(), model = PadModel(service: service)
         let id = DeviceGlobalID(home: "test-home", session: UUID()).string

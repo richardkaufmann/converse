@@ -71,6 +71,7 @@ final class TailTextView: UITextView {
     var insertingNewline = false
     var pastingText = false
     var historyLength = 0
+    var messageLabels: [(location: Int, number: Int)] = []
     var promptBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
     let gutter = PadGutter()
@@ -345,7 +346,7 @@ struct PadTranscript: UIViewRepresentable {
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
         let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
-        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
         let contentChanged = signature != c.signature || c.lastDraft != draft
         guard contentChanged || c.textSize != textSize else { return }
@@ -388,7 +389,8 @@ struct PadTranscript: UIViewRepresentable {
         c.updating = true
 
         let result = NSMutableAttributedString()
-        view.promptBlocks = []; view.trafficBlocks = []
+        view.promptBlocks = []; view.trafficBlocks = []; view.messageLabels = []
+        var messageNumber = 0
         c.trafficDetails = [:]
         for message in visibleMessages {
             let prompt = message.role == "user"
@@ -422,6 +424,8 @@ struct PadTranscript: UIViewRepresentable {
                 result.addAttribute(NSAttributedString.Key("Converse.imageHash"), value: hash, range: NSRange(location: result.length - 1, length: 1))
             }
             guard result.length > start else { continue }
+            messageNumber = message.messageNumber.flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber < Int.max ? messageNumber + 1 : Int.max)
+            view.messageLabels.append((location: start, number: messageNumber))
             let last = result.length - 1
             let paragraphRange = (result.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
             let style = ((result.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? .default).mutableCopy() as! NSMutableParagraphStyle

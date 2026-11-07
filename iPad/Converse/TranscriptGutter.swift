@@ -27,19 +27,18 @@ final class PadGutter: UIView {
             PadPalette.trafficBackground.setFill()
             for range in text.trafficBlocks { if let rect = blockRect(range) { UIRectFill(rect) } }
         }
-        var offset = 0; var line = 1
-        repeat {
+        // Match the Mac: one label per submitted message. Draft paragraphs,
+        // soft wraps and attachment previews never consume a message number.
+        for message in text.messageLabels where message.location < source.length {
+            let offset = message.location
             let fragment = offset < source.length ? layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: offset), effectiveRange: nil) : layout.extraLineFragmentRect
             let prompt = offset >= text.historyLength || text.promptBlocks.contains { NSLocationInRange(offset, $0) }
             let traffic = text.trafficBlocks.contains { NSLocationInRange(offset, $0) } || (offset >= text.historyLength && TranscriptStyle.isTraffic(source.substring(from: min(text.historyLength, source.length))))
             let color: UIColor = traffic ? PadPalette.traffic : dark ? (prompt ? .systemBlue : .white) : UIColor(white: 0.475, alpha: 1)
-            let label = NSAttributedString(string: String(line), attributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color])
+            let label = NSAttributedString(string: String(message.number), attributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color])
             let y = origin + fragment.minY + max(0, (fragment.height - label.size().height) / 2)
             if y >= -20 && y <= bounds.height { label.draw(at: CGPoint(x: bounds.width - label.size().width - 8, y: y)) }
-            if offset >= source.length { break }
-            offset = NSMaxRange(source.lineRange(for: NSRange(location: offset, length: 0))); line += 1
-            if offset == source.length && !text.text.hasSuffix("\n") { break }
-        } while offset <= source.length
+        }
     }
 }
 enum PadPalette {
