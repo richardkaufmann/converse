@@ -8,6 +8,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     accountUsageSelfTests(check)
     responseImageSelfTests(check)
     helpSelfTests(check)
+    MainActor.assumeIsolated { helpVideoSelfTests(check) }
     workspaceSelfTests(check)
     switchboardSelfTests(check)
     switchboardSupervisionSelfTests(check)

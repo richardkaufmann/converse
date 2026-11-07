@@ -18,6 +18,8 @@ Converse is one app for multiple, simultaneous conversations with the providers 
 
 After sign-in, there’s a coding session, an agent, and a Parking Lot ready to go. [First launch](#first-launch) walks through it.
 
+[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4): picking a provider, signing in, and the ready screen. On GitHub the link downloads the MP4; in Converse Help on a Mac or iPad it plays in place.
+
 <!-- readme-only:start -->
 ![After Muse sign-in: App Support and Muse Coding appear side by side, with Muse Agent and Parking Lot in the sidebar](docs/nux-ready.png)
 
@@ -99,6 +101,8 @@ You do not need Discord to use App Support, set up Converse or report a bug. App
 
 
 On a brand-new Mac installation, Converse opens with four things in the left panel: **Converse App Support**, a **Parking Lot**, **Coding** and an **Agent**. Only App Support is up. It says hello and asks one question: which provider should lead? Pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude**. A provider is the service behind the model; its account and usage charges are separate from Converse.
+
+[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4) shows these steps with Meta Muse. (GitHub serves it as an MP4 download; Converse Help on a Mac or iPad plays it in place.)
 
 1. **Click a provider.** Converse sets everything up to use it and renames the sessions to match, for example **Claude Coding** and **Claude Agent**. The Parking Lot is already linked to both.
 2. **Press Return.** App Support has typed `/login` for you. Return opens that provider's normal login (`claude auth login`, `codex login` or `muse login`) in Terminal and your browser. Finish there and come back. Already signed in? Click **I’m already signed in** instead.
