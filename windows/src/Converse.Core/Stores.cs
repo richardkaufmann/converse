@@ -92,6 +92,9 @@ public sealed class DeviceCommandRecord
     public DateTime UpdatedAt { get; set; }
     public string SessionID { get; set; } = "";
     public string PayloadHash { get; set; } = "";
+    // Absent on records written before canonical binding: those keep raw
+    // byte hashes, so only an identical legacy retry still matches.
+    public string? HashScheme { get; set; }
 }
 
 public sealed class DeviceCommandStore
@@ -113,16 +116,18 @@ public sealed class DeviceCommandStore
         Save();
     }
 
-    public bool Begin(Guid id, string origin, string sessionId = "", string payloadHash = "")
+    public bool Begin(Guid id, string origin, string sessionId = "", string payloadHash = "", string? hashScheme = null)
     {
         if (Records.ContainsKey(id)) return false;
-        Records[id] = new DeviceCommandRecord { Id = id, Origin = origin, Outcome = "accepted", UpdatedAt = DateTime.UtcNow, SessionID = sessionId, PayloadHash = payloadHash };
+        Records[id] = new DeviceCommandRecord { Id = id, Origin = origin, Outcome = "accepted", UpdatedAt = DateTime.UtcNow, SessionID = sessionId, PayloadHash = payloadHash, HashScheme = hashScheme };
         Save();
         return true;
     }
 
-    public bool BindingMatches(Guid id, string origin, string sessionId, string payloadHash) =>
-        Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId && record.PayloadHash == payloadHash;
+    // Compares under the scheme the record was written with.
+    public bool BindingMatches(Guid id, string origin, string sessionId, byte[] payload) =>
+        Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId
+        && DeviceCommandBinding.Hash(payload, record.HashScheme) is { } hash && record.PayloadHash == hash;
 
     // Recovery-ledger receipts survive an application-data restore that lost
     // this store. Seed only missing IDs; an existing local record stays as-is.
@@ -140,6 +145,7 @@ public sealed class DeviceCommandStore
                 UpdatedAt = receipt.UpdatedAt == default ? DateTime.UtcNow : receipt.UpdatedAt,
                 SessionID = receipt.SessionID,
                 PayloadHash = receipt.PayloadHash,
+                HashScheme = receipt.HashScheme,
             };
             changed = true;
         }
@@ -168,6 +174,10 @@ public sealed class DeviceOutboxRecord
     public ulong Epoch { get; set; }
     public string Outcome { get; set; } = "pending";
     public string? Detail { get; set; }
+    // Exact bytes first sent; every retry resends them. Absent on records
+    // saved by earlier versions, which cannot be resent.
+    public byte[]? PayloadBytes { get; set; }
+    public const string LegacyDetail = "Saved by an earlier Converse version, so it cannot be resent exactly. Check home for its result.";
 }
 
 public sealed class DeviceOutboxStore
@@ -180,6 +190,17 @@ public sealed class DeviceOutboxStore
         _file = Path.Combine(folder, "device-outbox.json");
         if (File.Exists(_file))
             Records = JsonSerializer.Deserialize<List<DeviceOutboxRecord>>(File.ReadAllBytes(_file)) ?? new();
+        // Re-encoding a legacy payload could differ from what home bound, and
+        // a fresh command ID could apply it twice. Only Check home is safe.
+        var legacy = Records.Where(r => r.PayloadBytes is null && r.Outcome == "pending").ToList();
+        foreach (var record in legacy) { record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; }
+        if (legacy.Count > 0) Save();
+    }
+    public void MarkLegacyUncertain(Guid commandId)
+    {
+        var record = Records.FirstOrDefault(r => r.CommandID == commandId);
+        if (record is null) return;
+        record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; Save();
     }
     public void Add(DeviceOutboxRecord record)
     {

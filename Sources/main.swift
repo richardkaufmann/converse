@@ -4334,6 +4334,10 @@ if CommandLine.arguments.contains("--settings-self-test") {
     settingsSelfTests { passed, label in print((passed ? "PASS: " : "FAIL: ") + label); if !passed { exit(1) } }; exit(0)
 }
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
+if let option = CommandLine.arguments.firstIndex(of: "--core-command-interop") {
+    guard CommandLine.arguments.indices.contains(option + 2), let port = Int(CommandLine.arguments[option + 2]) else { exit(2) }
+    exit(runCoreCommandInterop(host: CommandLine.arguments[option + 1], port: port))
+}
 if let option = CommandLine.arguments.firstIndex(of: "--scoreboard-preview") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
           let directory = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"],

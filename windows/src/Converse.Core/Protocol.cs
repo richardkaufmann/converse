@@ -135,6 +135,270 @@ public static class DeviceBlob
     public static string DeviceIdForPublicKey(ReadOnlySpan<byte> publicKey) => Sha256Hex(publicKey);
 }
 
+// Command payload binding, mirror of DeviceCommandBinding in
+// Sources/DeviceProtocol.swift. Viewers send canonical bytes once and resend
+// exactly those bytes; the home binds a command ID to the SHA-256 of the
+// payload's canonical JSON. Every field is kept, known or not: keys sorted
+// by code point, no whitespace, numbers and literals verbatim, strings
+// re-escaped minimally. Duplicate keys, invalid UTF-8, lone surrogates and
+// non-JSON are rejected. Tests/command-payload-canonical-vectors.json is
+// shared with the Swift suite; output must stay byte-identical.
+public static class DeviceCommandBinding
+{
+    public const string RawScheme = "raw";
+    public const string CanonicalScheme = "canonical-v1";
+    public const int MaxDepth = 64;
+
+    public sealed class UnbindableException(string reason) : Exception(reason);
+
+    public static byte[] Encode<T>(T value) => Canonical(DeviceJson.Encode(value));
+
+    // Records without a scheme predate canonical binding and keep raw hashes.
+    public static string? Hash(byte[] payload, string? scheme)
+    {
+        switch (scheme ?? RawScheme)
+        {
+            case RawScheme: return DeviceBlob.Sha256Hex(payload);
+            case CanonicalScheme:
+                try { return DeviceBlob.Sha256Hex(Canonical(payload)); }
+                catch (UnbindableException) { return null; }
+            default: return null;
+        }
+    }
+
+    public static byte[] Canonical(byte[] payload)
+    {
+        var parser = new Parser(payload);
+        parser.SkipSpace();
+        var value = parser.Value(0);
+        parser.SkipSpace();
+        if (parser.Index != payload.Length) throw new UnbindableException("Trailing content after JSON value.");
+        return value.ToArray();
+    }
+
+    private sealed class Parser(byte[] bytes)
+    {
+        public int Index;
+
+        public void SkipSpace()
+        {
+            while (Index < bytes.Length && bytes[Index] is 0x20 or 0x09 or 0x0A or 0x0D) Index++;
+        }
+
+        private UnbindableException Fail(string reason) => new(reason + " at byte " + Index + ".");
+
+        public List<byte> Value(int depth)
+        {
+            if (Index >= bytes.Length) throw Fail("Unexpected end of JSON");
+            return bytes[Index] switch
+            {
+                (byte)'{' => Object(depth + 1),
+                (byte)'[' => Array(depth + 1),
+                (byte)'"' => Emit(String()),
+                (byte)'t' => Literal("true"),
+                (byte)'f' => Literal("false"),
+                (byte)'n' => Literal("null"),
+                (byte)'-' or (>= (byte)'0' and <= (byte)'9') => Number(),
+                _ => throw Fail("Unexpected character"),
+            };
+        }
+
+        private List<byte> Object(int depth)
+        {
+            if (depth > MaxDepth) throw Fail("JSON nested too deeply");
+            Index++; SkipSpace();
+            var members = new List<(int[] Key, List<byte> Value)>();
+            if (Index < bytes.Length && bytes[Index] == (byte)'}') { Index++; return new List<byte>("{}"u8.ToArray()); }
+            while (true)
+            {
+                if (Index >= bytes.Length || bytes[Index] != (byte)'"') throw Fail("Expected object key");
+                var key = String();
+                if (members.Any(member => member.Key.AsSpan().SequenceEqual(key))) throw Fail("Duplicate object key");
+                SkipSpace();
+                if (Index >= bytes.Length || bytes[Index] != (byte)':') throw Fail("Expected colon");
+                Index++; SkipSpace();
+                members.Add((key, Value(depth)));
+                SkipSpace();
+                if (Index >= bytes.Length) throw Fail("Unterminated object");
+                if (bytes[Index] == (byte)',') { Index++; SkipSpace(); continue; }
+                if (bytes[Index] != (byte)'}') throw Fail("Expected comma or closing brace");
+                Index++; break;
+            }
+            // Code point order, the same as Swift's UTF-8 byte order.
+            members.Sort((a, b) => a.Key.AsSpan().SequenceCompareTo(b.Key));
+            var output = new List<byte> { (byte)'{' };
+            for (var i = 0; i < members.Count; i++)
+            {
+                if (i > 0) output.Add((byte)',');
+                output.AddRange(Emit(members[i].Key)); output.Add((byte)':'); output.AddRange(members[i].Value);
+            }
+            output.Add((byte)'}');
+            return output;
+        }
+
+        private List<byte> Array(int depth)
+        {
+            if (depth > MaxDepth) throw Fail("JSON nested too deeply");
+            Index++; SkipSpace();
+            var output = new List<byte> { (byte)'[' };
+            if (Index < bytes.Length && bytes[Index] == (byte)']') { Index++; return new List<byte>("[]"u8.ToArray()); }
+            while (true)
+            {
+                output.AddRange(Value(depth));
+                SkipSpace();
+                if (Index >= bytes.Length) throw Fail("Unterminated array");
+                if (bytes[Index] == (byte)',') { Index++; SkipSpace(); output.Add((byte)','); continue; }
+                if (bytes[Index] != (byte)']') throw Fail("Expected comma or closing bracket");
+                Index++; break;
+            }
+            output.Add((byte)']');
+            return output;
+        }
+
+        private List<byte> Literal(string word)
+        {
+            var expected = Encoding.ASCII.GetBytes(word);
+            if (Index + expected.Length > bytes.Length || !bytes.AsSpan(Index, expected.Length).SequenceEqual(expected)) throw Fail("Invalid literal");
+            Index += expected.Length;
+            return new List<byte>(expected);
+        }
+
+        // JSON number grammar, kept verbatim: no float conversion can differ
+        // between Swift and C#, and differing spellings stay different content.
+        private List<byte> Number()
+        {
+            var start = Index;
+            int Digits() { var from = Index; while (Index < bytes.Length && bytes[Index] is >= (byte)'0' and <= (byte)'9') Index++; return Index - from; }
+            if (bytes[Index] == (byte)'-') Index++;
+            if (Index >= bytes.Length) throw Fail("Invalid number");
+            if (bytes[Index] == (byte)'0') Index++;
+            else if (Digits() == 0) throw Fail("Invalid number");
+            if (Index < bytes.Length && bytes[Index] == (byte)'.') { Index++; if (Digits() == 0) throw Fail("Invalid number"); }
+            if (Index < bytes.Length && bytes[Index] is (byte)'e' or (byte)'E')
+            {
+                Index++;
+                if (Index < bytes.Length && bytes[Index] is (byte)'+' or (byte)'-') Index++;
+                if (Digits() == 0) throw Fail("Invalid number");
+            }
+            return new List<byte>(bytes.AsSpan(start, Index - start).ToArray());
+        }
+
+        private int Hex4()
+        {
+            if (Index + 4 > bytes.Length) throw Fail("Invalid unicode escape");
+            var value = 0;
+            for (var i = 0; i < 4; i++)
+            {
+                var b = bytes[Index + i];
+                int digit = b switch
+                {
+                    >= (byte)'0' and <= (byte)'9' => b - '0',
+                    >= (byte)'a' and <= (byte)'f' => b - 'a' + 10,
+                    >= (byte)'A' and <= (byte)'F' => b - 'A' + 10,
+                    _ => throw Fail("Invalid unicode escape"),
+                };
+                value = value * 16 + digit;
+            }
+            Index += 4;
+            return value;
+        }
+
+        // Decoded Unicode scalars; never repairs invalid input.
+        private int[] String()
+        {
+            Index++;
+            var scalars = new List<int>();
+            while (true)
+            {
+                if (Index >= bytes.Length) throw Fail("Unterminated string");
+                var b = bytes[Index];
+                if (b == (byte)'"') { Index++; return scalars.ToArray(); }
+                if (b < 0x20) throw Fail("Unescaped control character");
+                if (b == (byte)'\\')
+                {
+                    Index++;
+                    if (Index >= bytes.Length) throw Fail("Unterminated escape");
+                    var escape = bytes[Index++];
+                    switch (escape)
+                    {
+                        case (byte)'"': scalars.Add(0x22); break;
+                        case (byte)'\\': scalars.Add(0x5C); break;
+                        case (byte)'/': scalars.Add(0x2F); break;
+                        case (byte)'b': scalars.Add(0x08); break;
+                        case (byte)'f': scalars.Add(0x0C); break;
+                        case (byte)'n': scalars.Add(0x0A); break;
+                        case (byte)'r': scalars.Add(0x0D); break;
+                        case (byte)'t': scalars.Add(0x09); break;
+                        case (byte)'u':
+                            var unit = Hex4();
+                            if (unit is >= 0xD800 and <= 0xDBFF)
+                            {
+                                if (Index + 2 > bytes.Length || bytes[Index] != (byte)'\\' || bytes[Index + 1] != (byte)'u') throw Fail("Lone surrogate escape");
+                                Index += 2;
+                                var low = Hex4();
+                                if (low is < 0xDC00 or > 0xDFFF) throw Fail("Lone surrogate escape");
+                                scalars.Add(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00));
+                            }
+                            else
+                            {
+                                if (unit is >= 0xDC00 and <= 0xDFFF) throw Fail("Lone surrogate escape");
+                                scalars.Add(unit);
+                            }
+                            break;
+                        default: throw Fail("Invalid escape");
+                    }
+                    continue;
+                }
+                if (b < 0x80) { scalars.Add(b); Index++; continue; }
+                // Strict UTF-8: no overlongs, surrogates or values past U+10FFFF.
+                int length, minimum, scalar;
+                switch (b)
+                {
+                    case >= 0xC2 and <= 0xDF: length = 2; minimum = 0x80; scalar = b & 0x1F; break;
+                    case >= 0xE0 and <= 0xEF: length = 3; minimum = 0x800; scalar = b & 0x0F; break;
+                    case >= 0xF0 and <= 0xF4: length = 4; minimum = 0x10000; scalar = b & 0x07; break;
+                    default: throw Fail("Invalid UTF-8");
+                }
+                if (Index + length > bytes.Length) throw Fail("Invalid UTF-8");
+                for (var i = 1; i < length; i++)
+                {
+                    var continuation = bytes[Index + i];
+                    if ((continuation & 0xC0) != 0x80) throw Fail("Invalid UTF-8");
+                    scalar = scalar << 6 | (continuation & 0x3F);
+                }
+                if (scalar < minimum || scalar > 0x10FFFF || scalar is >= 0xD800 and <= 0xDFFF) throw Fail("Invalid UTF-8");
+                scalars.Add(scalar); Index += length;
+            }
+        }
+
+        private static List<byte> Emit(int[] scalars)
+        {
+            const string hex = "0123456789abcdef";
+            var output = new List<byte> { (byte)'"' };
+            foreach (var scalar in scalars)
+            {
+                switch (scalar)
+                {
+                    case 0x22: output.AddRange("\\\""u8.ToArray()); break;
+                    case 0x5C: output.AddRange("\\\\"u8.ToArray()); break;
+                    case 0x08: output.AddRange("\\b"u8.ToArray()); break;
+                    case 0x0C: output.AddRange("\\f"u8.ToArray()); break;
+                    case 0x0A: output.AddRange("\\n"u8.ToArray()); break;
+                    case 0x0D: output.AddRange("\\r"u8.ToArray()); break;
+                    case 0x09: output.AddRange("\\t"u8.ToArray()); break;
+                    case < 0x20: output.AddRange("\\u00"u8.ToArray()); output.Add((byte)hex[scalar >> 4]); output.Add((byte)hex[scalar & 0xF]); break;
+                    case < 0x80: output.Add((byte)scalar); break;
+                    case < 0x800: output.Add((byte)(0xC0 | scalar >> 6)); output.Add((byte)(0x80 | scalar & 0x3F)); break;
+                    case < 0x10000: output.Add((byte)(0xE0 | scalar >> 12)); output.Add((byte)(0x80 | scalar >> 6 & 0x3F)); output.Add((byte)(0x80 | scalar & 0x3F)); break;
+                    default: output.Add((byte)(0xF0 | scalar >> 18)); output.Add((byte)(0x80 | scalar >> 12 & 0x3F)); output.Add((byte)(0x80 | scalar >> 6 & 0x3F)); output.Add((byte)(0x80 | scalar & 0x3F)); break;
+                }
+            }
+            output.Add((byte)'"');
+            return output;
+        }
+    }
+}
+
 public sealed class DeviceHello
 {
     [JsonPropertyName("deviceID")] public string DeviceID { get; set; } = "";

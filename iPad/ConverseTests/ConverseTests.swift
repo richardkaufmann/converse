@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import Network
+import CryptoKit
 import UniformTypeIdentifiers
 @testable import Converse
 
@@ -2180,5 +2181,58 @@ extension ConverseTests {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(service.lotEditors[id]?.projected.rows.last?.text, "Next item")
         XCTAssertTrue(blank.isFirstResponder)
+    }
+}
+
+extension ConverseTests {
+    // Exact command bytes: an iPad send is stored, survives relaunch and is
+    // resent byte-for-byte; an earlier version's record asks home instead.
+    func testOutboxResendsExactCommandBytesAfterRelaunch() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-command-bytes-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
+        let homeStatic = Curve25519.KeyAgreement.PrivateKey()
+        let home = DeviceBlob.sha256Hex(homeStatic.publicKey.rawRepresentation), id = DeviceGlobalID(home: home, session: UUID()).string
+        var viewerHandshake = DeviceHandshake(isInitiator: true, staticKey: Curve25519.KeyAgreement.PrivateKey(), ephemeralKey: Curve25519.KeyAgreement.PrivateKey())
+        var homeHandshake = DeviceHandshake(isInitiator: false, staticKey: homeStatic, ephemeralKey: Curve25519.KeyAgreement.PrivateKey())
+        _ = try homeHandshake.readMessage(try viewerHandshake.writeMessage(payload: Data("v".utf8)))
+        _ = try viewerHandshake.readMessage(try homeHandshake.writeMessage(payload: Data("h".utf8)))
+        _ = try homeHandshake.readMessage(try viewerHandshake.writeMessage(payload: Data("v".utf8)))
+        var homeKeys = try homeHandshake.finish()
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.keys = try viewerHandshake.finish(); peer.trustedReady = true
+        var wire: [Data] = []; peer.testSink = { wire.append($0) }
+        service.adoptPeerForTesting(peer)
+        service.homes[home] = RemoteHomeState(deviceID: home, deviceName: "Home", online: true, rows: [], lastSeen: Date())
+        var decoder = DeviceFrameDecoder()
+        func sent() throws -> [DeviceEnvelope] {
+            var frames: [DeviceEnvelope] = []
+            for frame in wire { frames += try decoder.append(homeKeys.receiver.decrypt(frame)) }
+            wire = []; return frames
+        }
+        service.remoteLeases[id] = 3
+        let command = try XCTUnwrap(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "submit", text: "From iPad")))
+        let first = try XCTUnwrap(try sent().first { $0.commandID == command && $0.kind == DeviceMessageKind.command.rawValue }?.payload)
+        XCTAssertEqual(String(decoding: first, as: UTF8.self), #"{"action":"submit","blobHashes":[],"text":"From iPad"}"#, "iPad sends canonical command bytes")
+        XCTAssertEqual(service.outbox.first { $0.commandID == command }?.payloadData, first, "The outbox stores the bytes it sent")
+        try service.configureForTesting(folder: folder) // Relaunch: stores reload from disk.
+        service.remoteLeases[id] = 3
+        XCTAssertNotNil(service.homes[home], "The fixture home stays reachable across the simulated relaunch")
+        let reloaded = try XCTUnwrap(service.outbox.first { $0.commandID == command })
+        XCTAssertEqual(reloaded.payloadData, first)
+        service.retryOutbox(reloaded)
+        XCTAssertEqual(try sent().first { $0.commandID == command && $0.kind == DeviceMessageKind.command.rawValue }?.payload, first, "Resend same ID after relaunch is byte-identical")
+        let legacyID = UUID()
+        let legacy = #"[{"commandID":""# + legacyID.uuidString + #"","sessionID":""# + id + #"","payload":{"action":"submit","text":"Old","blobHashes":[]},"payloadHash":"h","epoch":3,"outcome":"pending"}]"#
+        try Data(legacy.utf8).write(to: folder.appendingPathComponent("device-outbox.json"))
+        try service.configureForTesting(folder: folder)
+        service.remoteLeases[id] = 3
+        var record = try XCTUnwrap(service.outbox.first { $0.commandID == legacyID })
+        XCTAssertEqual(record.outcome, "uncertain", "An earlier version's pending send surfaces as Check home")
+        XCTAssertEqual(record.detail, DeviceOutboxRecord.legacyDetail)
+        record.outcome = "pending"; service.retryOutbox(record)
+        let frames = try sent()
+        XCTAssertTrue(frames.contains { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.commandID == legacyID }, "Resending a legacy record queries home under its original ID")
+        XCTAssertFalse(frames.contains { $0.kind == DeviceMessageKind.command.rawValue }, "A legacy record is never re-encoded and resent")
     }
 }

@@ -441,6 +441,215 @@ enum DeviceCanonical {
         return try encoder.encode(value)
     }
 }
+
+// Command payload binding. Viewers send canonical bytes once and resend
+// exactly those bytes; the home binds a command ID to the SHA-256 of the
+// payload's canonical JSON so key order alone can never turn a retry into
+// "changed content". Canonical form keeps every field, known or not: keys
+// sorted by code point, no whitespace, numbers and literals verbatim,
+// strings re-escaped minimally. Duplicate keys, invalid UTF-8, lone
+// surrogates and non-JSON are rejected rather than normalized away.
+// Mirrored byte-for-byte by DeviceCommandBinding in
+// windows/src/Converse.Core/Protocol.cs; both suites run
+// Tests/command-payload-canonical-vectors.json.
+enum DeviceCommandBinding {
+    static let rawScheme = "raw", canonicalScheme = "canonical-v1"
+    struct Unbindable: Error { var reason: String }
+    static func encode<T: Encodable>(_ value: T) throws -> Data { try canonical(JSONEncoder().encode(value)) }
+    // Records without a scheme predate canonical binding and keep raw hashes.
+    static func hash(_ payload: Data, scheme: String?) -> String? {
+        switch scheme ?? rawScheme {
+        case rawScheme: return DeviceBlob.sha256Hex(payload)
+        case canonicalScheme: return (try? canonical(payload)).map(DeviceBlob.sha256Hex)
+        default: return nil
+        }
+    }
+    static func canonical(_ payload: Data) throws -> Data {
+        var parser = Parser(bytes: [UInt8](payload))
+        parser.skipSpace()
+        let value = try parser.value(depth: 0)
+        parser.skipSpace()
+        guard parser.index == parser.bytes.count else { throw Unbindable(reason: "Trailing content after JSON value.") }
+        return Data(value)
+    }
+    static let maxDepth = 64
+    private struct Parser {
+        let bytes: [UInt8]
+        var index = 0
+        mutating func skipSpace() { while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) { index += 1 } }
+        func fail(_ reason: String) -> Unbindable { Unbindable(reason: reason + " at byte " + String(index) + ".") }
+        mutating func value(depth: Int) throws -> [UInt8] {
+            guard index < bytes.count else { throw fail("Unexpected end of JSON") }
+            switch bytes[index] {
+            case UInt8(ascii: "{"): return try object(depth: depth + 1)
+            case UInt8(ascii: "["): return try array(depth: depth + 1)
+            case UInt8(ascii: "\""): return Self.emit(try string())
+            case UInt8(ascii: "t"): return try literal("true")
+            case UInt8(ascii: "f"): return try literal("false")
+            case UInt8(ascii: "n"): return try literal("null")
+            case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"): return try number()
+            default: throw fail("Unexpected character")
+            }
+        }
+        mutating func object(depth: Int) throws -> [UInt8] {
+            guard depth <= DeviceCommandBinding.maxDepth else { throw fail("JSON nested too deeply") }
+            index += 1; skipSpace()
+            var members: [(key: [UInt32], value: [UInt8])] = []
+            if index < bytes.count, bytes[index] == UInt8(ascii: "}") { index += 1; return Array("{}".utf8) }
+            while true {
+                guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { throw fail("Expected object key") }
+                let key = try string()
+                guard !members.contains(where: { $0.key == key }) else { throw fail("Duplicate object key") }
+                skipSpace()
+                guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else { throw fail("Expected colon") }
+                index += 1; skipSpace()
+                members.append((key, try value(depth: depth)))
+                skipSpace()
+                guard index < bytes.count else { throw fail("Unterminated object") }
+                if bytes[index] == UInt8(ascii: ",") { index += 1; skipSpace(); continue }
+                guard bytes[index] == UInt8(ascii: "}") else { throw fail("Expected comma or closing brace") }
+                index += 1; break
+            }
+            // UTF-8 byte order equals code point order, the same in C#.
+            members.sort { $0.key.lexicographicallyPrecedes($1.key) }
+            var out: [UInt8] = [UInt8(ascii: "{")]
+            for (offset, member) in members.enumerated() {
+                if offset > 0 { out.append(UInt8(ascii: ",")) }
+                out += Self.emit(member.key); out.append(UInt8(ascii: ":")); out += member.value
+            }
+            out.append(UInt8(ascii: "}")); return out
+        }
+        mutating func array(depth: Int) throws -> [UInt8] {
+            guard depth <= DeviceCommandBinding.maxDepth else { throw fail("JSON nested too deeply") }
+            index += 1; skipSpace()
+            var out: [UInt8] = [UInt8(ascii: "[")]
+            if index < bytes.count, bytes[index] == UInt8(ascii: "]") { index += 1; return Array("[]".utf8) }
+            while true {
+                out += try value(depth: depth)
+                skipSpace()
+                guard index < bytes.count else { throw fail("Unterminated array") }
+                if bytes[index] == UInt8(ascii: ",") { index += 1; skipSpace(); out.append(UInt8(ascii: ",")); continue }
+                guard bytes[index] == UInt8(ascii: "]") else { throw fail("Expected comma or closing bracket") }
+                index += 1; break
+            }
+            out.append(UInt8(ascii: "]")); return out
+        }
+        mutating func literal(_ word: String) throws -> [UInt8] {
+            let expected = Array(word.utf8)
+            guard index + expected.count <= bytes.count, Array(bytes[index..<index + expected.count]) == expected else { throw fail("Invalid literal") }
+            index += expected.count; return expected
+        }
+        // JSON number grammar, kept verbatim: no float conversion can differ
+        // between Swift and C#, and differing spellings stay different content.
+        mutating func number() throws -> [UInt8] {
+            let start = index
+            func digits() -> Int { let from = index; while index < bytes.count, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[index]) { index += 1 }; return index - from }
+            if bytes[index] == UInt8(ascii: "-") { index += 1 }
+            guard index < bytes.count else { throw fail("Invalid number") }
+            if bytes[index] == UInt8(ascii: "0") { index += 1 } else { guard digits() > 0 else { throw fail("Invalid number") } }
+            if index < bytes.count, bytes[index] == UInt8(ascii: ".") { index += 1; guard digits() > 0 else { throw fail("Invalid number") } }
+            if index < bytes.count, bytes[index] == UInt8(ascii: "e") || bytes[index] == UInt8(ascii: "E") {
+                index += 1
+                if index < bytes.count, bytes[index] == UInt8(ascii: "+") || bytes[index] == UInt8(ascii: "-") { index += 1 }
+                guard digits() > 0 else { throw fail("Invalid number") }
+            }
+            return Array(bytes[start..<index])
+        }
+        mutating func hex4() throws -> UInt32 {
+            guard index + 4 <= bytes.count else { throw fail("Invalid unicode escape") }
+            var value: UInt32 = 0
+            for byte in bytes[index..<index + 4] {
+                let digit: UInt8
+                switch byte {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"): digit = byte - UInt8(ascii: "0")
+                case UInt8(ascii: "a")...UInt8(ascii: "f"): digit = byte - UInt8(ascii: "a") + 10
+                case UInt8(ascii: "A")...UInt8(ascii: "F"): digit = byte - UInt8(ascii: "A") + 10
+                default: throw fail("Invalid unicode escape")
+                }
+                value = value * 16 + UInt32(digit)
+            }
+            index += 4; return value
+        }
+        // Decoded Unicode scalars; never repairs invalid input.
+        mutating func string() throws -> [UInt32] {
+            index += 1
+            var scalars: [UInt32] = []
+            while true {
+                guard index < bytes.count else { throw fail("Unterminated string") }
+                let byte = bytes[index]
+                if byte == UInt8(ascii: "\"") { index += 1; return scalars }
+                if byte < 0x20 { throw fail("Unescaped control character") }
+                if byte == UInt8(ascii: "\\") {
+                    index += 1
+                    guard index < bytes.count else { throw fail("Unterminated escape") }
+                    let escape = bytes[index]; index += 1
+                    switch escape {
+                    case UInt8(ascii: "\""): scalars.append(0x22)
+                    case UInt8(ascii: "\\"): scalars.append(0x5C)
+                    case UInt8(ascii: "/"): scalars.append(0x2F)
+                    case UInt8(ascii: "b"): scalars.append(0x08)
+                    case UInt8(ascii: "f"): scalars.append(0x0C)
+                    case UInt8(ascii: "n"): scalars.append(0x0A)
+                    case UInt8(ascii: "r"): scalars.append(0x0D)
+                    case UInt8(ascii: "t"): scalars.append(0x09)
+                    case UInt8(ascii: "u"):
+                        let unit = try hex4()
+                        if (0xD800...0xDBFF).contains(unit) {
+                            guard index + 2 <= bytes.count, bytes[index] == UInt8(ascii: "\\"), bytes[index + 1] == UInt8(ascii: "u") else { throw fail("Lone surrogate escape") }
+                            index += 2
+                            let low = try hex4()
+                            guard (0xDC00...0xDFFF).contains(low) else { throw fail("Lone surrogate escape") }
+                            scalars.append(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
+                        } else {
+                            guard !(0xDC00...0xDFFF).contains(unit) else { throw fail("Lone surrogate escape") }
+                            scalars.append(unit)
+                        }
+                    default: throw fail("Invalid escape")
+                    }
+                    continue
+                }
+                if byte < 0x80 { scalars.append(UInt32(byte)); index += 1; continue }
+                // Strict UTF-8: no overlongs, surrogates or values past U+10FFFF.
+                let length: Int, minimum: UInt32
+                var scalar: UInt32
+                switch byte {
+                case 0xC2...0xDF: length = 2; minimum = 0x80; scalar = UInt32(byte & 0x1F)
+                case 0xE0...0xEF: length = 3; minimum = 0x800; scalar = UInt32(byte & 0x0F)
+                case 0xF0...0xF4: length = 4; minimum = 0x10000; scalar = UInt32(byte & 0x07)
+                default: throw fail("Invalid UTF-8")
+                }
+                guard index + length <= bytes.count else { throw fail("Invalid UTF-8") }
+                for continuation in bytes[index + 1..<index + length] {
+                    guard continuation & 0xC0 == 0x80 else { throw fail("Invalid UTF-8") }
+                    scalar = scalar << 6 | UInt32(continuation & 0x3F)
+                }
+                guard scalar >= minimum, scalar <= 0x10FFFF, !(0xD800...0xDFFF).contains(scalar) else { throw fail("Invalid UTF-8") }
+                scalars.append(scalar); index += length
+            }
+        }
+        static func emit(_ scalars: [UInt32]) -> [UInt8] {
+            var out: [UInt8] = [UInt8(ascii: "\"")]
+            let hex = Array("0123456789abcdef".utf8)
+            for scalar in scalars {
+                switch scalar {
+                case 0x22: out += Array("\\\"".utf8)
+                case 0x5C: out += Array("\\\\".utf8)
+                case 0x08: out += Array("\\b".utf8)
+                case 0x0C: out += Array("\\f".utf8)
+                case 0x0A: out += Array("\\n".utf8)
+                case 0x0D: out += Array("\\r".utf8)
+                case 0x09: out += Array("\\t".utf8)
+                case 0..<0x20: out += Array("\\u00".utf8) + [hex[Int(scalar >> 4)], hex[Int(scalar & 0xF)]]
+                case 0..<0x80: out.append(UInt8(scalar))
+                case 0..<0x800: out += [UInt8(0xC0 | scalar >> 6), UInt8(0x80 | scalar & 0x3F)]
+                case 0..<0x10000: out += [UInt8(0xE0 | scalar >> 12), UInt8(0x80 | scalar >> 6 & 0x3F), UInt8(0x80 | scalar & 0x3F)]
+                default: out += [UInt8(0xF0 | scalar >> 18), UInt8(0x80 | scalar >> 12 & 0x3F), UInt8(0x80 | scalar >> 6 & 0x3F), UInt8(0x80 | scalar & 0x3F)]
+                }
+            }
+            out.append(UInt8(ascii: "\"")); return out
+        }
+    }
+}
 struct DeviceParticipantIntent: Codable, Identifiable {
     var id: UUID
     var home: String
