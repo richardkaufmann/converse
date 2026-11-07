@@ -9,6 +9,7 @@ final class PerformanceCapture {
         case archiveSnapshot, archiveEncodeWrite, checkedSave, sidebarPublish
         case mouseHover, dragDelivery, dragHandling, dragFrameWait, dragApply, resizeDraw, wrapThaw
         case lotEditHandling, lotEditCommit, lotAckEncodeQueue, lotEditToAckProcessed, lotAckSendFailed
+        case lotKeyDelivery, lotKeyHandling, lotTextInsertion, lotScrollDelivery, lotScrollHandling
         case lotRoundTrip, lotAckApply, lotLocalEdit, lotTextUpdate, lotTextLayout, lotInputToChange
     }
     struct Span { let start: Double; let generation: Int; let mainThread: Bool }
@@ -42,12 +43,15 @@ final class PerformanceCapture {
         let droppedSlowEvents: Int
         let pendingRoundTrips: Int
         let droppedRoundTrips: Int
+        // A lower bound when a queued main-thread probe has not returned by stop.
+        let unfinishedMainQueueDelayMilliseconds: Double?
     }
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "local.richard.Converse.performance", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var active = false, pendingProbe = false, dirty = false
     private var generation = 0, ticks = 0, dropped = 0
+    private var pendingProbeStart: Double?
     private var startedAt = Date()
     private var summaries: [String: Summary] = [:]
     private var events: [Event] = []
@@ -65,7 +69,7 @@ final class PerformanceCapture {
         let previousDestination = destination
         generation += 1
         let token = generation
-        active = enabled; pendingProbe = false; dirty = enabled
+        active = enabled; pendingProbe = false; pendingProbeStart = nil; dirty = enabled
         startedAt = Date(); summaries = [:]; events = []; dropped = 0
         roundTrips = [:]; droppedRoundTrips = 0
         destination = folder.appendingPathComponent("Performance Diagnostics/performance.json")
@@ -114,6 +118,26 @@ final class PerformanceCapture {
             DispatchQueue.main.async { completion(available) }
         }
     }
+    /// Stop at the deadline on the diagnostic worker, even if the UI is stalled.
+    /// The completion reflects this exact run's final write, never an older file.
+    func finish(_ completion: @escaping (Result<URL, Error>) -> Void) {
+        lock.lock()
+        guard active, let destination else {
+            lock.unlock()
+            completion(.failure(NSError(domain: "PerformanceCapture", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No capture is running."])))
+            return
+        }
+        let final = snapshot()
+        active = false; generation += 1; dirty = false; pendingProbe = false
+        roundTrips = [:]
+        lock.unlock()
+        queue.async {
+            self.timer?.cancel(); self.timer = nil
+            do { try self.writeChecked(final, to: destination); completion(.success(destination)) }
+            catch { completion(.failure(error)) }
+        }
+    }
     func delivery(since timestamp: Double, operation: Operation = .keyDelivery) {
         guard timestamp > 0, let span = begin() else { return }
         record(operation, since: timestamp, generation: span.generation, mainThread: true)
@@ -136,7 +160,7 @@ final class PerformanceCapture {
     private func tick(generation token: Int) {
         lock.lock()
         let shouldProbe = active && generation == token && !pendingProbe
-        if shouldProbe { pendingProbe = true }
+        if shouldProbe { pendingProbe = true; pendingProbeStart = ProcessInfo.processInfo.systemUptime }
         lock.unlock()
         if shouldProbe {
             let start = ProcessInfo.processInfo.systemUptime
@@ -144,7 +168,7 @@ final class PerformanceCapture {
                 guard let self else { return }
                 self.record(.mainQueueDelay, since: start, generation: token, mainThread: true)
                 self.lock.lock()
-                if self.generation == token { self.pendingProbe = false }
+                if self.generation == token { self.pendingProbe = false; self.pendingProbeStart = nil }
                 self.lock.unlock()
             }
         }
@@ -152,11 +176,12 @@ final class PerformanceCapture {
         if ticks % 20 == 0 { writeSnapshot() }
     }
     private func snapshot() -> Snapshot {
-        Snapshot(schemaVersion: 1, startedAt: startedAt, measuredAt: Date(),
+        Snapshot(schemaVersion: 2, startedAt: startedAt, measuredAt: Date(),
                  version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
                  build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
                  summaries: summaries, slowEvents: events, droppedSlowEvents: dropped,
-                 pendingRoundTrips: roundTrips.count, droppedRoundTrips: droppedRoundTrips)
+                 pendingRoundTrips: roundTrips.count, droppedRoundTrips: droppedRoundTrips,
+                 unfinishedMainQueueDelayMilliseconds: pendingProbeStart.map { max(0, (ProcessInfo.processInfo.systemUptime - $0) * 1000) })
     }
     /// Runs on the diagnostic queue. Never makes the UI wait on disk I/O.
     private func writeSnapshot() {
@@ -167,13 +192,14 @@ final class PerformanceCapture {
         write(value, to: destination)
     }
     private func write(_ value: Snapshot, to destination: URL) {
-        do {
-            let parent = destination.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-            try encoder.encode(value).write(to: destination, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
-        } catch { /* Observation must never change session behavior. */ }
+        try? writeChecked(value, to: destination)
+    }
+    private func writeChecked(_ value: Snapshot, to destination: URL) throws {
+        let parent = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(value).write(to: destination, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
     // Deterministic tests use the same accumulator and writer without timers.
     func recordForTesting(_ operation: Operation, milliseconds: Double) {
@@ -224,4 +250,95 @@ func performanceCaptureSelfTests(_ check: (Bool, String) -> Void) {
         check(restarted.pendingRoundTrips == 0 && restarted.summaries["lotRoundTrip"] == nil,
               "A receipt from an earlier capture cannot contaminate the next capture")
     } catch { check(false, "Performance capture fixture: " + error.localizedDescription) }
+    // Exercise the real scheduler while deliberately withholding the main run loop.
+    let timed = PerformanceCapture()
+    let run = PerformanceCaptureRun(capture: timed)
+    var finished: URL?
+    run.start(folder: root, delay: 0.05, duration: 0.15) {
+        if case .complete(let file) = $0 { finished = file }
+    }
+    let startDeadline = Date().addingTimeInterval(2)
+    while !timed.enabled && Date() < startDeadline { Thread.sleep(forTimeInterval: 0.005) }
+    check(timed.enabled, "Delayed diagnostic run starts without main-thread callbacks")
+    timed.recordForTesting(.lotKeyHandling, milliseconds: 75)
+    let stopDeadline = Date().addingTimeInterval(2)
+    while timed.enabled && Date() < stopDeadline { Thread.sleep(forTimeInterval: 0.005) }
+    check(!timed.enabled, "Capture deadline stops recording even while the main thread is blocked")
+    let resultDeadline = Date().addingTimeInterval(2)
+    while finished == nil && Date() < resultDeadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    if let finished, let data = try? Data(contentsOf: finished) {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let result = try? decoder.decode(PerformanceCapture.Snapshot.self, from: data)
+        check(result?.summaries["lotKeyHandling"]?.count == 1, "Completed export contains this run's final lot timing")
+        check((result?.unfinishedMainQueueDelayMilliseconds ?? 0) > 0, "A probe still blocked at the deadline is disclosed as an unfinished delay")
+    } else { check(false, "Completed export contains this run's final lot timing") }
+    var cancelled = false, unexpectedRecording = false
+    run.start(folder: root, delay: 0.15, duration: 0.05) {
+        if case .recording = $0 { unexpectedRecording = true }
+    }
+    run.cancel(folder: root) { if case .cancelled = $0 { cancelled = true } }
+    let cancelDeadline = Date().addingTimeInterval(0.3)
+    while Date() < cancelDeadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    check(cancelled && !unexpectedRecording && !timed.enabled, "Cancelling a delayed capture prevents recording and completion")
+    let badRoot = root.appendingPathComponent("not-a-directory")
+    try? Data([1]).write(to: badRoot)
+    var reportedFailure = false, exportedFailure = false
+    run.start(folder: badRoot, delay: 0, duration: 0.02) {
+        if case .failed = $0 { reportedFailure = true }
+        if case .complete = $0 { exportedFailure = true }
+    }
+    let failureDeadline = Date().addingTimeInterval(2)
+    while !reportedFailure && Date() < failureDeadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    check(reportedFailure && !exportedFailure, "Failed final write cannot enable export or reuse a previous capture")
+
+}
+
+/// Owns delayed, bounded runs independently of the Settings window's lifetime.
+/// No UI timer or animation is needed while measuring UI responsiveness.
+final class PerformanceCaptureRun {
+    enum State {
+        case waiting, recording, complete(URL), failed(String), cancelled
+    }
+    private let queue = DispatchQueue(label: "local.richard.Converse.performance-run", qos: .utility)
+    private let capture: PerformanceCapture
+    private var generation = 0
+    init(capture: PerformanceCapture = .shared) { self.capture = capture }
+    func start(folder: URL, delay: TimeInterval, duration: TimeInterval,
+               update: @escaping (State) -> Void) {
+        queue.async {
+            self.generation += 1
+            let token = self.generation
+            self.capture.configure(folder: folder, enabled: false)
+            let runFolder = folder.appendingPathComponent("Performance Diagnostics/Runs/" + UUID().uuidString)
+            func publish(_ state: State) { DispatchQueue.main.async { update(state) } }
+            guard delay.isFinite, duration.isFinite, delay >= 0, duration > 0, delay <= 60, duration <= 300 else {
+                publish(.failed("Choose a delay from 0–60 seconds and a duration up to 300 seconds.")); return
+            }
+            publish(.waiting)
+            self.queue.asyncAfter(deadline: .now() + delay) {
+                guard token == self.generation else { return }
+                self.capture.configure(folder: runFolder, enabled: true)
+                publish(.recording)
+                self.queue.asyncAfter(deadline: .now() + duration) {
+                    guard token == self.generation else { return }
+                    self.capture.finish { result in
+                        self.queue.async {
+                            guard token == self.generation else { return }
+                            switch result {
+                            case .success(let file): publish(.complete(file))
+                            case .failure(let error): publish(.failed("Could not save the capture: " + error.localizedDescription))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    func cancel(folder: URL, update: @escaping (State) -> Void) {
+        queue.async {
+            self.generation += 1
+            self.capture.configure(folder: folder, enabled: false)
+            DispatchQueue.main.async { update(.cancelled) }
+        }
+    }
 }

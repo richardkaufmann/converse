@@ -1,19 +1,21 @@
 # Investigating typing stalls
 
-On a Mac build with performance capture, open **Settings → General → Responsiveness diagnostics** and enable **Record performance timings**. Type while other panes stream, then turn capture off after a pause. **Show performance capture** reveals the JSON file. Turning capture off saves the final measurements asynchronously; allow the disk write to finish before copying it. A new capture replaces the previous capture. The toggle persists across app launches.
+On Mac, open **Converse → Settings → Debug** and enable **performance telemetry**. Set **Start in** (0–60 seconds) and **Run for** (5–300 seconds), then press **Go**. Return to the affected pane and type or scroll normally. You can close Settings; the capture continues and stops automatically. **Cancel** or turning telemetry off cancels the pending or active run. Telemetry starts disabled on the next app launch.
 
-The file lives under the current edition's data folder, in `Performance Diagnostics/performance.json`. Production, Demo and TEST use their own folders. For scripted launches, `CONVERSE_PERFORMANCE_DIAGNOSTICS=1` enables capture at startup. Mac and iPad/iPhone use the same bounded capture format. Windows UI timing is not instrumented.
+**Export** is disabled until a capture finishes and its final JSON file has saved successfully. It opens a save dialog; nothing is uploaded. Starting another run clears the previous export selection. Each run has a separate file under the current edition's `Performance Diagnostics/Runs` folder, so a failed write cannot export a stale capture. Production, Demo and TEST use their own data folders.
+
+For scripted launches, `CONVERSE_PERFORMANCE_DIAGNOSTICS=1` retains the continuous recorder at `Performance Diagnostics/performance.json`. The old persisted General-page toggle no longer enables continuous recording at launch. The analyzer reads both the mobile schema 1 and Mac schema 2 captures. Windows UI timing is not instrumented.
 
 Run `python3 scripts/summarize-performance.py /path/to/performance.json` to compare:
 
 - Main-queue scheduling delay and time from a keyboard event's timestamp until the composer handles it.
-- Keyboard handling, text insertion and transcript rendering.
+- Keyboard handling, text insertion and transcript rendering. Mac Parking Lots also record key delivery, key handling, text insertion, layout, scroll-event delivery and scroll-handler duration.
 - Archive snapshot creation, background encoding/writing, and synchronous checked saves (including waiting for the archive queue).
 - Sidebar snapshot publication to connected devices.
 - Mac-hosted Parking Lot edit handling, durable commit, acknowledgment encoding/queueing,
   and edit dispatch through local acknowledgment send completion.
 
-The capture keeps aggregate counts, sums, maxima and six duration buckets for every instrumented operation, plus the latest 512 events of at least 50 milliseconds. The file updates at most every five seconds during capture. File encoding and atomic writes run on a utility queue. Only one main-queue probe may be outstanding, so a blocked UI cannot accumulate probes. Disabled capture writes nothing. No message text, key characters, titles, session IDs, commands or credentials are recorded. Timestamps and app version/build are included.
+The capture keeps aggregate counts, sums, maxima and six duration buckets for every instrumented operation, plus the latest 512 events of at least 50 milliseconds. The file updates at most every five seconds during capture. File encoding and atomic writes run on a utility queue. Only one main-queue probe may be outstanding, so a blocked UI cannot accumulate probes. Disabled capture writes nothing. No message text, key characters, titles, session IDs, commands or credentials are recorded. Timestamps and app version/build are included. A main-queue probe still blocked at the deadline is recorded as an unfinished delay (a lower bound), rather than disappearing from the report. Scroll-handler duration does not measure the later display frame; these are not key-to-photon or frame-rate measurements.
 
 Use the reported overlaps to choose the next measurement, not as proof of causality. A slow checked save alongside a main-queue delay suggests waiting for persistence; background writes alone do not establish a UI stall. Repeated transcript-render overlaps point toward rendering/layout work. Delays without an instrumented overlap need a main-thread stack sample or additional instrumentation. Sleep/wake and CPU scheduling contention can affect timings. The sampler runs every 250 milliseconds and can miss brief pauses; key delivery and operation timings complement it. Nested operation durations must not be added together.
 

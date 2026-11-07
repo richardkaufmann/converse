@@ -5,7 +5,7 @@ import json
 
 
 def summarize(capture):
-    if capture.get("schemaVersion") != 1:
+    if capture.get("schemaVersion") not in (1, 2):
         raise ValueError("Unsupported performance capture schema")
     lines = [f"Converse {capture.get('version')} ({capture.get('build')})",
              f"Capture: {capture.get('startedAt')} to {capture.get('measuredAt')}",
@@ -16,17 +16,20 @@ def summarize(capture):
         mean = value["totalMilliseconds"] / count if count else 0
         slow = sum(value["buckets"][3:])
         lines.append(f"{name:25} {count:6} {mean:10.2f} {value['maximumMilliseconds']:10.2f} {slow:9}")
+    unfinished = capture.get("unfinishedMainQueueDelayMilliseconds")
+    if unfinished is not None:
+        lines.append(f"\nMain-queue probe still blocked at capture end: at least {unfinished:.1f} ms; excluded from completed-delay statistics.")
     events = capture["slowEvents"]
     if 'pendingRoundTrips' in capture:
         lines.append(f"\nRound trips still pending: {capture['pendingRoundTrips']}; dropped or abandoned: {capture.get('droppedRoundTrips', 0)}. Completed timings exclude these requests.")
-    stalls = [event for event in events if event["operation"] in ("mainQueueDelay", "keyDelivery", "dragDelivery", "dragFrameWait", "resizeDraw")]
+    stalls = [event for event in events if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw")]
     lines.append(f"\nRetained delay events: {len(stalls)}; overwritten slow events: {capture['droppedSlowEvents']}")
     for stall in sorted(stalls, key=lambda event: event["milliseconds"], reverse=True)[:10]:
         end = stall["uptime"]
         start = end - stall["milliseconds"] / 1000
         overlapping = set()
         for event in events:
-            if event["operation"] in ("mainQueueDelay", "keyDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "lotAckSendFailed") or not event["mainThread"]:
+            if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "lotAckSendFailed") or not event["mainThread"]:
                 continue
             event_start = event["uptime"] - event["milliseconds"] / 1000
             if event_start < end and event["uptime"] > start:
