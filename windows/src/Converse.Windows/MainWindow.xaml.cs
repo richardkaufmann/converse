@@ -877,7 +877,8 @@ public sealed partial class MainWindow : Window
         var deviceHeader = ((IEnumerable<SidebarItem>)Sidebar.ItemsSource).OfType<SidebarHeader>().Single(h => h.Key == "local");
         Require(deviceHeader.Title == "QA desktop label · this device" && deviceHeader.CanRename && deviceHeader.Details.Contains(_devices.DeviceId)
             && deviceHeader.Details.Contains(originalDeviceName) && _devices.DeviceName == originalDeviceName, "Device display label or hover identity is wrong");
-        Require(Title == "Converse " + VersionBuild && !Title.Contains("Development"), "Window title omits bundled release version/build");
+        var expectedAppName = SetupPreview.Demo ? "Converse Demo" : SetupPreview.Enabled ? "Converse Setup Preview" : "Converse";
+        Require(Title == expectedAppName + " " + VersionBuild && !Title.Contains("Development"), "Window title omits edition or bundled release version/build");
         await RunSidebarTrafficCheckAsync();
     }
 
