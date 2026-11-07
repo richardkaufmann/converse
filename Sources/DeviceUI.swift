@@ -356,7 +356,10 @@ struct RemotePane: View {
                                 Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
                                 Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                             }
-                            Button(queueBusy && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) }
+                            Button(queueBusy && queueRecord?.payload.action == "inject" && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) }
+                            if service.canRemoveQueuedRemote(globalID) {
+                                Button { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "removeQueued", pendingID: item.id)) } label: { Image(systemName: "xmark") }.help("Remove this queued message")
+                            }
                         }
                     }
                 }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06)).disabled(offline || !hasLease || queueBusy)

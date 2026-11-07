@@ -1965,3 +1965,39 @@ extension ConverseTests {
         XCTAssertEqual(service.lotEditors[id]?.projected.rows.first { $0.id == item.id }?.text.filter { $0 == "x" }.count, 60)
     }
 }
+
+extension ConverseTests {
+    func testQueueRemoveNeedsHomeCapabilityAndSendsExactID() throws {
+        let service = try service()
+        let home = String(repeating: "c", count: 64)
+        let sid = UUID(), id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        service.homes[home] = RemoteHomeState(deviceID: home, deviceName: "Home", online: true, rows: [
+            DeviceSidebarRow(globalID: id, sessionID: sid, title: "Queued", assistant: "Muse", engine: "muse", model: "m", effort: "", access: "", status: "Working", busy: true, queued: 3, queuePaused: false)
+        ], lastSeen: Date())
+        service.remoteLeases[id] = 3
+        XCTAssertNotNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "rename", text: "Reachable")), "The fixture home is reachable for ordinary commands")
+        let items = ["first", "second", "third"].map { DevicePendingDTO(id: UUID(), text: $0) }
+        var sent: [DeviceCommandPayload] = []
+        func queue() -> PadQueue { PadQueue(pending: items, paused: false, canRemove: service.canRemoveQueuedRemote(id)) { sent.append($0); service.sendRemoteCommand(globalID: id, command: $0) } }
+        let older = queue()
+        XCTAssertEqual(older.bulkActions.map(\.label), ["Pause", "Inject all", PadQueue.clearAll])
+        XCTAssertEqual(PadQueue.clearAll, "Clear all")
+        XCTAssertEqual(older.itemActions(items[1]).map(\.label), ["Inject now"], "An older home keeps only Clear all")
+        XCTAssertNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "removeQueued", pendingID: items[1].id)), "An older home is never sent a single removal")
+        XCTAssertFalse(service.outbox.contains { $0.payload.action == "removeQueued" })
+        peer.hello!.capabilities.append(DeviceSyncService.queueRemoveCapability)
+        let current = queue()
+        XCTAssertEqual(current.itemActions(items[1]).map(\.label), ["Inject now", "Remove"])
+        let remove = try XCTUnwrap(current.itemActions(items[1]).first { $0.label == "Remove" })
+        current.send(remove.command)
+        XCTAssertEqual(sent, [DeviceCommandPayload(action: "removeQueued", pendingID: items[1].id)])
+        let record = try XCTUnwrap(service.outbox.first { $0.payload.action == "removeQueued" })
+        XCTAssertEqual(record.payload.pendingID, items[1].id, "Remove names the exact queued message")
+        XCTAssertEqual(record.epoch, 3, "Remove travels with the display lease through the durable outbox")
+        current.send(remove.command)
+        XCTAssertEqual(service.outbox.filter { $0.payload.action == "removeQueued" }.map(\.commandID), [record.commandID], "A second tap reuses the outstanding command ID")
+    }
+}

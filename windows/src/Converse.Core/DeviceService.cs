@@ -771,7 +771,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = InstalledVersion.Version, ConverseBuild = InstalledVersion.Build,
-        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
+        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1", QueueRemoveCapability },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -1384,6 +1384,8 @@ public sealed partial class DeviceSyncService : IDisposable
         return expired.Count > 0;
     }
 
+    // Completed acks leave the outbox; tests read their receipt detail here.
+    internal event Action<Guid, DeviceAckPayload>? AckReceivedForTest;
     internal void ExpireJoinForTest(Guid requestId)
     {
         if (_sponsoredRequests.TryGetValue(requestId, out var live))
@@ -1816,7 +1818,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 "Already recorded on home.", envelope.Epoch);
             return;
         }
-        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
+        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
         if (!known.Contains(command.Action))
         {
             _commands.MarkFailed(commandId);
@@ -1912,11 +1914,18 @@ public sealed partial class DeviceSyncService : IDisposable
             case "resumeQueue": session.QueuePaused = false; _store.Save(); _store.RunNext(session); break;
             case "pauseQueue": session.QueuePaused = true; _store.Save(); break;
             case "clearQueue": session.Pending.Clear(); _store.Save(); break;
+            case "removeQueued":
+                failure = command.PendingID is { } pendingId ? _store.RemovePending(session, pendingId)
+                    : "Remove not applied: no queued item was specified. Nothing was removed.";
+                break;
             case "rename": if (!string.IsNullOrEmpty(command.Text)) { session.Title = command.Text; _store.Save(); } break;
             case "model": session.Choices.Model = command.Model; session.Choices.ModelProvider = command.ModelProvider; session.Choices.ModelProfile = command.ModelProfile; _store.Save(); break;
             case "effort": session.Choices.Effort = command.Effort; _store.Save(); break;
             case "access": session.Choices.Access = command.Access; _store.Save(); break;
         }
+        // Automatic dequeue won the race: the inject completes as a no-op.
+        var completion = "Applied once on home.";
+        if (SessionStore.InjectIsNoOp(failure)) { completion = failure!; failure = null; }
         if (failure is not null)
         {
             _commands.MarkFailed(commandId);
@@ -1925,7 +1934,7 @@ public sealed partial class DeviceSyncService : IDisposable
             return;
         }
         _commands.MarkCompleted(commandId);
-        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
+        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", completion, envelope.Epoch);
         await SendTranscriptAsync(peer, session);
         }
         finally { if (startsWork) EndExternalWork(); }
@@ -2135,6 +2144,7 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (envelope.CommandID is { } ackId && envelope.SessionID is { } ackSession &&
                     DeviceGlobalID.Parse(ackSession)?.Home == peerHome && envelope.Payload is not null)
                 {
+                    if (AckReceivedForTest is { } observe) observe(ackId, DeviceJson.Decode<DeviceAckPayload>(envelope.Payload));
                     var record = _outbox.Records.FirstOrDefault(r => r.CommandID == ackId);
                     if (record is null || record.SessionID != ackSession) break;
                     if (envelope.Epoch is null || (envelope.Epoch != record.Epoch && RemoteLeases.GetValueOrDefault(ackSession) != envelope.Epoch)) break;
@@ -2329,7 +2339,10 @@ public sealed partial class DeviceSyncService : IDisposable
         RemoteLeases.Remove(globalId);
     }
 
-    private static readonly HashSet<string> QueueActions = new() { "inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue" };
+    private static readonly HashSet<string> QueueActions = new() { "inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue", "removeQueued" };
+    public const string QueueRemoveCapability = "queue-remove-v1";
+    public bool CanRemoveQueuedRemote(string globalId) =>
+        DeviceGlobalID.Parse(globalId) is { } id && PeerForHome(id.Home)?.Hello?.Capabilities.Contains(QueueRemoveCapability) == true;
 
     // Mac parity: the outstanding queue intent feeds the Injecting label and
     // the double-press guard below. Falls back to the newest queue record so
@@ -2346,6 +2359,9 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         if (RemoteTranscripts.GetValueOrDefault(globalId)?.Engine == "parking" || Homes.Values.SelectMany(h => h.Rows).Any(r => r.GlobalID == globalId && r.Engine == "parking"))
         { LastOutcome = "Parking Lots are read only on Group viewers."; return null; }
+        // Older homes only know Clear queue; never send them a single removal.
+        if (command.Action == "removeQueued" && !CanRemoveQueuedRemote(globalId))
+        { LastOutcome = "Update the home device to remove one queued message."; return null; }
         var parsed = DeviceGlobalID.Parse(globalId);
         if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before sending."; return null; }

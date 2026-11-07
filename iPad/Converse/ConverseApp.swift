@@ -476,15 +476,8 @@ struct PadPane: View {
             }
             if let request = snapshot?.requests.first { PadRequest(id: id, request: request).disabled(!model.canControl(id)) }
             if let snapshot, !snapshot.pending.isEmpty {
-                VStack(spacing: 4) {
-                    HStack {
-                        Text("\(snapshot.pending.count) queued"); Spacer()
-                        Button(snapshot.queuePaused ? "Resume" : "Pause") { command(snapshot.queuePaused ? "resumeQueue" : "pauseQueue") }
-                        if snapshot.pending.count > 1 { Button("Inject all") { command("injectAll") } }
-                        Button("Clear") { command("clearQueue") }
-                    }
-                    ForEach(snapshot.pending) { item in HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
-                }.font(.caption).padding(8).background(Color.blue.opacity(0.06)).disabled(!model.canControl(id))
+                PadQueue(pending: snapshot.pending, paused: snapshot.queuePaused, canRemove: service.canRemoveQueuedRemote(id)) { service.sendRemoteCommand(globalID: id, command: $0) }
+                    .disabled(!model.canControl(id))
             }
             if let conflict = service.draftConflicts[id] {
                 Text(conflict).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.15))
@@ -627,6 +620,41 @@ struct PadPane: View {
 
 }
 
+// Queued input on the home. Per-item Remove appears only when the home
+// advertises queue-remove-v1; older homes keep Clear all. Inline buttons,
+// not a context menu: the queue updates live under the pointer.
+struct PadQueue: View {
+    struct Action: Identifiable { let label: String; let command: DeviceCommandPayload; var id: String { label } }
+    static let clearAll = "Clear all"
+    let pending: [DevicePendingDTO]
+    let paused: Bool
+    let canRemove: Bool
+    let send: (DeviceCommandPayload) -> Void
+    var bulkActions: [Action] {
+        [Action(label: paused ? "Resume" : "Pause", command: DeviceCommandPayload(action: paused ? "resumeQueue" : "pauseQueue"))]
+            + (pending.count > 1 ? [Action(label: "Inject all", command: DeviceCommandPayload(action: "injectAll"))] : [])
+            + [Action(label: Self.clearAll, command: DeviceCommandPayload(action: "clearQueue"))]
+    }
+    func itemActions(_ item: DevicePendingDTO) -> [Action] {
+        [Action(label: "Inject now", command: DeviceCommandPayload(action: "inject", pendingID: item.id))]
+            + (canRemove ? [Action(label: "Remove", command: DeviceCommandPayload(action: "removeQueued", pendingID: item.id))] : [])
+    }
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text("\(pending.count) queued"); Spacer()
+                ForEach(bulkActions) { action in Button(action.label) { send(action.command) } }
+            }
+            ForEach(pending) { item in
+                HStack {
+                    Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1)
+                    Spacer()
+                    ForEach(itemActions(item)) { action in Button(action.label, role: action.command.action == "removeQueued" ? .destructive : nil) { send(action.command) } }
+                }
+            }
+        }.font(.caption).padding(8).background(Color.blue.opacity(0.06))
+    }
+}
 
 // A snapshot-backed sheet keeps actions stationary while sidebar/status updates
 // arrive. Native context menus rebuilt from live row text can move under a pointer.

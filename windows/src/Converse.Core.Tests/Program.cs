@@ -305,6 +305,26 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     finally { Cleanup(root); }
 }
 
+// Remove one queued message never takes the prompt an inject is starting.
+{
+    var root = Directory.CreateTempSubdirectory("converse-remove-").FullName;
+    try
+    {
+        var store = new SessionStore(root, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        var starting = new PendingPrompt { Text = "starting" };
+        var later = new PendingPrompt { Text = "later" };
+        session.QueuePaused = true;
+        session.Pending.AddRange(new[] { starting, later });
+        session.Interrupted = true; session.ResumeAfterInterrupt = true;
+        Check(store.RemovePending(session, starting.Id)?.Contains("already starting") == true && session.Pending.Count == 2,
+            "Remove refuses the queued message an inject is already starting");
+        Check(store.RemovePending(session, later.Id) is null && session.Pending.Single().Id == starting.Id && session.Interrupted,
+            "Remove takes another queued message without touching the interrupt");
+    }
+    finally { Cleanup(root); }
+}
+
 // Loopback device service: pair, take, rename, bound ack over real TCP.
 {
     var homeRoot = Directory.CreateTempSubdirectory("converse-home-").FullName;
@@ -397,6 +417,70 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Drain refuses new submit work without queueing");
         if (drainSubmit is not null) viewer.DiscardOutbox(drainSubmit.Value);
         home.SetAcceptingWork(true);
+        // Remove one queued message (queue-remove-v1): exactly that entry
+        // leaves; the others keep order and provenance; retries never reapply.
+        Check(Link(viewer, home.DeviceId)?.Hello?.Capabilities.Contains(DeviceSyncService.QueueRemoveCapability) == true && viewer.CanRemoveQueuedRemote(gid),
+            "Core home advertises single queued-message removal");
+        var keepFirst = new PendingPrompt { Text = "keep first", Hop = 2, OriginGroupID = "group-a", OriginHomeID = "peer-home", AgentRunReserved = true, Autonomous = true };
+        var dropMiddle = new PendingPrompt { Text = "drop middle", Hop = 1 };
+        var keepLast = new PendingPrompt { Text = "part one\n\npart two", ComponentIDs = new() { Guid.NewGuid(), Guid.NewGuid() } };
+        var savedObligations = homeSession.SwitchboardObligations;
+        homeSession.SwitchboardObligations = new()
+        {
+            new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/one", SourceName = "Peer", PromptID = dropMiddle.Id },
+            new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/two", SourceName = "Peer", PromptID = keepFirst.Id },
+        };
+        string ObligationState() => string.Join("|", homeSession.SwitchboardObligations.Select(o => $"{o.Id} {o.PromptID} {o.State} {o.FinishedAt is null}"));
+        var obligationsBefore = ObligationState();
+        homeSession.QueuePaused = true;
+        homeSession.Pending.Clear();
+        homeSession.Pending.AddRange(new[] { keepFirst, dropMiddle, keepLast });
+        homeStore.Save();
+        // Saving a queue edit does not push a transcript; the Remove command's own
+        // snapshot is what refreshes the viewer below.
+        Check(homeSession.Pending.Count == 3 && !homeSession.Busy, "Remove fixture holds three queued messages on an idle, paused home");
+        var leaseEpoch = viewer.RemoteLeases[gid];
+        Task RawRemove(Guid commandId, Guid? pendingId, ulong epoch) => viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+        { Kind = DeviceKind.Command, SessionID = gid, CommandID = commandId, Epoch = epoch, Payload = DeviceJson.Encode(new DeviceCommandPayload { Action = "removeQueued", PendingID = pendingId }) });
+        await RawRemove(Guid.NewGuid(), dropMiddle.Id, 0);
+        await RawRemove(Guid.NewGuid(), dropMiddle.Id, leaseEpoch + 99);
+        await Task.Delay(300);
+        Check(homeSession.Pending.Count == 3, "Single removal requires the current display lease; it has no lease-free exemption");
+        var removeId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = dropMiddle.Id });
+        Check(removeId is not null && await Until(() => viewer.Unresolved(gid).All(r => r.CommandID != removeId)
+            && viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Pending.Select(p => p.Id).SequenceEqual(new[] { keepFirst.Id, keepLast.Id }) == true),
+            "A leased viewer removes exactly one of three queued messages and its queue refreshes in order");
+        Check(homeSession.Pending.Select(p => p.Id).SequenceEqual(new[] { keepFirst.Id, keepLast.Id })
+            && homeSession.Pending[0] is { Hop: 2, OriginGroupID: "group-a", OriginHomeID: "peer-home", AgentRunReserved: true, Autonomous: true }
+            && homeSession.Pending[1].ComponentIDs!.SequenceEqual(keepLast.ComponentIDs!),
+            "Remaining queued messages keep their hop, origin, reservation and merged components");
+        var archived = File.ReadAllText(Path.Combine(homeRoot, "sessions.json"));
+        Check(!archived.Contains("drop middle") && archived.Contains("keep first"), "Single removal is saved to the home archive");
+        Check(ObligationState() == obligationsBefore, "Single removal leaves switchboard obligations exactly as Clear queue does");
+        var duplicateId = Guid.NewGuid();
+        await RawRemove(duplicateId, keepLast.Id, leaseEpoch);
+        Check(await Until(() => homeSession.Pending.Count == 1), "Raw Remove applies with the current lease");
+        homeSession.Pending.Add(new PendingPrompt { Id = keepLast.Id, Text = "requeued with the same ID" });
+        await RawRemove(duplicateId, keepLast.Id, leaseEpoch);
+        await Task.Delay(300);
+        Check(homeSession.Pending.Count == 2 && homeSession.Pending[1].Text == "requeued with the same ID", "A duplicate Remove command ID is never applied twice");
+        var staleRemove = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = dropMiddle.Id });
+        Check(staleRemove is not null && await Until(() => viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == staleRemove) is { Outcome: "failed" } r
+            && r.Detail == SessionStore.QueuedMessageGone) && homeSession.Pending.Count == 2,
+            "Removing an already-started or removed message fails clearly without side effects");
+        if (staleRemove is not null) viewer.DiscardOutbox(staleRemove.Value);
+        var homeLink = Link(viewer, home.DeviceId)!;
+        var homeCapabilities = homeLink.Hello!.Capabilities;
+        homeLink.Hello.Capabilities = homeCapabilities.Where(c => c != DeviceSyncService.QueueRemoveCapability).ToArray();
+        var oldHomeRemove = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = keepFirst.Id });
+        Check(oldHomeRemove is null && !viewer.CanRemoveQueuedRemote(gid) && !viewer.Unresolved(gid).Any(r => r.Payload.Action == "removeQueued") && homeSession.Pending.Count == 2,
+            "An older home without queue-remove-v1 is never sent a single removal");
+        homeLink.Hello.Capabilities = homeCapabilities;
+        homeSession.Pending.Clear();
+        Check(ObligationState() == obligationsBefore, "Clear queue leaves the same obligations a single removal leaves");
+        homeSession.SwitchboardObligations = savedObligations;
+        homeSession.QueuePaused = false;
+        homeStore.Save();
         homeSession.Title = "Renamed on home while viewed remotely";
         homeSession.Draft = "keep this draft";
         homeStore.Save();
@@ -550,10 +634,17 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     var viewerRoot = Directory.CreateTempSubdirectory("converse-injviewer-").FullName;
     try
     {
-        var homeStore = new SessionStore(homeRoot, new FakeRunner());
+        var homeRunner = new FakeRunner();
+        var homeStore = new SessionStore(homeRoot, homeRunner);
         var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "codex"));
         using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        var acks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload Ack)>();
+        viewer.AckReceivedForTest += (id, ack) => acks.Enqueue((id, ack));
+        DeviceAckPayload? LastAck(Guid? id) => acks.LastOrDefault(a => a.Id == id).Ack;
+        Peer? Link(DeviceSyncService from, string to) =>
+            ((Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(from)!)
+                .Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == to);
         home.PairingConfirmation = _ => Task.FromResult(true);
         viewer.PairingConfirmation = _ => Task.FromResult(true);
         await home.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
@@ -568,11 +659,49 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Inject loopback pairing publishes home sidebar");
         await viewer.AcquireRemoteAsync(gid);
         Check(await Until(() => viewer.RemoteLeases.ContainsKey(gid)), "Inject loopback take holds a lease");
-        var failed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
-        Check(failed is not null && await Until(() => viewer.Unresolved(gid)
-            .Any(r => r.CommandID == failed && r.Outcome == "failed" && (r.Detail ?? "").Contains("already empty"))),
-            "Remote inject on an empty queue fails honestly");
-        viewer.DiscardOutbox(failed!.Value);
+        var empty = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(empty is not null && await Until(() => LastAck(empty) is { Outcome: "completed", Detail: SessionStore.InjectNothingQueued }
+            && viewer.Unresolved(gid).All(r => r.CommandID != empty)) && !homeSession.Messages.Any(m => m.Role == "notice"),
+            "Remote inject on an empty queue completes as a quiet no-op");
+        // Automatic dequeue wins the race: the last queued prompt starts just
+        // before Inject all arrives. Nothing is interrupted, resent or noted.
+        homeRunner.Gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var last = new PendingPrompt { Text = "last queued" };
+        homeSession.Pending.Add(last);
+        homeStore.RunNext(homeSession);
+        Check(await Until(() => homeSession.Busy && homeSession.Pending.Count == 0 && homeRunner.Prompts.Count == 1),
+            "Race fixture: automatic dequeue started the last queued prompt");
+        var messagesBefore = homeSession.Messages.Select(m => m.Id).ToList();
+        var race = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(race is not null && await Until(() => LastAck(race) is { Outcome: "completed", Detail: SessionStore.InjectNothingQueued }
+            && viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Pending.Count == 0 && viewer.Unresolved(gid).All(r => r.CommandID != race)),
+            "Inject all after automatic dequeue completes as a quiet no-op and refreshes the viewer's queue");
+        Check(homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && homeSession.Busy && !homeSession.Interrupted
+            && !homeSession.ResumeAfterInterrupt && homeRunner.Prompts.Count == 1,
+            "Inject all on an emptied queue appends no notice, never interrupts the running turn and sends nothing again");
+        await viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+        { Kind = DeviceKind.Command, SessionID = gid, CommandID = race, Epoch = viewer.RemoteLeases[gid], Payload = DeviceJson.Encode(new DeviceCommandPayload { Action = "injectAll" }) });
+        Check(await Until(() => acks.Count(a => a.Id == race) == 2) && LastAck(race) is { Outcome: "completed", Detail: "Already recorded on home." }
+            && home.CommandReceipts.Count(r => r.Id == race && r.Outcome == "completed") == 1
+            && homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && !homeSession.Interrupted && homeRunner.Prompts.Count == 1,
+            "A duplicate no-op Inject all command ID is answered from its receipt, never applied twice");
+        var started = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "inject", PendingID = last.Id });
+        Check(started is not null && await Until(() => LastAck(started) is { Outcome: "completed", Detail: SessionStore.InjectItemGone }
+            && viewer.Unresolved(gid).All(r => r.CommandID != started))
+            && homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && !homeSession.Interrupted && homeRunner.Prompts.Count == 1,
+            "Inject now for a message that already started reports it is gone without a notice or interrupt");
+        homeRunner.Gate.SetResult(true);
+        Check(await Until(() => !homeSession.Busy), "Race fixture turn finishes once released");
+        homeRunner.Gate = null;
+        // Inject all with items still queued keeps merging and running them.
+        homeSession.QueuePaused = true;
+        homeSession.Pending.AddRange(new[] { new PendingPrompt { Text = "merge a" }, new PendingPrompt { Text = "merge b" } });
+        homeStore.Save();
+        var merge = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(merge is not null && await Until(() => LastAck(merge) is { Outcome: "completed", Detail: "Applied once on home." }
+            && viewer.Unresolved(gid).All(r => r.CommandID != merge)
+            && homeRunner.Prompts.LastOrDefault() == "merge a\n\nmerge b" && !homeSession.Busy && homeSession.Pending.Count == 0),
+            "Inject all with queued items still merges them into one turn");
         // Both sends start before either ack returns: the second must reuse
         // the outstanding command instead of sending a duplicate interrupt.
         var first = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
@@ -1141,12 +1270,13 @@ MdnsChecks.RunGroupDevices(Check);
             && merged.Messages.First(m => m.Role == "user").Text == "alpha\n\nbeta",
             "Inject-all merges the queue into one prompt (Mac parity)");
         var honest = mergeStore.Create(mergeStore.Entries.First(e => e.Engine == "codex"));
-        Check(mergeStore.InjectPending(honest) is string emptyFail && emptyFail.Length > 0 && honest.Pending.Count == 0,
-            "Inject on an empty queue reports honestly instead of going silent");
+        var honestMessages = honest.Messages.Count;
+        Check(mergeStore.InjectPending(honest) == SessionStore.InjectNothingQueued && honest.Pending.Count == 0 && honest.Messages.Count == honestMessages,
+            "Inject on an empty queue reports a quiet no-op instead of going silent");
         honest.Pending.Add(new Converse.Core.PendingPrompt { Text = "kept" });
-        Check(mergeStore.InjectPending(honest, Guid.NewGuid()) is string missingFail && missingFail.Length > 0
-            && honest.Pending.Count == 1 && honest.Pending[0].Text == "kept",
-            "Inject of a missing queued item reports honestly and keeps the queue");
+        Check(mergeStore.InjectPending(honest, Guid.NewGuid()) == SessionStore.InjectItemGone
+            && honest.Pending.Count == 1 && honest.Pending[0].Text == "kept" && honest.Messages.Count == honestMessages,
+            "Inject of a missing queued item reports it is gone and keeps the queue");
     }
     finally { Cleanup(root); }
 }

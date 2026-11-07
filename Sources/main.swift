@@ -586,6 +586,11 @@ final class Store: ObservableObject {
         }
         send(s)
     }
+    static let injectNothingQueued = "Queue already empty; nothing to inject."
+    static let injectItemGone = "That message already started or was removed. Nothing was injected."
+    /// Automatic dequeue can win the race with an inject request. These
+    /// results are quiet no-ops, not failures: no notice, no interrupt.
+    static func injectIsNoOp(_ result: String?) -> Bool { result == injectNothingQueued || result == injectItemGone }
     @discardableResult
     func injectPending(_ s: Session, id: UUID? = nil) -> String? {
         func refused(_ detail: String) -> String {
@@ -594,9 +599,13 @@ final class Store: ObservableObject {
             }
             saveSoon(); return detail
         }
+        let hadQueue = !s.pending.isEmpty
         sanitizeGroupQueue(s)
         if s.changingSetting { return refused("Inject not applied: a session setting is still changing. Wait for its result, then try again.") }
-        if s.pending.isEmpty { return refused("Inject not applied: the queue is already empty. Nothing was sent.") }
+        if s.pending.isEmpty {
+            if hadQueue { return refused("Inject not applied: the queued group messages were discarded because their senders are no longer in this group. Nothing was sent.") }
+            return id == nil ? Store.injectNothingQueued : Store.injectItemGone
+        }
         if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID != nil {
             guard (id == nil && s.injectionAll) || id == s.injectionTargetID else {
                 return refused("Inject not applied: another queued prompt is already being injected. Wait for it to start before choosing a different item.")
@@ -604,9 +613,7 @@ final class Store: ObservableObject {
             s.injectionNotice = "Interrupting — your queued prompt is next"; return nil
         }
         if let id {
-            guard let index = s.pending.firstIndex(where: { $0.id == id }) else {
-                return refused("Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.")
-            }
+            guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return Store.injectItemGone }
             let prompt = s.pending.remove(at: index)
             s.pending.insert(prompt, at: 0)
         } else {
