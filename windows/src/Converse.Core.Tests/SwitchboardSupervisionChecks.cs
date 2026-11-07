@@ -252,6 +252,39 @@ static class SwitchboardSupervisionChecks
                 "Without components a markerless merge is ambiguous with a multi-paragraph tell and still collapses whole, as before");
             check(SwitchboardPresentation.QueueSummary(markerless, valid) is null && SwitchboardPresentation.QueueSummary(markerless, new List<MessageComponent> { valid[0] }) is null,
                 "Queue rows with recorded parts, valid or not, never summarize over the typed text");
+            // Metadata-only changes: the same text with different parts renders
+            // differently, so every render cache key (Windows SameLine, queue
+            // banner signature) must change with them.
+            var trafficToHuman = new List<MessageComponent> { new() { Offset = valid[0].Offset, Length = valid[0].Length, Kind = "human" }, valid[1] };
+            var partStates = new List<(string Name, List<MessageComponent>? Parts)> {
+                ("absent", null), ("valid", valid), ("invalid", new() { valid[0] }), ("empty", new()), ("traffic→human", trafficToHuman), ("reordered", new() { valid[1], valid[0] }) };
+            bool TypedVisible(IReadOnlyList<MessageComponent>? parts) => SwitchboardPresentation.Segments(markerless, parts)?.Any(s => s.Summary is null && s.Text.Contains(humanText)) == true;
+            string Rendered(IReadOnlyList<MessageComponent>? parts) => string.Join("|", (SwitchboardPresentation.Segments(markerless, parts)
+                ?? new List<TranscriptSegment> { new(markerless, SwitchboardPresentation.Summary(markerless)) }).Select(s => s.Summary ?? s.Text));
+            check(partStates.Select(s => TypedVisible(s.Parts)).SequenceEqual(new[] { false, true, true, true, true, true })
+                && Rendered(null) != Rendered(valid) && Rendered(valid) != Rendered(partStates[2].Parts) && Rendered(valid) != Rendered(trafficToHuman)
+                && SwitchboardPresentation.Segments(markerless, trafficToHuman) is [{ Summary: null } asHuman] && asHuman.Text == markerless,
+                "Same text, different parts: absent collapses; valid, invalid, empty, traffic→human and reordered parts render the typed prompt in full");
+            var queueId = Guid.NewGuid();
+            var distinct = true;
+            for (var i = 0; i < partStates.Count; i++)
+                for (var j = 0; j < partStates.Count; j++)
+                    if (i != j && (SwitchboardPresentation.SameComponents(partStates[i].Parts, partStates[j].Parts)
+                        || SwitchboardPresentation.ComponentsKey(partStates[i].Parts) == SwitchboardPresentation.ComponentsKey(partStates[j].Parts)
+                        || SwitchboardPresentation.QueueSignature(queueId, markerless, partStates[i].Parts) == SwitchboardPresentation.QueueSignature(queueId, markerless, partStates[j].Parts)))
+                        distinct = false;
+            check(distinct, "Metadata-only changes (absent→valid, valid→invalid, traffic→human, reordered, empty) change the line comparison and the queue banner signature");
+            var copy = SwitchboardPresentation.Snapshot(valid)!;
+            check(SwitchboardPresentation.SameComponents(valid, copy) && SwitchboardPresentation.QueueSignature(queueId, markerless, valid) == SwitchboardPresentation.QueueSignature(queueId, markerless, copy)
+                && SwitchboardPresentation.SameComponents(null, null) && !ReferenceEquals(copy, valid) && !ReferenceEquals(copy[0], valid[0]),
+                "Equal parts keep the cached line and banner; a cached snapshot is a detached copy");
+            var nullKind = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[],\"components\":[{\"offset\":0,\"length\":1,\"kind\":null}]}"));
+            check(SwitchboardPresentation.ComponentsKey(nullKind.Components) == "[0,1,0:]" && SwitchboardPresentation.Snapshot(nullKind.Components) is [{ Kind: null }],
+                "A part with a null kind from the wire keys and snapshots without throwing");
+            copy[0].Kind = "human";
+            check(!SwitchboardPresentation.SameComponents(valid, copy) && valid[0].Kind == "traffic", "Mutating a part in place is seen against the cached snapshot");
+            check(SwitchboardPresentation.QueueSummary(markerless, null) is not null && partStates.Skip(1).All(s => SwitchboardPresentation.QueueSummary(markerless, s.Parts) is null),
+                "Queue rows: same text summarizes without parts and shows typed text in full once any parts arrive");
             // Display rewrites carry the parts, or keep the whole visible.
             var crlf = plainTell.Replace("\n", "\r\n") + "\n\n" + humanText;
             var crlfParts = SwitchboardPresentation.Components(new[] { (plainTell.Replace("\n", "\r\n"), "traffic"), (humanText, "human") }, crlf);

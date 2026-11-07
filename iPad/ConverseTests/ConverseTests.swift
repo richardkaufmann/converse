@@ -580,6 +580,39 @@ final class ConverseTests: XCTestCase {
         XCTAssertNil(TranscriptStyle.queueSummary(text, components: invalid.components), "Queue rows never summarize over invalid parts")
         XCTAssertNotNil(TranscriptStyle.queueSummary(text), "Without parts the ambiguous old merge still summarizes as before")
     }
+    // The same message text with different recorded parts renders
+    // differently: the transcript's content signature must change with them.
+    func testComponentsOnlyChangeRerendersTranscript() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let valid = try XCTUnwrap(TranscriptStyle.components(joining: [(tell, "traffic"), (typed, "human")], into: text))
+        let asHuman = [MessageComponent(offset: valid[0].offset, length: valid[0].length, kind: "human"), valid[1]]
+        let id = UUID(), later = DeviceWireMessage(id: UUID(), role: "assistant", text: "Later reply")
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+        var coordinator: PadTranscript.Coordinator?
+        func render(_ parts: [MessageComponent]?) -> [String] {
+            let parent = PadTranscript(messages: [DeviceWireMessage(id: id, role: "user", text: text, components: parts), later], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            if coordinator == nil { coordinator = PadTranscript.Coordinator(parent) }
+            parent.update(view, coordinator: coordinator!)
+            return view.text.components(separatedBy: "\n")
+        }
+        func typedInFull(_ lines: [String]) -> Bool { lines.contains(typed) }
+        func summarized(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("Received tell from Fixture") } }
+        func wholeTell(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("[Converse message from Fixture") } }
+        var lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "Without parts the merge collapses as before")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines) && !wholeTell(lines), "absent→valid re-renders: typed visible, tell summarized")
+        lines = render([valid[0]])
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "valid→invalid re-renders the whole message expanded")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines), "invalid→valid re-renders")
+        lines = render(asHuman)
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "traffic→human re-renders the tell in full")
+        lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "→absent re-renders the legacy collapse")
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)

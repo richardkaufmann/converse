@@ -184,11 +184,11 @@ public sealed partial class ConversationPane : UserControl
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.DisplayedMessages
                 .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList(), m.CreatedAt, m.Components)).ToList();
+                .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList(), m.CreatedAt, SwitchboardPresentation.Snapshot(m.Components))).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes), m.CreatedAt, m.Components)).ToList();
+                .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes), m.CreatedAt, SwitchboardPresentation.Snapshot(m.Components))).ToList();
         if (lines is null) return (new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
@@ -749,7 +749,8 @@ public sealed partial class ConversationPane : UserControl
     // retires by construction the SetText crash class, the seam/tracker
     // bookkeeping, and the backspace hole of the single-document editor.
     private static bool SameLine((string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) a, (string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) b)
-        => a.Role == b.Role && a.Text == b.Text && a.CreatedAt == b.CreatedAt && a.Images.SequenceEqual(b.Images);
+        => a.Role == b.Role && a.Text == b.Text && a.CreatedAt == b.CreatedAt && a.Images.SequenceEqual(b.Images)
+            && SwitchboardPresentation.SameComponents(a.Components, b.Components);
 
 
     private static bool LinesEqual(List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> a, List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> b)
@@ -1704,7 +1705,7 @@ public sealed partial class ConversationPane : UserControl
             pending = transcript.Pending.Select(p => (p.Id, p.Text, p.Components)).ToList();
             paused = transcript.QueuePaused;
         }
-        foreach (var (id, preview, _) in pending) signature.Append($"|q:{id}:{preview.Length}:{preview.GetHashCode()}");
+        foreach (var (id, preview, components) in pending) signature.Append(SwitchboardPresentation.QueueSignature(id, preview, components));
         signature.Append("|paused:").Append(paused);
         var outbox = gid is null ? null : _host.Devices.Unresolved(gid).FirstOrDefault();
         if (outbox is not null) signature.Append($"|out:{outbox.CommandID}:{outbox.Outcome}:{outbox.Detail}");

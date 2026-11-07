@@ -114,6 +114,20 @@ public static class SwitchboardPresentation
         rebuilt.Append(rewrite(source[cursor..]));
         return rebuilt.ToString() == text ? result : ExpandedComponents(text);
     }
+    /// Order-sensitive key for recorded parts (offset, length, kind); null
+    /// and empty differ. Parts alone decide what a message or queue row
+    /// shows, so any cache of one keys on this along with its text.
+    public static string ComponentsKey(IReadOnlyList<MessageComponent>? components) =>
+        components is null ? "-" : "[" + string.Join(";", components.Select(c => $"{c.Offset},{c.Length},{(c.Kind ?? "").Length}:{c.Kind}")) + "]";
+    public static bool SameComponents(IReadOnlyList<MessageComponent>? a, IReadOnlyList<MessageComponent>? b) =>
+        ComponentsKey(a) == ComponentsKey(b);
+    /// A detached copy for a render cache: MessageComponent is mutable, and a
+    /// cached reference would change along with the message it compares to.
+    public static List<MessageComponent>? Snapshot(IReadOnlyList<MessageComponent>? components) =>
+        components?.Select(c => new MessageComponent { Offset = c.Offset, Length = c.Length, Kind = c.Kind }).ToList();
+    /// Queue banner signature for one item: rebuilds when its text or parts change.
+    public static string QueueSignature(Guid id, string text, IReadOnlyList<MessageComponent>? components) =>
+        $"|q:{id}:{text.Length}:{text.GetHashCode()}:{ComponentsKey(components)}";
     /// One-line queue label: a summary only when the whole item is traffic.
     public static string? QueueSummary(string text, IReadOnlyList<MessageComponent>? components = null) =>
         Segments(text, components) is null ? Summary(text, queued: true) : null;

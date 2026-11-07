@@ -390,7 +390,7 @@ struct PadTranscript: UIViewRepresentable {
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
         let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
-        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + TranscriptStyle.componentsKey($0.components) + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
         let contentChanged = signature != c.signature || c.lastDraft != draft
         guard contentChanged || c.textSize != textSize else { return }

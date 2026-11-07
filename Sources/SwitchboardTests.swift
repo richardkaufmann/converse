@@ -143,6 +143,40 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
     check(!fixture.text.string.contains("schemaVersion") && !fixture.text.string.contains(payload), "Turning compression back on collapses existing messages")
     Store.shared.collapseTranscriptPayloads = oldCollapse
 
+    // Metadata-only changes: the same merged text with different recorded
+    // parts renders differently, so the pane's history key (Message equality
+    // and messagesRevision) must re-render it, even before a later message.
+    let tell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message"
+    let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+    let merged = tell + "\n\n" + typed
+    let valid = TranscriptStyle.components(joining: [(tell, "traffic"), (typed, "human")], into: merged) ?? []
+    let asHuman = [MessageComponent(offset: valid[0].offset, length: valid[0].length, kind: "human"), valid[1]]
+    let partsSession = Session(entry: Entry(name: "Parts fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
+    partsSession.messages = [Message(role: "user", text: merged), Message(role: "assistant", text: "Later reply")]
+    let partsPane = PaneTextFixture(partsSession)
+    func shown() -> [Bool] {
+        let lines = partsPane.text.string.components(separatedBy: "\n")
+        return [lines.contains(typed), lines.contains { $0.hasPrefix("Received tell from Fixture") }, partsPane.text.string.contains("[Converse message from Fixture"), lines.contains("Later reply")]
+    }
+    check(shown() == [false, true, false, true], "Merged text without parts collapses whole, as before")
+    let transitions: [(String, [MessageComponent]?, [Bool])] = [
+        ("absent→valid", valid, [true, true, false, true]), ("valid→invalid", [valid[0]], [true, false, true, true]),
+        ("invalid→valid", valid, [true, true, false, true]), ("traffic→human", asHuman, [true, false, true, true]),
+        ("human→traffic", valid, [true, true, false, true]), ("valid→empty", [], [true, false, true, true]), ("→absent", nil, [false, true, false, true])]
+    for (name, parts, expected) in transitions {
+        let before = partsSession.messages[0], revision = partsSession.messagesRevision
+        partsSession.messages[0].components = parts
+        check(partsSession.messages[0] != before && partsSession.messagesRevision != revision && partsSession.messages[0].text == before.text,
+              "\(name): a components-only change invalidates the pane's message key")
+        partsPane.coordinator.render(partsPane.text)
+        check(shown() == expected, "\(name): the pane re-renders the earlier message with the right visibility")
+    }
+    let partStates: [[MessageComponent]?] = [nil, valid, [valid[0]], [], asHuman, [valid[1], valid[0]]]
+    check(Set(partStates.map(TranscriptStyle.componentsKey)).count == partStates.count && TranscriptStyle.componentsKey(valid) == TranscriptStyle.componentsKey(valid.map { $0 }),
+          "Components keys are order-sensitive, tell nil from empty, and change with offset, length and kind")
+    check(TranscriptStyle.queueSummary(merged) != nil && partStates.dropFirst().allSatisfy { TranscriptStyle.queueSummary(merged, components: $0) == nil },
+          "Queue rows: the same text summarizes without parts and shows typed text in full once any parts arrive")
+
     if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
        let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {
         fixture.scroll.cacheDisplay(in: fixture.scroll.bounds, to: bitmap)

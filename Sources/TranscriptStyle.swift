@@ -242,6 +242,13 @@ extension TranscriptStyle {
         rebuilt += rewrite(whole.substring(from: cursor))
         return rebuilt == text ? result : expandedComponents(text)
     }
+    /// Order-sensitive key for recorded parts (offset, length, kind); nil
+    /// and [] differ. Parts alone decide what a message or queue row shows,
+    /// so any cache of one keys on this along with its text.
+    static func componentsKey(_ components: [MessageComponent]?) -> String {
+        guard let components else { return "-" }
+        return "[" + components.map { "\($0.offset),\($0.length),\($0.kind.utf16.count):\($0.kind)" }.joined(separator: ";") + "]"
+    }
     /// One-line queue label: a summary only when the whole item is traffic.
     static func queueSummary(_ text: String, components: [MessageComponent]? = nil) -> String? {
         segments(text, components: components) == nil ? trafficSummary(text, queued: true) : nil
