@@ -397,6 +397,28 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(legacyRecord.CommandID == legacyOutboxId && legacyRecord.PayloadBytes is null && legacyRecord.Outcome == "uncertain" && legacyRecord.Detail == DeviceOutboxRecord.LegacyDetail
             && legacyRecord.Payload.Text == "Old" && new DeviceOutboxStore(legacyRoot).Records.Single().Outcome == "uncertain",
             "An earlier Core version's pending outbox record loads as uncertain with Check home, keeping its ID and content");
+        // Migration must not stop device sync starting when the outbox cannot
+        // be rewritten yet: a directory squats on the atomic-write temp path.
+        var lockedRoot = Path.Combine(root, "locked-outbox");
+        Directory.CreateDirectory(lockedRoot);
+        var lockedId = Guid.NewGuid();
+        var lockedJson = "[{\"CommandID\":\"" + lockedId + "\",\"SessionID\":\"home/s\",\"Payload\":{\"action\":\"rename\",\"text\":\"Locked\",\"blobHashes\":[]},\"PayloadHash\":\"h\",\"Epoch\":3,\"Outcome\":\"pending\",\"Detail\":null}]";
+        File.WriteAllText(Path.Combine(lockedRoot, "device-outbox.json"), lockedJson);
+        var squatter = Path.Combine(lockedRoot, "device-outbox.json.tmp");
+        Directory.CreateDirectory(squatter);
+        DeviceSyncService? lockedService = null;
+        Exception? startError = null;
+        try { lockedService = new DeviceSyncService(lockedRoot, new SessionStore(lockedRoot, new FakeRunner()), "Locked"); }
+        catch (Exception e) { startError = e; }
+        Check(startError is null && lockedService!.Outbox.SingleOrDefault(r => r.CommandID == lockedId) is { Outcome: "uncertain", Detail: DeviceOutboxRecord.LegacyDetail }
+            && File.ReadAllText(Path.Combine(lockedRoot, "device-outbox.json")) == lockedJson,
+            "Core device sync starts with an unwritable outbox, legacy records migrated in memory" + (startError is null ? "" : ": " + startError.Message));
+        Directory.Delete(squatter);
+        lockedService?.DiscardOutbox(Guid.NewGuid());
+        Check(new DeviceOutboxStore(lockedRoot).Records.SingleOrDefault(r => r.CommandID == lockedId) is { Outcome: "uncertain", Detail: DeviceOutboxRecord.LegacyDetail }
+            && File.ReadAllText(Path.Combine(lockedRoot, "device-outbox.json")).Contains("\"Outcome\":\"uncertain\""),
+            "The next normal Core outbox save persists the in-memory migration");
+        lockedService?.Dispose();
     }
     finally { Cleanup(root); }
 }
@@ -837,10 +859,10 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         home.CommandStoreForTest.MarkCompleted(legacyRename);
         var legacyRaw = await BindingAck(legacyRename, legacyJson);
         var legacyPermuted = await BindingAck(legacyRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding L\"}");
-        Check(legacyRaw is { Outcome: "completed", Detail: "Already recorded on home." } && legacyPermuted is { Outcome: "rejected", Detail: "Command ID reused with different content." }
-            && homeSession.Title == "Binding B" && home.CommandReceipts.Single(r => r.Id == legacyRename).HashScheme is null
+        Check(legacyRaw is { Outcome: "completed", Detail: "Already recorded on home." } && legacyPermuted is { Outcome: "uncertain", Detail: DeviceCommandBinding.RawMismatchDetail }
+            && homeSession.Title == "Binding B" && home.CommandReceipts.Single(r => r.Id == legacyRename) is { HashScheme: null, Outcome: "completed" }
             && home.CommandReceipts.Single(r => r.Id == firstRename).HashScheme == DeviceCommandBinding.CanonicalScheme,
-            "A legacy raw Core record matches an identical raw retry and rejects a permuted one without executing it");
+            "A legacy raw Core record matches an identical raw retry; a permuted one is uncertain (check home), never rejected or executed");
         homeSession.Title = titleBefore;
         var started = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "inject", PendingID = last.Id });
         Check(started is not null && await Until(() => LastAck(started) is { Outcome: "completed", Detail: SessionStore.InjectItemGone }
@@ -1329,14 +1351,18 @@ MdnsChecks.RunGroupDevices(Check);
         // never given a new ID; Resend asks home instead.
         var legacyOutbox = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = gid, Payload = new DeviceCommandPayload { Action = "rename", Text = "Old" }, PayloadHash = "h", Epoch = viewer.RemoteLeases[gid] };
         viewer.OutboxStoreForTest.Add(legacyOutbox);
+        var queryAcks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload? Ack)>();
+        viewer.AckReceivedForTest += (id, ack) => queryAcks.Enqueue((id, ack));
         sent.Clear();
         Check(!await viewer.RetryOutboxAsync(legacyOutbox)
             && sent.Any(e => e.Kind == DeviceKind.CommandQuery && e.CommandID == legacyOutbox.CommandID) && !sent.Any(e => e.Kind == DeviceKind.Command)
-            && viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID).Detail is DeviceOutboxRecord.LegacyDetail or "Home record lookup.",
+            && viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID).Detail is DeviceOutboxRecord.LegacyDetail or DeviceCommandBinding.UnrecordedDetail,
             "Resending a legacy Core record queries home under its original ID and sends no re-encoded command");
-        Check(await Until(() => viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID) is { Outcome: "rejected", Detail: "Home record lookup." })
+        Check(await Until(() => viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID) is { Outcome: "rejected", Detail: DeviceCommandBinding.UnrecordedDetail })
             && homeSession.Title != "Old",
             "Home's answer resolves the legacy record: it never reached home, so nothing was applied");
+        Check(queryAcks.Any(q => q.Id == legacyOutbox.CommandID && q.Ack?.Query == true),
+            "Core home marks its status-query answer as a query reply");
         viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");

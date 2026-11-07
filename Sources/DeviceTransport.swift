@@ -192,6 +192,7 @@ final class DeviceSyncService: ObservableObject {
     private var pendingTakes: [String: Date] = [:]
     private var resumeEpochs: [String: UInt64] = [:]
     private var leaseBoots: [String: UInt64] = [:]
+    // Status-query replies report a record; they never revoke the display lease.
     private var pendingUploads: Set<String> = []
     private var recoveredUploads: [String: [String: UInt64]] = [:]
     private var pendingDownloads: Set<String> = []
@@ -976,8 +977,8 @@ extension DeviceSyncService {
         }
         return true
     }
-    private func sendAck(_ peer: DevicePeer, commandID: UUID, sessionID: String?, outcome: String, detail: String? = nil, epoch: UInt64? = nil) {
-        let payload = try? JSONEncoder().encode(DeviceAckPayload(outcome: outcome, detail: detail, epoch: epoch))
+    private func sendAck(_ peer: DevicePeer, commandID: UUID, sessionID: String?, outcome: String, detail: String? = nil, epoch: UInt64? = nil, query: Bool? = nil) {
+        let payload = try? JSONEncoder().encode(DeviceAckPayload(outcome: outcome, detail: detail, epoch: epoch, query: query))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: sessionID, commandID: commandID, epoch: epoch, payload: payload))
     }
     private func executeHomeCommand(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
@@ -1004,6 +1005,8 @@ extension DeviceSyncService {
             guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash ?? "", hashScheme: DeviceCommandBinding.canonicalScheme) else {
                 if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payload: data) {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Already recorded on home.", epoch: envelope.epoch)
+                } else if commandStore.rawBindingUnconfirmed(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "") {
+                    sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: DeviceCommandBinding.rawMismatchDetail, epoch: envelope.epoch)
                 } else {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command ID reused with different content.", epoch: envelope.epoch)
                 }
@@ -1307,7 +1310,8 @@ extension DeviceSyncService {
         case DeviceMessageKind.commandQuery.rawValue:
             if let commandID = envelope.commandID, let commandStore {
                 if let record = commandStore.records[commandID], record.origin != peerHome || record.sessionID != envelope.sessionID { return }
-                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.", epoch: envelope.epoch)
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue,
+                        detail: commandStore.records[commandID] == nil ? DeviceCommandBinding.unrecordedDetail : "Home record lookup.", epoch: envelope.epoch, query: true)
             }
         #endif
         case DeviceMessageKind.commandAck.rawValue:
@@ -1323,7 +1327,10 @@ extension DeviceSyncService {
                 try? outboxStore?.resolve(commandID: commandID, outcome: ack.outcome, detail: ack.detail)
                 outbox = outboxStore?.records ?? outbox
                 if ack.outcome == "completed" { completedCommands.insert(commandID) }
-                if ack.outcome == "rejected" { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
+                // A query answer never costs the lease, however many are in
+                // flight. Older homes don't mark answers; they keep the old
+                // behaviour.
+                if ack.outcome == "rejected" && ack.query != true { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
             }
         #if os(macOS)
         case DeviceMessageKind.blobChunk.rawValue, DeviceMessageKind.blobComplete.rawValue, DeviceMessageKind.blobOffer.rawValue:

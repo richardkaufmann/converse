@@ -155,6 +155,8 @@ public static class DeviceCommandBinding
 {
     public const string RawScheme = "raw";
     public const string CanonicalScheme = "canonical-v1";
+    public const string RawMismatchDetail = "Home already recorded this command ID from an older version and can't confirm the content matches. It may already be applied; check home before sending again.";
+    public const string UnrecordedDetail = "Home has no record of this send, so nothing was applied there.";
     public const int MaxBytes = 4_194_304;
     public const int MaxDepth = 64;
 
@@ -651,6 +653,8 @@ public sealed class DeviceAckPayload
     [JsonPropertyName("outcome")] public string Outcome { get; set; } = "";
     [JsonPropertyName("detail")] public string? Detail { get; set; }
     [JsonPropertyName("epoch")] public ulong? Epoch { get; set; }
+    /// True on a home's answer to a status query. Older homes omit it.
+    [JsonPropertyName("query")] public bool? Query { get; set; }
 }
 
 public sealed class DeviceDraftPayload
