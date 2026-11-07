@@ -6,6 +6,8 @@
 
 Converse is one app for multiple, simultaneous conversations with the providers **Muse, Claude Code, and Codex**. From one pane of glass you can orchestrate projects across multiple systems (Mac, Linux, Windows) with a set of agents overseeing progress.
 
+A key differentiator from other tools is that agents and sessions talk to each other across systems, and use a shared outliner “parking lot” to track bugs, feature requests, and plans. Try it, and please don’t forget to give me a star if you like it!
+
 **Watch the 3-minute demo:** [on YouTube](https://youtu.be/bSWs7vsioNI) (or [download the MP4](https://github.com/richardkaufmann/converse/releases/download/v0.6.3/Converse-hackathon-demo.mp4))
 
 **Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** when App Support asks. After that provider's own sign-in you have a coding session, an agent and a Parking Lot ready to go. No Meta API key is needed to start; it only adds Muse Spark API agents, scoreboard art, voice and the image tools. [First launch](#first-launch) walks through it.
@@ -51,7 +53,7 @@ Please file bugs and suggestions through the support agent. Your agent will talk
 
 **On Windows:** use a Windows preview supplied by the project, or build the Windows app from source. There is not yet a general-purpose Windows installer. The [Windows build instructions](windows/README.md#build-and-test-on-the-windows-box) are for developers, not a required step for someone who already has a preview.
 
-**On iPhone or iPad:** There is no public testing link at present. If you have an Apple Developer account, you can build from the source with a Mac coding session. I haven't figured out a real distribution channel for those not willing to cough up $100/year for a developer account.
+The iPhone and iPad apps are in TestFlight (reach out if you want access as a beta tester), or you can build them yourself from source using your own developer account.
 
 Coding sessions have scrubbed this repo for security issues, but please do read those [security posture notes](#security-and-privacy) in this README. Better yet, have your agent pound away on it and have it reach out with issues...
 
