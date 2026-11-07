@@ -908,6 +908,51 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(messages[0].text, "Prompt" + tail)
         }
     }
+    func testDraftImageKeyboardDeletionAndMenusProtectHistory() throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: "test-home", session: UUID()).string
+        service.remoteLeases[id] = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 160, height: 100)).image { context in
+            UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 160, height: 100))
+        }
+        let file = service.storageFolder.appendingPathComponent("keyboard-draft-preview.png")
+        try XCTUnwrap(image.pngData()).write(to: file)
+        let historical = DeviceWireMessage(id: UUID(), role: "assistant", text: "Keep history", imageHashes: ["one"])
+        for scenario in ["tail", "delegate", "attachment", "selected", "mixed", "text", "history", "read-only"] {
+            model.state.drafts[id] = PadDraft(text: "Keep text", hashes: ["one", "two"], dirty: true)
+            var parent = PadTranscript(messages: [historical], draft: model.draft(id).text, images: ["one": file, "two": file], draftImageHashes: model.draft(id).hashes, editable: true, lineNumbers: true, edit: { model.edit(id, text: $0) }, send: { XCTFail("Deleting never sends") }, attach: { _ in }, removeImage: { model.removeImage(id, hash: $0) })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+            parent.update(view, coordinator: coordinator)
+            let first = try XCTUnwrap(view.draftImages.first), last = try XCTUnwrap(view.draftImages.last)
+            let history = view.textStorage.attributedSubstring(from: NSRange(location: 0, length: first.location)).string
+            XCTAssertEqual(coordinator.imageMenuActions(view, range: NSRange(location: last.location, length: 1)).map(\.title), ["Remove image from draft"])
+            XCTAssertTrue(coordinator.imageMenuActions(view, range: NSRange(location: first.location - 2, length: 1)).isEmpty)
+            switch scenario {
+            case "text": view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+            case "tail", "delegate": view.selectedRange = NSRange(location: view.historyLength, length: 0)
+            case "attachment": view.selectedRange = NSRange(location: last.location + 1, length: 0)
+            case "selected": view.selectedRange = NSRange(location: last.location, length: 1)
+            case "mixed": view.selectedRange = NSRange(location: last.location, length: view.historyLength + 4 - last.location)
+            case "history": view.selectedRange = NSRange(location: first.location - 1, length: view.historyLength - first.location + 1)
+            default:
+                parent.editable = false; parent.update(view, coordinator: coordinator)
+                XCTAssertTrue(coordinator.imageMenuActions(view, range: NSRange(location: last.location, length: 1)).isEmpty)
+                view.selectedRange = NSRange(location: view.historyLength, length: 0)
+            }
+            if scenario == "delegate" {
+                XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: view.historyLength - 1, length: 1), replacementText: ""))
+            } else { view.deleteBackward() }
+            let expected = ["text", "history", "read-only"].contains(scenario) ? ["one", "two"] : ["one"]
+            XCTAssertEqual(model.draft(id).hashes, expected, scenario)
+            XCTAssertEqual(model.draft(id).text, scenario == "mixed" ? " text" : scenario == "text" ? "Keep tex" : "Keep text", scenario)
+            parent.draft = model.draft(id).text; parent.draftImageHashes = model.draft(id).hashes
+            parent.update(view, coordinator: coordinator)
+            XCTAssertEqual(view.textStorage.attributedSubstring(from: NSRange(location: 0, length: first.location)).string, history, scenario)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Never delete the image file used by history")
+        }
+    }
+
     func testDraftImageRemoveButtonPreservesHistoryAndText() throws {
         let service = try service(), model = PadModel(service: service)
         let id = DeviceGlobalID(home: "test-home", session: UUID()).string

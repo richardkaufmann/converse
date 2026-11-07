@@ -543,7 +543,6 @@ struct PadPane: View {
                 if !model.draft(id).hashes.isEmpty {
                     Button { imageToolsHash = nil; imageTools = true } label: { Image(systemName: "wand.and.stars") }.accessibilityLabel("Image tools")
                     Text("\(model.draft(id).hashes.count) images").font(.caption)
-                    Button("Clear images") { model.clearImages(id) }.font(.caption)
                 }
                 Spacer()
                 if snapshot?.busy == true { Button("Stop") { command("stop") } }

@@ -238,6 +238,7 @@ final class PadModel: ObservableObject {
         return true
     }
     func clearImages(_ id: String) {
+        guard canControl(id) else { return }
         var draft = draft(id); draft.hashes = []; draft.dirty = true; state.drafts[id] = draft; persist(); flush(id)
     }
     func removeImage(_ id: String, hash: String) {
