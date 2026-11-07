@@ -90,6 +90,45 @@ final class TailTextView: UITextView {
         }
         setNeedsLayout()
     }
+    // Draft attachments precede the editable text tail, but are not history.
+    // Delete through the model so an echoed snapshot cannot restore the image.
+    @discardableResult func deleteDraftImages(in range: NSRange) -> Bool {
+        guard isEditable, let coordinator = delegate as? PadTranscript.Coordinator,
+              !coordinator.updating, coordinator.parent.editable,
+              let first = draftImages.first, range.location >= first.location,
+              range.location < historyLength, range.length > 0,
+              range.location <= textStorage.length,
+              range.length <= textStorage.length - range.location else { return false }
+        let end = range.location + range.length
+        let removed = draftImages.filter {
+            ($0.location >= range.location && $0.location < end) ||
+            (range.length == 1 && range.location == $0.location + 1)
+        }
+        guard !removed.isEmpty else { return false }
+        // Backspace at the beginning of the text hits the attachment's newline.
+        // Removing an image must never edit a submitted message with the same hash.
+        selectedRange = NSRange(location: historyLength, length: 0)
+        if end > historyLength {
+            let draft = (textStorage.string as NSString).substring(from: historyLength) as NSString
+            coordinator.parent.edit(draft.replacingCharacters(in: NSRange(location: 0, length: end - historyLength), with: ""))
+        }
+        for image in removed { coordinator.parent.removeImage(image.hash) }
+        return true
+    }
+    override func deleteBackward() {
+        guard isEditable else { return }
+        let range = selectedRange
+        if range.length > 0 {
+            if deleteDraftImages(in: range) { return }
+        } else if range.location > 0, range.location != NSNotFound,
+                  deleteDraftImages(in: NSRange(location: range.location - 1, length: 1)) { return }
+        // UIKit's direct deleteBackward path can bypass shouldChangeTextIn.
+        // Keep the same history boundary for keyboard and delegate edits.
+        if range.location < historyLength || (range.length == 0 && range.location == historyLength) {
+            focusDraft(); return
+        }
+        super.deleteBackward()
+    }
     private func layoutDraftImageButtons() {
         guard !draftImageButtons.isEmpty else { return }
         layoutManager.ensureLayout(for: textContainer)
@@ -231,6 +270,11 @@ final class TailTextView: UITextView {
     override func replace(_ range: UITextRange, withText text: String) {
         guard isEditable else { return }
         if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
+        if text.isEmpty {
+            let start = offset(from: beginningOfDocument, to: range.start)
+            let length = offset(from: range.start, to: range.end)
+            if deleteDraftImages(in: NSRange(location: start, length: length)) { return }
+        }
         if offset(from: beginningOfDocument, to: range.start) < historyLength {
             focusDraft()
             if !text.isEmpty { insertText(text) }; return
@@ -583,13 +627,27 @@ struct PadTranscript: UIViewRepresentable {
                 self.parent.imageTools?(hash, bytes)
             }
         }
+        func imageMenuActions(_ textView: UITextView, range: NSRange) -> [UIAction] {
+            var actions = [UIAction]()
+            if let tools = imageToolsAction(textView, range: range) { actions.append(tools) }
+            if parent.editable, textView.isEditable, let tail = textView as? TailTextView,
+               let image = tail.draftImages.first(where: { $0.location == range.location }) {
+                actions.append(UIAction(title: "Remove image from draft", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                    guard let self, self.parent.editable else { return }
+                    self.parent.removeImage(image.hash)
+                })
+            }
+            return actions
+        }
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
-            guard let action = imageToolsAction(textView, range: range) else { return nil }
-            return UIMenu(children: [action] + suggestedActions)
+            let actions = imageMenuActions(textView, range: range)
+            guard !actions.isEmpty else { return nil }
+            return UIMenu(children: actions + suggestedActions)
         }
         func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
-            guard let action = imageToolsAction(textView, range: textItem.range) else { return nil }
-            return UITextItem.MenuConfiguration(menu: UIMenu(children: [action] + defaultMenu.children))
+            let actions = imageMenuActions(textView, range: textItem.range)
+            guard !actions.isEmpty else { return nil }
+            return UITextItem.MenuConfiguration(menu: UIMenu(children: actions + defaultMenu.children))
         }
         func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
             guard URL.scheme == "converse-traffic" else { return true }
@@ -649,6 +707,7 @@ struct PadTranscript: UIViewRepresentable {
         init(_ parent: PadTranscript) { self.parent = parent }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             guard !updating, parent.editable, view.isEditable else { return false }
+            if text.isEmpty, let tail = view as? TailTextView, tail.deleteDraftImages(in: range) { return false }
             guard range.location >= historyLength else {
                 if let tail = view as? TailTextView {
                     tail.focusDraft()
