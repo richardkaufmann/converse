@@ -79,6 +79,27 @@ class HelpContentTests(unittest.TestCase):
         with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
             self.assertEqual(generator.source_commit(root), 'unknown')
 
+    def test_readme_scoreboard_and_caption_are_excluded_from_help(self):
+        source = (root / 'README.md').read_text()
+        self.assertIn('docs/converse-status.jpg', source)
+        book = generator.build_book(source)
+        markdown = '\n'.join(topic['markdown'] for topic in book['topics'])
+        plain = '\n'.join(topic['plainText'] for topic in book['topics'])
+        for rendered in (markdown, plain):
+            self.assertNotIn('converse-status.jpg', rendered)
+            self.assertNotIn("Muse's pictoral representation", rendered)
+            self.assertNotIn('readme-only:', rendered)
+            self.assertIn('It talks to the outside world.', rendered)
+            self.assertIn('It has polish.', rendered)
+
+    def test_readme_only_blocks_preserve_surrounding_prose_and_code_examples(self):
+        source = '# App\nBefore\n<!-- readme-only:start -->\n![Art](docs/art.jpg)\n\n*Caption*\n<!-- readme-only:end -->\nAfter\n```html\n<!-- readme-only:start -->\nExample\n<!-- readme-only:end -->\n```\n'
+        markdown = generator.build_book(source)['topics'][0]['markdown']
+        self.assertNotIn('docs/art.jpg', markdown)
+        self.assertNotIn('*Caption*', markdown)
+        self.assertIn('Before\nAfter', markdown)
+        self.assertIn('<!-- readme-only:start -->\nExample', markdown)
+
     def test_help_builds_on_a_machine_without_git(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

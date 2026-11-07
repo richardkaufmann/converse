@@ -240,45 +240,96 @@ enum AgentDiscord {
     }
 }
 
-// Only host-selected agent artwork and scoreboard fields can become uploads.
-// No model-supplied path, transcript, attention text, or working notes are read.
+// Channel-specific permission checks stay outside the shared renderer.
 @MainActor enum AgentDiscordImage {
     static func render(session: Session, store: Store, kind: String) throws -> Data {
-        guard let config = session.agent, config.discordShareScoreboard == true,
-              ["art", "scoreboard"].contains(kind) else { throw AgentFailure.message("Scoreboard sharing is off in Agent Setup.") }
+        guard session.agent?.discordShareScoreboard == true else { throw AgentFailure.message("Scoreboard sharing is off in Agent Setup.") }
+        return try AgentScoreboardImage.render(session: session, store: store, kind: kind)
+    }
+}
+
+// Draw numbers as text from measured snapshots; image generation supplies only
+// the background. No drafts, transcripts, working notes or model-selected files.
+@MainActor enum AgentScoreboardImage {
+    struct Line {
+        var text: String
+        var size: CGFloat = 24
+    }
+    static func lines(session: Session) -> [Line] {
+        guard let config = session.agent else { return [] }
+        func stamp(_ date: Date?) -> String { date.map { ISO8601DateFormatter().string(from: $0) } ?? "Unknown" }
+        var rows = [Line(text: session.title, size: 36)]
+        for lot in config.visibleLotScoreboards {
+            rows.append(Line(text: lot.name + " · unfinished items", size: 28))
+            for section in lot.sections where section.unfinished > 0 || section.title.lowercased() == "bugs" || section.title.lowercased().contains("implement now") { rows.append(Line(text: section.title + ": " + section.value)) }
+            rows.append(Line(text: "Revision \(lot.revision) · measured " + stamp(lot.observedAt), size: 17))
+        }
+        if let repo = config.repositorySnapshot, repo.hasMeasurements {
+            rows.append(Line(text: "GitHub · " + repo.repository, size: 28))
+            rows += repo.metrics.filter { !["Users", "Visitors · 14d", "Conversation comments"].contains($0.0) }.map { Line(text: $0.0 + ": " + $0.1) }
+            rows.append(Line(text: "Measured " + stamp(repo.observedAt) + " · github.com/" + repo.repository, size: 17))
+            rows.append(Line(text: "Cloners: rolling 14 days; lifetime uniques are not provided. Today is UTC and may be delayed. Downloads are cumulative across all accessible releases.", size: 17))
+        } else if config.hasRepository {
+            rows.append(Line(text: "GitHub · " + config.repository + ": Unavailable"))
+        }
+        if let board = config.scoreboard, board.metrics.contains(where: { $0.value != "Unavailable" }) {
+            // Unverified model metrics stay unavailable. Host measurements above
+            // are authoritative, independent of the external-search validator.
+            rows.append(Line(text: "Agent report", size: 28))
+            rows.append(Line(text: String(board.summary.prefix(1000)), size: 21))
+            rows += board.metrics.prefix(12).map { metric in
+                Line(text: metric.label + ": " + metric.value + (metric.asOf.map { " · " + $0 } ?? ""))
+            }
+            rows.append(Line(text: "Report measured " + stamp(board.observedAt), size: 17))
+        }
+        if config.visibleLotScoreboards.isEmpty && config.scoreboard == nil && config.repositorySnapshot?.hasMeasurements != true {
+            rows.append(Line(text: "No measured scoreboard data yet."))
+        }
+        return rows
+    }
+    static func render(session: Session, store: Store, kind: String = "scoreboard") throws -> Data {
+        guard let config = session.agent, ["art", "scoreboard"].contains(kind) else { throw AgentFailure.message("No agent scoreboard is available.") }
         let root = store.folder.appendingPathComponent("Agents/" + session.id.uuidString).resolvingSymlinksInPath()
         var art: NSImage?
         if let path = config.artPath {
             let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            let size = (try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]))
-            if file.path.hasPrefix(root.path + "/"), size?.isRegularFile == true, (size?.fileSize ?? Int.max) <= 8_000_000 { art = NSImage(contentsOf: file) }
+            let size = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if file.path.hasPrefix(root.path + "/"), size?.isRegularFile == true, (size?.fileSize ?? Int.max) <= 8_000_000,
+               let candidate = NSImage(contentsOf: file), candidate.size.width <= 4096, candidate.size.height <= 4096 { art = candidate }
         }
         if kind == "art" && art == nil { throw AgentFailure.message("This agent has no saved mood image yet.") }
-        let width = 1200, height = kind == "art" ? 900 : (art == nil ? 640 : 1100)
-        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { throw AgentFailure.message("Could not render scoreboard image.") }
+        let width = 1200
+        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byWordWrapping
+        let textRows = kind == "art" ? [] : lines(session: session)
+        let layout = textRows.map { row -> (String, [NSAttributedString.Key: Any], CGFloat) in
+            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: row.size, weight: row.size >= 28 ? .semibold : .regular), .foregroundColor: NSColor.white, .paragraphStyle: style]
+            let text = String(row.text.prefix(2400))
+            let height = ceil((text as NSString).boundingRect(with: NSSize(width: 1040, height: 10000), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes).height) + 8
+            return (text, attributes, height)
+        }
+        let contentHeight = layout.reduce(CGFloat(0)) { $0 + $1.2 + 14 }
+        let height = kind == "art" ? 900 : max(900, Int(ceil(contentHeight)) + 300)
+        guard height <= 12000,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { throw AgentFailure.message("Could not render scoreboard image.") }
         NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = context
         defer { NSGraphicsContext.restoreGraphicsState() }
-        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: width, height: height).fill()
-        let artHeight: CGFloat = kind == "art" ? CGFloat(height) : (art == nil ? 0 : 460)
+        NSColor(calibratedRed: 0.05, green: 0.09, blue: 0.14, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
         if let art, art.size.width > 0, art.size.height > 0 {
-            let scale = min(CGFloat(width) / art.size.width, artHeight / art.size.height)
+            let scale = kind == "art" ? min(CGFloat(width) / art.size.width, CGFloat(height) / art.size.height) : max(CGFloat(width) / art.size.width, CGFloat(height) / art.size.height)
             let size = NSSize(width: art.size.width * scale, height: art.size.height * scale)
-            art.draw(in: NSRect(x: (CGFloat(width) - size.width) / 2, y: CGFloat(height) - artHeight + (artHeight - size.height) / 2, width: size.width, height: size.height))
+            art.draw(in: NSRect(x: (CGFloat(width) - size.width) / 2, y: (CGFloat(height) - size.height) / 2, width: size.width, height: size.height))
         }
         if kind == "scoreboard" {
-            var y = CGFloat(height) - artHeight - 60
-            func label(_ text: String, size: CGFloat, height: CGFloat) {
-                let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
-                (text as NSString).draw(in: NSRect(x: 40, y: y - height, width: 1120, height: height), withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: size > 24 ? .semibold : .regular), .foregroundColor: NSColor.black, .paragraphStyle: style]); y -= height + 12
+            let panel = NSBezierPath(roundedRect: NSRect(x: 40, y: 40, width: 1120, height: height - 240), xRadius: 24, yRadius: 24)
+            NSColor(calibratedRed: 0.025, green: 0.045, blue: 0.07, alpha: 0.96).setFill(); panel.fill()
+            NSColor(calibratedWhite: 0.7, alpha: 0.7).setStroke(); panel.lineWidth = 3; panel.stroke()
+            var y = CGFloat(height) - 230
+            for (text, attributes, lineHeight) in layout {
+                (text as NSString).draw(in: NSRect(x: 80, y: y - lineHeight, width: 1040, height: lineHeight), withAttributes: attributes)
+                y -= lineHeight + 14
             }
-            label(String(session.title.prefix(100)), size: 32, height: 48)
-            if let board = config.scoreboard {
-                label(board.summary, size: 23, height: 70)
-                for metric in board.metrics.prefix(6) { label(metric.label + ": " + metric.value + (metric.asOf.map { " · " + $0 } ?? ""), size: 21, height: 42) }
-                label("Observed: " + (board.observedAt?.formatted() ?? "Unknown"), size: 17, height: 30)
-            } else if let repo = config.repositorySnapshot, repo.hasMeasurements {
-                for metric in repo.metrics.prefix(6) { label(metric.0 + ": " + metric.1, size: 23, height: 48) }
-            } else { label("No measured scoreboard data yet.", size: 23, height: 50) }
         }
         guard let data = bitmap.representation(using: .png, properties: [:]), data.count <= 8_000_000 else { throw AgentFailure.message("Scoreboard image exceeds 8 MB.") }
         return data

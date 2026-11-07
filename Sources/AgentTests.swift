@@ -1,6 +1,43 @@
 import AppKit
 import Foundation
 
+// Separate native-window check: never runs against the owner's workspace.
+@MainActor func agentScoreboardFocusSelfTests(_ check: (Bool, String) -> Void) {
+    let app = NSApplication.shared
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-focus-" + UUID().uuidString)
+    let store = Store(folder: root)
+    let session = store.createAgent(title: "Isolated scoreboard focus test")
+    session.agent?.enabled = false
+    let workspace = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 600, height: 400), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    workspace.isReleasedWhenClosed = false
+    let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+    workspace.contentView = composer
+    workspace.makeKeyAndOrderFront(nil)
+    workspace.makeFirstResponder(composer)
+    check(app.keyWindow === workspace && workspace.firstResponder === composer, "Focus fixture has an active composer")
+    let windows = AgentWindows()
+    defer {
+        app.windows.filter { $0.title == session.title + " · Scoreboard" }.forEach { $0.close() }
+        workspace.close()
+        try? FileManager.default.removeItem(at: root)
+    }
+    for action in ["create", "re-show", "reopen after close"] {
+        if action == "reopen after close" {
+            app.windows.first { $0.title == session.title + " · Scoreboard" }?.close()
+        }
+        // Both the local menu and remote agent.widget use this entry point.
+        windows.widget(session)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        check(app.keyWindow === workspace && workspace.firstResponder === composer, "Scoreboard \(action) preserves workspace key window and composer responder")
+        check(app.windows.contains { $0.title == session.title + " · Scoreboard" && $0.isVisible }, "Scoreboard \(action) remains visible")
+        let before = composer.string
+        if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: workspace.windowNumber, context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7) {
+            app.keyWindow?.sendEvent(event)
+        }
+        check(composer.string == before + "x", "Typing reaches composer with scoreboard open after \(action)")
+    }
+}
+
 @MainActor func agentSelfTests(_ check: (Bool, String) -> Void) {
     do {
         var art = AgentConfig(); art.artDirection = "Ink illustration of determined explorers"; art.lastArtDirection = art.artDirection
@@ -254,6 +291,24 @@ import Foundation
         if status != 200 { object = ["message": "private-service-error-canary"] }
         return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
+    let cloneAPI = AgentAPI(); var denyClones = false
+    cloneAPI.request = { request in
+        var object: Any = ["stargazers_count": 0, "total_count": 0, "items": []] as [String: Any]
+        var status = 200
+        if request.url?.path.hasSuffix("/releases") == true || request.url?.path.hasSuffix("/issues/comments") == true { object = [] as [String] }
+        if request.url?.path.hasSuffix("/traffic/clones") == true {
+            status = denyClones ? 403 : 200
+            let today = String(ISO8601DateFormatter().string(from: Date()).prefix(10)) + "T00:00:00Z"
+            object = ["uniques": 7, "clones": [["timestamp": today, "uniques": 0], ["timestamp": "2000-01-01T00:00:00Z", "uniques": 6]]]
+        }
+        return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+    }
+    var cloneSnapshot: AgentRepoSnapshot?
+    _ = probe { cloneSnapshot = await cloneAPI.metrics(repository: "fixture/project", token: "synthetic"); return "done" }
+    check(cloneSnapshot?.uniqueClonersTodayUTC == 0 && cloneSnapshot?.uniqueCloners14d == 7, "GitHub clones preserve measured zero and use API window uniques rather than summing daily uniques")
+    denyClones = true
+    _ = probe { cloneSnapshot = await cloneAPI.metrics(repository: "fixture/project", token: "synthetic"); return "done" }
+    check(cloneSnapshot?.uniqueClonersTodayUTC == nil && cloneSnapshot?.uniqueCloners14d == nil, "Denied clone traffic remains unavailable instead of zero")
     let searchAPI = AgentAPI()
     searchAPI.request = { request in
         let final = "{\"reply\":\"Sourced answer\",\"scoreboard\":{\"summary\":\"News summary\",\"metrics\":[]}}"

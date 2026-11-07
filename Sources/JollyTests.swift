@@ -1,6 +1,25 @@
 import AppKit
 import Foundation
 
+// Explicit, isolated export for README/visual acceptance. The caller supplies
+// a minimal snapshot; this mode never opens the production archive or runs agents.
+@MainActor func renderScoreboardPreview(input: URL, output: URL, folder: URL) throws {
+    struct Preview: Decodable { var title: String; var config: AgentConfig }
+    let preview = try JSONDecoder().decode(Preview.self, from: Data(contentsOf: input))
+    let store = Store(folder: folder), session = store.createAgent(title: preview.title)
+    session.agent = preview.config
+    if let original = preview.config.artPath {
+        let source = URL(fileURLWithPath: original)
+        guard ((try source.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? Int.max) <= 8_000_000 else { throw AgentFailure.message("Preview art exceeds 8 MB.") }
+        let artFolder = folder.appendingPathComponent("Agents/" + session.id.uuidString)
+        try FileManager.default.createDirectory(at: artFolder, withIntermediateDirectories: true)
+        let art = artFolder.appendingPathComponent("background.png")
+        try Data(contentsOf: source).write(to: art)
+        session.agent?.artPath = art.path
+    }
+    try AgentScoreboardImage.render(session: session, store: store).write(to: output, options: .atomic)
+}
+
 @MainActor func jollySelfTests(_ check: (Bool, String) -> Void) {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-jolly-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -51,6 +70,42 @@ import Foundation
     router.complete(first, text: "A correlated answer", success: true, store: store)
     router.tick(store: store, now: now)
     check(result(req.id)["answer"] as? String == "A correlated answer" && starts == 1 && first.agent?.jollyRequestID == nil, "Jolly persists a correlated reply and never replays its completed request")
+    do {
+        let heading = ParkingLotRow(heading: true, text: "Bugs", tag: .red)
+        let parent = ParkingLotRow(heading: false, text: "Parent", parentID: heading.id, tag: .red)
+        let rows = [heading, parent,
+            ParkingLotRow(heading: false, text: "Nested", parentID: parent.id, tag: .green),
+            ParkingLotRow(heading: false, text: "Done", done: true, parentID: heading.id, tag: .red),
+            ParkingLotRow(heading: true, text: "Things To Implement Now"),
+            ParkingLotRow(heading: false, text: "Feature")]
+        let lot = AgentLotScoreboard.measure(id: UUID(), home: nil, name: "Fixture lot", document: ParkingLotDocument(revision: 42, rows: rows), now: now)
+        check(lot.sections[0].value == "2 (1 red, 1 green)" && lot.sections[1].value == "1", "Scoreboard counts unfinished nested items once, excludes headings and Done, and never inherits colors")
+        first.agent?.watchedSessions = [lot.id]; first.agent?.lotScoreboards = [lot]
+        first.agent?.repository = "fixture/project"
+        first.agent?.snapshot = AgentRepoSnapshot(repository: "fixture/project", observedAt: now, stars: 0, openPRs: 0, openIssues: 4, openBugs: 1, releaseDownloads: 106, uniqueClonersTodayUTC: 2, uniqueCloners14d: 9)
+        first.agent?.scoreboard = AgentScoreboard(summary: "Fixture measurements", metrics: [.init(label: "External metric", value: "Unavailable")], observedAt: now)
+        first.agent?.jollyRequestID = String(repeating: "9", count: 64)
+        router.complete(first, text: "Measured status", success: true, store: store)
+        let response = result(String(repeating: "9", count: 64))
+        let imageID = response["imageID"] as? String ?? "missing"
+        let imagePath = JollyRouter.folder(store).appendingPathComponent("images/" + imageID + ".png")
+        let png = try Data(contentsOf: imagePath)
+        check(response["imageKind"] as? String == "scoreboard" && NSBitmapImageRep(data: png) != nil && first.agent?.discordShareScoreboard != true, "Jolly publishes a rendered scoreboard even without art or Discord opt-in")
+        let labels = AgentScoreboardImage.lines(session: first).map(\.text).joined(separator: "\n")
+        check(labels.contains("Bugs: 2 (1 red, 1 green)") && labels.contains("Stars: 0") && labels.contains("cumulative: 106") && labels.contains("Unique cloners · today UTC: 2") && labels.contains("14d: 9") && labels.contains("Revision 42"), "Rendered scoreboard includes local counts AND repository data, timestamps and measured zeros")
+        first.agent?.snapshot?.uniqueClonersTodayUTC = nil
+        check(AgentScoreboardImage.lines(session: first).contains { $0.text == "Unique cloners · today UTC: Unavailable" }, "A missing current-day traffic bucket is explicitly unavailable")
+        let preview = FileManager.default.temporaryDirectory.appendingPathComponent("converse-jolly-scoreboard-fixture.png")
+        try png.write(to: preview)
+        print("Jolly measured scoreboard fixture: " + preview.path)
+        check(first.agent?.measuredArtMood(fallback: "peaceful") == "urgent", "Unresolved red lot items prevent falsely peaceful art")
+        first.agent?.watchedSessions = []
+        check(!AgentScoreboardImage.lines(session: first).map(\.text).joined().contains("Fixture lot") && !AgentWidgetExport.html(first).contains("Fixture lot"), "Revoked lot access excludes stored counts from images and HTML")
+        first.agent?.jollyAllowed = false; first.agent?.jollyRequestID = String(repeating: "8", count: 64)
+        router.complete(first, text: "No image", success: true, store: store)
+        check(result(String(repeating: "8", count: 64))["imageID"] == nil, "Revoked Jolly access never shares a scoreboard image")
+        first.agent?.jollyAllowed = nil
+    } catch { check(false, "Jolly measured scoreboard fixture: " + error.localizedDescription) }
     first.queuePaused = true
     let held = request("b"); enqueue(held); router.tick(store: store, now: now)
     check(result(held.id)["status"] as? String == "busy" && starts == 1 && first.agent?.turnLimit == 20, "Paused queues refuse Jolly without injection or budget consumption")

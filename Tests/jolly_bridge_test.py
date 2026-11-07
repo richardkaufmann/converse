@@ -44,6 +44,13 @@ class Tests(unittest.TestCase):
         text = self.call("/openapi.json", auth=False)[1]["info"]["description"]
         self.assertIn("Converse Steward is not a default", text)
         self.assertIn("misrouted", text)
+    def test_scoreboard_image_is_not_labelled_bare_art(self):
+        key, image = "a" * 64, "b" * 64
+        bridge.atomic(self.b.root / "responses" / (key + ".json"),
+                      {"status": "completed", "answer": "Measured", "imageID": image, "imageKind": "scoreboard"})
+        status, result = self.call("/v1/requests/" + key)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["images"], [{"title": "Agent scoreboard", "url": "https://example.test/v1/images/" + image}])
     def test_request_idempotency_and_correlation(self):
         self.live()
         body = {"question": "Price?", "agent": "Stock", "request_id": "same"}

@@ -167,6 +167,12 @@ import Foundation
     check(decide(age: 60, direction: true), "Edited art direction regenerates immediately")
     check(!decide(age: 600, mood: true) && !decide(age: 600, board: true) && decide(age: 1800, mood: true) && decide(age: 1800, board: true), "Mood or scoreboard changes wait for the minimum interval")
     check(!decide(age: 1800) && !decide(age: 21599) && decide(age: 21600), "Unchanged art refreshes only at the maximum staleness")
+    var activity = AgentConfig()
+    activity.artDirection = "Only generate this if there has been significant activity"
+    activity.lastArtAt = now.addingTimeInterval(-86400); activity.lastArtDirection = activity.artDirection
+    activity.lastArtMood = "up"; activity.lastArtScoreboard = AgentArtPolicy.signature(base)
+    check(!activity.shouldRegenerateArt(mood: "up", board: base, now: now), "Explicit activity-only art does not regenerate merely because its age limit elapsed")
+    check(activity.shouldRegenerateArt(mood: "up", board: board([("Price", "$11"), ("Bugs", "3")]), now: now), "Measured activity still regenerates art after the minimum interval")
     var throttled = AgentConfig(); throttled.lastArtAt = last; throttled.lastArtMood = "up"; throttled.lastArtScoreboard = AgentArtPolicy.signature(base)
     check(!throttled.shouldRegenerateArt(mood: "down", board: base, now: now) && throttled.shouldRegenerateArt(mood: "down", board: base, now: now.addingTimeInterval(1200)), "Agent art uses the default 30 minute minimum")
     throttled.artDirection = "Moonbase"

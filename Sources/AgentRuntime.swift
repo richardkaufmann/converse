@@ -309,18 +309,24 @@ enum AgentPolicy {
                 let display = decoded.reply + (parkingOutcome.isEmpty ? "" : "\n\n" + parkingOutcome) + research.appendix(for: decoded.reply)
                 Self.recordResponse(display, session: session, responseID: responseID, store: store)
                 let board = decoded.scoreboard?.validated(research: research)
-                let mood = config.hasRepository ? snapshot.mood(previous: session.agent?.snapshot) : (board?.sentiment ?? "neutral")
+                var mood = config.hasRepository ? snapshot.mood(previous: session.agent?.snapshot) : (board?.sentiment ?? "neutral")
                 if refreshScoreboard && session.agent?.repository == config.repository {
                     session.agent?.scoreboard = board
                     session.agent?.snapshot = snapshot; session.agent?.widgetSummary = String(display.prefix(1200))
+                    let currentScope = session.agent ?? config
+                    session.agent?.lotScoreboards = service.parkingLibrary.lots.filter {
+                        currentScope.allows(local: $0.id, home: service.localDeviceID) && $0.error.isEmpty
+                    }.map { AgentLotScoreboard.measure(id: $0.id, home: service.localDeviceID, name: $0.name, document: $0.document, now: Date()) }
                 }
+                mood = session.agent?.measuredArtMood(fallback: mood) ?? mood
                 if let memory = decoded.memory { session.agent?.workingMemory = String(memory.prefix(4000)) }
                 session.agent?.lastRunAt = Date(); session.agent?.recordSuccess("Completed", attention: reply?.attention)
                 session.agent?.applyPace(suggestedMinutes: decoded.nextRunInMinutes?.value, reason: decoded.paceReason?.value, at: Date())
                 if let reply {
                     self.deliver(reply, from: session, store: store)
                     let direction = session.agent?.artDirection ?? ""
-                    if refreshScoreboard && session.agent?.generateArt == true && session.agent?.shouldRegenerateArt(mood: mood, board: board, now: Date()) == true {
+                    let artBoard = session.agent?.artMeasurementBoard ?? board
+                    if refreshScoreboard && session.agent?.generateArt == true && session.agent?.shouldRegenerateArt(mood: mood, board: artBoard, now: Date()) == true {
                         do {
                             let artPrompt = AgentArt.prompt(direction: direction, scene: reply.artPrompt, mood: mood)
                             guard let artKey = try self.keyReader("meta"), !artKey.isEmpty else { throw AgentFailure.message("Meta key required for mood art.") }
@@ -330,12 +336,22 @@ enum AgentPolicy {
                             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                             let path = folder.appendingPathComponent("status-" + UUID().uuidString + ".png"); try bytes.write(to: path, options: .atomic)
                             session.agent?.artPath = path.path; session.agent?.lastArtMood = mood; session.agent?.lastArtAt = Date(); session.agent?.lastArtDirection = direction
-                            session.agent?.lastArtScoreboard = AgentArtPolicy.signature(board)
-                            session.agent?.lastArtMetricValues = AgentMetricNumber.values(board)
-                            // Normal attachment transport makes the art available on remote viewers.
-                            if let index = session.messages.firstIndex(where: { $0.id == responseID }) { session.messages[index].images = [path.path] }
+                            session.agent?.lastArtScoreboard = AgentArtPolicy.signature(artBoard)
+                            session.agent?.lastArtMetricValues = AgentMetricNumber.values(artBoard)
                         } catch is CancellationError { throw CancellationError() }
                         catch { session.messages.append(Message(role: "notice", text: "Status art unavailable; the measured scoreboard is still current.")) }
+                    }
+                    if refreshScoreboard && session.agent?.generateArt == true {
+                        do {
+                            let bytes = try AgentScoreboardImage.render(session: session, store: store)
+                            let folder = store.folder.appendingPathComponent("Agents/" + session.id.uuidString)
+                            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                            let image = folder.appendingPathComponent("scoreboard-" + responseID.uuidString + ".png")
+                            try bytes.write(to: image, options: .atomic)
+                            if let index = session.messages.firstIndex(where: { $0.id == responseID }) { session.messages[index].images = [image.path] }
+                        } catch {
+                            session.messages.append(Message(role: "notice", text: "Scoreboard image unavailable; measured data remains in the Scoreboard view."))
+                        }
                     }
                     try Task.checkCancellation()
                     // Side effects never fail a completed run: report and finish.

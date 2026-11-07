@@ -101,18 +101,19 @@ struct JollyRequest: Codable {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
-    func answer(_ id: String, text: String, status: String, agent: Session? = nil, suggested: Session? = nil, image: String? = nil, store: Store) throws {
+    func answer(_ id: String, text: String, status: String, agent: Session? = nil, suggested: Session? = nil, image: Data? = nil, store: Store) throws {
         guard Self.validID(id) else { throw AgentFailure.message("Invalid Jolly request ID.") }
         var body: [String: Any] = ["ok": true, "status": status, "answer": String(text.prefix(24000)), "backend": "converse"]
         if let agent { body["agent"] = ["id": agent.id.uuidString, "name": agent.title] }
         if let suggested { body["suggestedAgent"] = ["id": suggested.id.uuidString, "name": suggested.title] }
-        if let image, let data = try? Data(contentsOf: URL(fileURLWithPath: image)), data.count <= 8_000_000,
+        if let data = image, data.count <= 8_000_000,
            NSBitmapImageRep(data: data) != nil {
             let hash = DeviceBlob.sha256Hex(data)
             let directory = Self.folder(store).appendingPathComponent("images")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try data.write(to: directory.appendingPathComponent(hash + ".png"), options: .atomic)
             body["imageID"] = hash
+            body["imageKind"] = "scoreboard"
         }
         try write(body, file: Self.folder(store).appendingPathComponent("responses/" + id + ".json"))
         finished.insert(id)
@@ -120,7 +121,7 @@ struct JollyRequest: Codable {
     func complete(_ session: Session, text: String, success: Bool, store: Store) {
         guard let id = session.agent?.jollyRequestID else { return }
         do {
-            try answer(id, text: text, status: success ? "completed" : "failed", agent: session, image: success ? session.agent?.artPath : nil, store: store)
+            try answer(id, text: text, status: success ? "completed" : "failed", agent: session, image: success && session.agent?.jollyAllowed != false ? try? AgentScoreboardImage.render(session: session, store: store) : nil, store: store)
             session.agent?.jollyRequestID = nil
             try store.saveChecked()
         } catch { session.agent?.attention = "Jolly reply could not be saved. Check disk access before retrying." }

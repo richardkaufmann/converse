@@ -483,6 +483,9 @@ struct AgentWidgetView: View {
                     }.padding(24)
                 }.frame(height: 220).clipped()
                 VStack(alignment: .leading, spacing: 22) {
+                    ForEach(session.agent?.visibleLotScoreboards ?? [], id: \.id) { lot in
+                        AgentScoreboardCards(board: AgentScoreboard(title: lot.name + " · unfinished items", summary: "Revision \(lot.revision). Counts exclude headings and Done items; colors are explicit, not inherited.", metrics: lot.sections.map { .init(label: $0.title, value: $0.value) }, observedAt: lot.observedAt))
+                    }
                     if let board = session.agent?.scoreboard {
                         AgentScoreboardCards(board: board)
                     }
@@ -557,11 +560,13 @@ struct AgentWidgetView: View {
         remoteSetups[globalID] = window; window.center(); window.makeKeyAndOrderFront(nil)
     }
     func widget(_ session: Session) {
-        if let window = widgets[session.id] { window.makeKeyAndOrderFront(nil); return }
+        // A scoreboard is a companion view, including when requested remotely.
+        // Showing it must not move keyboard focus away from an active draft.
+        if let window = widgets[session.id] { window.orderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = session.title + " · Scoreboard"; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: AgentWidgetView(session: session)); widgets[session.id] = window
-        window.center(); window.makeKeyAndOrderFront(nil)
+        window.center(); window.orderFront(nil)
     }
     func setup(_ session: Session) {
         if let old = setups[session.id], old.isVisible { old.makeKeyAndOrderFront(nil); return }
@@ -586,7 +591,10 @@ enum AgentWidgetExport {
         var art = ""
         if let path = config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
         let cells = (config.repositorySnapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
-        let metrics = AgentScoreboardCards.html(config.scoreboard) + (!config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>")
+        let lots = config.visibleLotScoreboards.map { lot in
+            AgentScoreboardCards.html(AgentScoreboard(title: lot.name + " · unfinished items", summary: "Revision \(lot.revision). Counts exclude headings and Done items; colors are explicit, not inherited.", metrics: lot.sections.map { .init(label: $0.title, value: $0.value) }, observedAt: lot.observedAt))
+        }.joined()
+        let metrics = lots + AgentScoreboardCards.html(config.scoreboard) + (!config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>")
         return """
         <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>
         *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}h2{font-size:17px;margin:0 0 10px}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric,.empty{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:28px;line-height:1.3}.metric span{font-size:12px;color:#bbc4d1}p{white-space:pre-wrap;margin:0}section{margin-bottom:24px}details{margin:24px 0}summary{cursor:pointer;font-weight:600;margin-bottom:10px}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}

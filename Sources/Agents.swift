@@ -27,6 +27,7 @@ struct AgentConfig: Codable, Equatable {
     var jollyAllowed: Bool? = nil
     var jollyRequestID: String? = nil
     var scoreboard: AgentScoreboard? = nil
+    var lotScoreboards: [AgentLotScoreboard]? = nil
     var supportDefaultsVersion: Int? = nil
     var model = "muse-spark-1.3"
     var intervalSeconds: Double = 900
@@ -161,19 +162,23 @@ struct AgentRepoSnapshot: Codable, Equatable {
     var conversationComments: Int?
     var releaseDownloads: Int?
     var visitors14d: Int?
+    var uniqueClonersTodayUTC: Int? = nil
+    var uniqueCloners14d: Int? = nil
     struct Issue: Codable, Equatable { var title: String; var url: String; var labels: [String]; var updatedAt: String; var summary: String }
     var recentOpenIssues: [Issue]? = nil
     var latestRelease: String? = nil
     var latestReleaseURL: String? = nil
     var notes: [String] = []
     var hasMeasurements: Bool {
-        [stars, openPRs, openIssues, openBugs, conversationComments, releaseDownloads, visitors14d].contains { $0 != nil }
+        [stars, openPRs, openIssues, openBugs, conversationComments, releaseDownloads, visitors14d, uniqueClonersTodayUTC, uniqueCloners14d].contains { $0 != nil }
     }
     var metrics: [(String, String)] {
         [("Users", "Not measured"), ("Visitors · 14d", visitors14d.map(String.init) ?? "Unavailable"),
          ("Stars", stars.map(String.init) ?? "Unavailable"), ("Open PRs", openPRs.map(String.init) ?? "Unavailable"),
          ("Open issues", openIssues.map(String.init) ?? "Unavailable"), ("Bugs · label:bug", openBugs.map(String.init) ?? "Unavailable"),
-         ("Conversation comments", conversationComments.map(String.init) ?? "Unavailable"), ("Release downloads", releaseDownloads.map(String.init) ?? "Unavailable")]
+         ("Conversation comments", conversationComments.map(String.init) ?? "Unavailable"), ("Release downloads · cumulative", releaseDownloads.map(String.init) ?? "Unavailable"),
+         ("Unique cloners · today UTC", uniqueClonersTodayUTC.map(String.init) ?? "Unavailable"),
+         ("Unique cloners · 14d", uniqueCloners14d.map(String.init) ?? "Unavailable")]
     }
     func mood(previous: AgentRepoSnapshot?) -> String {
         guard let bugs = openBugs else { return "unknown" }
@@ -433,6 +438,17 @@ final class AgentAPI {
         if let token, !token.isEmpty {
             do { let (raw, _) = try await get("repos/" + repository + "/traffic/views"); snapshot.visitors14d = (raw as? [String: Any])?["uniques"] as? Int }
             catch { snapshot.notes.append("Visitors require GitHub repository traffic access.") }
+            do {
+                let (raw, _) = try await get("repos/" + repository + "/traffic/clones?per=day")
+                if let traffic = raw as? [String: Any], let total = traffic["uniques"] as? Int,
+                   let days = traffic["clones"] as? [[String: Any]], total >= 0 {
+                    snapshot.uniqueCloners14d = total
+                    let today = String(ISO8601DateFormatter().string(from: snapshot.observedAt).prefix(10))
+                    // Missing current-day buckets may be delayed: do not invent a zero.
+                    if let day = days.first(where: { ($0["timestamp"] as? String)?.hasPrefix(today) == true }),
+                       let count = day["uniques"] as? Int, count >= 0 { snapshot.uniqueClonersTodayUTC = count }
+                } else { snapshot.notes.append("Unique cloner counts unavailable: invalid traffic response.") }
+            } catch { snapshot.notes.append("Unique cloners require GitHub repository traffic access.") }
         } else { snapshot.notes.append("Add a GitHub token in Agent Setup for private traffic metrics and higher rate limits.") }
         return snapshot
     }
@@ -504,6 +520,6 @@ extension AgentConfig {
 // Art direction is separate from operational instructions and forwarded directly.
 enum AgentArt {
     static func prompt(direction: String, scene: String?, mood: String) -> String {
-        "Create a beautifully composed scoreboard illustration. No numerical data or captions; the app overlays those. Mood: " + mood + ". Owner art direction (takes precedence over suggested scene): " + direction + ". Suggested scene: " + String((scene ?? "An imaginative scene expressing current progress.").prefix(1800))
+        "Create a beautifully composed scoreboard background illustration. No numerical data, example counts, labels or captions; the app draws a readable sports scoreboard with measured data over the center and lower area. Keep distinctive scenery and characters near the top and edges. Mood: " + mood + ". For a parking-lot scene, peaceful means pastoral and healthy; urgent or watchful means unresolved problems and dark stormy scenery; unknown means unverified, never falsely healthy. Owner art direction (takes precedence over suggested scene): " + direction + ". Suggested scene: " + String((scene ?? "An imaginative scene expressing current progress.").prefix(1800))
     }
 }

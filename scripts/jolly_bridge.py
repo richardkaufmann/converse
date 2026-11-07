@@ -92,7 +92,7 @@ class Bridge:
             result["requestId"] = key
             image = result.pop("imageID", None)
             if image and re.fullmatch("[0-9a-f]{64}", image):
-                result["images"] = [{"title": "Agent scoreboard art", "url": self.public_base + "/v1/images/" + image}]
+                result["images"] = [{"title": "Agent scoreboard" if result.get("imageKind") == "scoreboard" else "Agent scoreboard art", "url": self.public_base + "/v1/images/" + image}]
             return 200, result
         if not (self.root / "requests" / (key + ".json")).exists():
             return 404, {"ok": False, "error": "Unknown request."}

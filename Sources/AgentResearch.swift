@@ -89,3 +89,61 @@ struct AgentScoreboard: Codable, Equatable {
         return result
     }
 }
+
+// Local counts are measured by the host, never inferred from generated prose or
+// passed through the validator for external web-search claims.
+struct AgentLotScoreboard: Codable, Equatable {
+    struct Section: Codable, Equatable {
+        var title: String
+        var unfinished: Int
+        var colors: [String: Int]
+        var value: String {
+            let tags = ParkingLotTag.allCases.compactMap { tag -> String? in
+                let count = colors[tag.rawValue] ?? 0
+                return count == 0 ? nil : "\(count) \(tag.rawValue)"
+            }
+            return String(unfinished) + (tags.isEmpty ? "" : " (" + tags.joined(separator: ", ") + ")")
+        }
+    }
+    var id: UUID
+    var home: String?
+    var name: String
+    var revision: Int
+    var observedAt: Date
+    var sections: [Section]
+    static func measure(id: UUID, home: String?, name: String, document: ParkingLotDocument, now: Date) -> Self {
+        var sections: [Section] = []
+        for row in document.rows {
+            if row.heading { sections.append(Section(title: row.text, unfinished: 0, colors: [:])); continue }
+            guard !row.isDone else { continue }
+            if sections.isEmpty { sections.append(Section(title: "Items", unfinished: 0, colors: [:])) }
+            sections[sections.count - 1].unfinished += 1
+            if let tag = row.tag { sections[sections.count - 1].colors[tag.rawValue, default: 0] += 1 }
+        }
+        return Self(id: id, home: home, name: name, revision: document.revision, observedAt: now, sections: sections)
+    }
+}
+
+extension AgentConfig {
+    var visibleLotScoreboards: [AgentLotScoreboard] {
+        (lotScoreboards ?? []).filter { allows(local: $0.id, home: $0.home) }
+    }
+    // Strip timestamps and explanatory prose out of the art-change comparison.
+    // Include host measurements even when the model omits a scoreboard object.
+    var artMeasurementBoard: AgentScoreboard {
+        var board = scoreboard ?? AgentScoreboard(summary: "", metrics: [])
+        for lot in visibleLotScoreboards {
+            board.metrics += lot.sections.map { .init(label: lot.id.uuidString + "/" + $0.title, value: $0.value) }
+        }
+        if let repo = repositorySnapshot { board.metrics += repo.metrics.map { .init(label: "GitHub/" + $0.0, value: $0.1) } }
+        return board
+    }
+    func measuredArtMood(fallback: String) -> String {
+        let sections = visibleLotScoreboards.flatMap(\.sections)
+        if sections.contains(where: { ($0.colors["red"] ?? 0) > 0 }) { return "urgent" }
+        let bugs = sections.filter { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "bugs" }
+        if bugs.contains(where: { $0.unfinished > 0 }) || (repositorySnapshot?.openBugs ?? 0) > 0 { return "watchful" }
+        if !bugs.isEmpty || repositorySnapshot?.openBugs == 0 { return "peaceful" }
+        return fallback
+    }
+}

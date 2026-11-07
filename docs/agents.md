@@ -266,3 +266,26 @@ iPad Agent Setup uses explicit Save/Cancel. Save and run once persists the edite
 For this feature, a private channel is a guild text or announcement channel where the `@everyone` role lacks effective `VIEW_CHANNEL`, following Discord's [permission rules](https://docs.discord.com/developers/topics/permissions). The bot does not change channel permissions. The existing **Share scoreboard and mood image** option remains separate and explicitly allows those artifacts to be requested without sharing conversation context.
 
 Natural requests such as `@Converse ask converse agent for current status` use the channel's configured default. Explicit agent names take precedence; unknown names are not guessed. Editing an already-processed Discord message does not trigger it again: send a new mention.
+
+
+### Measured scoreboard images
+
+Jolly and the agent transcript carry a host-rendered scoreboard PNG, not just
+Muse's decorative background. The Mac scoreboard and HTML export also show
+host-counted local Parking Lot sections: every unfinished non-heading row counts
+once, including nested rows. Done rows are excluded; color counts use explicit
+tags without inheritance. Measurements retain the lot revision and observation
+time and disappear from exports when the agent loses access to the lot.
+
+GitHub clone metrics use the authenticated traffic API: today's UTC bucket and
+rolling 14-day unique cloners. A missing bucket or denied traffic access is
+Unavailable, never zero. GitHub does not provide lifetime unique cloners; daily
+uniques must not be summed into that claim. Release downloads are cumulative
+counts for currently listed release assets, not a reconstructed daily history.
+
+An explicit instruction such as “Only generate this if there has been significant
+activity” or “Only generate new artwork when backlog counts, severity or repository
+metrics meaningfully change” suppresses age-only art refreshes. Measured counts
+and severity determine change; observation timestamps do not. Existing minimum
+intervals still limit paid generation. Scoreboard numbers refresh without buying
+new artwork. Red unfinished items or known open bugs prevent a peaceful scene.

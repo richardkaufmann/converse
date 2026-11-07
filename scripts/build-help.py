@@ -14,6 +14,7 @@ SOURCE_URL = "https://github.com/richardkaufmann/converse/blob/main/README.md"
 
 def build_book(source, app_version="development", source_commit="unknown", app_build=""):
     topics, lines, title, fence = [], [], "Overview", None
+    readme_only = False
     used = set()
 
     def flush():
@@ -41,6 +42,15 @@ def build_book(source, app_version="development", source_commit="unknown", app_b
         return "[" + label + "](" + target + ")"
 
     for line in source.splitlines():
+        # Exclude marked decorative illustrations and captions from native Help.
+        # Explicit boundaries preserve nearby prose and literal code examples.
+        if fence is None and line.strip() == "<!-- readme-only:start -->":
+            readme_only = True
+            continue
+        if readme_only:
+            if line.strip() == "<!-- readme-only:end -->":
+                readme_only = False
+            continue
         marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
         if marker:
             token, suffix = marker.groups()

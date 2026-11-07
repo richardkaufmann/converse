@@ -4208,6 +4208,12 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
+if CommandLine.arguments.contains("--scoreboard-focus-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    MainActor.assumeIsolated { agentScoreboardFocusSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } } }
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--groups-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     var failures = 0
@@ -4252,6 +4258,15 @@ if CommandLine.arguments.contains("--settings-self-test") {
     settingsSelfTests { passed, label in print((passed ? "PASS: " : "FAIL: ") + label); if !passed { exit(1) } }; exit(0)
 }
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
+if let option = CommandLine.arguments.firstIndex(of: "--scoreboard-preview") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          let directory = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"],
+          CommandLine.arguments.indices.contains(option + 2) else { exit(2) }
+    do {
+        try MainActor.assumeIsolated { try renderScoreboardPreview(input: URL(fileURLWithPath: CommandLine.arguments[option + 1]), output: URL(fileURLWithPath: CommandLine.arguments[option + 2]), folder: URL(fileURLWithPath: directory)) }
+        exit(0)
+    } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
 if let option = CommandLine.arguments.firstIndex(of: "--lot-disclosure-preview") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil, CommandLine.arguments.indices.contains(option + 1) else { exit(2) }
     do { try renderLotDisclosurePreview(to: URL(fileURLWithPath: CommandLine.arguments[option + 1])); exit(0) }
