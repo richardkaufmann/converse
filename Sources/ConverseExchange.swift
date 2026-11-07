@@ -182,7 +182,7 @@ enum ConverseExchange {
     /// file URLs) then loses every image marker, which no later pass can undo
     /// because the parser needs `![` and references never span lines.
     static func neutralizeLocalImages(_ text: String) -> String {
-        let embed = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
+        let embed = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\[\]\r\n]{0,512}+)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
         let marker = try! NSRegularExpression(pattern: #"(?<!!)!++\["#)
         let result = embed.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
         let remaining = TranscriptStyle.localImageReferences(result)

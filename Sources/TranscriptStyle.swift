@@ -171,8 +171,11 @@ struct TranscriptImageReference {
     var url: URL
 }
 extension TranscriptStyle {
+    // Captions stop at any bracket, and caption and target are bounded and
+    // never backtrack, so each `!` costs a few steps even on long nested or
+    // unclosed lines. A bracket inside a caption means it is not an image.
     static func localImageReferences(_ text: String) -> [TranscriptImageReference] {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|(file://[^\r\n\)]+|[^\s\)]+))\s*\)"#)
+        let expression = try! NSRegularExpression(pattern: #"!\[([^\[\]\r\n]{0,512}+)\]\(\s*(?:<([^>\r\n]{1,4096})>|(file://[^\r\n\)]{1,4096}|[^\s\)]{1,4096}+))\s*\)"#)
         var result: [TranscriptImageReference] = [], offset = 0
         var fence: String?
         for line in text.components(separatedBy: "\n") {
@@ -197,7 +200,7 @@ extension TranscriptStyle {
         return result
     }
     static func imageReferences(_ text: String) -> [TranscriptImageReference] {
-        let regex = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)"#)
+        let regex = try! NSRegularExpression(pattern: #"!\[([^\[\]\r\n]{0,512}+)\]\(\s*(?:<([^>\r\n]{1,4096})>|([^\s\)]{1,4096}+))\s*\)"#)
         var result: [TranscriptImageReference] = [], offset = 0
         var fence: String?
         for line in text.components(separatedBy: "\n") {

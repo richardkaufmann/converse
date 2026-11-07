@@ -214,7 +214,17 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         }
         let fencedExample = "```\n![![x](/tmp/code-example.png)\n```\n" + String(repeating: "![", count: 3) + "x](/tmp/nonexistent.png)"
         let fencedNeutral = ConverseExchange.neutralizeLocalImages(fencedExample)
-        check(TranscriptStyle.localImageReferences(fencedNeutral).isEmpty && fencedNeutral.hasPrefix("```\n[![x](/tmp/code-example.png)\n```\n"), "Nested-marker cleanup only edits lines the fence-aware scan flags")
+        check(TranscriptStyle.localImageReferences(fencedNeutral).isEmpty && fencedNeutral.hasPrefix("```\n![[x](/tmp/code-example.png)\n```\n"), "Nested-marker cleanup only edits lines the fence-aware scan flags")
+        // Rejecting long nested or unclosed lines must stay bounded too.
+        for tail in ["x](https://example.com/w.png)", "x](relative.png)", "x(/tmp/a.png", "x](/tmp/a.png)"] {
+            let line = String(repeating: "![", count: 10_000) + tail
+            let started = Date()
+            let local = TranscriptStyle.localImageReferences(line), web = TranscriptStyle.imageReferences(line)
+            let neutral = ConverseExchange.neutralizeLocalImages(line)
+            check(Date().timeIntervalSince(started) < 0.5 && TranscriptStyle.localImageReferences(neutral).isEmpty && local.count <= 1 && web.count <= 1, "10,000 nested image openers are scanned in bounded time: " + tail)
+        }
+        check(TranscriptStyle.imageReferences("![" + String(repeating: "a", count: 600) + "](https://example.com/w.png)").isEmpty && TranscriptStyle.imageReferences("![Chart](https://example.com/w.png)").count == 1, "Image captions longer than 512 characters are not treated as images")
+        check(TranscriptStyle.localImageReferences("![![x](/tmp/a.png)").count == 1 && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages("![![x](/tmp/a.png)")).isEmpty, "A nested local embed is still found and neutralized")
         // Nested opening markers once needed one round per level; any depth now goes in one pass.
         for depth in [2, 6, 10, 100, 5_000] {
             let nestedImport = String(repeating: "![", count: depth) + "x](/tmp/nonexistent.png)\n![web](https://example.com/w.png)"
