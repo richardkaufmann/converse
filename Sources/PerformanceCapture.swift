@@ -280,6 +280,28 @@ func performanceCaptureSelfTests(_ check: (Bool, String) -> Void) {
     let cancelDeadline = Date().addingTimeInterval(0.3)
     while Date() < cancelDeadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
     check(cancelled && !unexpectedRecording && !timed.enabled, "Cancelling a delayed capture prevents recording and completion")
+    var oldCompleted = false, replacementFinished: URL?
+    run.start(folder: root, delay: 0, duration: 0.1) {
+        if case .complete = $0 { oldCompleted = true }
+    }
+    let activeDeadline = Date().addingTimeInterval(2)
+    while !timed.enabled && Date() < activeDeadline { Thread.sleep(forTimeInterval: 0.005) }
+    check(timed.enabled, "Cancellation replacement fixture reaches active recording")
+    timed.recordForTesting(.lotKeyHandling, milliseconds: 81)
+    run.cancel(folder: root) { _ in }
+    run.start(folder: root, delay: 0.15, duration: 0.1) {
+        if case .complete(let file) = $0 { replacementFinished = file }
+    }
+    let replacementDeadline = Date().addingTimeInterval(3)
+    while replacementFinished == nil && Date() < replacementDeadline {
+        _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+    if let replacementFinished, let data = try? Data(contentsOf: replacementFinished) {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let result = try? decoder.decode(PerformanceCapture.Snapshot.self, from: data)
+        check(!oldCompleted && result != nil && result?.summaries["lotKeyHandling"] == nil,
+              "Cancelling active capture preserves the replacement deadline and excludes old samples and completion")
+    } else { check(false, "Cancelling active capture preserves the replacement deadline and excludes old samples and completion") }
     let badRoot = root.appendingPathComponent("not-a-directory")
     try? Data([1]).write(to: badRoot)
     var reportedFailure = false, exportedFailure = false
