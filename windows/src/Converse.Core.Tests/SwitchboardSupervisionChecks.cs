@@ -279,8 +279,40 @@ static class SwitchboardSupervisionChecks
                 && SwitchboardPresentation.SameComponents(null, null) && !ReferenceEquals(copy, valid) && !ReferenceEquals(copy[0], valid[0]),
                 "Equal parts keep the cached line and banner; a cached snapshot is a detached copy");
             var nullKind = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[],\"components\":[{\"offset\":0,\"length\":1,\"kind\":null}]}"));
-            check(SwitchboardPresentation.ComponentsKey(nullKind.Components) == "[0,1,0:]" && SwitchboardPresentation.Snapshot(nullKind.Components) is [{ Kind: null }],
+            check(SwitchboardPresentation.ComponentsKey(nullKind.Components) == "[0,1,~]" && SwitchboardPresentation.Snapshot(nullKind.Components) is [{ Kind: null }],
                 "A part with a null kind from the wire keys and snapshots without throwing");
+            // Archive/wire JSON with a null kind: every walker tolerates it, the
+            // part stays visible, and null→"" is a change.
+            var parsedNullKind = System.Text.Json.JsonSerializer.Deserialize<List<MessageComponent>>("[{\"offset\":0,\"length\":5,\"kind\":null}]")!;
+            var emptyKind = new List<MessageComponent> { new() { Offset = 0, Length = 5, Kind = "" } };
+            check(parsedNullKind is [{ Kind: null }] && SwitchboardPresentation.Segments("hello", parsedNullKind) is null
+                && SwitchboardPresentation.Segments(plainTell, new List<MessageComponent> { new() { Offset = 0, Length = plainTell.Length, Kind = null! } }) is [{ Summary: null } nullKindTell] && nullKindTell.Text == plainTell
+                && SwitchboardPresentation.ComponentsKey(parsedNullKind) != SwitchboardPresentation.ComponentsKey(emptyKind) && !SwitchboardPresentation.SameComponents(parsedNullKind, emptyKind)
+                && SwitchboardPresentation.SameComponents(parsedNullKind, SwitchboardPresentation.Snapshot(parsedNullKind))
+                && SwitchboardPresentation.QueueSignature(queueId, "hello", parsedNullKind) != SwitchboardPresentation.QueueSignature(queueId, "hello", emptyKind)
+                && SwitchboardPresentation.QueueSummary("hello", parsedNullKind) is null && SwitchboardPresentation.Components(parsedNullKind, "hello", "hello", text => text) is [{ Kind: null }],
+                "A deserialized null kind renders plain, never collapses traffic, and keys apart from an empty kind");
+            // Null list entries are invalid metadata: the whole message shows
+            // expanded, and nothing that walks the parts throws.
+            var nullEntryLists = new[] { "[null]", "[{\"offset\":0,\"length\":" + plainTell.Length + ",\"kind\":\"traffic\"},null]", "[null,{\"offset\":" + (plainTell.Length + 2) + ",\"length\":" + humanText.Length + ",\"kind\":\"human\"}]" }
+                .Select(json => System.Text.Json.JsonSerializer.Deserialize<List<MessageComponent>>(json)!).ToList();
+            var nullEntriesSafe = nullEntryLists.All(parts =>
+                parts.Any(part => part is null) && Expanded(parts) && SwitchboardPresentation.QueueSummary(markerless, parts) is null
+                && SwitchboardPresentation.Components(parts, markerless, markerless, text => text) is [{ Kind: "text" } whole] && whole.Length == markerless.Length
+                && SwitchboardPresentation.Snapshot(parts) is { } snap && snap.Count == parts.Count && SwitchboardPresentation.SameComponents(parts, snap)
+                && SwitchboardPresentation.ComponentsKey(parts).Contains('!') && SwitchboardPresentation.QueueSignature(queueId, markerless, parts).Length > 0);
+            check(nullEntriesSafe && SwitchboardPresentation.ComponentsKey(nullEntryLists[0]) != SwitchboardPresentation.ComponentsKey(new List<MessageComponent>())
+                && SwitchboardPresentation.ComponentsKey(nullEntryLists[1]) != SwitchboardPresentation.ComponentsKey(new List<MessageComponent> { valid[0] }),
+                "Null component entries show the whole message expanded, key apart from their neighbours, and never throw");
+            var nullEntryWire = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"" + markerless.Replace("\n", "\\n") + "\",\"imageHashes\":[],\"components\":[null]}"));
+            var nullEntryHeld = Busy(new PendingPrompt { Text = markerless, Components = nullEntryLists[1] }, new PendingPrompt { Text = "and more", Typed = true });
+            store.InjectPending(nullEntryHeld);
+            check(nullEntryWire.Text == markerless && nullEntryWire.Components is [null] && Expanded(nullEntryWire.Components)
+                && SwitchboardPresentation.Segments(nullEntryHeld.Pending[0].Text, nullEntryHeld.Pending[0].Components) is [{ Summary: null } nullHeldWhole] && nullHeldWhole.Text == markerless + "\n\nand more",
+                "A wire message with a null part keeps its text, and Inject all over it keeps that part visible");
+            var archivedNullEntry = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>("{\"Role\":\"user\",\"Text\":\"kept text\",\"Components\":[null,{\"offset\":0,\"length\":9,\"kind\":null}]}")!;
+            check(archivedNullEntry.Text == "kept text" && archivedNullEntry.Components?.Count == 2 && SwitchboardPresentation.Segments(archivedNullEntry.Text, archivedNullEntry.Components) is [{ Summary: null, Text: "kept text" }],
+                "An archived message with null parts loads with its text and renders it whole");
             copy[0].Kind = "human";
             check(!SwitchboardPresentation.SameComponents(valid, copy) && valid[0].Kind == "traffic", "Mutating a part in place is seen against the cached snapshot");
             check(SwitchboardPresentation.QueueSummary(markerless, null) is not null && partStates.Skip(1).All(s => SwitchboardPresentation.QueueSummary(markerless, s.Parts) is null),

@@ -79,13 +79,14 @@ public static class SwitchboardPresentation
     public static List<MessageComponent> ExpandedComponents(string text) =>
         new() { new MessageComponent { Offset = 0, Length = text.Length, Kind = MessageComponent.Plain } };
     /// Whether recorded ranges are in order, inside the text, and leave
-    /// nothing but whitespace uncovered.
+    /// nothing but whitespace uncovered. A null entry (`[null]` from JSON)
+    /// is invalid metadata like any other: the whole message shows expanded.
     public static bool ComponentsTile(string source, IReadOnlyList<MessageComponent> components)
     {
         var cursor = 0;
         foreach (var component in components)
         {
-            if (component.Offset < cursor || component.Offset > source.Length || component.Length < 0
+            if (component is null || component.Offset < cursor || component.Offset > source.Length || component.Length < 0
                 || component.Length > source.Length - component.Offset || !string.IsNullOrWhiteSpace(source[cursor..component.Offset])) return false;
             cursor = component.Offset + component.Length;
         }
@@ -115,16 +116,17 @@ public static class SwitchboardPresentation
         return rebuilt.ToString() == text ? result : ExpandedComponents(text);
     }
     /// Order-sensitive key for recorded parts (offset, length, kind); null
-    /// and empty differ. Parts alone decide what a message or queue row
-    /// shows, so any cache of one keys on this along with its text.
+    /// and empty differ, for the list, an entry and a kind. Parts alone
+    /// decide what a message or queue row shows, so any cache of one keys
+    /// on this along with its text.
     public static string ComponentsKey(IReadOnlyList<MessageComponent>? components) =>
-        components is null ? "-" : "[" + string.Join(";", components.Select(c => $"{c.Offset},{c.Length},{(c.Kind ?? "").Length}:{c.Kind}")) + "]";
+        components is null ? "-" : "[" + string.Join(";", components.Select(c => c is null ? "!" : $"{c.Offset},{c.Length},{(c.Kind is null ? "~" : $"{c.Kind.Length}:{c.Kind}")}")) + "]";
     public static bool SameComponents(IReadOnlyList<MessageComponent>? a, IReadOnlyList<MessageComponent>? b) =>
         ComponentsKey(a) == ComponentsKey(b);
     /// A detached copy for a render cache: MessageComponent is mutable, and a
     /// cached reference would change along with the message it compares to.
     public static List<MessageComponent>? Snapshot(IReadOnlyList<MessageComponent>? components) =>
-        components?.Select(c => new MessageComponent { Offset = c.Offset, Length = c.Length, Kind = c.Kind }).ToList();
+        components?.Select(c => c is null ? null! : new MessageComponent { Offset = c.Offset, Length = c.Length, Kind = c.Kind }).ToList();
     /// Queue banner signature for one item: rebuilds when its text or parts change.
     public static string QueueSignature(Guid id, string text, IReadOnlyList<MessageComponent>? components) =>
         $"|q:{id}:{text.Length}:{text.GetHashCode()}:{ComponentsKey(components)}";

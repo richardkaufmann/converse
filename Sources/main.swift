@@ -34,6 +34,20 @@ struct Message: Codable, Identifiable, Equatable {
     // Keep `==` compiler-synthesized: the transcript's prepared-message cache
     // keys on whole-Message equality, so it must cover `components` too.
 }
+extension Message {
+    // Synthesized decoding, except that unreadable Inject all parts never
+    // fail the archive: the message keeps its text and shows whole.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        images = try c.decode([String].self, forKey: .images)
+        delays = try c.decodeIfPresent([DelayMark].self, forKey: .delays)
+        finalReply = try c.decodeIfPresent(String.self, forKey: .finalReply)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
+        imported = try c.decodeIfPresent(Bool.self, forKey: .imported)
+        components = c.decodeComponents(forKey: .components)
+    }
+}
 struct ToolStatus: Codable {
     var model = "not reported"
     var effort = "CLI default"

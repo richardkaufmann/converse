@@ -229,12 +229,29 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
         return Date(timeIntervalSince1970: seconds)
     }
 }
+extension DeviceWireMessage {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        imageHashes = try c.decode([String].self, forKey: .imageHashes)
+        messageNumber = try c.decodeIfPresent(Int.self, forKey: .messageNumber)
+        createdAtUnixSeconds = try c.decodeIfPresent(Double.self, forKey: .createdAtUnixSeconds)
+        components = c.decodeComponents(forKey: .components)
+    }
+}
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID
     var text: String
     // Inject all parts of a merged queue item, as on DeviceWireMessage.
     // Optional: older peers omit and ignore it.
     var components: [MessageComponent]? = nil
+}
+extension DevicePendingDTO {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); text = try c.decode(String.self, forKey: .text)
+        components = c.decodeComponents(forKey: .components)
+    }
 }
 struct DeviceChoiceDTO: Codable, Equatable, Identifiable {
     var id: String

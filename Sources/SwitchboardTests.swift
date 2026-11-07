@@ -176,6 +176,41 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
           "Components keys are order-sensitive, tell nil from empty, and change with offset, length and kind")
     check(TranscriptStyle.queueSummary(merged) != nil && partStates.dropFirst().allSatisfy { TranscriptStyle.queueSummary(merged, components: $0) == nil },
           "Queue rows: the same text summarizes without parts and shows typed text in full once any parts arrive")
+    // Unreadable parts in an archive or snapshot (a null entry, a wrong
+    // type) are invalid metadata: the message loads with its text and shows
+    // whole. A null kind is an ordinary visible part.
+    let damagedSession = Session(entry: partsSession.entry)
+    damagedSession.messages = [Message(role: "user", text: merged, components: valid), Message(role: "user", text: merged, components: valid),
+                               Message(role: "user", text: merged, components: valid), Message(role: "user", text: merged, components: valid)]
+    var savedObject = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(damagedSession.saved)) as! [String: Any]
+    var savedMessages = savedObject["messages"] as! [[String: Any]]
+    let tellPart: [String: Any] = ["offset": valid[0].offset, "length": valid[0].length, "kind": "traffic"]
+    savedMessages[0]["components"] = [NSNull()]
+    savedMessages[1]["components"] = [tellPart, NSNull()]
+    savedMessages[2]["components"] = "not a list"
+    savedMessages[3]["components"] = [tellPart, ["offset": valid[1].offset, "length": valid[1].length, "kind": NSNull()]]
+    savedObject["messages"] = savedMessages
+    let damaged = try? JSONDecoder().decode(SavedSession.self, from: JSONSerialization.data(withJSONObject: savedObject))
+    check(damaged?.messages.map(\.text) == Array(repeating: merged, count: 4) && damaged?.messages.prefix(3).allSatisfy({ $0.components == MessageComponent.undecodable }) == true
+          && damaged?.messages[3].components == [valid[0], MessageComponent(offset: valid[1].offset, length: valid[1].length, kind: MessageComponent.text)],
+          "An archive with null, mixed-null or mistyped parts still loads with every message's text intact")
+    if let damaged {
+        let damagedPane = PaneTextFixture(Session(damaged))
+        let lines = damagedPane.text.string.components(separatedBy: "\n")
+        check(lines.filter { $0 == typed }.count == 4 && lines.filter { $0.hasPrefix("[Converse message from Fixture") }.count == 3 && lines.filter { $0.hasPrefix("Received tell from Fixture") }.count == 1
+              && damagedPane.text.copyBlocks.map(\.source) == Array(repeating: merged, count: 4),
+              "Unreadable parts show the whole message expanded; a null kind keeps the typed part visible beside its summarized tell")
+    }
+    let wireJSON = { (components: String) in "{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"kept\",\"imageHashes\":[],\"components\":" + components + "}" }
+    let wireNull = try? JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON("[null]").utf8))
+    let wireAbsent = try? JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON("null").utf8))
+    let pendingNull = try? JSONDecoder().decode(DevicePendingDTO.self, from: Data("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"text\":\"kept\",\"components\":[{\"offset\":0,\"length\":4,\"kind\":\"traffic\"},null]}".utf8))
+    let recordNull = try? JSONDecoder().decode(ConverseExchange.MessageRecord.self, from: Data("{\"role\":\"user\",\"text\":\"kept\",\"components\":[null]}".utf8))
+    check(wireNull?.text == "kept" && wireNull?.components == MessageComponent.undecodable && wireAbsent?.components == nil
+          && pendingNull?.text == "kept" && pendingNull?.components == MessageComponent.undecodable && TranscriptStyle.queueSummary("kept", components: pendingNull?.components) == nil
+          && recordNull?.text == "kept" && recordNull?.components == MessageComponent.undecodable
+          && TranscriptStyle.segments(merged, components: MessageComponent.undecodable) == [TranscriptSegment(text: merged, summary: nil)],
+          "Device snapshots and .converse records with a null part keep their text and render it whole")
 
     if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
        let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {

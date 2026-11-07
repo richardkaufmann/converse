@@ -180,6 +180,27 @@ struct MessageComponent: Codable, Equatable {
     /// composer) and "text" (anything else) always stay visible.
     var kind: String
     static let traffic = "traffic", human = "human", text = "text"
+    /// Stands in for recorded parts that could not be decoded (a null
+    /// entry, a wrong type). It never tiles, so the message shows whole and
+    /// expanded, like any other invalid parts.
+    static let undecodable = [MessageComponent(offset: -1, length: 0, kind: text)]
+}
+extension MessageComponent {
+    /// A missing or null kind is an ordinary visible part (Windows parity).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        offset = try c.decode(Int.self, forKey: .offset); length = try c.decode(Int.self, forKey: .length)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? Self.text
+    }
+}
+extension KeyedDecodingContainer {
+    /// Inject all parts are presentation only: unreadable ones never fail
+    /// the message, archive or snapshot that carries them.
+    func decodeComponents(forKey key: Key) -> [MessageComponent]? {
+        guard contains(key), (try? decodeNil(forKey: key)) == false else { return nil }
+        guard let parts = try? decode([MessageComponent?].self, forKey: key), !parts.contains(where: { $0 == nil }) else { return MessageComponent.undecodable }
+        return parts.compactMap { $0 }
+    }
 }
 /// One rendered part of a message. A nil summary shows `text` in full.
 struct TranscriptSegment: Equatable {

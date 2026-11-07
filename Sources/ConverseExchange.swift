@@ -32,7 +32,7 @@ enum ConverseExchange {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
             createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt); images = try c.decodeIfPresent([String].self, forKey: .images) ?? []
-            components = try c.decodeIfPresent([MessageComponent].self, forKey: .components)
+            components = c.decodeComponents(forKey: .components)
         }
     }
     struct SessionRecord: Codable, Equatable {

@@ -614,6 +614,32 @@ final class ConverseTests: XCTestCase {
         lines = render(nil)
         XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "→absent re-renders the legacy collapse")
     }
+    // A snapshot whose parts include a null entry still decodes: the message
+    // keeps its text and shows whole instead of failing the whole page.
+    func testNullComponentEntriesDecodeAndRenderWhole() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        func wire(_ components: String) throws -> DeviceWireMessage {
+            let object: [String: Any] = ["id": UUID().uuidString, "role": "user", "text": text, "imageHashes": [String]()]
+            var json = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            json.removeLast(); json += ",\"components\":" + components + "}"
+            return try JSONDecoder().decode(DeviceWireMessage.self, from: Data(json.utf8))
+        }
+        let tellLength = (tell as NSString).length
+        let damaged = try ["[null]", "[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},null]", "{\"offset\":0}"].map(wire)
+        let nullKind = try wire("[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},{\"offset\":\(tellLength + 2),\"length\":\((typed as NSString).length),\"kind\":null}]")
+        XCTAssertTrue(damaged.allSatisfy { $0.text == text && $0.components == MessageComponent.undecodable }, "Null entries and mistyped parts decode as invalid parts with the text intact")
+        XCTAssertEqual(nullKind.components?.map(\.kind), ["traffic", "text"], "A null kind is an ordinary visible part")
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+        let parent = PadTranscript(messages: damaged + [nullKind], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        parent.update(view, coordinator: coordinator)
+        let lines = view.text.components(separatedBy: "\n")
+        XCTAssertEqual(lines.filter { $0 == typed }.count, 4, "Typed text stays visible in every message")
+        XCTAssertEqual(lines.filter { $0.hasPrefix("[Converse message from Fixture") }.count, 3, "Invalid parts show the whole message expanded")
+        XCTAssertEqual(lines.filter { $0.hasPrefix("Received tell from Fixture") }.count, 1, "Valid parts with a null kind still summarize the tell")
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
