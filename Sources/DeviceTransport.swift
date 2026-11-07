@@ -810,7 +810,7 @@ extension DeviceSyncService {
     }
     #if os(macOS)
     private func wireMessage(_ message: Message) -> DeviceWireMessage {
-        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) }, createdAtUnixSeconds: message.createdAt?.timeIntervalSince1970)
+        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) }, createdAtUnixSeconds: message.createdAt?.timeIntervalSince1970, components: message.components)
     }
     private func requestDTOs(_ session: Session) -> [DeviceRequestDTO] {
         session.requests.map { request in
@@ -947,7 +947,7 @@ extension DeviceSyncService {
                                               homeSeq: stateStore?.nextSeq() ?? 0, epoch: holder.epoch, boot: boot,
                                               messages: slice, offset: start, total: total, prepend: beforeOffset != nil,
                                               draft: session.draft, draftVersion: drafts.version(session: sessionID.uuidString), draftImageHashes: imageHashes,
-                                              pending: session.pending.map { DevicePendingDTO(id: $0.id, text: $0.text) },
+                                              pending: session.pending.map { DevicePendingDTO(id: $0.id, text: $0.text, components: $0.messageComponents) },
                                               busy: session.busy, status: session.status, title: session.title, engine: session.entry.engine,
                                               accountName: session.entry.accountName, model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },

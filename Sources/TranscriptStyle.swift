@@ -169,6 +169,176 @@ enum TranscriptStyle {
     }
 }
 
+/// One part of a message that Inject all combined from several queued
+/// prompts: a UTF-16 range of the stored text and how that part renders.
+/// Presentation only. The stored text stays authoritative for the provider,
+/// Copy Message, context and handoff.
+struct MessageComponent: Codable, Equatable {
+    var offset: Int
+    var length: Int
+    /// "traffic" may collapse to its own summary. "human" (typed in a
+    /// composer) and "text" (anything else) always stay visible.
+    var kind: String
+    static let traffic = "traffic", human = "human", text = "text"
+}
+/// One rendered part of a message. A nil summary shows `text` in full.
+struct TranscriptSegment: Equatable {
+    var text: String
+    var summary: String?
+}
+extension TranscriptStyle {
+    /// Inject all joins queued prompts with this separator.
+    static let injectSeparator = "\n\n"
+    static func componentKind(_ text: String, typed: Bool) -> String {
+        typed ? MessageComponent.human : trafficSummary(text) != nil ? MessageComponent.traffic : MessageComponent.text
+    }
+    /// Component ranges for parts joined by Inject all, or nil unless the
+    /// parts reproduce the merged text exactly.
+    static func components(joining parts: [(text: String, kind: String)], into text: String) -> [MessageComponent]? {
+        guard parts.count > 1, parts.map(\.text).joined(separator: injectSeparator) == text else { return nil }
+        var offset = 0
+        return parts.map { part in
+            let length = (part.text as NSString).length
+            defer { offset += length + (injectSeparator as NSString).length }
+            return MessageComponent(offset: offset, length: length, kind: part.kind)
+        }
+    }
+    /// One visible part over all of `text`: what a merged message renders
+    /// as when its recorded ranges cannot be carried through a rewrite.
+    static func expandedComponents(_ text: String) -> [MessageComponent] {
+        [MessageComponent(offset: 0, length: (text as NSString).length, kind: MessageComponent.text)]
+    }
+    /// Whether recorded ranges are in order, inside the text, and leave
+    /// nothing but whitespace uncovered.
+    static func componentsTile(_ source: String, _ components: [MessageComponent]) -> Bool {
+        let whole = source as NSString
+        func blank(_ range: NSRange) -> Bool { whole.substring(with: range).allSatisfy(\.isWhitespace) }
+        var cursor = 0
+        for component in components {
+            guard component.offset >= cursor, component.offset <= whole.length, component.length >= 0,
+                  component.length <= whole.length - component.offset,
+                  blank(NSRange(location: cursor, length: component.offset - cursor)) else { return false }
+            cursor = component.offset + component.length
+        }
+        return blank(NSRange(location: cursor, length: whole.length - cursor))
+    }
+    /// Components for `text`, a display, export or import rewrite of
+    /// `source`. Parts survive when rewriting each piece reproduces `text`
+    /// exactly; anything else that had parts becomes one visible part, so
+    /// lost or invalid ranges never fall back to a whole-message summary.
+    static func components(_ components: [MessageComponent]?, from source: String, to text: String, rewrite: (String) -> String) -> [MessageComponent]? {
+        guard let components else { return nil }
+        guard componentsTile(source, components) else { return expandedComponents(text) }
+        if text == source { return components }
+        let whole = source as NSString
+        var rebuilt = "", cursor = 0, result: [MessageComponent] = []
+        for component in components {
+            rebuilt += rewrite(whole.substring(with: NSRange(location: cursor, length: component.offset - cursor)))
+            let part = rewrite(whole.substring(with: NSRange(location: component.offset, length: component.length)))
+            result.append(MessageComponent(offset: (rebuilt as NSString).length, length: (part as NSString).length, kind: component.kind))
+            rebuilt += part
+            cursor = component.offset + component.length
+        }
+        rebuilt += rewrite(whole.substring(from: cursor))
+        return rebuilt == text ? result : expandedComponents(text)
+    }
+    /// Order-sensitive key for recorded parts (offset, length, kind); nil
+    /// and [] differ. Parts alone decide what a message or queue row shows,
+    /// so any cache of one keys on this along with its text.
+    static func componentsKey(_ components: [MessageComponent]?) -> String {
+        guard let components else { return "-" }
+        return "[" + components.map { "\($0.offset),\($0.length),\($0.kind.utf16.count):\($0.kind)" }.joined(separator: ";") + "]"
+    }
+    /// One-line queue label: a summary only when the whole item is traffic.
+    static func queueSummary(_ text: String, components: [MessageComponent]? = nil) -> String? {
+        segments(text, components: components) == nil ? trafficSummary(text, queued: true) : nil
+    }
+    /// Parts of a merged message to render separately: traffic parts with
+    /// their own summary, everything else in full. Nil renders the message
+    /// whole, exactly as before. Recorded components that do not tile the
+    /// text show it all expanded; only messages without them use the
+    /// conservative legacy split.
+    static func segments(_ source: String, components: [MessageComponent]?, resolveName: (String) -> String? = { _ in nil }) -> [TranscriptSegment]? {
+        guard let components else { return legacySegments(source, resolveName: resolveName) }
+        // Untrusted ranges never hide text, and never fall back to a
+        // whole-message summary that could cover a typed part.
+        guard componentsTile(source, components) else { return [TranscriptSegment(text: source, summary: nil)] }
+        let whole = source as NSString
+        var result: [TranscriptSegment] = [], plainStart: Int?
+        for component in components {
+            let part = whole.substring(with: NSRange(location: component.offset, length: component.length))
+            let summary = component.kind == MessageComponent.traffic ? trafficSummary(part, resolveName: resolveName) : nil
+            let end = component.offset + component.length
+            if part.allSatisfy(\.isWhitespace) { continue }
+            // Adjacent visible parts stay one block with their separator.
+            if summary == nil, let start = plainStart {
+                result[result.count - 1].text = whole.substring(with: NSRange(location: start, length: end - start)); continue
+            }
+            plainStart = summary == nil ? component.offset : nil
+            result.append(TranscriptSegment(text: part, summary: summary))
+        }
+        // Plain parts alone render as before, unless the whole would
+        // otherwise collapse over a visible part.
+        return !result.isEmpty && (result.contains { $0.summary != nil } || trafficSummary(source) != nil) ? result : nil
+    }
+    /// Messages merged before component metadata. Splits only after a
+    /// complete delivery block followed by the Inject all separator, and
+    /// never says who wrote the remainder. A delivery block followed by
+    /// anything else shows the whole message expanded. A plain tell has no
+    /// delivery block, so an old merge of one with typed text cannot be told
+    /// apart from a multi-paragraph tell: it still collapses, as before.
+    static func legacySegments(_ source: String, resolveName: (String) -> String? = { _ in nil }) -> [TranscriptSegment]? {
+        let envelope = "[Converse message from "
+        // Every render asks about ordinary prompts too; check before copying.
+        guard source.drop(while: \.isWhitespace).hasPrefix(envelope) else { return nil }
+        let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result: [TranscriptSegment] = [], rest = Substring(text), trailing = false
+        while rest.hasPrefix(envelope) {
+            guard let (end, next) = deliveryEnd(rest, trailing: &trailing) else { break }
+            let part = String(rest[..<end])
+            result.append(TranscriptSegment(text: part, summary: trafficSummary(part, resolveName: resolveName)))
+            rest = rest[next...]
+        }
+        if result.isEmpty { return trailing ? [TranscriptSegment(text: source, summary: nil)] : nil }
+        let remainder = rest.trimmingCharacters(in: .newlines)
+        if !remainder.isEmpty { result.append(TranscriptSegment(text: remainder, summary: nil)) }
+        return result.count > 1 ? result : nil
+    }
+    /// End of the first delivery block that closes an envelope, and where
+    /// the next part starts (the end of the text when nothing follows).
+    private static func deliveryEnd(_ text: Substring, trailing: inout Bool) -> (Substring.Index, Substring.Index)? {
+        let reply = "[Reply to request ", expected = "[Reply expected · request ID:\n"
+        func uuid(_ from: Substring.Index) -> Substring.Index? {
+            guard let end = text.index(from, offsetBy: 36, limitedBy: text.endIndex), UUID(uuidString: String(text[from..<end])) != nil else { return nil }
+            return end
+        }
+        func expectedEnd(_ from: Substring.Index) -> Substring.Index? {
+            guard text[from...].hasPrefix(expected), let id = uuid(text.index(from, offsetBy: expected.count)),
+                  text[id...].hasPrefix("\n"), let close = text[id...].firstIndex(of: "]") else { return nil }
+            return text.index(after: close)
+        }
+        func blockEnd(_ from: Substring.Index) -> Substring.Index? {
+            if text[from...].hasPrefix(reply) {
+                guard let id = uuid(text.index(from, offsetBy: reply.count)), text[id...].hasPrefix("]") else { return nil }
+                let end = text.index(after: id)
+                if text[end...].hasPrefix("\n" + expected) { return expectedEnd(text.index(after: end)) }
+                return end
+            }
+            return expectedEnd(from)
+        }
+        var search = text.startIndex
+        while let marker = text[search...].firstIndex(of: "\n") {
+            search = text.index(after: marker)
+            guard text[search...].hasPrefix(reply) || text[search...].hasPrefix(expected), let end = blockEnd(search) else { continue }
+            let after = text[end...]
+            if after.allSatisfy(\.isWhitespace) { return (end, text.endIndex) }
+            if after.hasPrefix(injectSeparator) { return (end, text.index(end, offsetBy: injectSeparator.count)) }
+            trailing = true
+        }
+        return nil
+    }
+}
+
 struct TranscriptImageReference {
     var range: NSRange
     var caption: String

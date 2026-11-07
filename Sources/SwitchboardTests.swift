@@ -143,6 +143,40 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
     check(!fixture.text.string.contains("schemaVersion") && !fixture.text.string.contains(payload), "Turning compression back on collapses existing messages")
     Store.shared.collapseTranscriptPayloads = oldCollapse
 
+    // Metadata-only changes: the same merged text with different recorded
+    // parts renders differently, so the pane's history key (Message equality
+    // and messagesRevision) must re-render it, even before a later message.
+    let tell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message"
+    let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+    let merged = tell + "\n\n" + typed
+    let valid = TranscriptStyle.components(joining: [(tell, "traffic"), (typed, "human")], into: merged) ?? []
+    let asHuman = [MessageComponent(offset: valid[0].offset, length: valid[0].length, kind: "human"), valid[1]]
+    let partsSession = Session(entry: Entry(name: "Parts fixture", command: "unused", directory: NSTemporaryDirectory(), engine: "codex"))
+    partsSession.messages = [Message(role: "user", text: merged), Message(role: "assistant", text: "Later reply")]
+    let partsPane = PaneTextFixture(partsSession)
+    func shown() -> [Bool] {
+        let lines = partsPane.text.string.components(separatedBy: "\n")
+        return [lines.contains(typed), lines.contains { $0.hasPrefix("Received tell from Fixture") }, partsPane.text.string.contains("[Converse message from Fixture"), lines.contains("Later reply")]
+    }
+    check(shown() == [false, true, false, true], "Merged text without parts collapses whole, as before")
+    let transitions: [(String, [MessageComponent]?, [Bool])] = [
+        ("absent→valid", valid, [true, true, false, true]), ("valid→invalid", [valid[0]], [true, false, true, true]),
+        ("invalid→valid", valid, [true, true, false, true]), ("traffic→human", asHuman, [true, false, true, true]),
+        ("human→traffic", valid, [true, true, false, true]), ("valid→empty", [], [true, false, true, true]), ("→absent", nil, [false, true, false, true])]
+    for (name, parts, expected) in transitions {
+        let before = partsSession.messages[0], revision = partsSession.messagesRevision
+        partsSession.messages[0].components = parts
+        check(partsSession.messages[0] != before && partsSession.messagesRevision != revision && partsSession.messages[0].text == before.text,
+              "\(name): a components-only change invalidates the pane's message key")
+        partsPane.coordinator.render(partsPane.text)
+        check(shown() == expected, "\(name): the pane re-renders the earlier message with the right visibility")
+    }
+    let partStates: [[MessageComponent]?] = [nil, valid, [valid[0]], [], asHuman, [valid[1], valid[0]]]
+    check(Set(partStates.map(TranscriptStyle.componentsKey)).count == partStates.count && TranscriptStyle.componentsKey(valid) == TranscriptStyle.componentsKey(valid.map { $0 }),
+          "Components keys are order-sensitive, tell nil from empty, and change with offset, length and kind")
+    check(TranscriptStyle.queueSummary(merged) != nil && partStates.dropFirst().allSatisfy { TranscriptStyle.queueSummary(merged, components: $0) == nil },
+          "Queue rows: the same text summarizes without parts and shows typed text in full once any parts arrive")
+
     if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
        let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {
         fixture.scroll.cacheDisplay(in: fixture.scroll.bounds, to: bitmap)
@@ -512,6 +546,110 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
           "Legacy queue receipts also read replies as replies")
     check(TranscriptStyle.trafficSummary("[Converse message from Muse · session abc]\nI read [Reply to request X] in the docs") == "Received tell from Muse · I read [Reply to request X] in the docs",
           "Only the delivery reply marker, not quoted body text, makes a reply")
+    // Inject all merging traffic with a typed prompt (bug 941BAB1E): each
+    // switchboard part keeps its own summary and typed text stays visible.
+    do {
+        let reply = envelope("Read-only diagnosis", expected: false, inReplyTo: envelopeRequest)
+        let ask = envelope("Which build?", expected: true, inReplyTo: nil)
+        let typed = "OK, propose: make 148 on Mac have a Debug pane.\n\nSecond paragraph."
+        func merged(_ parts: [(String, String)]) -> (String, [MessageComponent]?) {
+            let text = parts.map(\.0).joined(separator: "\n\n")
+            return (text, TranscriptStyle.components(joining: parts.map { ($0.0, $0.1) }, into: text))
+        }
+        let replySummary = "Received reply from ClaudeConverse · Read-only diagnosis", askSummary = "Received ask from ClaudeConverse · Which build?"
+        let agentHuman = merged([(reply, TranscriptStyle.componentKind(reply, typed: false)), (typed, TranscriptStyle.componentKind(typed, typed: true))])
+        check(agentHuman.1 == [MessageComponent(offset: 0, length: (reply as NSString).length, kind: "traffic"), MessageComponent(offset: (reply as NSString).length + 2, length: (typed as NSString).length, kind: "human")]
+              && TranscriptStyle.segments(agentHuman.0, components: agentHuman.1) == [TranscriptSegment(text: reply, summary: replySummary), TranscriptSegment(text: typed, summary: nil)],
+              "Agent then human: the reply collapses to its own summary and the typed prompt stays visible in full")
+        let humanAgent = merged([(typed, "human"), (reply, "traffic")])
+        check(TranscriptStyle.segments(humanAgent.0, components: humanAgent.1) == [TranscriptSegment(text: typed, summary: nil), TranscriptSegment(text: reply, summary: replySummary)],
+              "Human then agent: typed text first, then the reply's own summary")
+        let sandwich = merged([(reply, "traffic"), (typed, "human"), (ask, "traffic")])
+        check(TranscriptStyle.segments(sandwich.0, components: sandwich.1)?.map(\.summary) == [replySummary, nil, askSummary]
+              && TranscriptStyle.segments(sandwich.0, components: sandwich.1)?[1].text == typed, "Two traffic parts around a typed prompt render as two summaries plus the visible text")
+        let twoHumans = merged([(reply, "traffic"), ("first typed", "human"), ("second typed", "human")])
+        check(TranscriptStyle.segments(twoHumans.0, components: twoHumans.1) == [TranscriptSegment(text: reply, summary: replySummary), TranscriptSegment(text: "first typed\n\nsecond typed", summary: nil)],
+              "Adjacent visible parts stay one block with their original separator")
+        let trafficOnly = merged([(reply, "traffic"), (ask, "traffic")])
+        check(TranscriptStyle.segments(trafficOnly.0, components: trafficOnly.1)?.map(\.summary) == [replySummary, askSummary], "Traffic-only merges still collapse, one summary per message")
+        let lookalike = "Switchboard: why did the last tell fail?"
+        let typedLookalike = merged([(lookalike, TranscriptStyle.componentKind(lookalike, typed: true)), ("and this", "human")])
+        check(typedLookalike.1?.map(\.kind) == ["human", "human"] && TranscriptStyle.segments(typedLookalike.0, components: typedLookalike.1) == [TranscriptSegment(text: typedLookalike.0, summary: nil)],
+              "Typed text that looks like a switchboard line never collapses once merged")
+        check(TranscriptStyle.segments("plain one\n\nplain two", components: merged([("plain one", "human"), ("plain two", "text")]).1) == nil
+              && TranscriptStyle.segments(reply, components: nil) == nil && TranscriptStyle.segments(typed, components: nil) == nil,
+              "Unmerged traffic and plain messages, and merges with no traffic, render whole exactly as before")
+        check(TranscriptStyle.components(joining: [(reply, "traffic")], into: reply) == nil && TranscriptStyle.components(joining: [(reply, "traffic"), (typed, "human")], into: reply + "\n" + typed) == nil,
+              "Components are recorded only for a real merge whose parts reproduce the text exactly")
+        let forged = [MessageComponent(offset: 0, length: (reply as NSString).length, kind: "traffic"), MessageComponent(offset: (agentHuman.0 as NSString).length + 5, length: 3, kind: "human")]
+        let hidden = [MessageComponent(offset: 0, length: (reply as NSString).length, kind: "traffic"), MessageComponent(offset: (reply as NSString).length + 2, length: 4, kind: "traffic")]
+        check(TranscriptStyle.segments(agentHuman.0, components: forged) == [TranscriptSegment(text: agentHuman.0, summary: nil)] && TranscriptStyle.segments(agentHuman.0, components: hidden) == [TranscriptSegment(text: agentHuman.0, summary: nil)],
+              "Out-of-range ranges, or ranges leaving text uncovered, show the whole message expanded instead of hiding text")
+        // A plain tell has no delivery block, so only recorded parts can
+        // separate it from typed text. Invalid parts must never collapse it.
+        let plainTell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message"
+        let human = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let markerless = plainTell + "\n\n" + human, markerlessLength = (markerless as NSString).length, tellLength = (plainTell as NSString).length
+        let valid = TranscriptStyle.components(joining: [(plainTell, "traffic"), (human, "human")], into: markerless) ?? []
+        func expanded(_ parts: [MessageComponent]) -> Bool { TranscriptStyle.segments(markerless, components: parts) == [TranscriptSegment(text: markerless, summary: nil)] }
+        check(TranscriptStyle.segments(markerless, components: valid) == [TranscriptSegment(text: plainTell, summary: "Received tell from Fixture · Status message"), TranscriptSegment(text: human, summary: nil)],
+              "Markerless tell then typed text: valid parts keep the typed prompt visible")
+        check(expanded([valid[0], MessageComponent(offset: markerlessLength + 1, length: 1, kind: "human")]), "Markerless tell then typed text: an out-of-bounds part shows the whole message expanded")
+        check(expanded([valid[0], MessageComponent(offset: tellLength - 3, length: markerlessLength - tellLength + 3, kind: "human")]), "Markerless tell then typed text: overlapping parts show the whole message expanded")
+        check(expanded([valid[0]]) && expanded([]) && expanded([MessageComponent(offset: 0, length: 5, kind: "traffic")]),
+              "Markerless tell then typed text: parts leaving non-blank text uncovered, including a single or empty list, show it expanded")
+        check(TranscriptStyle.segments(markerless, components: nil) == nil && TranscriptStyle.trafficSummary(markerless) != nil,
+              "Without components a markerless merge is ambiguous with a multi-paragraph tell and still collapses whole, as before")
+        check(TranscriptStyle.queueSummary(markerless, components: valid) == nil && TranscriptStyle.queueSummary(markerless, components: [valid[0]]) == nil,
+              "Queue rows with recorded parts, valid or not, never summarize over the typed text")
+        // Display, export and import rewrites carry the parts, or keep the whole visible.
+        let scrubbedTell = plainTell.replacingOccurrences(of: "Fixture", with: "[name]")
+        check(TranscriptStyle.components(valid, from: markerless, to: scrubbedTell + "\n\n" + human) { $0.replacingOccurrences(of: "Fixture", with: "[name]") }
+              == [MessageComponent(offset: 0, length: (scrubbedTell as NSString).length, kind: "traffic"), MessageComponent(offset: (scrubbedTell as NSString).length + 2, length: (human as NSString).length, kind: "human")],
+              "A length-changing rewrite moves the recorded parts with the text")
+        check(TranscriptStyle.components(valid, from: markerless, to: "rewritten whole") { $0 } == TranscriptStyle.expandedComponents("rewritten whole")
+              && TranscriptStyle.components(nil, from: markerless, to: "x") { $0 } == nil
+              && TranscriptStyle.components([valid[0]], from: markerless, to: markerless) { $0 } == TranscriptStyle.expandedComponents(markerless)
+              && TranscriptStyle.segments(markerless, components: TranscriptStyle.expandedComponents(markerless)) == [TranscriptSegment(text: markerless, summary: nil)],
+              "A rewrite the parts cannot follow, or invalid parts, become one visible part; no parts stay no parts")
+        // Queued parts that no longer reproduce the text keep it visible.
+        let drifted = PendingPrompt(components: [PendingPrompt(text: plainTell, images: []), PendingPrompt(typed: true, text: human, images: [])], text: markerless + " edited", images: [])
+        let single = PendingPrompt(components: [PendingPrompt(text: plainTell, images: [])], text: plainTell, images: [])
+        check(drifted.messageComponents == TranscriptStyle.expandedComponents(drifted.text) && TranscriptStyle.queueSummary(drifted.text, components: drifted.messageComponents) == nil
+              && single.messageComponents == nil && PendingPrompt(components: [], text: plainTell, images: []).messageComponents == nil,
+              "Queued parts that drift from the text keep it visible; a single unchanged part is an ordinary message")
+        let pendingWire = try? JSONDecoder().decode(DevicePendingDTO.self, from: JSONEncoder().encode(DevicePendingDTO(id: UUID(), text: markerless, components: valid)))
+        let olderPending = try? JSONDecoder().decode(DevicePendingDTO.self, from: Data(#"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","text":"x"}"#.utf8))
+        check(pendingWire?.components == valid && TranscriptStyle.queueSummary(markerless, components: pendingWire?.components) == nil && olderPending != nil && olderPending?.components == nil
+              && !(String(data: (try? JSONEncoder().encode(DevicePendingDTO(id: UUID(), text: "x"))) ?? Data(), encoding: .utf8) ?? "components").contains("components"),
+              "Queue snapshots carry merged parts when present and omit them otherwise")
+        // Richard's archived shape: no metadata, a reply envelope, the separator, then typed text.
+        let legacy = reply + "\n\n" + typed
+        check(TranscriptStyle.segments(legacy, components: nil) == [TranscriptSegment(text: reply, summary: replySummary), TranscriptSegment(text: typed, summary: nil)],
+              "Old merged messages split after the reply's delivery block and show the remainder unattributed and in full")
+        check(TranscriptStyle.segments(ask + "\n\n" + typed, components: nil)?.map(\.summary) == [askSummary, nil]
+              && TranscriptStyle.segments(envelope("Both", expected: true, inReplyTo: envelopeRequest) + "\n\n" + typed, components: nil)?.last == TranscriptSegment(text: typed, summary: nil),
+              "Old merges split after a Reply expected block, alone or after a reply marker")
+        check(TranscriptStyle.segments(reply + "\n\n" + ask + "\n\n" + typed, components: nil)?.map(\.summary) == [replySummary, askSummary, nil], "Old merges of two envelopes and typed text split into each part")
+        let tellOnly = envelope("Status\n\nwith a second paragraph", expected: false, inReplyTo: nil)
+        check(TranscriptStyle.segments(tellOnly, components: nil) == nil && TranscriptStyle.segments(reply, components: nil) == nil,
+              "A single envelope, including multi-paragraph tells without a delivery block, still collapses as before")
+        let unsafe = reply + "\ntrailing text without the separator"
+        check(TranscriptStyle.segments(unsafe, components: nil) == [TranscriptSegment(text: unsafe, summary: nil)], "Content after a delivery block that cannot be split safely shows the whole message expanded")
+        check(TranscriptStyle.queueSummary(reply) == "Queued reply from ClaudeConverse · Read-only diagnosis" && TranscriptStyle.queueSummary(legacy) == nil && TranscriptStyle.queueSummary(agentHuman.0, components: agentHuman.1) == nil,
+              "Queue rows summarize whole traffic only and never hide merged typed input")
+        // Archive and wire round trips keep the parts; older payloads decode without them.
+        let stored = Message(role: "user", text: agentHuman.0, components: agentHuman.1)
+        let roundTrip = try? JSONDecoder().decode(Message.self, from: JSONEncoder().encode(stored))
+        let oldArchive = try? JSONDecoder().decode(Message.self, from: Data(#"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","role":"user","text":"x","images":[]}"#.utf8))
+        check(roundTrip == stored && roundTrip?.components == agentHuman.1 && oldArchive != nil && oldArchive?.components == nil, "Message components survive archive save and load; old archives decode without them")
+        let wire = DeviceWireMessage(id: stored.id, role: "user", text: stored.text, components: stored.components)
+        let wireJSON = (try? JSONEncoder().encode(wire)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let olderPeer = try? JSONDecoder().decode(DeviceWireMessage.self, from: Data(#"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","role":"user","text":"x","imageHashes":[]}"#.utf8))
+        check(wireJSON.contains(#""components":[{"#) && (try? JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON.utf8)))?.components == agentHuman.1 && olderPeer?.components == nil
+              && !((try? JSONEncoder().encode(DeviceWireMessage(id: UUID(), role: "user", text: "x"))).flatMap { String(data: $0, encoding: .utf8) } ?? "components").contains("components"),
+              "The transcript DTO carries components when present and omits them otherwise, so older peers ignore it")
+    }
     // A delivered reply carries no obligation: an interrupted receiving turn is not a delivery failure.
     let replyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("reply-interrupted-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: replyFolder) }

@@ -56,7 +56,7 @@ final class RemoteComposer: ObservableObject {
     }
     func updateEditor(transcript: DeviceTranscriptPayload?, cache: [String: URL]) {
         editor.messages = (transcript?.messages ?? []).map { message in
-            Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: message.createdAt)
+            Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: message.createdAt, components: message.components)
         }
         editor.messageNumbers = (transcript?.messages ?? []).reduce(into: [UUID: Int]()) { numbers, message in
             if let number = message.messageNumber, number > 0 { numbers[message.id] = number }
@@ -350,7 +350,7 @@ struct RemotePane: View {
                     }
                     ForEach(pending) { item in
                         HStack {
-                            Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                            Text(TranscriptStyle.queueSummary(item.text, components: item.components) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text, components: item.components) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                             Spacer()
                             if pending.count == 1 {
                                 Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }

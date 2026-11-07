@@ -390,7 +390,7 @@ struct PadTranscript: UIViewRepresentable {
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
         let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
-        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + TranscriptStyle.componentsKey($0.components) + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
         let contentChanged = signature != c.signature || c.lastDraft != draft
         guard contentChanged || c.textSize != textSize else { return }
@@ -440,7 +440,21 @@ struct PadTranscript: UIViewRepresentable {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
             let body: NSMutableAttributedString
-            if let summary = TranscriptStyle.trafficSummary(message.text, resolveName: DeviceSyncService.shared.switchboardDisplayName) {
+            // Inject all can merge traffic with typed input: each part renders on its own.
+            let segments = prompt ? TranscriptStyle.segments(message.text, components: message.components, resolveName: DeviceSyncService.shared.switchboardDisplayName) : nil
+            var segmentTraffic: [NSRange] = []
+            if let segments {
+                body = NSMutableAttributedString(string: "")
+                for (index, segment) in segments.enumerated() {
+                    if body.length > 0 { body.append(NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16)])) }
+                    guard let summary = segment.summary else { body.append(Self.render(segment.text.trimmingCharacters(in: .newlines))); continue }
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    let key = message.id.uuidString + "-" + String(index)
+                    c.trafficDetails[key] = segment.text
+                    segmentTraffic.append(NSRange(location: body.length, length: (summary as NSString).length))
+                    body.append(NSAttributedString(string: summary, attributes: [.font: UIFont.systemFont(ofSize: 16), .paragraphStyle: oneLine, .link: URL(string: "converse-traffic://message/" + key)!]))
+                }
+            } else if let summary = TranscriptStyle.trafficSummary(message.text, resolveName: DeviceSyncService.shared.switchboardDisplayName) {
                 let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                 let key = message.id.uuidString
                 c.trafficDetails[key] = message.text
@@ -455,7 +469,9 @@ struct PadTranscript: UIViewRepresentable {
                 if link != nil { body.addAttribute(.foregroundColor, value: UIColor.link, range: range) }
             }
             let start = result.length
-            if TranscriptStyle.isTraffic(message.text) { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            let traffic = segments == nil && TranscriptStyle.isTraffic(message.text)
+            if traffic { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            for range in segmentTraffic where NSMaxRange(range) <= body.length { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: range) }
             result.append(body)
             for hash in message.imageHashes {
                 guard let url = images[hash], let image = UIImage(contentsOfFile: url.path) else { continue }
@@ -479,7 +495,8 @@ struct PadTranscript: UIViewRepresentable {
             let range = NSRange(location: start, length: result.length - start)
             c.messageRanges.append((message.id, range))
             if prompt { view.promptBlocks.append(range) }
-            if TranscriptStyle.isTraffic(message.text) { view.trafficBlocks.append(range) }
+            if traffic { view.trafficBlocks.append(range) }
+            for part in segmentTraffic where NSMaxRange(part) <= body.length { view.trafficBlocks.append(NSRange(location: start + part.location, length: part.length)) }
         }
         view.draftImages = []
         for hash in draftImageHashes {

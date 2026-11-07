@@ -220,6 +220,9 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
     // UTC Unix seconds, not Swift's default Date encoding (2001 epoch).
     // Optional for older peers and history with no original timestamp.
     var createdAtUnixSeconds: Double? = nil
+    // Inject all parts (UTF-16 ranges of `text`). Optional: older peers
+    // omit and ignore it; viewers then use the conservative text split.
+    var components: [MessageComponent]? = nil
     var createdAt: Date? {
         guard let seconds = createdAtUnixSeconds, seconds.isFinite,
               seconds >= -62135596800, seconds < 253402300800 else { return nil }
@@ -229,6 +232,9 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID
     var text: String
+    // Inject all parts of a merged queue item, as on DeviceWireMessage.
+    // Optional: older peers omit and ignore it.
+    var components: [MessageComponent]? = nil
 }
 struct DeviceChoiceDTO: Codable, Equatable, Identifiable {
     var id: String

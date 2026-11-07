@@ -521,6 +521,99 @@ final class ConverseTests: XCTestCase {
             window.isHidden = true
         }
     }
+    // Inject all merged a reply with typed input (941BAB1E): the typed part
+    // stays visible whether the home sent components or not.
+    func testMergedTrafficKeepsTypedPromptVisible() throws {
+        let reply = "[Converse message from ClaudeConverse · session abc · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+        let typed = "OK, propose: make 148 on Mac have a Debug pane."
+        let text = reply + "\n\n" + typed
+        let wireJSON = #"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","role":"user","text":"#
+            + String(data: try JSONEncoder().encode(text), encoding: .utf8)!
+            + #","imageHashes":[],"components":[{"offset":0,"length":"# + String((reply as NSString).length) + #","kind":"traffic"},{"offset":"#
+            + String((reply as NSString).length + 2) + #","length":"# + String((typed as NSString).length) + #","kind":"human"}]}"#
+        let recorded = try JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON.utf8))
+        XCTAssertEqual(recorded.components?.map(\.kind), ["traffic", "human"], "The snapshot DTO decodes components from the home")
+        let legacy = DeviceWireMessage(id: UUID(), role: "user", text: text)
+        for message in [recorded, legacy] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "Received reply from ClaudeConverse · Read-only diagnosis").location, 0, "The reply collapses to its own summary")
+            XCTAssertFalse(view.text.contains("[Reply to request"))
+            let typedColor = try XCTUnwrap(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor)
+            XCTAssertNotEqual(typedColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic)
+            XCTAssertNotNil(view.textStorage.attribute(.link, at: 0, effectiveRange: nil), "Tapping the summary still opens its full message")
+            XCTAssertEqual(coordinator.trafficDetails.values.sorted(), [reply], "Details hold only the switchboard part")
+            XCTAssertFalse(view.trafficBlocks.contains { NSIntersectionRange($0, typedRange).length > 0 }, "Typed text keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+    }
+    // A plain tell has no delivery block: invalid recorded parts from the
+    // home must show the whole merged message expanded, never collapse it.
+    func testInvalidMergedPartsShowWholeMessageExpanded() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let tellLength = (tell as NSString).length, textLength = (text as NSString).length
+        let invalid = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: textLength + 1, length: 1, kind: "human")])
+        let overlapping = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: tellLength - 3, length: textLength - tellLength + 3, kind: "human")])
+        for message in [invalid, overlapping] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "[Converse message from Fixture").location, 0, "The whole message is shown expanded, not summarized")
+            XCTAssertFalse(view.text.contains("Received tell"))
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Nothing in the expanded message is orange")
+            XCTAssertTrue(coordinator.trafficDetails.isEmpty, "No collapsed summary to tap")
+            XCTAssertTrue(view.trafficBlocks.isEmpty, "The message keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+        XCTAssertNil(TranscriptStyle.queueSummary(text, components: invalid.components), "Queue rows never summarize over invalid parts")
+        XCTAssertNotNil(TranscriptStyle.queueSummary(text), "Without parts the ambiguous old merge still summarizes as before")
+    }
+    // The same message text with different recorded parts renders
+    // differently: the transcript's content signature must change with them.
+    func testComponentsOnlyChangeRerendersTranscript() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let valid = try XCTUnwrap(TranscriptStyle.components(joining: [(tell, "traffic"), (typed, "human")], into: text))
+        let asHuman = [MessageComponent(offset: valid[0].offset, length: valid[0].length, kind: "human"), valid[1]]
+        let id = UUID(), later = DeviceWireMessage(id: UUID(), role: "assistant", text: "Later reply")
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+        var coordinator: PadTranscript.Coordinator?
+        func render(_ parts: [MessageComponent]?) -> [String] {
+            let parent = PadTranscript(messages: [DeviceWireMessage(id: id, role: "user", text: text, components: parts), later], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            if coordinator == nil { coordinator = PadTranscript.Coordinator(parent) }
+            parent.update(view, coordinator: coordinator!)
+            return view.text.components(separatedBy: "\n")
+        }
+        func typedInFull(_ lines: [String]) -> Bool { lines.contains(typed) }
+        func summarized(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("Received tell from Fixture") } }
+        func wholeTell(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("[Converse message from Fixture") } }
+        var lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "Without parts the merge collapses as before")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines) && !wholeTell(lines), "absent→valid re-renders: typed visible, tell summarized")
+        lines = render([valid[0]])
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "valid→invalid re-renders the whole message expanded")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines), "invalid→valid re-renders")
+        lines = render(asHuman)
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "traffic→human re-renders the tell in full")
+        lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "→absent re-renders the legacy collapse")
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
