@@ -704,12 +704,31 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Inject all with queued items still merges them into one turn");
         // Both sends start before either ack returns: the second must reuse
         // the outstanding command instead of sending a duplicate interrupt.
+        // Earlier completed inject records may not be pruned yet; count only new ones.
+        // The outbox list is also updated by acks on the network thread, so
+        // retry a read that races a concurrent change.
+        T ReadOutbox<T>(Func<IReadOnlyList<DeviceOutboxRecord>, T> read)
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try { return read(viewer.Outbox); }
+                catch (InvalidOperationException) when (attempt < 100) { Thread.Sleep(1); }
+            }
+        }
+        var priorInjects = ReadOutbox(o => o.Where(r => r.SessionID == gid && r.Payload.Action == "injectAll").Select(r => r.CommandID).ToHashSet());
         var first = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
         var second = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
         var ids = await Task.WhenAll(first, second);
-        Check(ids[0] is not null && ids[0] == ids[1]
-            && viewer.Outbox.Count(r => r.SessionID == gid && r.Payload.Action == "injectAll") == 1,
-            "Double inject reuses the outstanding command");
+        // The quiet empty-queue completion can return before the second send.
+        // Then a new command is correct; what must never happen is two
+        // outstanding injects for the session.
+        // A completed record may already be pruned, so at most one new record.
+        var reused = ids[0] is not null && ids[0] == ids[1]
+            && ReadOutbox(o => o.Count(r => r.SessionID == gid && r.Payload.Action == "injectAll" && !priorInjects.Contains(r.CommandID))) <= 1;
+        var sequential = ids[0] is not null && ids[1] is not null && ids[0] != ids[1]
+            && await Until(() => LastAck(ids[0]) is { Outcome: "completed" });
+        var single = await Until(() => viewer.Unresolved(gid).Count(r => r.Payload.Action == "injectAll") <= 1);
+        Check((reused || sequential) && single, "Double inject reuses the outstanding command");
     }
     finally
     {
