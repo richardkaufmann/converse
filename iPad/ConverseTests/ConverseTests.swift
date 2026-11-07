@@ -940,6 +940,10 @@ final class ConverseTests: XCTestCase {
         first.messageNumber = nil; second.messageNumber = nil
         parent.messages = [first, hidden, empty, second]; parent.update(view, coordinator: coordinator)
         XCTAssertEqual(view.messageLabels.map(\.number), [1, 2], "Older homes still number visible messages, not lines")
+        let notice = DeviceWireMessage(id: UUID(), role: "notice", text: "Switchboard: queued")
+        let receipt = DeviceWireMessage(id: UUID(), role: "notice", text: "Switchboard: message queued from test")
+        parent.messages = [first, notice, receipt, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [1, 2, 3], "Like the Mac, visible notices consume one number; hidden queue receipts consume none")
         first.messageNumber = Int.max
         parent.messages = [first, second]; parent.update(view, coordinator: coordinator)
         XCTAssertEqual(view.messageLabels.map(\.number), [Int.max, Int.max], "An extreme home ordinal cannot overflow")
