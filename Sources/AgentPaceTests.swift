@@ -173,6 +173,11 @@ import Foundation
     activity.lastArtMood = "up"; activity.lastArtScoreboard = AgentArtPolicy.signature(base)
     check(!activity.shouldRegenerateArt(mood: "up", board: base, now: now), "Explicit activity-only art does not regenerate merely because its age limit elapsed")
     check(activity.shouldRegenerateArt(mood: "up", board: board([("Price", "$11"), ("Bugs", "3")]), now: now), "Measured activity still regenerates art after the minimum interval")
+    activity.lastArtAt = now.addingTimeInterval(-60)
+    activity.artDirection = "Scenery only, no numbers. Only generate new artwork when measurements meaningfully change."
+    check(activity.shouldRegenerateArt(mood: "up", board: base, now: now), "An activity-only art direction edit refreshes despite unchanged measurements and the minimum interval")
+    activity.lastArtDirection = activity.artDirection; activity.lastArtAt = now
+    check(!activity.shouldRegenerateArt(mood: "up", board: base, now: now.addingTimeInterval(86400)), "After rendering the edited direction, unchanged activity-only art stays quiet even beyond its age limit")
     var throttled = AgentConfig(); throttled.lastArtAt = last; throttled.lastArtMood = "up"; throttled.lastArtScoreboard = AgentArtPolicy.signature(base)
     check(!throttled.shouldRegenerateArt(mood: "down", board: base, now: now) && throttled.shouldRegenerateArt(mood: "down", board: base, now: now.addingTimeInterval(1200)), "Agent art uses the default 30 minute minimum")
     throttled.artDirection = "Moonbase"

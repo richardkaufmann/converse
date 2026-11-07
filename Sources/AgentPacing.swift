@@ -128,8 +128,9 @@ extension AgentConfig {
         // Check art direction as well as objective: owners put art timing there.
         let directionAndObjective = (artDirection ?? "") + "\n" + objective
         let activityOnly = directionAndObjective.range(of: #"(?is)only\s+(?:generate|regenerate|refresh)(?:\s+new)?(?:\s+(?:this|artwork|art|image|the image))?.{0,60}(?:significant activity|meaningful.{0,20}chang|significant.{0,20}chang)"#, options: .regularExpression) != nil
-        if activityOnly && lastArtAt != nil && !moodChanged && !scoreboardChanged { return false }
-        return AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: (lastArtDirection ?? "") != (artDirection ?? ""),
+        let directionChanged = (lastArtDirection ?? "") != (artDirection ?? "")
+        if activityOnly && lastArtAt != nil && !directionChanged && !moodChanged && !scoreboardChanged { return false }
+        return AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: directionChanged,
             moodChanged: moodChanged, scoreboardChanged: scoreboardChanged, minInterval: effectiveArtMinMinutes * 60, maxStale: effectiveArtStaleHours * 3600)
     }
 }
