@@ -761,7 +761,7 @@ func switchboardTrailingFenceSelfTests(_ check: (Bool, String) -> Void) {
         reply("Saving directly.\n" + edit("Saved without review"))
         let deadline = Date().addingTimeInterval(5)
         while !lot.document.rows.contains(where: { $0.text == "Saved without review" }) && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-        check(lot.document.rows.contains { $0.text == "Saved without review" } && notices().contains { $0.contains("Parking Lot review pending") }, engine + ": a trailing edit to a lot with confirmation off saves through the normal path")
+        check(lot.document.rows.contains { $0.text == "Saved without review" } && notices().contains { $0.contains("Parking Lot edit in progress.") } && !notices().contains { $0.contains("Parking Lot review pending") }, engine + ": a trailing edit to a lot with confirmation off saves through the normal path")
         try? service.parkingLibrary.delete(lot.id)
         store.sessions.removeAll { $0 === source || $0 === target }
     }
