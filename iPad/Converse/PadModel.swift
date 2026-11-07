@@ -69,6 +69,10 @@ final class PadModel: ObservableObject {
     var file: URL { service.storageFolder.appendingPathComponent("ipad-scene.json") }
     init(service: DeviceSyncService = .shared) {
         self.service = service
+        if !service.isTestEnvironment {
+            PerformanceCapture.shared.configure(folder: service.storageFolder,
+                enabled: UserDefaults.standard.bool(forKey: "performanceCapture") || ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1")
+        }
         if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(PadState.self, from: data), saved.placements.count == 3 { state = saved }
         if state.defaultDeviceName == nil {
             state.defaultDeviceName = Self.mobileDeviceName(phone: UIDevice.current.userInterfaceIdiom == .phone, identifier: service.identity?.deviceID ?? UUID().uuidString)

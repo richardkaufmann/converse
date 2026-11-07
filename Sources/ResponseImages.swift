@@ -288,7 +288,16 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         hoverView.textContainer?.containerSize = NSSize(width: 700, height: CGFloat.greatestFiniteMagnitude)
         ScrollingConversation.Coordinator(hoverSession).render(hoverView)
         var hoverClicks = 0
+        check(hoverView.hasImageLinks && hoverView.imageHoverTracking == nil, "A rendered web image link is detected; no move tracking until Load image is available")
         hoverView.loadImage = { _ in hoverClicks += 1 }
+        check(hoverView.imageHoverTracking?.options.contains(.mouseMoved) == true, "Move tracking exists while a hoverable web image link is shown")
+        let plainSession = store.create(Entry(name: "Plain hover", command: "unused", directory: allowed.path, engine: "claude"))
+        plainSession.messages = [Message(role: "assistant", text: "No images here, just [a link](https://example.invalid/page) and text")]
+        let plainView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        plainView.loadImage = { _ in }
+        ScrollingConversation.Coordinator(plainSession).render(plainView)
+        check(!plainView.hasImageLinks && plainView.imageHoverTracking == nil, "Transcripts without web image links install no per-move tracking")
+        check(ConversationTextView.containsImageLinks(NSAttributedString(string: "x"), in: NSRange(location: 5, length: 3)) == false, "Image link scan tolerates out-of-range requests")
         let beforeHover = validations
         var linkRange = NSRange(location: NSNotFound, length: 0)
         hoverView.textStorage?.enumerateAttribute(.converseImageLink, in: NSRange(location: 0, length: hoverView.textStorage?.length ?? 0)) { value, range, stop in
@@ -302,9 +311,22 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             check(hoverView.imageHover?.isHidden == false && (hoverView.imageHover?.frame.minY ?? 0) >= rect.maxY && hoverView.imageHover?.link?.url == remoteURL, "Hovering a web image link shows Load image directly beneath it")
             hoverView.updateImageHover(NSPoint(x: rect.minX + 4, y: rect.minY - 30))
             check(hoverView.imageHover?.isHidden == true && hoverClicks == 0 && validations == beforeHover, "Moving off the link hides Load image; hovering never fetches")
+            // A real mouse-moved event, as AppKit delivers it through the tracking area.
+            let hoverWindow = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 700, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+            hoverWindow.isReleasedWhenClosed = false; hoverWindow.contentView = hoverView
+            func move(to point: NSPoint) {
+                guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: hoverView.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: hoverWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else { check(false, "Mouse-moved fixture event"); return }
+                hoverView.mouseMoved(with: event)
+            }
+            move(to: NSPoint(x: rect.minX + 4, y: rect.midY))
+            check(hoverView.imageHoverTracking != nil && hoverView.imageHover?.isHidden == false && hoverView.imageHover?.link?.url == remoteURL, "A real mouse-moved event over a web image link shows Load image")
+            move(to: NSPoint(x: rect.minX + 4, y: rect.minY - 30))
+            check(hoverView.imageHover?.isHidden == true && hoverClicks == 0 && validations == beforeHover, "A real mouse-moved event off the link hides Load image without fetching")
+            hoverWindow.contentView = nil; hoverWindow.close()
             hoverView.loadImage = nil
             hoverView.updateImageHover(NSPoint(x: rect.minX + 4, y: rect.midY))
             check(hoverView.imageHover?.isHidden != false, "Viewer panes offer no Load image")
+            check(hoverView.imageHoverTracking == nil, "Viewer panes drop per-move tracking with Load image")
         } else { check(false, "Web image link carries a hover target in the rendered transcript") }
         let missingURL = URL(string: "https://images.example.invalid/missing")!
         let failing = store.create(Entry(name: "Failing image", command: "unused", directory: allowed.path, engine: "claude"))

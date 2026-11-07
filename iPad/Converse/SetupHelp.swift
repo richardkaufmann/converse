@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PadConnect: View {
     @ObservedObject var model: PadModel
@@ -85,16 +86,46 @@ struct PadHelp: View {
 
 struct PadAbout: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("performanceCapture") private var captureTimings = false
+    @State private var timingFile: TimingExportFile?
+    @State private var exportTimings = false
+    @State private var timingError = ""
     var body: some View {
         NavigationStack {
             Form {
                 Section { Text("Converse " + ConverseAbout.versionBuild).font(.headline) }
                 Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("GPLv3 or later · licensing details", destination: ConverseAbout.licenseURL) }
                 Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
+                Section("Performance diagnostics") {
+                    Toggle("Record performance timings", isOn: $captureTimings)
+                        .onChange(of: captureTimings) { _, enabled in
+                            PerformanceCapture.shared.configure(folder: DeviceSyncService.shared.storageFolder, enabled: enabled)
+                        }
+                    Text("Records timing and counts, including Parking Lot save round trips. No lot text or message contents. Starting a capture replaces the previous capture.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("Export timings…") {
+                        PerformanceCapture.shared.prepareExport { url in
+                            guard let url else { timingError = "Record some timings first."; return }
+                            do { timingFile = TimingExportFile(data: try Data(contentsOf: url)); timingError = ""; exportTimings = true }
+                            catch { timingError = error.localizedDescription }
+                        }
+                    }
+                    if !timingError.isEmpty { Text(timingError).font(.footnote).foregroundStyle(.red) }
+                }
             }.navigationTitle("About Converse")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .fileExporter(isPresented: $exportTimings, document: timingFile, contentType: .json, defaultFilename: "Converse performance timings") { result in
+            if case .failure(let error) = result { timingError = error.localizedDescription }
+        }
     }
+}
+private struct TimingExportFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+    init(data: Data) { self.data = data }
+    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 struct PadRenameSession: View {
     let row: DeviceSidebarRow

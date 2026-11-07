@@ -15,6 +15,7 @@ final class PaneDividerHandle: NSView {
     private var lastDragEvent = Date.distantPast
     private var pendingPosition: CGFloat?
     private var dragFrame: DispatchWorkItem?
+    private var pendingFrameMeasurement: PerformanceCapture.Span?
     private var idleCheck: DispatchWorkItem?
     private var releaseMonitor: Any?
     private var lastLocationInWindow: NSPoint = .zero
@@ -66,6 +67,9 @@ final class PaneDividerHandle: NSView {
         NSCursor.resizeLeftRight.set()
     }
     override func mouseDragged(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .dragDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.dragHandling, measurement) }
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         lastDragEvent = Date()
         lastLocationInWindow = event.locationInWindow
@@ -81,6 +85,7 @@ final class PaneDividerHandle: NSView {
         // Consume only the newest pointer position each display interval.
         // Reflowing every queued mouse event makes long transcripts lag behind.
         if dragFrame == nil {
+            pendingFrameMeasurement = PerformanceCapture.shared.begin()
             let frame = DispatchWorkItem { [weak self] in self?.applyDragFrame() }
             dragFrame = frame
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60, execute: frame)
@@ -88,11 +93,18 @@ final class PaneDividerHandle: NSView {
         NSCursor.resizeLeftRight.set()
     }
     private func applyDragFrame() {
+        PerformanceCapture.shared.end(.dragFrameWait, pendingFrameMeasurement)
+        pendingFrameMeasurement = nil
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.dragApply, measurement) }
         dragFrame = nil
         guard let split, let position = pendingPosition, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         pendingPosition = nil
         let constrained = max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex)))
-        if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 { split.setPosition(constrained, ofDividerAt: dividerIndex) }
+        if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 {
+            ConversationTextView.markResize(in: split)
+            split.setPosition(constrained, ofDividerAt: dividerIndex)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -210,9 +222,12 @@ final class WrapFreeze {
     }
     /// Restores wrapping, or only for transcripts up to `limit` characters.
     func thaw(upTo limit: Int = .max) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.wrapThaw, measurement) }
         let thawing = frozen.filter { ($0.container.textView?.textStorage?.length ?? 0) <= limit }
         frozen.removeAll { entry in thawing.contains { $0.container === entry.container } }
         for (container, tracks) in thawing {
+            ConversationTextView.markResize(in: container.textView)
             container.widthTracksTextView = tracks
             Self.matchTrackedWidth(container)
         }

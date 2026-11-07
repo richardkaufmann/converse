@@ -55,6 +55,7 @@ struct SettingsView: View {
     @ObservedObject var store = Store.shared
     @Environment(\.dismiss) private var dismiss
     @State private var sessionID: UUID?
+    @State private var performanceCapture = PerformanceCapture.shared.enabled
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
@@ -92,6 +93,19 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                             Divider()
                             ModelsSettingsView(state: state)
+                            Divider()
+                            Text("Responsiveness diagnostics").font(.headline)
+                            Toggle("Record performance timings", isOn: $performanceCapture)
+                                .onChange(of: performanceCapture) { value in
+                                    UserDefaults.standard.set(value, forKey: "performanceCapture")
+                                    PerformanceCapture.shared.configure(folder: store.folder, enabled: value)
+                                }
+                            Text("Records UI delays, typing, rendering, saves and sidebar updates on this Mac. No message text, key characters or credentials. The bounded capture updates every five seconds; starting a new capture replaces the previous one.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Show performance capture") {
+                                if let file = PerformanceCapture.shared.file { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+                            }
+
                         }.padding(22)
                     }
                 case .jolly: JollyView()

@@ -713,6 +713,8 @@ struct LotEntryText: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: LotEntryTextView, context: Context) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextUpdate, measurement) }
         context.coordinator.parent = self
         view.accessibilityIdentifier = identifier; view.isEditable = editable; view.isSelectable = editable
         view.onEmptyBackspace = emptyBackspace
@@ -733,6 +735,8 @@ struct LotEntryText: UIViewRepresentable {
         if !view.wantsFocus && view.isFirstResponder { view.resignFirstResponder() }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: LotEntryTextView, context: Context) -> CGSize? {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextLayout, measurement) }
         guard let width = proposal.width, width > 0 else { return nil }
         return CGSize(width: width, height: max(font.lineHeight, uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height))
     }
@@ -741,17 +745,24 @@ struct LotEntryText: UIViewRepresentable {
         init(_ parent: LotEntryText) { self.parent = parent }
         func textViewDidBeginEditing(_ textView: UITextView) { parent.focusChanged(true) }
         func textViewDidEndEditing(_ textView: UITextView) { parent.focusChanged(false) }
-        func textViewDidChange(_ textView: UITextView) { parent.changed(textView.text); textView.invalidateIntrinsicContentSize() }
+        func textViewDidChange(_ textView: UITextView) {
+            if let view = textView as? LotEntryTextView {
+                PerformanceCapture.shared.end(.lotInputToChange, view.inputMeasurement); view.inputMeasurement = nil
+            }
+            parent.changed(textView.text); textView.invalidateIntrinsicContentSize()
+        }
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             guard parent.editable else { return false }
             if text == "\n", (textView as? LotEntryTextView)?.softReturn != true, textView.markedTextRange == nil {
                 parent.returned(range); return false
             }
+            (textView as? LotEntryTextView)?.inputMeasurement = PerformanceCapture.shared.begin()
             return true
         }
     }
 }
 final class LotEntryTextView: UITextView {
+    var inputMeasurement: PerformanceCapture.Span?
     var wantsFocus = false
     var softReturn = false
     var onEmptyBackspace: (() -> Void)?

@@ -465,12 +465,16 @@ final class Store: ObservableObject {
     /// and returns the expensive part, encoding and the atomic write, to run on
     /// ArchiveWriter's queue.
     private func archiveWrite(source: String) -> (generation: Int, write: () throws -> Void) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.archiveSnapshot, measurement) }
         ArchiveWriter.generation += 1
         let generation = ArchiveWriter.generation
         let archive = Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts, paneTextSize: paneTextSize == PaneTextSize.standard ? nil : paneTextSize)
         let summary = ConfigurationAudit.SaveSummary(sessions)
         let audit = configurationAudit, url = folder.appendingPathComponent("sessions.json")
         return (generation, {
+            let measurement = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.archiveEncodeWrite, measurement) }
             do {
                 let data = try JSONEncoder().encode(archive)
                 audit.willSave(summary, data: data, source: source)
@@ -485,6 +489,8 @@ final class Store: ObservableObject {
     /// Writes now and reports failure. Use where a caller must know the save
     /// succeeded (it waits for the archive queue); ordinary saves use save().
     func saveChecked(file: String = #fileID, line: Int = #line, function: String = #function) throws {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.checkedSave, measurement) }
         let source = "\(file):\(line) \(function)"
         let began = ProcessInfo.processInfo.systemUptime
         defer {
@@ -1404,6 +1410,7 @@ final class Store: ObservableObject {
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
+        CharacterLatencyProbe.shared.received(obj, session: s)
         updateReportedStatus(obj, session: s)
         var text: String?; var replace = false; var delta = false; var startsTextBlock = false
         let type = obj["type"] as? String ?? ""
@@ -1864,6 +1871,14 @@ final class TranscriptFindClient: NSObject, NSTextFinderClient {
     }
 }
 final class ConversationTextView: NSTextView {
+    private var resizeMeasurement: PerformanceCapture.Span?
+    static func markResize(in view: NSView?) {
+        guard PerformanceCapture.shared.enabled, let view else { return }
+        if let text = view as? ConversationTextView, text.resizeMeasurement == nil {
+            text.resizeMeasurement = PerformanceCapture.shared.begin()
+        }
+        for child in view.subviews { markResize(in: child) }
+    }
     var explicitCursor = false
     var handlingSelectionGesture = false
     var findOwnsSelection = false
@@ -1885,18 +1900,37 @@ final class ConversationTextView: NSTextView {
         (enclosingScrollView as? ConversationScrollView)?.interaction()
     }
 
-    var loadImage: ((ResponseImageLink) -> Void)? { didSet { if loadImage == nil { hideImageHover() } } }
+    var loadImage: ((ResponseImageLink) -> Void)? { didSet { if loadImage == nil { hideImageHover() }; if (loadImage == nil) != (oldValue == nil) { updateTrackingAreas() } } }
     var imageHover: ResponseImageLoadControl?
-    private var imageHoverTracking: NSTrackingArea?
+    private(set) var imageHoverTracking: NSTrackingArea?
+    var tracksResponseImageHover: Bool { imageHoverTracking != nil }
+    // Move tracking delivers an event per pointer move and per scroll frame
+    // under a still pointer, so it exists only while a web image link can
+    // be hovered. Renders set this from the transcript's link attributes.
+    var hasImageLinks = false { didSet { if hasImageLinks != oldValue { updateTrackingAreas() } } }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let imageHoverTracking { removeTrackingArea(imageHoverTracking) }
+        if let imageHoverTracking { removeTrackingArea(imageHoverTracking); self.imageHoverTracking = nil }
+        guard hasImageLinks, loadImage != nil else { hideImageHover(); return }
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area); imageHoverTracking = area
     }
+    // While our area exists it is the reason moves arrive, and they only
+    // drive Load image. The default handler would add a synchronous
+    // window-server lookup and SwiftUI hover forwarding per move. (Plain
+    // moved events have no trackingArea; reading it raises.)
     override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.mouseHover, measurement) }
+        guard imageHoverTracking != nil else { super.mouseMoved(with: event); return }
         updateImageHover(convert(event.locationInWindow, from: nil))
+    }
+    static func containsImageLinks(_ storage: NSAttributedString, in range: NSRange) -> Bool {
+        let range = NSIntersectionRange(range, NSRange(location: 0, length: storage.length))
+        guard range.length > 0 else { return false }
+        var found = false
+        storage.enumerateAttribute(.converseImageLink, in: range) { value, _, stop in if value != nil { found = true; stop.pointee = true } }
+        return found
     }
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
@@ -2029,6 +2063,8 @@ final class ConversationTextView: NSTextView {
         if manager.groupingLevel > 1 { manager.endUndoGrouping() }
     }
     override func insertText(_ value: Any, replacementRange: NSRange) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.textInsertion, measurement) }
         prepareTypingUndoGroup()
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
@@ -2208,6 +2244,13 @@ final class ConversationTextView: NSTextView {
     var trafficBlocks: [NSRange] = []
     func refreshDecorations() { (enclosingScrollView as? ConversationScrollView)?.refreshLatest(); layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
+        defer {
+            if window?.isVisible == true, !visibleRect.isEmpty, dirtyRect.intersects(visibleRect) {
+                PerformanceCapture.shared.end(.resizeDraw, resizeMeasurement)
+                resizeMeasurement = nil
+            }
+            CharacterLatencyProbe.shared.didDraw(self, dirty: dirtyRect)
+        }
         super.draw(dirtyRect)
         guard let layout = layoutManager, let container = textContainer else { return }
         layout.ensureLayout(for: container)
@@ -2231,6 +2274,9 @@ final class ConversationTextView: NSTextView {
     var imagePaste: ((NSImage) -> Void)?
     var droppedFileSourceDevice: String?
     override func keyDown(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.keyHandling, measurement) }
         handlingSelectionGesture = true
         defer { handlingSelectionGesture = false }
         (enclosingScrollView as? ConversationScrollView)?.interaction()
@@ -2578,6 +2624,9 @@ struct ScrollingConversation: NSViewRepresentable {
             lastRestyleAt = ProcessInfo.processInfo.systemUptime
         }
         func render(_ text: ConversationTextView) {
+            defer { CharacterLatencyProbe.shared.bind(text, session: session) }
+            let measurement = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.transcriptRender, measurement) }
             let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
             defer {
@@ -2815,6 +2864,10 @@ struct ScrollingConversation: NSViewRepresentable {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
                 scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            // Links before an unchanged prefix are still there; rescan only what was replaced.
+            if let storage = text.textStorage {
+                text.hasImageLinks = (prefix > 0 && text.hasImageLinks) || ConversationTextView.containsImageLinks(storage, in: NSRange(location: prefix, length: max(0, min(text.inputStart, storage.length) - prefix)))
             }
             text.refreshDecorations(); text.refreshImageHover()
             rendering = false
@@ -3149,6 +3202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PerformanceCapture.shared.configure(folder: Store.shared.folder, enabled: ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1" || UserDefaults.standard.bool(forKey: "performanceCapture"))
         AppDelegate.shared = self
         Store.shared.chooseImportProvider = { [weak self] in self?.chooseLogin($0) }
         Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }
@@ -3174,6 +3228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Store.shared.firstRun.linkLot(home: DeviceSyncService.shared.localDeviceID, library: .shared)
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
+        CharacterLatencyProbe.shared.start(app: self)
         if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
             Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Store.shared.trimIdleTranscripts() }
         }
@@ -4164,6 +4219,7 @@ func selfTest() {
     check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
+    performanceCaptureSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
@@ -4212,6 +4268,18 @@ if CommandLine.arguments.contains("--scoreboard-focus-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     var failures = 0
     MainActor.assumeIsolated { agentScoreboardFocusSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } } }
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--response-images-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    responseImageSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--group-switchboard-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    groupSwitchboardSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
     exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--groups-self-test") {
