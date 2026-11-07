@@ -358,6 +358,21 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Concurrent multi-threaded sends keep the encrypted link and display lease intact");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+        // A Mac viewer teaches with epoch 0 and no display lease. Only teaching
+        // is exempt: other epoch-0 commands stay rejected as stale.
+        if (Link(viewer, home.DeviceId) is { } teachLink)
+        {
+            Task Raw(DeviceCommandPayload payload) => viewer.SendEnvelopeAsync(teachLink, new DeviceEnvelope
+            { Kind = DeviceKind.Command, SessionID = gid, CommandID = Guid.NewGuid(), Epoch = 0, Payload = DeviceJson.Encode(payload) });
+            await Raw(new DeviceCommandPayload { Action = "rename", Text = "Renamed without lease" });
+            await Task.Delay(300);
+            Check(homeSession.Title == "Renamed from viewer", "Epoch-0 commands other than teach still need the display lease");
+            Check(!homeSession.MessagingEnabled, "Teach fixture starts without switchboard messaging");
+            await Raw(new DeviceCommandPayload { Action = "teachSwitchboard" });
+            Check(await Until(() => homeSession.MessagingEnabled && !homeSession.Busy && homeSession.Messages.Any(m => m.Role == "user" && m.Text.Contains("[Converse switchboard instructions]"))),
+                "A viewer teaches a Core-homed session the switchboard without a display lease");
+        }
+        else Check(false, "Teach fixture has a trusted viewer link");
         // Reproduce typing a final character and immediately pressing Return:
         // the home still has the previous throttled draft, but Send has all of it.
         await viewer.SendRemoteDraftAsync(gid, "testing.  you there\n");
