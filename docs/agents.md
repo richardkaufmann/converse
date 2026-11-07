@@ -140,6 +140,16 @@ agent's already-authorized session scope is available to its run.
 Stable request IDs prevent repeat execution. The app stores its active request
 before starting a model call; after restart it reports an interrupted request
 as uncertain instead of replaying it. Replies remain available for polling.
+The ask endpoint acknowledges durable admission immediately with HTTP 200 and
+`status: pending`, a `requestId`, `pollPath` and `pollAfterSeconds`. HTTP success
+is not an agent answer. Poll that path until the status is terminal; only
+`completed` supplies a successful answer. Pending work and network timeouts must
+not be reported as credentials failures. The connector schema requires a stable
+`request_id`; if a call loses its response, retry the identical payload with that
+same ID to recover the original request instead of executing twice. Older
+callers that omit the ID remain accepted for compatibility. Refresh the Muse
+connector schema after updating the bridge to protocol 3.1.
+
 Closing the app withdraws its directory heartbeat. Explicit phone messages
 use the Converse-owned outbox; GET is non-consuming, and acknowledgements are
 separate. The existing tunnel and bearer credential are retained at handoff;

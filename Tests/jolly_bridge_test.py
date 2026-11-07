@@ -17,7 +17,7 @@ class Tests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.token = self.root / "token"; self.token.write_text("synthetic-test-token")
         self.b = bridge.Bridge(self.root / "spool", self.token, "https://example.test")
-        self.server = bridge.Server(("127.0.0.1", 0), bridge.handler(self.b, wait_seconds=.05))
+        self.server = bridge.Server(("127.0.0.1", 0), bridge.handler(self.b))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
         self.base = "http://127.0.0.1:" + str(self.server.server_port)
     def tearDown(self):
@@ -48,7 +48,11 @@ class Tests(unittest.TestCase):
         self.live()
         body = {"question": "Price?", "agent": "Stock", "request_id": "same"}
         status, result = self.call("/v1/ask", body)
-        self.assertEqual(status, 202)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "pending")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("answer", result)
+        self.assertIn("not a failure", result["message"])
         key = result["requestId"]
         self.assertEqual(self.call("/v1/ask", body)[1]["requestId"], key)
         self.assertEqual(len(list((self.b.root / "requests").glob("*.json"))), 1)
@@ -56,6 +60,34 @@ class Tests(unittest.TestCase):
         bridge.atomic(self.b.root / "responses" / (key + ".json"), {"ok": True, "status": "completed", "answer": "fixture"})
         self.assertEqual(self.call("/v1/requests/" + key)[1]["answer"], "fixture")
         self.assertEqual(self.call("/v1/ask", body)[1]["answer"], "fixture")
+    def test_pending_poll_and_terminal_failure_are_distinct(self):
+        self.live()
+        started = time.monotonic()
+        status, pending = self.call("/v1/ask", {"question": "Slow answer", "request_id": "slow"})
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(status, 200)
+        key = pending["requestId"]
+        self.assertEqual(pending["pollPath"], "/v1/requests/" + key)
+        self.assertEqual(self.call(pending["pollPath"]), (200, pending))
+        self.assertGreater(pending["pollAfterSeconds"], 0)
+        bridge.atomic(self.b.root / "responses" / (key + ".json"),
+                      {"ok": True, "status": "failed", "answer": "Actual agent failure"})
+        status, failed = self.call(pending["pollPath"])
+        self.assertEqual(status, 200)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["answer"], "Actual agent failure")
+        self.assertNotIn("pollPath", failed)
+        self.assertEqual(failed["requestId"], key)
+
+    def test_schema_describes_async_results(self):
+        doc = self.call("/openapi.json", auth=False)[1]
+        for path, method in (("/v1/ask", "post"), ("/v1/requests/{requestId}", "get")):
+            operation = doc["paths"][path][method]
+            self.assertIn("pending", operation["description"])
+            self.assertIn("content", operation["responses"]["200"])
+        required = doc["paths"]["/v1/ask"]["post"]["requestBody"]["content"]["application/json"]["schema"]["required"]
+        self.assertIn("request_id", required)
+
     def test_app_unavailable_and_limits(self):
         self.assertEqual(self.call("/v1/ask", {"question": "Hi"})[0], 503)
         self.live()

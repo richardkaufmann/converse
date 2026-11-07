@@ -403,7 +403,7 @@ Once that bridge is configured:
 1. Open **Converse → Settings → Jolly** and allow the local agents the phone may address.
 2. Load or refresh the connector schema in Muse so it exposes **Ask Converse**.
 3. Ask it to list the available agents, then address one by exact name. If a choice is ambiguous, it should ask which one rather than broadcast.
-4. Confirm the request appears in the intended agent's conversation and the reply returns to the phone. Pending is not a completed answer.
+4. Confirm the request appears in the intended agent's conversation and the reply returns to the phone. Jolly should keep checking a pending request until its answer arrives. If it cannot finish waiting, it should say the request is still pending and retain its ID for follow-up; pending does not mean a credentials failure.
 
 The bridge runs in the background as the launchd agent `local.converse.jolly.bridge`, and launchd restarts it if it stops, so it keeps running after you quit Converse. That way Jolly can still reach your Mac and learn whether Converse is available. To stop it, run `launchctl bootout gui/$UID/local.converse.jolly.bridge`.
 

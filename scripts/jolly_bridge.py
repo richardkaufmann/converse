@@ -37,6 +37,11 @@ def read(path, fallback=None):
     except (OSError, ValueError):
         return fallback
 
+def pending_result(key):
+    return {"ok": True, "status": "pending", "requestId": key,
+            "message": "Request accepted and still running. This is not a failure or an agent answer. Poll pollPath for the result; do not submit a new request or change credentials.",
+            "pollPath": "/v1/requests/" + key, "pollAfterSeconds": 2}
+
 class Bridge:
     def __init__(self, root, token_file, public_base):
         self.admissions = []
@@ -78,7 +83,7 @@ class Bridge:
             body["createdAt"] = time.time()
             atomic(path, body)
             self.admissions.append(now)
-        return 202, {"ok": True, "status": "pending", "requestId": key}
+        return 202, pending_result(key)
     def result(self, key):
         if not re.fullmatch("[0-9a-f]{64}", key):
             return 400, {"ok": False, "error": "Invalid request ID."}
@@ -91,7 +96,7 @@ class Bridge:
             return 200, result
         if not (self.root / "requests" / (key + ".json")).exists():
             return 404, {"ok": False, "error": "Unknown request."}
-        return 202, {"ok": True, "status": "pending", "requestId": key}
+        return 202, pending_result(key)
 
 def schema():
     security = [{"bearerAuth": []}]
@@ -113,12 +118,37 @@ def schema():
     paths["/v1/ask"] = post("Ask a Converse agent", {
         "question": {"type": "string", "maxLength": 4000}, "context": {"type": "string", "maxLength": 8000},
         "agent": {"type": "string", "maxLength": 200, "description": "Agent ID or exact name from /v1/agents"},
-        "request_id": {"type": "string", "maxLength": 128, "description": "Stable unique ID for this request; reuse on retries"}}, ["question"])
-    return {"openapi": "3.0.3", "info": {"title": "Ask Converse", "version": "3.0.0",
+        "request_id": {"type": "string", "maxLength": 128, "description": "Generate one stable unique ID before calling; reuse the same ID and payload on retries, including after a network timeout"}}, ["question", "request_id"])
+    async_description = ("HTTP 200 means the request was accepted or its state was retrieved, not that the agent finished. "
+        "Read status: pending means still running, not failure. Follow pollPath after pollAfterSeconds; "
+        "keep polling the same requestId until status changes. Execution can take minutes. "
+        "If you cannot keep polling now, tell the user it is still pending and retain requestId for follow-up. "
+        "Only status completed supplies the final answer. Report other terminal statuses using their actual answer/error. "
+        "Never infer a missing API key or change agent models from pending or a network timeout. "
+        "After a transport error, retry the original ask with the same request_id and identical payload to recover its state; never create a duplicate.")
+    result_schema = {"type": "object", "required": ["ok", "status", "requestId"], "properties": {
+        "ok": {"type": "boolean", "description": "Transport/protocol result; read status for agent outcome."},
+        "status": {"type": "string", "description": "pending while running; completed on success; failed, busy, expired, rejected, needs_agent, misrouted or budget_exhausted otherwise."},
+        "requestId": {"type": "string", "description": "Correlated ID used for polling this request."},
+        "message": {"type": "string", "description": "Protocol guidance, not an agent answer."},
+        "pollPath": {"type": "string", "description": "Authenticated relative GET path for a pending request."},
+        "pollAfterSeconds": {"type": "integer", "minimum": 1},
+        "answer": {"type": "string", "description": "Agent reply or actual terminal diagnostic; absent while pending."},
+        "images": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "url": {"type": "string"}}}},
+        "agent": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}},
+        "suggestedAgent": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}}}
+    for path, method in (("/v1/ask", "post"), ("/v1/requests/{requestId}", "get")):
+        operation = paths[path][method]
+        operation["description"] = async_description
+        operation["responses"]["200"] = {"description": "Accepted pending work or a correlated terminal result; inspect status.",
+            "content": {"application/json": {"schema": result_schema}}}
+        operation["responses"].pop("202", None)
+
+    return {"openapi": "3.0.3", "info": {"title": "Ask Converse", "version": "3.1.0",
         "description": "Jolly addresses Converse agents. List agents, then ask with an agent ID or exact name. General Converse health questions (is the app up, its version or Group, which hosts are in its Group) go to Converse App Support: choose the agent marked appSupport, or use agent=converse. Never route an explicitly named other agent to App Support. If the question names an agent or a project that matches an agent name (for example 'KAOS' -> KAOS Steward), address that agent. Converse Steward is not a default. If Converse answers needs_agent or misrouted, resend to the agent it names (suggestedAgent). If Converse is offline, report appAvailable=false from /health rather than claiming an agent answered. If ambiguous, ask Richard which agent; never guess or broadcast. Reuse request_id when retrying. A pending response has requestId: poll /v1/requests/{requestId}. Agent execution can take minutes. No fallback backend. Inbox is non-consuming; acknowledge received IDs explicitly."},
         "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}, "paths": paths}
 
-def handler(bridge, wait_seconds=20):
+def handler(bridge, wait_seconds=0):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ConverseJolly/3"
         def log_message(self, *_):
@@ -146,7 +176,9 @@ def handler(bridge, wait_seconds=20):
             if not self.auth(): return
             if path == "/identity": return self.send(200, {"ok": True, "backend": "converse", "available": bridge.directory().get("available", False)})
             if path == "/v1/agents": return self.send(200, {"ok": True, **bridge.directory()})
-            if path.startswith("/v1/requests/"): return self.send(*bridge.result(path.removeprefix("/v1/requests/")))
+            if path.startswith("/v1/requests/"):
+                status, result = bridge.result(path.removeprefix("/v1/requests/"))
+                return self.send(200 if status == 202 else status, result)
             if path == "/v1/inbox":
                 with LOCK:
                     messages = [read(p) for p in sorted((bridge.root / "outbox").glob("*.json"))]
@@ -181,7 +213,9 @@ def handler(bridge, wait_seconds=20):
                     time.sleep(.1)
                     status, result = bridge.result(result["requestId"])
                     if status != 202: break
-            return self.send(status, result)
+            # HTTP success acknowledges durable admission, not agent completion.
+            # Return promptly so connector timeouts cannot conceal the poll ID.
+            return self.send(200 if status == 202 else status, result)
     return Handler
 
 class Server(ThreadingHTTPServer):
