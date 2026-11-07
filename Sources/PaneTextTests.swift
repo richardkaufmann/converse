@@ -241,6 +241,29 @@ func paneTextRoutingSelfTests(_ check: (Bool, String) -> Void) {
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-route-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
+        let capture = PerformanceCapture.shared
+        capture.configure(folder: root, enabled: true, sampleMainQueue: false)
+        for scroll in [ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200)),
+                       ParkingLotScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))] as [NSScrollView] {
+            scroll.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 2000))
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: 500))
+            for delta: Int32 in [-12, 12] {
+                if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) {
+                    cg.timestamp = DispatchTime.now().uptimeNanoseconds - 80_000_000
+                    if let event = NSEvent(cgEvent: cg) { scroll.scrollWheel(with: event) }
+                }
+            }
+        }
+        capture.flushForTesting()
+        do {
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+            for prefix in ["session", "lot"] {
+                check(snapshot.summaries[prefix + "ScrollDelivery"]?.count == 2 && snapshot.summaries[prefix + "ScrollHandling"]?.count == 2,
+                      "\(prefix) scrolling records upward and downward native event delivery and handling")
+            }
+        } catch { check(false, "Native scroll telemetry exports: \(error)") }
+        capture.configure(folder: root, enabled: false)
         let store = Store(folder: root)
         let entry = Entry(name: "Echo", command: "unused", directory: NSTemporaryDirectory(), engine: "muse")
         let a = store.create(entry), b = store.create(entry)

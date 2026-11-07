@@ -25,12 +25,14 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertIn("excluded from completed-delay statistics", text)
         self.assertIn("Retained delay events: 0", text)
 
-    def test_lot_delivery_is_a_delay_not_its_own_cause(self):
-        events = [dict(operation="lotScrollDelivery", uptime=3, milliseconds=90, mainThread=True)]
-        text = summary.summarize(self.capture(schemaVersion=2, slowEvents=events))
-        self.assertIn("Retained delay events: 1", text)
-        self.assertIn("lotScrollDelivery 90.0 ms", text)
-        self.assertIn("no instrumented slow main-thread operation overlapped", text)
+    def test_scroll_delivery_is_a_delay_not_its_own_cause(self):
+        for operation in ("lotScrollDelivery", "sessionScrollDelivery"):
+            with self.subTest(operation=operation):
+                events = [dict(operation=operation, uptime=3, milliseconds=90, mainThread=True)]
+                text = summary.summarize(self.capture(schemaVersion=2, slowEvents=events))
+                self.assertIn("Retained delay events: 1", text)
+                self.assertIn(operation + " 90.0 ms", text)
+                self.assertIn("no instrumented slow main-thread operation overlapped", text)
 
     def test_unknown_schema_rejected(self):
         with self.assertRaises(ValueError):
