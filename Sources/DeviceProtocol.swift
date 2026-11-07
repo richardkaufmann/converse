@@ -452,8 +452,17 @@ enum DeviceCanonical {
 // Mirrored byte-for-byte by DeviceCommandBinding in
 // windows/src/Converse.Core/Protocol.cs; both suites run
 // Tests/command-payload-canonical-vectors.json.
+//
+// Payloads arrive from remote devices and are canonicalized on the home's
+// connection queue, so cost stays near linear: input is capped at maxBytes
+// (the whole device frame limit; real commands are a few KB) and nesting at
+// maxDepth, output goes into one buffer, duplicate keys are found with a
+// per-object hash set of exact scalar sequences, and only objects whose keys
+// arrive out of order are rearranged (each byte moves at most once per
+// enclosing unsorted object, so at most maxDepth times).
 enum DeviceCommandBinding {
     static let rawScheme = "raw", canonicalScheme = "canonical-v1"
+    static let maxBytes = 4_194_304, maxDepth = 64
     struct Unbindable: Error { var reason: String }
     static func encode<T: Encodable>(_ value: T) throws -> Data { try canonical(JSONEncoder().encode(value)) }
     // Records without a scheme predate canonical binding and keep raw hashes.
@@ -465,83 +474,108 @@ enum DeviceCommandBinding {
         }
     }
     static func canonical(_ payload: Data) throws -> Data {
+        guard payload.count <= maxBytes else { throw Unbindable(reason: "Payload exceeds " + String(maxBytes) + " bytes.") }
         var parser = Parser(bytes: [UInt8](payload))
+        parser.out.reserveCapacity(payload.count)
         parser.skipSpace()
-        let value = try parser.value(depth: 0)
+        try parser.value(depth: 0)
         parser.skipSpace()
         guard parser.index == parser.bytes.count else { throw Unbindable(reason: "Trailing content after JSON value.") }
-        return Data(value)
+        return Data(parser.out)
     }
-    static let maxDepth = 64
     private struct Parser {
         let bytes: [UInt8]
         var index = 0
-        mutating func skipSpace() { while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) { index += 1 } }
+        var out: [UInt8] = []
+        var scratch: [UInt8] = []
+        mutating func skipSpace() {
+            while index < bytes.count {
+                switch bytes[index] { case 0x20, 0x09, 0x0A, 0x0D: index += 1; default: return }
+            }
+        }
         func fail(_ reason: String) -> Unbindable { Unbindable(reason: reason + " at byte " + String(index) + ".") }
-        mutating func value(depth: Int) throws -> [UInt8] {
+        mutating func value(depth: Int) throws {
             guard index < bytes.count else { throw fail("Unexpected end of JSON") }
             switch bytes[index] {
-            case UInt8(ascii: "{"): return try object(depth: depth + 1)
-            case UInt8(ascii: "["): return try array(depth: depth + 1)
-            case UInt8(ascii: "\""): return Self.emit(try string())
-            case UInt8(ascii: "t"): return try literal("true")
-            case UInt8(ascii: "f"): return try literal("false")
-            case UInt8(ascii: "n"): return try literal("null")
-            case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"): return try number()
+            case UInt8(ascii: "{"): try object(depth: depth + 1)
+            case UInt8(ascii: "["): try array(depth: depth + 1)
+            case UInt8(ascii: "\""): emit(try string())
+            case UInt8(ascii: "t"): try literal("true")
+            case UInt8(ascii: "f"): try literal("false")
+            case UInt8(ascii: "n"): try literal("null")
+            case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"): try number()
             default: throw fail("Unexpected character")
             }
         }
-        mutating func object(depth: Int) throws -> [UInt8] {
+        mutating func object(depth: Int) throws {
             guard depth <= DeviceCommandBinding.maxDepth else { throw fail("JSON nested too deeply") }
             index += 1; skipSpace()
-            var members: [(key: [UInt32], value: [UInt8])] = []
-            if index < bytes.count, bytes[index] == UInt8(ascii: "}") { index += 1; return Array("{}".utf8) }
+            out.append(UInt8(ascii: "{"))
+            if index < bytes.count, bytes[index] == UInt8(ascii: "}") { index += 1; out.append(UInt8(ascii: "}")); return }
+            // Keys compare as exact scalar sequences: String equality would
+            // merge canonically equivalent keys such as "é" and "e\u{301}".
+            var seen = Set<[UInt32]>()
+            var members: [(key: [UInt32], bytes: Range<Int>)] = []
+            var inOrder = true
+            let start = out.count
             while true {
                 guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { throw fail("Expected object key") }
                 let key = try string()
-                guard !members.contains(where: { $0.key == key }) else { throw fail("Duplicate object key") }
+                guard seen.insert(key).inserted else { throw fail("Duplicate object key") }
+                if let last = members.last, !last.key.lexicographicallyPrecedes(key) { inOrder = false }
                 skipSpace()
                 guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else { throw fail("Expected colon") }
                 index += 1; skipSpace()
-                members.append((key, try value(depth: depth)))
+                if !members.isEmpty { out.append(UInt8(ascii: ",")) }
+                let memberStart = out.count
+                emit(key); out.append(UInt8(ascii: ":"))
+                try value(depth: depth)
+                members.append((key, memberStart..<out.count))
                 skipSpace()
                 guard index < bytes.count else { throw fail("Unterminated object") }
                 if bytes[index] == UInt8(ascii: ",") { index += 1; skipSpace(); continue }
                 guard bytes[index] == UInt8(ascii: "}") else { throw fail("Expected comma or closing brace") }
                 index += 1; break
             }
-            // UTF-8 byte order equals code point order, the same in C#.
-            members.sort { $0.key.lexicographicallyPrecedes($1.key) }
-            var out: [UInt8] = [UInt8(ascii: "{")]
-            for (offset, member) in members.enumerated() {
-                if offset > 0 { out.append(UInt8(ascii: ",")) }
-                out += Self.emit(member.key); out.append(UInt8(ascii: ":")); out += member.value
+            if !inOrder {
+                // UTF-8 byte order equals code point order, the same in C#.
+                members.sort { $0.key.lexicographicallyPrecedes($1.key) }
+                // Same members and commas, so rewrite the region in place.
+                scratch.removeAll(keepingCapacity: true)
+                scratch += out[start...]
+                var at = start
+                for (offset, member) in members.enumerated() {
+                    if offset > 0 { out[at] = UInt8(ascii: ","); at += 1 }
+                    let from = member.bytes.lowerBound - start, count = member.bytes.count
+                    out.replaceSubrange(at..<at + count, with: scratch[from..<from + count]); at += count
+                }
             }
-            out.append(UInt8(ascii: "}")); return out
+            out.append(UInt8(ascii: "}"))
         }
-        mutating func array(depth: Int) throws -> [UInt8] {
+        mutating func array(depth: Int) throws {
             guard depth <= DeviceCommandBinding.maxDepth else { throw fail("JSON nested too deeply") }
             index += 1; skipSpace()
-            var out: [UInt8] = [UInt8(ascii: "[")]
-            if index < bytes.count, bytes[index] == UInt8(ascii: "]") { index += 1; return Array("[]".utf8) }
+            out.append(UInt8(ascii: "["))
+            if index < bytes.count, bytes[index] == UInt8(ascii: "]") { index += 1; out.append(UInt8(ascii: "]")); return }
             while true {
-                out += try value(depth: depth)
+                try value(depth: depth)
                 skipSpace()
                 guard index < bytes.count else { throw fail("Unterminated array") }
                 if bytes[index] == UInt8(ascii: ",") { index += 1; skipSpace(); out.append(UInt8(ascii: ",")); continue }
                 guard bytes[index] == UInt8(ascii: "]") else { throw fail("Expected comma or closing bracket") }
                 index += 1; break
             }
-            out.append(UInt8(ascii: "]")); return out
+            out.append(UInt8(ascii: "]"))
         }
-        mutating func literal(_ word: String) throws -> [UInt8] {
-            let expected = Array(word.utf8)
-            guard index + expected.count <= bytes.count, Array(bytes[index..<index + expected.count]) == expected else { throw fail("Invalid literal") }
-            index += expected.count; return expected
+        mutating func literal(_ word: StaticString) throws {
+            let count = word.utf8CodeUnitCount
+            guard index + count <= bytes.count else { throw fail("Invalid literal") }
+            for offset in 0..<count where bytes[index + offset] != word.utf8Start[offset] { throw fail("Invalid literal") }
+            out += bytes[index..<index + count]; index += count
         }
         // JSON number grammar, kept verbatim: no float conversion can differ
         // between Swift and C#, and differing spellings stay different content.
-        mutating func number() throws -> [UInt8] {
+        mutating func number() throws {
             let start = index
             func digits() -> Int { let from = index; while index < bytes.count, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[index]) { index += 1 }; return index - from }
             if bytes[index] == UInt8(ascii: "-") { index += 1 }
@@ -553,7 +587,7 @@ enum DeviceCommandBinding {
                 if index < bytes.count, bytes[index] == UInt8(ascii: "+") || bytes[index] == UInt8(ascii: "-") { index += 1 }
                 guard digits() > 0 else { throw fail("Invalid number") }
             }
-            return Array(bytes[start..<index])
+            out += bytes[start..<index]
         }
         mutating func hex4() throws -> UInt32 {
             guard index + 4 <= bytes.count else { throw fail("Invalid unicode escape") }
@@ -627,27 +661,28 @@ enum DeviceCommandBinding {
                 scalars.append(scalar); index += length
             }
         }
-        static func emit(_ scalars: [UInt32]) -> [UInt8] {
-            var out: [UInt8] = [UInt8(ascii: "\"")]
-            let hex = Array("0123456789abcdef".utf8)
+        static let hex = Array("0123456789abcdef".utf8)
+        mutating func emit(_ scalars: [UInt32]) {
+            out.append(UInt8(ascii: "\""))
             for scalar in scalars {
                 switch scalar {
-                case 0x22: out += Array("\\\"".utf8)
-                case 0x5C: out += Array("\\\\".utf8)
-                case 0x08: out += Array("\\b".utf8)
-                case 0x0C: out += Array("\\f".utf8)
-                case 0x0A: out += Array("\\n".utf8)
-                case 0x0D: out += Array("\\r".utf8)
-                case 0x09: out += Array("\\t".utf8)
-                case 0..<0x20: out += Array("\\u00".utf8) + [hex[Int(scalar >> 4)], hex[Int(scalar & 0xF)]]
+                case 0x22: escape(UInt8(ascii: "\""))
+                case 0x5C: escape(UInt8(ascii: "\\"))
+                case 0x08: escape(UInt8(ascii: "b"))
+                case 0x0C: escape(UInt8(ascii: "f"))
+                case 0x0A: escape(UInt8(ascii: "n"))
+                case 0x0D: escape(UInt8(ascii: "r"))
+                case 0x09: escape(UInt8(ascii: "t"))
+                case 0..<0x20: escape(UInt8(ascii: "u")); out.append(UInt8(ascii: "0")); out.append(UInt8(ascii: "0")); out.append(Self.hex[Int(scalar >> 4)]); out.append(Self.hex[Int(scalar & 0xF)])
                 case 0..<0x80: out.append(UInt8(scalar))
-                case 0..<0x800: out += [UInt8(0xC0 | scalar >> 6), UInt8(0x80 | scalar & 0x3F)]
-                case 0..<0x10000: out += [UInt8(0xE0 | scalar >> 12), UInt8(0x80 | scalar >> 6 & 0x3F), UInt8(0x80 | scalar & 0x3F)]
-                default: out += [UInt8(0xF0 | scalar >> 18), UInt8(0x80 | scalar >> 12 & 0x3F), UInt8(0x80 | scalar >> 6 & 0x3F), UInt8(0x80 | scalar & 0x3F)]
+                case 0..<0x800: out.append(UInt8(0xC0 | scalar >> 6)); out.append(UInt8(0x80 | scalar & 0x3F))
+                case 0..<0x10000: out.append(UInt8(0xE0 | scalar >> 12)); out.append(UInt8(0x80 | scalar >> 6 & 0x3F)); out.append(UInt8(0x80 | scalar & 0x3F))
+                default: out.append(UInt8(0xF0 | scalar >> 18)); out.append(UInt8(0x80 | scalar >> 12 & 0x3F)); out.append(UInt8(0x80 | scalar >> 6 & 0x3F)); out.append(UInt8(0x80 | scalar & 0x3F))
                 }
             }
-            out.append(UInt8(ascii: "\"")); return out
+            out.append(UInt8(ascii: "\""))
         }
+        mutating func escape(_ letter: UInt8) { out.append(UInt8(ascii: "\\")); out.append(letter) }
     }
 }
 struct DeviceParticipantIntent: Codable, Identifiable {

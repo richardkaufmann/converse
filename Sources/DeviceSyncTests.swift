@@ -144,7 +144,40 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
             let expected = (vector["canonical"] as? String).map { Data($0.utf8) }
             if vector["reject"] as? Bool == true ? output != nil : output == nil || output != expected { mismatched.append(vector["name"] as? String ?? "?") }
         }
-        check(vectors.count >= 60 && mismatched.isEmpty, "Swift command canonicalization matches every shared vector" + (mismatched.isEmpty ? "" : ": " + mismatched.joined(separator: ", ")))
+        check(vectors.count >= 80 && mismatched.isEmpty, "Swift command canonicalization matches every shared vector" + (mismatched.isEmpty ? "" : ": " + mismatched.joined(separator: ", ")))
+        // Remote payloads are canonicalized on the home's connection queue:
+        // key count, nesting and size must not turn into a stall. The Core
+        // suite runs the same shapes and bounds.
+        func timedCanonical(_ input: Data) -> (output: Data?, seconds: Double) {
+            let start = Date(); let output = try? DeviceCommandBinding.canonical(input)
+            return (output, Date().timeIntervalSince(start))
+        }
+        let manyKeys = "{\"action\":\"injectAll\",\"blobHashes\":[],\"extra\":{" + (0..<32_000).map { "\"field" + String($0) + "\":0" }.joined(separator: ",") + "}}"
+        let manyKeysRun = timedCanonical(Data(manyKeys.utf8))
+        check(manyKeysRun.output?.count == manyKeys.utf8.count && manyKeysRun.seconds < 0.25, "Swift canonicalizes a 32,000-key object in under 250 ms (" + String(Int(manyKeysRun.seconds * 1000)) + " ms)")
+        let reversedKeys = "{" + (0..<32_000).reversed().map { "\"k" + String($0) + "\":0" }.joined(separator: ",") + "}"
+        let reversedRun = timedCanonical(Data(reversedKeys.utf8))
+        check(reversedRun.output.map { String(decoding: $0, as: UTF8.self).hasPrefix("{\"k0\":0,\"k1\":0,\"k10\":0,") } == true && reversedRun.seconds < 0.25, "Swift sorts 32,000 reversed keys in under 250 ms (" + String(Int(reversedRun.seconds * 1000)) + " ms)")
+        let duplicateLast = Data((manyKeys.dropLast(2) + ",\"field0\":1}}").utf8)
+        let duplicateRun = timedCanonical(duplicateLast)
+        check(duplicateRun.output == nil && duplicateRun.seconds < 0.25, "Swift rejects a duplicate after 32,000 keys in under 250 ms")
+        // Worst case near the size cap: unsorted objects at every level move
+        // their contents once per level.
+        var deep = "[" + Array(repeating: "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"", count: 118_000).joined(separator: ",") + "]"
+        for _ in 0..<(DeviceCommandBinding.maxDepth - 1) { deep = "{\"z\":0,\"a\":" + deep + "}" }
+        let deepRun = timedCanonical(Data(deep.utf8))
+        check(deepRun.output?.count == deep.utf8.count && deepRun.seconds < 1, "Swift canonicalizes a 3.9 MB payload with unsorted objects at every nesting level in under 1 s (" + String(Int(deepRun.seconds * 1000)) + " ms)")
+        let limit = DeviceCommandBinding.maxBytes
+        let atLimit = Data("\"x\"".utf8) + Data(repeating: 0x20, count: limit - 3)
+        check((try? DeviceCommandBinding.canonical(atLimit)) == Data("\"x\"".utf8), "Swift accepts a payload of exactly the 4 MiB size limit")
+        do { _ = try DeviceCommandBinding.canonical(atLimit + Data(" ".utf8)); check(false, "Swift rejects a payload over the size limit") }
+        catch let error as DeviceCommandBinding.Unbindable { check(error.reason == "Payload exceeds 4194304 bytes.", "Swift rejects a payload over the size limit with an explicit reason") }
+        catch { check(false, "Swift rejects a payload over the size limit with an explicit reason") }
+        let overDeep = Data((String(repeating: "[", count: DeviceCommandBinding.maxDepth + 1) + String(repeating: "]", count: DeviceCommandBinding.maxDepth + 1)).utf8)
+        check(((try? DeviceCommandBinding.canonical(overDeep)) == nil) && (try? DeviceCommandBinding.canonical(overDeep.dropFirst().dropLast())) != nil, "Swift nesting limit is exactly 64 levels")
+        do { _ = try DeviceCommandBinding.canonical(Data(#"{"a":1,"a":2}"#.utf8)); check(false, "Swift names an escaped duplicate key") }
+        catch let error as DeviceCommandBinding.Unbindable { check(error.reason.hasPrefix("Duplicate object key"), "Swift names an escaped duplicate key") }
+        catch { check(false, "Swift names an escaped duplicate key") }
         let typed = DeviceCommandPayload(action: "rename", text: "X")
         let encodings = Set((0..<500).compactMap { _ in try? DeviceCommandBinding.encode(typed) })
         check(encodings == [Data(#"{"action":"rename","blobHashes":[],"text":"X"}"#.utf8)], "Viewer command bytes are canonical and identical on every encode, matching the Core client")

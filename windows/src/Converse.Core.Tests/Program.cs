@@ -315,7 +315,44 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             var ok = reject ? output is null : output is not null && output.SequenceEqual(Utf8(vector.GetProperty("canonical").GetString()!));
             if (!ok) mismatched.Add(vector.GetProperty("name").GetString()!);
         }
-        Check(vectors.Count >= 60 && mismatched.Count == 0, "Core command canonicalization matches every shared vector" + (mismatched.Count == 0 ? "" : ": " + string.Join(", ", mismatched)));
+        Check(vectors.Count >= 80 && mismatched.Count == 0, "Core command canonicalization matches every shared vector" + (mismatched.Count == 0 ? "" : ": " + string.Join(", ", mismatched)));
+        // Remote payloads are canonicalized while a home handles the
+        // connection: key count, nesting and size must not turn into a stall.
+        // The Swift suite runs the same shapes and bounds.
+        (byte[]? Output, double Seconds) TimedCanonical(byte[] input)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            byte[]? output;
+            try { output = DeviceCommandBinding.Canonical(input); } catch (DeviceCommandBinding.UnbindableException) { output = null; }
+            return (output, clock.Elapsed.TotalSeconds);
+        }
+        var manyKeys = "{\"action\":\"injectAll\",\"blobHashes\":[],\"extra\":{" + string.Join(",", Enumerable.Range(0, 32_000).Select(i => "\"field" + i + "\":0")) + "}}";
+        var manyKeysRun = TimedCanonical(Utf8(manyKeys));
+        Check(manyKeysRun.Output?.Length == Utf8(manyKeys).Length && manyKeysRun.Seconds < 0.25, $"Core canonicalizes a 32,000-key object in under 250 ms ({(int)(manyKeysRun.Seconds * 1000)} ms)");
+        var reversedKeys = "{" + string.Join(",", Enumerable.Range(0, 32_000).Reverse().Select(i => "\"k" + i + "\":0")) + "}";
+        var reversedRun = TimedCanonical(Utf8(reversedKeys));
+        Check(reversedRun.Output is { } reversedOutput && System.Text.Encoding.UTF8.GetString(reversedOutput).StartsWith("{\"k0\":0,\"k1\":0,\"k10\":0,", StringComparison.Ordinal) && reversedRun.Seconds < 0.25,
+            $"Core sorts 32,000 reversed keys in under 250 ms ({(int)(reversedRun.Seconds * 1000)} ms)");
+        var duplicateRun = TimedCanonical(Utf8(manyKeys[..^2] + ",\"field0\":1}}"));
+        Check(duplicateRun.Output is null && duplicateRun.Seconds < 0.25, "Core rejects a duplicate after 32,000 keys in under 250 ms");
+        // Worst case near the size cap: unsorted objects at every level move
+        // their contents once per level.
+        var deep = "[" + string.Join(",", Enumerable.Repeat("\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"", 118_000)) + "]";
+        for (var level = 0; level < DeviceCommandBinding.MaxDepth - 1; level++) deep = "{\"z\":0,\"a\":" + deep + "}";
+        var deepRun = TimedCanonical(Utf8(deep));
+        Check(deepRun.Output?.Length == Utf8(deep).Length && deepRun.Seconds < 1, $"Core canonicalizes a 3.9 MB payload with unsorted objects at every nesting level in under 1 s ({(int)(deepRun.Seconds * 1000)} ms)");
+        var atLimit = new byte[DeviceCommandBinding.MaxBytes];
+        System.Array.Fill(atLimit, (byte)' ');
+        Utf8("\"x\"").CopyTo(atLimit, 0);
+        Check(TimedCanonical(atLimit).Output?.SequenceEqual(Utf8("\"x\"")) == true, "Core accepts a payload of exactly the 4 MiB size limit");
+        string? oversizeReason = null;
+        try { DeviceCommandBinding.Canonical([.. atLimit, (byte)' ']); } catch (DeviceCommandBinding.UnbindableException error) { oversizeReason = error.Message; }
+        Check(oversizeReason == "Payload exceeds 4194304 bytes.", "Core rejects a payload over the size limit with an explicit reason");
+        var overDeep = new string('[', DeviceCommandBinding.MaxDepth + 1) + new string(']', DeviceCommandBinding.MaxDepth + 1);
+        Check(TimedCanonical(Utf8(overDeep)).Output is null && TimedCanonical(Utf8(overDeep[1..^1])).Output is not null, "Core nesting limit is exactly 64 levels");
+        string? duplicateReason = null;
+        try { DeviceCommandBinding.Canonical(Utf8("{\"a\":1,\"\\u0061\":2}")); } catch (DeviceCommandBinding.UnbindableException error) { duplicateReason = error.Message; }
+        Check(duplicateReason?.StartsWith("Duplicate object key", StringComparison.Ordinal) == true, "Core names an escaped duplicate key");
         var typed = new DeviceCommandPayload { Action = "rename", Text = "X" };
         Check(DeviceCommandBinding.Encode(typed).SequenceEqual(Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}")),
             "Core viewer command bytes are canonical, matching the Mac and iPad client");
