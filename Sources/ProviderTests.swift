@@ -186,6 +186,17 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: second", "answer: first"] && session.draft == "untouched", engine + " Inject now promotes selected row, interrupts, and preserves draft")
         check(session.injectionNotice.isEmpty && session.injectionTargetID == nil, engine + " injection confirmation clears once the promoted prompt receives a response")
+        session.draft = "slow"; store.submit(session)
+        pump { session.messages.last?.text == "partial" }
+        let keepOne = PendingPrompt(text: "keep one", images: []), dropTwo = PendingPrompt(text: "drop two", images: []), keepThree = PendingPrompt(text: "keep three", images: [])
+        session.pending = [keepOne, dropTwo, keepThree]
+        session.draft = "untouched"
+        check(store.removePending(session, id: dropTwo.id) == nil && session.pending.map(\.id) == [keepOne.id, keepThree.id] && session.busy && !session.interrupted, engine + " Remove takes exactly one queued message and leaves the running turn alone")
+        check(store.removePending(session, id: dropTwo.id) == Store.queuedMessageGone && store.removePending(session, id: UUID()) == Store.queuedMessageGone && session.pending.map(\.id) == [keepOne.id, keepThree.id] && session.busy && !session.interrupted, engine + " Removing an absent or already-started message fails without side effects")
+        store.stop(session); pump { !session.busy }
+        session.queuePaused = false; store.runNext(session)
+        pump { !session.busy && session.pending.isEmpty }
+        check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: keep one", "answer: keep three"] && !session.messages.contains { $0.text.contains("drop two") } && session.draft == "untouched", engine + " the remaining queue drains in order after one removal")
         session.pending = [PendingPrompt(text: "one", images: []), PendingPrompt(text: "two", images: [])]
         session.queuePaused = true
         store.injectPending(session)

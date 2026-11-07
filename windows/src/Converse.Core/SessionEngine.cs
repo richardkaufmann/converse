@@ -538,6 +538,22 @@ public sealed class SessionStore
         return null;
     }
 
+    public const string QueuedMessageGone = "That message already started or was removed. Nothing else changed.";
+
+    // Mac removePending parity: removes exactly one queued prompt. Every
+    // other entry keeps its order and provenance; switchboard obligations
+    // stay as Clear queue leaves them. The running turn is never touched.
+    public string? RemovePending(ChatSession session, Guid id)
+    {
+        if (session.Interrupted && session.ResumeAfterInterrupt && session.Pending.FirstOrDefault()?.Id == id)
+            return "That message is already starting. Nothing was removed.";
+        var index = session.Pending.FindIndex(p => p.Id == id);
+        if (index < 0) return QueuedMessageGone;
+        session.Pending.RemoveAt(index);
+        Save();
+        return null;
+    }
+
     private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images)
     {
         var first = !session.Messages.Any(m => m.Role == "user");

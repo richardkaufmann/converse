@@ -397,12 +397,14 @@ final class DeviceSyncService: ObservableObject {
         hello.capabilities.append("session-close-v1")
         hello.capabilities.append("session-rename-v1")
         hello.capabilities.append("session-create-v1")
+        hello.capabilities.append(Self.queueRemoveCapability)
         #endif
         if editableLotsEnabled { hello.capabilities.append(LotEditing.capability) }
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
+    func helloCapabilitiesForTesting(_ peer: DevicePeer) -> [String] { (try? JSONDecoder().decode(DeviceHello.self, from: helloPayload(peer)))?.capabilities ?? [] }
     private func sendHandshake(_ peer: DevicePeer) {
         do {
             guard var handshake = peer.handshake else { return }
@@ -982,7 +984,7 @@ extension DeviceSyncService {
         guard teaching || requireLease(peer, envelope, session) else { return }
         guard let origin = peer.hello?.deviceID, let commandStore else { return }
         let payloadHash = DeviceBlob.sha256Hex(data)
-        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
+        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
         do {
             guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) else {
                 if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) {
@@ -1028,6 +1030,9 @@ extension DeviceSyncService {
         case "resumeQueue": session.queuePaused = false; store.save(); store.runNext(session)
         case "pauseQueue": session.queuePaused = true; store.save()
         case "clearQueue": session.pending = []; store.save()
+        case "removeQueued":
+            if let id = command.pendingID { failure = store.removePending(session, id: id) }
+            else { failure = "Remove not applied: no queued item was specified. Nothing was removed." }
         case "rename":
             // Same path as local rename: title didSet updates identity sidecar.
             if let text = command.text, !text.isEmpty { session.title = text; store.save() }
@@ -1523,6 +1528,8 @@ extension DeviceSyncService {
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
         guard remoteRow(globalID: globalID)?.engine != "parking", remoteTranscripts[globalID]?.engine != "parking" else { lastOutcome = "Parking Lots are read only on Group viewers."; return nil }
+        // Older homes only know Clear queue; never send them a single removal.
+        guard command.action != "removeQueued" || canRemoveQueuedRemote(globalID) else { lastOutcome = "Update the home device to remove one queued message."; return nil }
         // A double click is the same outstanding queue intent, not a second
         // interrupt. Uncertain requests require a home query before retrying.
         if Self.queueActions.contains(command.action), let active = queueCommand(globalID: globalID),
@@ -1552,7 +1559,11 @@ extension DeviceSyncService {
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }
     func unresolved(globalID: String) -> [DeviceOutboxRecord] { outbox.filter { $0.sessionID == globalID } }
-    static let queueActions: Set<String> = ["inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue"]
+    static let queueActions: Set<String> = ["inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue", "removeQueued"]
+    static let queueRemoveCapability = "queue-remove-v1"
+    func canRemoveQueuedRemote(_ globalID: String) -> Bool {
+        DeviceGlobalID(globalID).flatMap { peerForHome($0.home) }?.hello?.capabilities.contains(Self.queueRemoveCapability) == true
+    }
     func queueCommand(globalID: String) -> DeviceOutboxRecord? {
         let records = unresolved(globalID: globalID).filter { Self.queueActions.contains($0.payload.action) }
         return records.first { ["pending", "accepted", "uncertain"].contains($0.outcome) } ?? records.last

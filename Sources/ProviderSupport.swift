@@ -445,6 +445,16 @@ extension Store {
         s.draft = prompt.text + (s.draft.isEmpty ? "" : "\n" + s.draft); s.attachments = prompt.images + s.attachments
         save()
     }
+    static let queuedMessageGone = "That message already started or was removed. Nothing else changed."
+    /// Removes exactly one queued prompt. Every other entry keeps its order and
+    /// provenance; switchboard obligations stay as Clear queue leaves them.
+    @discardableResult
+    func removePending(_ s: Session, id: UUID) -> String? {
+        if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID == id { return "That message is already starting. Nothing was removed." }
+        guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return Store.queuedMessageGone }
+        s.pending.remove(at: index)
+        save(); return nil
+    }
 }
 
 import SwiftUI
@@ -553,7 +563,8 @@ struct PendingMessagesView: View {
                     }
                     Button(session.interrupted && session.injectionTargetID == prompt.id ? "Interrupting…" : "Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }
-                    Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
+                    Button { Store.shared.removePending(session, id: prompt.id) } label: { Image(systemName: "xmark") }
+                        .disabled(session.interrupted && session.resumeAfterInterrupt && session.injectionTargetID == prompt.id).help("Remove this queued message")
                 }
             }
         }.font(.caption).padding(8).background(StatusTint.queue)
