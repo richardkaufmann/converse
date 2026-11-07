@@ -378,6 +378,27 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     store.injectPending(lifecycle, id: lifecycle.pending.first?.id)
     pump { !lifecycle.busy && lifecycle.pending.isEmpty }
     check(lifecycle.messages.filter { $0.role == "user" && $0.text == "blocked input" }.count == 1 && lifecycle.messages.filter { $0.text == "answer: blocked input" }.count == 1 && lifecycle.draft == "keep typing" && lifecycle.attachments == ["new-attachment.png"], "Inject after a Muse lock clears delivers held input exactly once and preserves the draft")
+    // An Inject all merge held by the lock keeps its parts and typed flags,
+    // so the retried message still shows the typed prompt beside the tell.
+    try! FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
+    let heldTell = "[Converse message from Fixture · session peer/one · delivery test · hop 1/100]\nStatus message"
+    let heldTyped = "MY TYPED PROMPT MUST STAY VISIBLE", heldText = heldTell + "\n\n" + heldTyped
+    let heldParts = [PendingPrompt(switchboardHop: 1, text: heldTell, images: []), PendingPrompt(typed: true, text: heldTyped, images: [])]
+    lifecycle.queuePaused = true; lifecycle.pending = heldParts
+    store.injectPending(lifecycle)
+    pump { !lifecycle.busy }
+    let held = lifecycle.pending.first
+    check(lifecycle.status == "Session in use · input held" && lifecycle.pending.count == 1 && held?.text == heldText && held?.components?.map(\.text) == [heldTell, heldTyped]
+          && held?.components?.map { $0.typed == true } == [false, true] && held?.messageComponents?.map(\.kind) == ["traffic", "human"]
+          && held.map { $0.durabilityIDs.isDisjoint(with: heldParts.map(\.id)) } == true && !lifecycle.messages.contains { $0.role == "user" && $0.text == heldText },
+          "Muse lock conflict re-queues an Inject all merge with its parts and typed flags under fresh identities")
+    try! FileManager.default.removeItem(at: lock)
+    store.injectPending(lifecycle, id: held?.id)
+    pump { !lifecycle.busy && lifecycle.pending.isEmpty }
+    let redelivered = lifecycle.messages.last { $0.role == "user" }
+    check(redelivered?.text == heldText && lifecycle.messages.last?.text == "answer: " + heldText
+          && TranscriptStyle.segments(heldText, components: redelivered?.components) == [TranscriptSegment(text: heldTell, summary: "Received tell from Fixture · Status message"), TranscriptSegment(text: heldTyped, summary: nil)],
+          "The re-injected message is byte-identical and renders the typed prompt visibly")
     let quittingStore = Store(folder: store.folder.appendingPathComponent("muse-quit"))
     let quittingSession = quittingStore.create(lifecycleEntry)
     let quitHost = MuseConnection(sessionID: UUID().uuidString)

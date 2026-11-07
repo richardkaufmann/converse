@@ -230,8 +230,48 @@ static class SwitchboardSupervisionChecks
                 "Unmerged traffic and plain messages, and merges with no traffic, render whole exactly as before");
             var forged = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = merged.Text.Length + 5, Length = 3, Kind = "human" } };
             var hiding = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = reply.Length + 2, Length = 4, Kind = "traffic" } };
-            check(SwitchboardPresentation.Segments(merged.Text, forged) is [{ Summary: replySummary }, { Summary: null }] && SwitchboardPresentation.Segments(merged.Text, hiding) is [{ Summary: replySummary }, { Summary: null } rest] && rest.Text == typed,
-                "Out-of-range ranges, or ranges leaving text uncovered, fall back to the conservative split instead of hiding text");
+            check(SwitchboardPresentation.Segments(merged.Text, forged) is [{ Summary: null } forgedWhole] && forgedWhole.Text == merged.Text
+                && SwitchboardPresentation.Segments(merged.Text, hiding) is [{ Summary: null } hidingWhole] && hidingWhole.Text == merged.Text,
+                "Out-of-range ranges, or ranges leaving text uncovered, show the whole message expanded instead of hiding text");
+            // A plain tell has no delivery block, so only recorded parts can
+            // separate it from typed text. Invalid parts must never collapse it.
+            var plainTell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message";
+            const string humanText = "MY TYPED PROMPT MUST STAY VISIBLE";
+            var markerless = plainTell + "\n\n" + humanText;
+            var valid = SwitchboardPresentation.Components(new[] { (plainTell, "traffic"), (humanText, "human") }, markerless)!;
+            bool Expanded(IReadOnlyList<MessageComponent>? parts) => SwitchboardPresentation.Segments(markerless, parts) is [{ Summary: null } only] && only.Text == markerless;
+            check(SwitchboardPresentation.Segments(markerless, valid) is [{ Summary: "Received tell from Fixture · Status message" }, { Summary: null, Text: humanText }],
+                "Markerless tell then typed text: valid parts keep the typed prompt visible");
+            check(Expanded(new List<MessageComponent> { valid[0], new() { Offset = markerless.Length + 1, Length = 1, Kind = "human" } }),
+                "Markerless tell then typed text: an out-of-bounds part shows the whole message expanded");
+            check(Expanded(new List<MessageComponent> { valid[0], new() { Offset = valid[0].Length - 3, Length = markerless.Length - valid[0].Length + 3, Kind = "human" } }),
+                "Markerless tell then typed text: overlapping parts show the whole message expanded");
+            check(Expanded(new List<MessageComponent> { valid[0] }) && Expanded(new List<MessageComponent>()) && Expanded(new List<MessageComponent> { new() { Offset = 0, Length = 5, Kind = "traffic" } }),
+                "Markerless tell then typed text: parts leaving non-blank text uncovered, including a single or empty list, show it expanded");
+            check(SwitchboardPresentation.Segments(markerless, null) is null && SwitchboardPresentation.Summary(markerless) is not null,
+                "Without components a markerless merge is ambiguous with a multi-paragraph tell and still collapses whole, as before");
+            check(SwitchboardPresentation.QueueSummary(markerless, valid) is null && SwitchboardPresentation.QueueSummary(markerless, new List<MessageComponent> { valid[0] }) is null,
+                "Queue rows with recorded parts, valid or not, never summarize over the typed text");
+            // Display rewrites carry the parts, or keep the whole visible.
+            var crlf = plainTell.Replace("\n", "\r\n") + "\n\n" + humanText;
+            var crlfParts = SwitchboardPresentation.Components(new[] { (plainTell.Replace("\n", "\r\n"), "traffic"), (humanText, "human") }, crlf);
+            var normalizedParts = SwitchboardPresentation.Components(crlfParts, crlf, markerless, text => text.Replace("\r\n", "\n"));
+            check(SwitchboardPresentation.Segments(markerless, normalizedParts) is [{ Summary: not null }, { Summary: null, Text: humanText }],
+                "Newline normalization moves the recorded parts with the text");
+            check(SwitchboardPresentation.Components(valid, markerless, "rewritten whole", text => text) is [{ Offset: 0, Kind: "text" } marker] && marker.Length == "rewritten whole".Length
+                && SwitchboardPresentation.Components(null, markerless, "x", text => text) is null
+                && SwitchboardPresentation.Components(new List<MessageComponent> { valid[0] }, markerless, markerless, text => text) is [{ Kind: "text" } invalidMarker] && invalidMarker.Length == markerless.Length,
+                "A rewrite the parts cannot follow, or invalid parts, become one visible part; no parts stay no parts");
+            var invalidHeld = Busy(new PendingPrompt { Text = markerless, Components = new List<MessageComponent> { valid[0], new() { Offset = 999, Length = 1, Kind = "human" } } },
+                new PendingPrompt { Text = "and more", Typed = true });
+            store.InjectPending(invalidHeld);
+            check(SwitchboardPresentation.Segments(invalidHeld.Pending[0].Text, invalidHeld.Pending[0].Components) is [{ Summary: null } heldWhole] && heldWhole.Text == markerless + "\n\nand more",
+                "Inject all over a part with invalid ranges keeps that part visible instead of reclassifying it as traffic");
+            var pendingWire = DeviceJson.Decode<DevicePendingDto>(DeviceJson.Encode(new DevicePendingDto { Id = Guid.NewGuid(), Text = markerless, Components = valid }));
+            var olderPending = DeviceJson.Decode<DevicePendingDto>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"text\":\"x\"}"));
+            check(SwitchboardPresentation.QueueSummary(pendingWire.Text, pendingWire.Components) is null && pendingWire.Components?.Count == 2 && olderPending.Components is null
+                && !System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(new DevicePendingDto { Text = "x" })).Contains("components"),
+                "Queue snapshots carry merged parts when present and omit them otherwise");
             // Archived shape without metadata: reply envelope, separator, typed text.
             check(SwitchboardPresentation.Segments(reply + "\n\n" + typed, null) is [{ Summary: replySummary }, { Summary: null } legacyTyped] && legacyTyped.Text == typed,
                 "Old merged messages split after the reply's delivery block and show the remainder unattributed and in full");

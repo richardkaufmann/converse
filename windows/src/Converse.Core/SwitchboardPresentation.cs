@@ -74,46 +74,83 @@ public static class SwitchboardPresentation
         }
         return result;
     }
+    /// One visible part over all of text: what a merged message renders as
+    /// when its recorded ranges cannot be carried through a rewrite.
+    public static List<MessageComponent> ExpandedComponents(string text) =>
+        new() { new MessageComponent { Offset = 0, Length = text.Length, Kind = MessageComponent.Plain } };
+    /// Whether recorded ranges are in order, inside the text, and leave
+    /// nothing but whitespace uncovered.
+    public static bool ComponentsTile(string source, IReadOnlyList<MessageComponent> components)
+    {
+        var cursor = 0;
+        foreach (var component in components)
+        {
+            if (component.Offset < cursor || component.Offset > source.Length || component.Length < 0
+                || component.Length > source.Length - component.Offset || !string.IsNullOrWhiteSpace(source[cursor..component.Offset])) return false;
+            cursor = component.Offset + component.Length;
+        }
+        return string.IsNullOrWhiteSpace(source[cursor..]);
+    }
+    /// Components for text, a display rewrite of source (Swift parity).
+    /// Parts survive when rewriting each piece reproduces text exactly;
+    /// anything else that had parts becomes one visible part, so lost or
+    /// invalid ranges never fall back to a whole-message summary.
+    public static List<MessageComponent>? Components(IReadOnlyList<MessageComponent>? components, string source, string text, Func<string, string> rewrite)
+    {
+        if (components is null) return null;
+        if (!ComponentsTile(source, components)) return ExpandedComponents(text);
+        if (text == source) return components.ToList();
+        var rebuilt = new System.Text.StringBuilder();
+        var cursor = 0;
+        var result = new List<MessageComponent>();
+        foreach (var component in components)
+        {
+            rebuilt.Append(rewrite(source[cursor..component.Offset]));
+            var part = rewrite(source.Substring(component.Offset, component.Length));
+            result.Add(new MessageComponent { Offset = rebuilt.Length, Length = part.Length, Kind = component.Kind });
+            rebuilt.Append(part);
+            cursor = component.Offset + component.Length;
+        }
+        rebuilt.Append(rewrite(source[cursor..]));
+        return rebuilt.ToString() == text ? result : ExpandedComponents(text);
+    }
     /// One-line queue label: a summary only when the whole item is traffic.
     public static string? QueueSummary(string text, IReadOnlyList<MessageComponent>? components = null) =>
         Segments(text, components) is null ? Summary(text, queued: true) : null;
     /// Parts of a merged message to render separately (Swift parity): traffic
     /// parts with their own summary, everything else in full. Null renders the
-    /// message whole, exactly as before.
+    /// message whole, exactly as before. Recorded components that do not tile
+    /// the text show it all expanded; only messages without them use the
+    /// conservative legacy split.
     public static List<TranscriptSegment>? Segments(string source, IReadOnlyList<MessageComponent>? components, Func<string, string?>? resolveName = null)
     {
-        if (components is { Count: > 1 })
+        if (components is null) return LegacySegments(source, resolveName);
+        // Untrusted ranges never hide text, and never fall back to a
+        // whole-message summary that could cover a typed part.
+        if (!ComponentsTile(source, components)) return new List<TranscriptSegment> { new(source, null) };
+        var result = new List<TranscriptSegment>();
+        int? plainStart = null;
+        foreach (var component in components)
         {
-            var cursor = 0;
-            var result = new List<TranscriptSegment>();
-            int? plainStart = null;
-            bool Blank(int start, int length) => string.IsNullOrWhiteSpace(source.Substring(start, length));
-            foreach (var component in components)
-            {
-                // Untrusted ranges never hide text: anything outside them
-                // must be blank, or the message falls back below.
-                if (component.Offset < cursor || component.Offset > source.Length || component.Length < 0
-                    || component.Length > source.Length - component.Offset || !Blank(cursor, component.Offset - cursor)) { result.Clear(); break; }
-                var part = source.Substring(component.Offset, component.Length);
-                var summary = component.Kind == MessageComponent.Traffic ? Summary(part, resolveName: resolveName) : null;
-                cursor = component.Offset + component.Length;
-                if (string.IsNullOrWhiteSpace(part)) continue;
-                // Adjacent visible parts stay one block with their separator.
-                if (summary is null && plainStart is { } start) { result[^1] = result[^1] with { Text = source[start..cursor] }; continue; }
-                plainStart = summary is null ? component.Offset : null;
-                result.Add(new TranscriptSegment(part, summary));
-            }
-            if (result.Count > 0 && Blank(cursor, source.Length - cursor))
-                // Plain parts alone render as before, unless the whole would
-                // otherwise collapse over a visible part.
-                return result.Any(segment => segment.Summary is not null) || Summary(source) is not null ? result : null;
+            var part = source.Substring(component.Offset, component.Length);
+            var summary = component.Kind == MessageComponent.Traffic ? Summary(part, resolveName: resolveName) : null;
+            var end = component.Offset + component.Length;
+            if (string.IsNullOrWhiteSpace(part)) continue;
+            // Adjacent visible parts stay one block with their separator.
+            if (summary is null && plainStart is { } start) { result[^1] = result[^1] with { Text = source[start..end] }; continue; }
+            plainStart = summary is null ? component.Offset : null;
+            result.Add(new TranscriptSegment(part, summary));
         }
-        return LegacySegments(source, resolveName);
+        // Plain parts alone render as before, unless the whole would
+        // otherwise collapse over a visible part.
+        return result.Count > 0 && (result.Any(segment => segment.Summary is not null) || Summary(source) is not null) ? result : null;
     }
     /// Messages merged before component metadata. Splits only after a
     /// complete delivery block followed by the Inject all separator, and never
     /// says who wrote the remainder. A delivery block followed by anything
-    /// else shows the whole message expanded.
+    /// else shows the whole message expanded. A plain tell has no delivery
+    /// block, so an old merge of one with typed text cannot be told apart from
+    /// a multi-paragraph tell: it still collapses, as before.
     public static List<TranscriptSegment>? LegacySegments(string source, Func<string, string?>? resolveName = null)
     {
         const string envelope = "[Converse message from ";

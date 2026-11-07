@@ -549,8 +549,46 @@ func switchboardSupervisionSelfTests(_ check: (Bool, String) -> Void) {
               "Components are recorded only for a real merge whose parts reproduce the text exactly")
         let forged = [MessageComponent(offset: 0, length: (reply as NSString).length, kind: "traffic"), MessageComponent(offset: (agentHuman.0 as NSString).length + 5, length: 3, kind: "human")]
         let hidden = [MessageComponent(offset: 0, length: (reply as NSString).length, kind: "traffic"), MessageComponent(offset: (reply as NSString).length + 2, length: 4, kind: "traffic")]
-        check(TranscriptStyle.segments(agentHuman.0, components: forged) == TranscriptStyle.legacySegments(agentHuman.0) && TranscriptStyle.segments(agentHuman.0, components: hidden) == TranscriptStyle.legacySegments(agentHuman.0),
-              "Out-of-range ranges, or ranges leaving text uncovered, fall back to the conservative split instead of hiding text")
+        check(TranscriptStyle.segments(agentHuman.0, components: forged) == [TranscriptSegment(text: agentHuman.0, summary: nil)] && TranscriptStyle.segments(agentHuman.0, components: hidden) == [TranscriptSegment(text: agentHuman.0, summary: nil)],
+              "Out-of-range ranges, or ranges leaving text uncovered, show the whole message expanded instead of hiding text")
+        // A plain tell has no delivery block, so only recorded parts can
+        // separate it from typed text. Invalid parts must never collapse it.
+        let plainTell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message"
+        let human = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let markerless = plainTell + "\n\n" + human, markerlessLength = (markerless as NSString).length, tellLength = (plainTell as NSString).length
+        let valid = TranscriptStyle.components(joining: [(plainTell, "traffic"), (human, "human")], into: markerless) ?? []
+        func expanded(_ parts: [MessageComponent]) -> Bool { TranscriptStyle.segments(markerless, components: parts) == [TranscriptSegment(text: markerless, summary: nil)] }
+        check(TranscriptStyle.segments(markerless, components: valid) == [TranscriptSegment(text: plainTell, summary: "Received tell from Fixture · Status message"), TranscriptSegment(text: human, summary: nil)],
+              "Markerless tell then typed text: valid parts keep the typed prompt visible")
+        check(expanded([valid[0], MessageComponent(offset: markerlessLength + 1, length: 1, kind: "human")]), "Markerless tell then typed text: an out-of-bounds part shows the whole message expanded")
+        check(expanded([valid[0], MessageComponent(offset: tellLength - 3, length: markerlessLength - tellLength + 3, kind: "human")]), "Markerless tell then typed text: overlapping parts show the whole message expanded")
+        check(expanded([valid[0]]) && expanded([]) && expanded([MessageComponent(offset: 0, length: 5, kind: "traffic")]),
+              "Markerless tell then typed text: parts leaving non-blank text uncovered, including a single or empty list, show it expanded")
+        check(TranscriptStyle.segments(markerless, components: nil) == nil && TranscriptStyle.trafficSummary(markerless) != nil,
+              "Without components a markerless merge is ambiguous with a multi-paragraph tell and still collapses whole, as before")
+        check(TranscriptStyle.queueSummary(markerless, components: valid) == nil && TranscriptStyle.queueSummary(markerless, components: [valid[0]]) == nil,
+              "Queue rows with recorded parts, valid or not, never summarize over the typed text")
+        // Display, export and import rewrites carry the parts, or keep the whole visible.
+        let scrubbedTell = plainTell.replacingOccurrences(of: "Fixture", with: "[name]")
+        check(TranscriptStyle.components(valid, from: markerless, to: scrubbedTell + "\n\n" + human) { $0.replacingOccurrences(of: "Fixture", with: "[name]") }
+              == [MessageComponent(offset: 0, length: (scrubbedTell as NSString).length, kind: "traffic"), MessageComponent(offset: (scrubbedTell as NSString).length + 2, length: (human as NSString).length, kind: "human")],
+              "A length-changing rewrite moves the recorded parts with the text")
+        check(TranscriptStyle.components(valid, from: markerless, to: "rewritten whole") { $0 } == TranscriptStyle.expandedComponents("rewritten whole")
+              && TranscriptStyle.components(nil, from: markerless, to: "x") { $0 } == nil
+              && TranscriptStyle.components([valid[0]], from: markerless, to: markerless) { $0 } == TranscriptStyle.expandedComponents(markerless)
+              && TranscriptStyle.segments(markerless, components: TranscriptStyle.expandedComponents(markerless)) == [TranscriptSegment(text: markerless, summary: nil)],
+              "A rewrite the parts cannot follow, or invalid parts, become one visible part; no parts stay no parts")
+        // Queued parts that no longer reproduce the text keep it visible.
+        let drifted = PendingPrompt(components: [PendingPrompt(text: plainTell, images: []), PendingPrompt(typed: true, text: human, images: [])], text: markerless + " edited", images: [])
+        let single = PendingPrompt(components: [PendingPrompt(text: plainTell, images: [])], text: plainTell, images: [])
+        check(drifted.messageComponents == TranscriptStyle.expandedComponents(drifted.text) && TranscriptStyle.queueSummary(drifted.text, components: drifted.messageComponents) == nil
+              && single.messageComponents == nil && PendingPrompt(components: [], text: plainTell, images: []).messageComponents == nil,
+              "Queued parts that drift from the text keep it visible; a single unchanged part is an ordinary message")
+        let pendingWire = try? JSONDecoder().decode(DevicePendingDTO.self, from: JSONEncoder().encode(DevicePendingDTO(id: UUID(), text: markerless, components: valid)))
+        let olderPending = try? JSONDecoder().decode(DevicePendingDTO.self, from: Data(#"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","text":"x"}"#.utf8))
+        check(pendingWire?.components == valid && TranscriptStyle.queueSummary(markerless, components: pendingWire?.components) == nil && olderPending != nil && olderPending?.components == nil
+              && !(String(data: (try? JSONEncoder().encode(DevicePendingDTO(id: UUID(), text: "x"))) ?? Data(), encoding: .utf8) ?? "components").contains("components"),
+              "Queue snapshots carry merged parts when present and omit them otherwise")
         // Richard's archived shape: no metadata, a reply envelope, the separator, then typed text.
         let legacy = reply + "\n\n" + typed
         check(TranscriptStyle.segments(legacy, components: nil) == [TranscriptSegment(text: reply, summary: replySummary), TranscriptSegment(text: typed, summary: nil)],

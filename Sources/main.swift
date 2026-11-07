@@ -587,7 +587,7 @@ final class Store: ObservableObject {
             else if !s.busy { runNext(s) }
             save(); return
         }
-        send(s)
+        send(s, input: PendingPrompt(typed: true, text: s.draft, images: s.attachments))
     }
     static let injectNothingQueued = "Queue already empty; nothing to inject."
     static let injectItemGone = "That message already started or was removed. Nothing was injected."
@@ -702,7 +702,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, components: next.messageComponents)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -763,7 +763,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, components: [MessageComponent]? = nil) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -793,6 +793,8 @@ final class Store: ObservableObject {
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
+        // Inject all parts render separately; text that differs from the queued input shows whole.
+        let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
         s.messages.append(Message(role: "user", text: text, images: images, components: components))
         if let context = s.restoreContext { s.restoreRetry = (text, context) }
         s.restoreContext = nil
@@ -826,7 +828,7 @@ final class Store: ObservableObject {
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && usesInteractiveMuse {
-            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
+            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID, input: input); return
         }
         if let live = s.claudeLive { deliverClaudeLive(s, live: live, prompt: prompt, responseID: responseID); save(); return }
         switch s.entry.engine {
@@ -924,7 +926,7 @@ final class Store: ObservableObject {
             }
         }
     }
-    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = []) {
+    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = [], input: PendingPrompt? = nil) {
         let connection = MuseConnection(sessionID: s.remoteID ?? s.conversationID.uuidString)
         s.muse = connection; s.museItems = [:]; s.requests = []; s.requestError = ""; s.status = "Connecting…"
         connection.event = { [weak self, weak s] method, params in
@@ -950,7 +952,9 @@ final class Store: ObservableObject {
                            s.messages[index - 1].images == images {
                             s.messages.removeSubrange((index - 1)...index)
                         }
-                        s.pending.insert(PendingPrompt(switchboardHop: s.switchboardHop, text: display, images: images), at: 0)
+                        // Inject all parts and typed flags travel with it, so the retried
+                        // message renders the same way.
+                        s.pending.insert((input ?? PendingPrompt(text: display, images: images)).held(text: display, images: images, switchboardHop: s.switchboardHop), at: 0)
                         s.interrupted = false; s.resumeAfterInterrupt = false; s.queuePaused = true
                         self.finishMuse(s, status: "Session in use · input held", notice: "Muse has this session open in another host. This prompt was not submitted and is held in the paused queue. Close the other host, then choose Resume queue or Inject now. Your conversation identity and draft are unchanged.")
                     } else { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription) }
@@ -2748,7 +2752,7 @@ struct ScrollingConversation: NSViewRepresentable {
                     if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
                 }
                 // Inject all can merge traffic with typed input: each part renders on its own.
-                let segments = disclosure == nil && message.role == "user" ? TranscriptStyle.segments(visible, components: visible == message.text ? message.components : nil, resolveName: resolveSessionName) : nil
+                let segments = disclosure == nil && message.role == "user" ? TranscriptStyle.segments(visible, components: TranscriptStyle.components(message.components, from: message.text, to: visible, rewrite: Store.visibleText), resolveName: resolveSessionName) : nil
                 let trafficSummary = segments != nil || !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
                 var segmentTraffic: [NSRange] = []
                 if let disclosure {
@@ -3847,6 +3851,30 @@ func selfTest() {
     check(mergedView.copyBlocks.filter { $0.role == "user" }.map(\.source) == [mergedText, mergedWithTell, mergedReply] && mergedSession.messages[0].text == mergedText,
           "Copy Message and the archive keep the exact merged text")
     check(mergedView.userBlocks.count == 3 && mergedView.messageLabels.map(\.number) == [1, 2, 3, 4], "A merged message is still one prompt block and one message number")
+    // A plain tell has no delivery block: invalid recorded parts must show
+    // the whole message expanded, never collapse it over the typed text.
+    let plainTell = "[Converse message from Fixture · session peer/three · delivery test · hop 1/100]\nStatus message"
+    let plainTyped = "MY TYPED PROMPT MUST STAY VISIBLE", plainMerged = plainTell + "\n\n" + plainTyped
+    let plainValid = TranscriptStyle.components(joining: [(plainTell, "traffic"), (plainTyped, "human")], into: plainMerged)
+    let plainSession = Session(entry: entry)
+    plainSession.messages = [Message(role: "user", text: plainMerged, components: [MessageComponent(offset: 0, length: (plainTell as NSString).length, kind: "traffic"), MessageComponent(offset: (plainMerged as NSString).length + 1, length: 1, kind: "human")]),
+                             Message(role: "user", text: plainMerged, components: plainValid), Message(role: "user", text: plainMerged)]
+    let plainView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(plainSession).render(plainView)
+    let plainString = plainView.string as NSString
+    let plainBlocks = plainView.userBlocks.count == 3 ? plainView.userBlocks : Array(repeating: NSRange(location: 0, length: 0), count: 3)
+    let invalidBlock = plainBlocks[0], invalidTyped = plainString.range(of: plainTyped, range: plainBlocks[0]), validTyped = plainString.range(of: plainTyped, range: plainBlocks[1])
+    check(invalidTyped.location != NSNotFound && NSLocationInRange(invalidTyped.location, invalidBlock) && plainString.range(of: "[Converse message from Fixture").location == 0
+          && (plainView.textStorage?.attribute(.foregroundColor, at: invalidTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && (plainView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && !plainView.trafficBlocks.contains { NSIntersectionRange($0, invalidBlock).length > 0 },
+          "Invalid recorded parts render the whole merged message expanded: typed text visible, nothing orange or collapsed")
+    check(validTyped.location != NSNotFound && plainString.substring(with: plainBlocks[1]).hasPrefix("Received tell from Fixture · Status message\n")
+          && (plainView.textStorage?.attribute(.foregroundColor, at: validTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && plainString.substring(with: plainBlocks[2]).hasPrefix("Received tell from Fixture") && !plainString.substring(with: plainBlocks[2]).contains("\n" + plainTyped)
+          && plainView.trafficBlocks.contains { NSIntersectionRange($0, plainBlocks[2]).length == plainBlocks[2].length },
+          "Valid parts keep the typed text visible; without parts the ambiguous old merge still collapses as before")
+    check(plainView.copyBlocks.map(\.source) == [plainMerged, plainMerged, plainMerged], "Copy Message keeps the exact merged text whatever the parts")
     let rulerBlocks = [NSRange(location: 0, length: 10), NSRange(location: 20, length: 10), NSRange(location: 40, length: 10)]
     let rulerLabels = [0, 18, 40, 60].enumerated().map { TranscriptMessageLabel(location: $0.element, number: $0.offset + 1, prompt: false) }
     check(Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 25, length: 10))) == [rulerBlocks[1]] && Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 28, length: 15))) == Array(rulerBlocks[1...2]) && MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 51, length: 5)).isEmpty,

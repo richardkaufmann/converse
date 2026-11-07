@@ -289,6 +289,9 @@ public sealed class DevicePendingDto
 {
     [JsonPropertyName("id")] public Guid Id { get; set; }
     [JsonPropertyName("text")] public string Text { get; set; } = "";
+    // Inject all parts of a merged queue item, as on DeviceWireMessage.
+    // Optional: older peers omit and ignore it.
+    [JsonPropertyName("components")] public List<MessageComponent>? Components { get; set; }
 }
 
 public sealed class DeviceChoiceDto

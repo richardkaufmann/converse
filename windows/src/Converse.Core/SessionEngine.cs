@@ -547,15 +547,16 @@ public sealed class SessionStore
     }
 
     // Each part keeps its own kind; an already merged part contributes its
-    // recorded parts, shifted to where its text lands in the new merge.
+    // recorded parts, shifted to where its text lands in the new merge. Parts
+    // whose ranges do not tile their text stay visible as a whole, never
+    // reclassified as one traffic part over the typed text inside.
     private static List<MessageComponent>? MergedComponents(IReadOnlyList<PendingPrompt> merge)
     {
         var result = new List<MessageComponent>();
         var offset = 0;
         foreach (var prompt in merge)
         {
-            if (prompt.Components is { Count: > 1 } parts && parts[0].Offset == 0 && parts[^1].Offset + parts[^1].Length == prompt.Text.Length
-                && parts.Zip(parts.Skip(1)).All(pair => pair.Second.Offset == pair.First.Offset + pair.First.Length + SwitchboardPresentation.InjectSeparator.Length))
+            if (SwitchboardPresentation.Components(prompt.Components, prompt.Text, prompt.Text, text => text) is { } parts)
                 result.AddRange(parts.Select(part => new MessageComponent { Offset = offset + part.Offset, Length = part.Length, Kind = part.Kind }));
             else result.Add(new MessageComponent { Offset = offset, Length = prompt.Text.Length, Kind = SwitchboardPresentation.ComponentKind(prompt.Text, prompt.Typed) });
             offset += prompt.Text.Length + SwitchboardPresentation.InjectSeparator.Length;

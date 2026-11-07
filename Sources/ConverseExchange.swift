@@ -22,11 +22,17 @@ enum ConverseExchange {
     struct Scrub: Codable, Equatable { var applied: Bool; var counts: [String: Int] }
     struct MessageRecord: Codable, Equatable {
         var role: String; var text: String; var createdAt: String?; var images: [String]
-        init(role: String, text: String, createdAt: String?, images: [String]) { self.role = role; self.text = text; self.createdAt = createdAt; self.images = images }
+        /// Inject all parts (UTF-16 ranges of `text`). Optional: absent in
+        /// older files and for unmerged messages; older importers ignore it.
+        var components: [MessageComponent]? = nil
+        init(role: String, text: String, createdAt: String?, images: [String], components: [MessageComponent]? = nil) {
+            self.role = role; self.text = text; self.createdAt = createdAt; self.images = images; self.components = components
+        }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
             createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt); images = try c.decodeIfPresent([String].self, forKey: .images) ?? []
+            components = try c.decodeIfPresent([MessageComponent].self, forKey: .components)
         }
     }
     struct SessionRecord: Codable, Equatable {
@@ -101,7 +107,14 @@ enum ConverseExchange {
                 let text = Store.visibleText(message.text)
                 let images = message.images.compactMap(attach)
                 guard !text.isEmpty || !images.isEmpty else { continue }
-                messages.append(MessageRecord(role: message.role, text: clean(text), createdAt: message.createdAt.map(dateFormatter.string), images: images))
+                let exported = clean(text)
+                // Parts follow the scrubbed text; a scratch copy keeps the counts honest.
+                var probe = scrubber
+                let components = TranscriptStyle.components(message.components, from: message.text, to: exported) { piece in
+                    let visible = Store.visibleText(piece)
+                    return probe == nil ? visible : probe!.scrub(visible)
+                }
+                messages.append(MessageRecord(role: message.role, text: exported, createdAt: message.createdAt.map(dateFormatter.string), images: images, components: components))
             }
             records.append(SessionRecord(exportID: UUID(), title: clean(session.title), provider: clean(session.provider), engine: session.engine,
                                          kind: session.isAgent ? "agent" : "session", messages: messages, handoff: ProviderHandoff.noteText(session.handoff).map(clean)))
@@ -268,7 +281,9 @@ extension Store {
                     let images = try message.images.prefix(ConverseExchange.maxImagesPerMessage).compactMap { try writeImage($0, to: directory) }
                     let text = ConverseExchange.neutralizeLocalImages(message.text)
                     guard !text.isEmpty || !images.isEmpty else { return nil }
-                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt), imported: true)
+                    // Imported parts are untrusted: ranges that do not tile the text render it all.
+                    let components = TranscriptStyle.components(message.components, from: message.text, to: text, rewrite: ConverseExchange.neutralizeLocalImages)
+                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt), imported: true, components: components)
                 }
                 if let note = ProviderHandoff.noteText(record.handoff) {
                     // The exported note travels as a record, so the late-bound provider starts from it.

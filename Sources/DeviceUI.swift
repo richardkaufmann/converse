@@ -350,7 +350,7 @@ struct RemotePane: View {
                     }
                     ForEach(pending) { item in
                         HStack {
-                            Text(TranscriptStyle.queueSummary(item.text) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                            Text(TranscriptStyle.queueSummary(item.text, components: item.components) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text, components: item.components) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                             Spacer()
                             if pending.count == 1 {
                                 Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }

@@ -880,7 +880,9 @@ public sealed partial class ConversationPane : UserControl
         var body = new StackPanel { Spacing = 8 };
         Grid.SetColumn(body, 1);
         grid.Children.Add(body);
-        var flat = MarkdownRuns.SanitizeLoneSurrogates(line.Text.Replace("\r\n", "\n").Replace('\r', '\n'));
+        static string Normalize(string text) => MarkdownRuns.SanitizeLoneSurrogates(text.Replace("\r\n", "\n").Replace('\r', '\n'));
+        var normalized = Normalize(line.Text);
+        var flat = normalized;
         // Outer editor blank lines are not a separate visible message row.
         // Keep the stored/copyable prompt and all internal whitespace intact.
         if (isUser) flat = flat.Trim('\n');
@@ -896,7 +898,10 @@ public sealed partial class ConversationPane : UserControl
             return row;
         }
         // Inject all can merge traffic with typed input: each part renders on its own.
-        if (isUser && SwitchboardPresentation.Segments(flat, flat == line.Text ? line.Components : null, SwitchboardName) is { } segments)
+        // Recorded parts follow the newline normalization; the legacy split
+        // reads the trimmed text as before.
+        if (isUser && (line.Components is null ? SwitchboardPresentation.Segments(flat, null, SwitchboardName)
+                : SwitchboardPresentation.Segments(normalized, SwitchboardPresentation.Components(line.Components, line.Text, normalized, Normalize), SwitchboardName)) is { } segments)
             foreach (var segment in segments)
                 body.Children.Add(segment.Summary is { } part ? TrafficRow(part, segment.Text) : RenderMdBlock(new MdText(segment.Text.Trim('\n'), new List<MdRun>()), isUser));
         else if (SwitchboardPresentation.Summary(flat, resolveName: SwitchboardName) is { } summary)
@@ -1687,19 +1692,19 @@ public sealed partial class ConversationPane : UserControl
             liveKeys.Add(scope + ":" + request.Id);
             signature.Append($"|req:{request.Id}:{request.Kind}:{request.ToolName}:{request.Choices.Count}:{request.Questions.Count}");
         }
-        List<(Guid Id, string Text)> pending = new();
+        List<(Guid Id, string Text, List<MessageComponent>? Components)> pending = new();
         var paused = false;
         if (local is not null)
         {
-            pending = local.Pending.Select(p => (p.Id, p.Text)).ToList();
+            pending = local.Pending.Select(p => (p.Id, p.Text, p.Components)).ToList();
             paused = local.QueuePaused;
         }
         else if (gid is not null && _host.Devices.RemoteTranscripts.GetValueOrDefault(gid) is { } transcript)
         {
-            pending = transcript.Pending.Select(p => (p.Id, p.Text)).ToList();
+            pending = transcript.Pending.Select(p => (p.Id, p.Text, p.Components)).ToList();
             paused = transcript.QueuePaused;
         }
-        foreach (var (id, preview) in pending) signature.Append($"|q:{id}:{preview.Length}:{preview.GetHashCode()}");
+        foreach (var (id, preview, _) in pending) signature.Append($"|q:{id}:{preview.Length}:{preview.GetHashCode()}");
         signature.Append("|paused:").Append(paused);
         var outbox = gid is null ? null : _host.Devices.Unresolved(gid).FirstOrDefault();
         if (outbox is not null) signature.Append($"|out:{outbox.CommandID}:{outbox.Outcome}:{outbox.Detail}");
@@ -1904,7 +1909,7 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
-    private StackPanel BuildPendingPanel(List<(Guid Id, string Text)> pending, bool paused, ChatSession? local, string? gid)
+    private StackPanel BuildPendingPanel(List<(Guid Id, string Text, List<MessageComponent>? Components)> pending, bool paused, ChatSession? local, string? gid)
     {
         var panel = new StackPanel { Spacing = 4 };
         // Mac parity: one outstanding remote queue intent disables the whole
@@ -1977,14 +1982,14 @@ public sealed partial class ConversationPane : UserControl
         };
         controls.Children.Add(clear);
         panel.Children.Add(controls);
-        foreach (var (id, text) in pending)
+        foreach (var (id, text, components) in pending)
         {
             var row = new Grid();
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var preview = new TextBlock
             {
-                Text = SwitchboardPresentation.QueueSummary(text) ?? text.Replace("\r", " ").Replace("\n", " "),
+                Text = SwitchboardPresentation.QueueSummary(text, components) ?? text.Replace("\r", " ").Replace("\n", " "),
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,

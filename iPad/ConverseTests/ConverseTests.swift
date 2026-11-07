@@ -552,6 +552,34 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(view.promptBlocks.count, 1)
         }
     }
+    // A plain tell has no delivery block: invalid recorded parts from the
+    // home must show the whole merged message expanded, never collapse it.
+    func testInvalidMergedPartsShowWholeMessageExpanded() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let tellLength = (tell as NSString).length, textLength = (text as NSString).length
+        let invalid = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: textLength + 1, length: 1, kind: "human")])
+        let overlapping = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: tellLength - 3, length: textLength - tellLength + 3, kind: "human")])
+        for message in [invalid, overlapping] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "[Converse message from Fixture").location, 0, "The whole message is shown expanded, not summarized")
+            XCTAssertFalse(view.text.contains("Received tell"))
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Nothing in the expanded message is orange")
+            XCTAssertTrue(coordinator.trafficDetails.isEmpty, "No collapsed summary to tap")
+            XCTAssertTrue(view.trafficBlocks.isEmpty, "The message keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+        XCTAssertNil(TranscriptStyle.queueSummary(text, components: invalid.components), "Queue rows never summarize over invalid parts")
+        XCTAssertNotNil(TranscriptStyle.queueSummary(text), "Without parts the ambiguous old merge still summarizes as before")
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)

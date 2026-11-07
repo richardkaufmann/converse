@@ -203,47 +203,83 @@ extension TranscriptStyle {
             return MessageComponent(offset: offset, length: length, kind: part.kind)
         }
     }
+    /// One visible part over all of `text`: what a merged message renders
+    /// as when its recorded ranges cannot be carried through a rewrite.
+    static func expandedComponents(_ text: String) -> [MessageComponent] {
+        [MessageComponent(offset: 0, length: (text as NSString).length, kind: MessageComponent.text)]
+    }
+    /// Whether recorded ranges are in order, inside the text, and leave
+    /// nothing but whitespace uncovered.
+    static func componentsTile(_ source: String, _ components: [MessageComponent]) -> Bool {
+        let whole = source as NSString
+        func blank(_ range: NSRange) -> Bool { whole.substring(with: range).allSatisfy(\.isWhitespace) }
+        var cursor = 0
+        for component in components {
+            guard component.offset >= cursor, component.offset <= whole.length, component.length >= 0,
+                  component.length <= whole.length - component.offset,
+                  blank(NSRange(location: cursor, length: component.offset - cursor)) else { return false }
+            cursor = component.offset + component.length
+        }
+        return blank(NSRange(location: cursor, length: whole.length - cursor))
+    }
+    /// Components for `text`, a display, export or import rewrite of
+    /// `source`. Parts survive when rewriting each piece reproduces `text`
+    /// exactly; anything else that had parts becomes one visible part, so
+    /// lost or invalid ranges never fall back to a whole-message summary.
+    static func components(_ components: [MessageComponent]?, from source: String, to text: String, rewrite: (String) -> String) -> [MessageComponent]? {
+        guard let components else { return nil }
+        guard componentsTile(source, components) else { return expandedComponents(text) }
+        if text == source { return components }
+        let whole = source as NSString
+        var rebuilt = "", cursor = 0, result: [MessageComponent] = []
+        for component in components {
+            rebuilt += rewrite(whole.substring(with: NSRange(location: cursor, length: component.offset - cursor)))
+            let part = rewrite(whole.substring(with: NSRange(location: component.offset, length: component.length)))
+            result.append(MessageComponent(offset: (rebuilt as NSString).length, length: (part as NSString).length, kind: component.kind))
+            rebuilt += part
+            cursor = component.offset + component.length
+        }
+        rebuilt += rewrite(whole.substring(from: cursor))
+        return rebuilt == text ? result : expandedComponents(text)
+    }
     /// One-line queue label: a summary only when the whole item is traffic.
     static func queueSummary(_ text: String, components: [MessageComponent]? = nil) -> String? {
         segments(text, components: components) == nil ? trafficSummary(text, queued: true) : nil
     }
     /// Parts of a merged message to render separately: traffic parts with
     /// their own summary, everything else in full. Nil renders the message
-    /// whole, exactly as before.
+    /// whole, exactly as before. Recorded components that do not tile the
+    /// text show it all expanded; only messages without them use the
+    /// conservative legacy split.
     static func segments(_ source: String, components: [MessageComponent]?, resolveName: (String) -> String? = { _ in nil }) -> [TranscriptSegment]? {
+        guard let components else { return legacySegments(source, resolveName: resolveName) }
+        // Untrusted ranges never hide text, and never fall back to a
+        // whole-message summary that could cover a typed part.
+        guard componentsTile(source, components) else { return [TranscriptSegment(text: source, summary: nil)] }
         let whole = source as NSString
-        if let components, components.count > 1 {
-            var cursor = 0, result: [TranscriptSegment] = [], plainStart: Int?
-            func blank(_ range: NSRange) -> Bool { whole.substring(with: range).allSatisfy(\.isWhitespace) }
-            for component in components {
-                // Untrusted ranges never hide text: anything outside them
-                // must be blank, or the message falls back below.
-                guard component.offset >= cursor, component.offset <= whole.length, component.length >= 0,
-                      component.length <= whole.length - component.offset,
-                      blank(NSRange(location: cursor, length: component.offset - cursor)) else { result = []; break }
-                let part = whole.substring(with: NSRange(location: component.offset, length: component.length))
-                let summary = component.kind == MessageComponent.traffic ? trafficSummary(part, resolveName: resolveName) : nil
-                cursor = component.offset + component.length
-                if part.allSatisfy(\.isWhitespace) { continue }
-                // Adjacent visible parts stay one block with their separator.
-                if summary == nil, let start = plainStart {
-                    result[result.count - 1].text = whole.substring(with: NSRange(location: start, length: cursor - start)); continue
-                }
-                plainStart = summary == nil ? component.offset : nil
-                result.append(TranscriptSegment(text: part, summary: summary))
+        var result: [TranscriptSegment] = [], plainStart: Int?
+        for component in components {
+            let part = whole.substring(with: NSRange(location: component.offset, length: component.length))
+            let summary = component.kind == MessageComponent.traffic ? trafficSummary(part, resolveName: resolveName) : nil
+            let end = component.offset + component.length
+            if part.allSatisfy(\.isWhitespace) { continue }
+            // Adjacent visible parts stay one block with their separator.
+            if summary == nil, let start = plainStart {
+                result[result.count - 1].text = whole.substring(with: NSRange(location: start, length: end - start)); continue
             }
-            if !result.isEmpty, blank(NSRange(location: cursor, length: whole.length - cursor)) {
-                // Plain parts alone render as before, unless the whole would
-                // otherwise collapse over a visible part.
-                return result.contains { $0.summary != nil } || trafficSummary(source) != nil ? result : nil
-            }
+            plainStart = summary == nil ? component.offset : nil
+            result.append(TranscriptSegment(text: part, summary: summary))
         }
-        return legacySegments(source, resolveName: resolveName)
+        // Plain parts alone render as before, unless the whole would
+        // otherwise collapse over a visible part.
+        return !result.isEmpty && (result.contains { $0.summary != nil } || trafficSummary(source) != nil) ? result : nil
     }
     /// Messages merged before component metadata. Splits only after a
     /// complete delivery block followed by the Inject all separator, and
     /// never says who wrote the remainder. A delivery block followed by
-    /// anything else shows the whole message expanded.
+    /// anything else shows the whole message expanded. A plain tell has no
+    /// delivery block, so an old merge of one with typed text cannot be told
+    /// apart from a multi-paragraph tell: it still collapses, as before.
     static func legacySegments(_ source: String, resolveName: (String) -> String? = { _ in nil }) -> [TranscriptSegment]? {
         let envelope = "[Converse message from "
         // Every render asks about ordinary prompts too; check before copying.

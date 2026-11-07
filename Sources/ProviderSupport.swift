@@ -45,8 +45,17 @@ struct PendingPrompt: Codable, Identifiable {
     /// This prompt and, after Inject all, the prompts combined into it.
     var durabilityIDs: Set<UUID> { Set([id] + (components ?? []).map(\.id)) }
     /// Where each combined prompt sits in the merged text, for the transcript.
+    /// Parts that no longer reproduce the text keep it all visible.
     var messageComponents: [MessageComponent]? {
-        TranscriptStyle.components(joining: (components ?? []).map { ($0.text, TranscriptStyle.componentKind($0.text, typed: $0.typed == true)) }, into: text)
+        guard let components, !components.isEmpty, !(components.count == 1 && components[0].text == text) else { return nil }
+        return TranscriptStyle.components(joining: components.map { ($0.text, TranscriptStyle.componentKind($0.text, typed: $0.typed == true)) }, into: text)
+            ?? TranscriptStyle.expandedComponents(text)
+    }
+    /// A copy to hold again after a turn could not start: same text, parts
+    /// and typed flags, with fresh identities so no delivery is rematched.
+    func held(text display: String, images: [String], switchboardHop: Int?) -> PendingPrompt {
+        PendingPrompt(switchboardHop: switchboardHop, components: components?.map { PendingPrompt(typed: $0.typed, text: $0.text, images: $0.images) },
+                      typed: typed, text: display, images: images)
     }
 }
 // Applied after login-shell startup, consistently for turns, catalog queries and login.

@@ -232,6 +232,9 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID
     var text: String
+    // Inject all parts of a merged queue item, as on DeviceWireMessage.
+    // Optional: older peers omit and ignore it.
+    var components: [MessageComponent]? = nil
 }
 struct DeviceChoiceDTO: Codable, Equatable, Identifiable {
     var id: String
