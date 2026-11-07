@@ -129,15 +129,31 @@ public sealed class SupportSetup
 
 public static class AppSupportActions
 {
-    public static void ValidateSource(ChatSession source)
+    public const int MaxDepth = 8;
+    // Provenance and depth come from the requesting turn's captured
+    // authority; teaching is checked live so revocation applies at once.
+    public static void ValidateSource(SessionStore store, ChatSession source, TurnAuthority authority)
     {
+        if (!store.Sessions.Contains(source)) throw new ArgumentException("This session was closed.");
         if (source.SupportTeachingVersion is null) throw new ArgumentException("Teach Converse Setup & Control first.");
-        if (source.ActiveBackground || source.ActiveHop > 0) throw new ArgumentException("Background or forwarded turns cannot configure the app.");
-        if (source.ActiveAppControlDepth >= 8) throw new ArgumentException("Setup action limit reached. Ask the human before continuing.");
+        if (authority.Background || authority.Hop > 0) throw new ArgumentException("Background or forwarded turns cannot configure the app.");
+        if (authority.AppControlDepth >= MaxDepth) throw new ArgumentException("Setup action limit reached. Ask the human before continuing.");
     }
-    public static string Execute(SessionStore store, ChatSession source, JsonObject command, HelpDocument? help)
+    // Only human-initiated, taught chains get another turn, one level deeper
+    // than the turn that asked. No auto-replies to background/forwarded
+    // requests, revoked teaching, closed sessions or chain overflow.
+    public static void Continue(SessionStore store, ChatSession source, TurnAuthority authority, string result)
     {
-        ValidateSource(source);
+        if (store.Sessions.Contains(source) && source.SupportTeachingVersion is not null && !authority.Background && authority.Hop == 0 && authority.AppControlDepth < MaxDepth)
+        {
+            source.Pending.Add(new PendingPrompt { Text = "[Converse app operation result]\n" + result, AppControlDepth = authority.AppControlDepth + 1 });
+            store.Save(); store.RunNext(source);
+        }
+        else { source.Messages.Add(new ChatMessage { Role = "notice", Text = result }); store.Save(); }
+    }
+    public static string Execute(SessionStore store, ChatSession source, TurnAuthority authority, JsonObject command, HelpDocument? help)
+    {
+        ValidateSource(store, source, authority);
         if (command["command"]?.GetValue<string>() != "app-control") throw new ArgumentException("Invalid app command.");
         var action = command["action"]?.GetValue<string>();
         var allowed = new[] { "command", "action", "target", "title", "objective", "repository", "query", "body", "provider", "directory" };

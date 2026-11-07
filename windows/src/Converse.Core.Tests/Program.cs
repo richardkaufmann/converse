@@ -138,7 +138,7 @@ if (args.Contains("--group-leave-only")) {
     return failures == 0 ? 0 : 1;
 }
 
-if (args.Contains("--support-only")) { await AppSupportChecks.Run(Check); return failures == 0 ? 0 : 1; }
+if (args.Contains("--support-only")) { await AppSupportChecks.Run(Check); await TurnAuthorityChecks.Run(Check); return failures == 0 ? 0 : 1; }
 
 Console.WriteLine("ChaCha20Poly1305 supported: " + ChaCha20Poly1305.IsSupported);
 Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on Windows/Linux)");
@@ -2587,6 +2587,7 @@ await CheckGroupLeave();
 }
 await SwitchboardSupervisionChecks.Run(Check, JoinPair);
 await AppSupportChecks.Run(Check);
+await TurnAuthorityChecks.Run(Check);
 await AgentChecks.Run(Check, JoinPair);
 await HeadlessSessionChecks.Run(Check, JoinPair);
 
