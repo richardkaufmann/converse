@@ -6,11 +6,27 @@
 
 Converse is one app for multiple, simultaneous conversations with the providers **Muse, Claude Code, and Codex**. From one pane of glass you can orchestrate projects across multiple systems (Mac, Linux, Windows) with a set of agents overseeing progress.
 
-A key differentiator from other tools is that agents and sessions talk to each other across systems, and use a shared outliner “parking lot” to track bugs, feature requests, and plans. Try it, and please don’t forget to give me a star if you like it!
-
 **Watch the 3-minute demo:** [on YouTube](https://youtu.be/bSWs7vsioNI) (or [download the MP4](https://github.com/richardkaufmann/converse/releases/download/v0.6.3/Converse-hackathon-demo.mp4))
 
-**Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** when App Support asks. After that provider's own sign-in you have a coding session, an agent and a Parking Lot ready to go. No Meta API key is needed to start; it only adds Muse Spark API agents, scoreboard art, voice and the image tools. [First launch](#first-launch) walks through it.
+**Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and your first “app control” session—**Converse App Support**—will ask you to pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** as your first provider.
+
+<!-- readme-only:start -->
+![First launch: Converse App Support offers Meta Muse, OpenAI Codex and Anthropic Claude](docs/nux-provider-choice.png)
+
+*First launch, captured in the isolated Setup Preview on Converse 0.6.2 (127). Current controls may differ.*
+<!-- readme-only:end -->
+
+After sign-in, there’s a coding session, an agent, and a Parking Lot ready to go. [First launch](#first-launch) walks through it.
+
+[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4): picking a provider, signing in, and the ready screen. GitHub downloads the MP4 rather than playing it in the browser.
+
+<!-- readme-only:start -->
+![After Muse sign-in: App Support and Muse Coding appear side by side, with Muse Agent and Parking Lot in the sidebar](docs/nux-ready.png)
+
+*After sign-in, from the same build-127 Setup Preview.*
+<!-- readme-only:end -->
+
+Type prompts into this window, e.g. “Help me set up a Meta API key for the optional features.” The key is not required to use Converse. The **P 1 2 3 X** buttons on the left control whether a session is **Parked**, visible in one of the **three panes**, or **closed with its work stopped**. You can ask your app control session for ideas of what to do next!
 
 **Hackathon:** The tag `pre-hackathon` marks the code before the hackathon window opened (last commit before Oct 26, 2026, 9:00 AM PT), and `hackathon-submit` marks the submitted version; `git diff pre-hackathon hackathon-submit` shows everything built during the hackathon.
 
@@ -25,10 +41,9 @@ Its standout features:
 7. **[It hosts agent sessions.](#set-up-your-first-agent)** These sessions have initiative and can start periodically or via an external stimulus.
 8. **[It’s chatty.](#messaging-between-sessions)** Sessions can talk to each other. “Tell” sends a message; “Ask” expects a response. Agents can supervise groups of sessions, and Converse can “force inject” prompts to break logjams. Agents also have rich tooling to assess progress toward shared goals.
 9. **[It talks to the outside world.](#give-the-agent-evidence-for-its-objective)** Agents interact with GitHub (to track PRs, issues, updates), [Discord](#connect-discord-on-a-mac) (to send and receive messages), [Home Assistant](#give-the-agent-evidence-for-its-objective) (to read selected device states), and [Meta’s Muse mobile app](#jolly-mac) (“Jolly” can talk to agents and get updates). They can do outbound searches and assess sentiment too.
-
 10. **[It has polish.](#use)** Images can be pasted into sessions—and even analyzed with a right click using Meta’s segmentation toolkit—allowing only pertinent content to be passed to session prompts. Responses’ Markdown output is converted to tables, headings, etc., providing a pleasing experience. Right-click to copy entire prompts and responses, or export traffic across sessions and systems in a consolidated, well-formatted document. Quit and restart the app: your sessions survive!
 11. **[You can enter into spoken conversations with your agent.](#voice-on-mac)**
-12. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. You've been warned! Read the [security section](#security-and-privacy) to make sure this app is for you!
+12. **It has an “opinionated” security posture.** The basic thesis: if you can reach another system’s Converse port (normally TCP 48721), you can ask to join its Group. Messages are encrypted with ChaCha20-Poly1305, and both sides approve pairing—it feels like pairing a phone to a car! Once paired, you’re trusting that system with your sessions. Read the [security section](#security-and-privacy) to make sure this app is for you! Suggestion: ask your security org or your coding tool for an assessment.
 
 These features combine in interesting ways. There’s a built-in support agent that knows this README, and can help you avoid fiddly UIs to configure providers, agents, etc. You can talk with this support agent via Discord or Muse Jolly. And it checks daily for bugs and version updates of the app! This uses a teaching prompt injected into a normal Converse agent.
 
@@ -86,6 +101,8 @@ You do not need Discord to use App Support, set up Converse or report a bug. App
 
 
 On a brand-new Mac installation, Converse opens with four things in the left panel: **Converse App Support**, a **Parking Lot**, **Coding** and an **Agent**. Only App Support is up. It says hello and asks one question: which provider should lead? Pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude**. A provider is the service behind the model; its account and usage charges are separate from Converse.
+
+[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4) shows these steps with Meta Muse.
 
 1. **Click a provider.** Converse sets everything up to use it and renames the sessions to match, for example **Claude Coding** and **Claude Agent**. The Parking Lot is already linked to both.
 2. **Press Return.** App Support has typed `/login` for you. Return opens that provider's normal login (`claude auth login`, `codex login` or `muse login`) in Terminal and your browser. Finish there and come back. Already signed in? Click **I’m already signed in** instead.
