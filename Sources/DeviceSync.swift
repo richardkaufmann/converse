@@ -106,6 +106,12 @@ final class DeviceCommandStore {
               let hash = DeviceCommandBinding.hash(payload, scheme: record.hashScheme) else { return false }
         return record.payloadHash == hash
     }
+    // An earlier home hashed raw bytes, so a key-reordered retry of the same
+    // command misses. Its original may already have run: never call it rejected.
+    func rawBindingUnconfirmed(id: UUID, origin: String, sessionID: String) -> Bool {
+        guard let record = records[id], record.origin == origin, record.sessionID == sessionID else { return false }
+        return (record.hashScheme ?? DeviceCommandBinding.rawScheme) == DeviceCommandBinding.rawScheme
+    }
     func markRunning(id: UUID) throws { try update(id: id, outcome: .running) }
     func markCompleted(id: UUID) throws { try update(id: id, outcome: .completed) }
     func markFailed(id: UUID) throws { try update(id: id, outcome: .failed) }
@@ -182,7 +188,10 @@ final class DeviceOutboxStore {
         // a fresh command ID could apply it twice. Only Check home is safe.
         let legacy = records.indices.filter { records[$0].payloadData == nil && records[$0].outcome == "pending" }
         for index in legacy { records[index].outcome = "uncertain"; records[index].detail = DeviceOutboxRecord.legacyDetail }
-        if !legacy.isEmpty { try save() }
+        // Never block sync start: memory keeps the migration and the next save writes it.
+        if !legacy.isEmpty {
+            do { try save() } catch { NSLog("Device outbox migration not saved yet: %@", error.localizedDescription) }
+        }
     }
     func markLegacyUncertain(commandID: UUID) throws {
         guard let index = records.firstIndex(where: { $0.commandID == commandID }) else { return }

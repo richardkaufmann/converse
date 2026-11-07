@@ -192,6 +192,8 @@ final class DeviceSyncService: ObservableObject {
     private var pendingTakes: [String: Date] = [:]
     private var resumeEpochs: [String: UInt64] = [:]
     private var leaseBoots: [String: UInt64] = [:]
+    // Status-query replies report a record; they never revoke the display lease.
+    private var queriedCommands: Set<UUID> = []
     private var pendingUploads: Set<String> = []
     private var recoveredUploads: [String: [String: UInt64]] = [:]
     private var pendingDownloads: Set<String> = []
@@ -1004,6 +1006,8 @@ extension DeviceSyncService {
             guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash ?? "", hashScheme: DeviceCommandBinding.canonicalScheme) else {
                 if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payload: data) {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Already recorded on home.", epoch: envelope.epoch)
+                } else if commandStore.rawBindingUnconfirmed(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "") {
+                    sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: DeviceCommandBinding.rawMismatchDetail, epoch: envelope.epoch)
                 } else {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command ID reused with different content.", epoch: envelope.epoch)
                 }
@@ -1307,7 +1311,8 @@ extension DeviceSyncService {
         case DeviceMessageKind.commandQuery.rawValue:
             if let commandID = envelope.commandID, let commandStore {
                 if let record = commandStore.records[commandID], record.origin != peerHome || record.sessionID != envelope.sessionID { return }
-                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.", epoch: envelope.epoch)
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue,
+                        detail: commandStore.records[commandID] == nil ? DeviceCommandBinding.unrecordedDetail : "Home record lookup.", epoch: envelope.epoch)
             }
         #endif
         case DeviceMessageKind.commandAck.rawValue:
@@ -1323,7 +1328,8 @@ extension DeviceSyncService {
                 try? outboxStore?.resolve(commandID: commandID, outcome: ack.outcome, detail: ack.detail)
                 outbox = outboxStore?.records ?? outbox
                 if ack.outcome == "completed" { completedCommands.insert(commandID) }
-                if ack.outcome == "rejected" { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
+                let queried = queriedCommands.remove(commandID) != nil
+                if ack.outcome == "rejected" && !queried { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
             }
         #if os(macOS)
         case DeviceMessageKind.blobChunk.rawValue, DeviceMessageKind.blobComplete.rawValue, DeviceMessageKind.blobOffer.rawValue:
@@ -1581,6 +1587,7 @@ extension DeviceSyncService {
     }
     func queryOutbox(_ record: DeviceOutboxRecord) {
         guard let global = DeviceGlobalID(record.sessionID), let peer = peerForHome(global.home) else { return }
+        queriedCommands.insert(record.commandID)
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandQuery.rawValue, sessionID: record.sessionID, commandID: record.commandID, epoch: record.epoch))
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }

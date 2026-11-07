@@ -1835,6 +1835,8 @@ public sealed partial class DeviceSyncService : IDisposable
         {
             if (_commands.BindingMatches(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", envelope.Payload))
                 await SendAckAsync(peer, commandId, envelope.SessionID, _commands.Outcome(commandId) ?? "rejected", "Already recorded on home.", envelope.Epoch);
+            else if (_commands.RawBindingUnconfirmed(commandId, peer.Hello.DeviceID, envelope.SessionID ?? ""))
+                await SendAckAsync(peer, commandId, envelope.SessionID, "uncertain", DeviceCommandBinding.RawMismatchDetail, envelope.Epoch);
             else
                 await SendAckAsync(peer, commandId, envelope.SessionID, "rejected", "Command ID reused with different content.", envelope.Epoch);
             return;
@@ -2158,7 +2160,8 @@ public sealed partial class DeviceSyncService : IDisposable
                 {
                     if (_commands.Records.TryGetValue(queryId, out var record) &&
                         (record.Origin != peerHome || record.SessionID != envelope.SessionID)) break;
-                    await SendAckAsync(peer, queryId, envelope.SessionID, _commands.Outcome(queryId) ?? "rejected", "Home record lookup.", envelope.Epoch);
+                    await SendAckAsync(peer, queryId, envelope.SessionID, _commands.Outcome(queryId) ?? "rejected",
+                        _commands.Records.ContainsKey(queryId) ? "Home record lookup." : DeviceCommandBinding.UnrecordedDetail, envelope.Epoch);
                 }
                 break;
             case DeviceKind.CommandAck:

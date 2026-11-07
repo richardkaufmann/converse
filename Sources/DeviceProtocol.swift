@@ -462,6 +462,8 @@ enum DeviceCanonical {
 // enclosing unsorted object, so at most maxDepth times).
 enum DeviceCommandBinding {
     static let rawScheme = "raw", canonicalScheme = "canonical-v1"
+    static let rawMismatchDetail = "Home already recorded this command ID from an older version and can't confirm the content matches. It may already be applied; check home before sending again."
+    static let unrecordedDetail = "Home has no record of this send, so nothing was applied there."
     static let maxBytes = 4_194_304, maxDepth = 64
     struct Unbindable: Error { var reason: String }
     static func encode<T: Encodable>(_ value: T) throws -> Data { try canonical(JSONEncoder().encode(value)) }

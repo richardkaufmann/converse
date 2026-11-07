@@ -593,9 +593,15 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         try home.commandStoreForTesting?.markCompleted(id: legacyRename)
         let legacyRaw = try bindingAck(legacyRename, legacyBytes)
         let legacyPermuted = try bindingAck(legacyRename, #"{"action":"rename","blobHashes":[],"text":"Binding L"}"#)
-        check(legacyRaw?.outcome == "completed" && legacyRaw?.detail == "Already recorded on home." && legacyPermuted?.outcome == "rejected" && legacyPermuted?.detail == "Command ID reused with different content."
-              && session.title == "Binding B" && home.commandStoreForTesting?.records[legacyRename]?.hashScheme == nil,
-              "A legacy raw home record matches an identical raw retry and rejects a permuted one without executing it")
+        check(legacyRaw?.outcome == "completed" && legacyRaw?.detail == "Already recorded on home." && legacyPermuted?.outcome == "uncertain" && legacyPermuted?.detail == DeviceCommandBinding.rawMismatchDetail
+              && session.title == "Binding B" && home.commandStoreForTesting?.records[legacyRename]?.hashScheme == nil && home.commandStoreForTesting?.outcome(id: legacyRename) == .completed,
+              "A legacy raw home record matches an identical raw retry; a permuted one is uncertain (check home), never rejected or executed")
+        captured = []
+        let unknownQuery = UUID()
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandQuery.rawValue, sessionID: globalString, commandID: unknownQuery, epoch: granted?.epoch))
+        let unknownAck = try capturedEnvelopes().first { $0.commandID == unknownQuery && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
+        check(unknownAck?.outcome == "rejected" && unknownAck?.detail == DeviceCommandBinding.unrecordedDetail && home.commandStoreForTesting?.records[unknownQuery] == nil,
+              "Mac home answers a status query for an unrecorded send explicitly: nothing was applied there")
         check(home.commandStoreForTesting?.records[firstRename]?.hashScheme == DeviceCommandBinding.canonicalScheme, "New home command records name the canonical hash scheme")
         session.title = "Renamed remotely"
         captured = []
@@ -940,6 +946,34 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
               "Resending a legacy record queries home under its original ID and sends no re-encoded command")
         viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: legacyID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "completed", detail: "Home record lookup.", epoch: 6))))
         check(viewer.outbox.isEmpty && viewer.completedCommands.contains(legacyID), "Home's answer to the query resolves the legacy record")
+        // A status-query reply reports a record; even "rejected" keeps the
+        // lease. A rejected command ack still drops it.
+        let unsentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Never arrived"))
+        if let unsent = viewer.outbox.first(where: { $0.commandID == unsentID }) { viewer.queryOutbox(unsent) }
+        check(try newViewerFrames().contains { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.commandID == unsentID }, "Check home sends a status query under the original ID")
+        if let unsentID { viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: unsentID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: DeviceCommandBinding.unrecordedDetail, epoch: 6)))) }
+        check(viewer.remoteLeases[gid] == 6 && viewer.outbox.first { $0.commandID == unsentID }.map { $0.outcome == "rejected" && $0.detail == DeviceCommandBinding.unrecordedDetail } == true,
+              "A status-query reply for an unrecorded send resolves it without dropping the viewer's display lease")
+        let refusedID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Refused"))
+        if let refusedID { viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: refusedID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: "Stale or missing display lease. Take the session again.", epoch: 6)))) }
+        check(refusedID != nil && viewer.remoteLeases[gid] == nil, "A rejected command ack still drops the viewer's display lease")
+        // Migration of a legacy record must not stop sync starting, even when
+        // the outbox cannot be rewritten yet.
+        let lockedFolder = viewer.storageFolder
+        let lockedID = UUID()
+        try Data((#"[{"commandID":""# + lockedID.uuidString + #"","sessionID":""# + gid + #"","payload":{"action":"rename","text":"Locked","blobHashes":[]},"payloadHash":"h","epoch":6,"outcome":"pending"}]"#).utf8)
+            .write(to: lockedFolder.appendingPathComponent("device-outbox.json"))
+        var startError: Error?
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: lockedFolder.path)
+        do { try viewer.configureForTesting(folder: lockedFolder) } catch { startError = error }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedFolder.path)
+        let onDisk = String(decoding: (try? Data(contentsOf: lockedFolder.appendingPathComponent("device-outbox.json"))) ?? Data(), as: UTF8.self)
+        check(startError == nil && viewer.outbox.first { $0.commandID == lockedID }.map { $0.outcome == "uncertain" && $0.detail == DeviceOutboxRecord.legacyDetail } == true && onDisk.contains(#""outcome":"pending""#),
+              "Device sync starts with an unwritable outbox, legacy records migrated in memory" + (startError.map { ": " + $0.localizedDescription } ?? ""))
+        viewer.discardOutbox(DeviceOutboxRecord(commandID: UUID(), sessionID: gid, payload: DeviceCommandPayload(action: "rename"), payloadHash: "h", epoch: 6))
+        check((try? Data(contentsOf: lockedFolder.appendingPathComponent("device-outbox.json"))).map { String(decoding: $0, as: UTF8.self).contains(#""outcome":"uncertain""#) } == true
+              && (try? DeviceOutboxStore(folder: lockedFolder))?.records.first { $0.commandID == lockedID }?.detail == DeviceOutboxRecord.legacyDetail,
+              "The next normal outbox save persists the in-memory migration")
 
     } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
     do {

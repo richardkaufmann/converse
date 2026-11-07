@@ -129,6 +129,12 @@ public sealed class DeviceCommandStore
         Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId
         && DeviceCommandBinding.Hash(payload, record.HashScheme) is { } hash && record.PayloadHash == hash;
 
+    // An earlier home hashed raw bytes, so a key-reordered retry of the same
+    // command misses. Its original may already have run: never call it rejected.
+    public bool RawBindingUnconfirmed(Guid id, string origin, string sessionId) =>
+        Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId
+        && (record.HashScheme ?? DeviceCommandBinding.RawScheme) == DeviceCommandBinding.RawScheme;
+
     // Recovery-ledger receipts survive an application-data restore that lost
     // this store. Seed only missing IDs; an existing local record stays as-is.
     public void SeedIfMissing(IEnumerable<DeviceCommandRecord> receipts)
@@ -194,7 +200,12 @@ public sealed class DeviceOutboxStore
         // a fresh command ID could apply it twice. Only Check home is safe.
         var legacy = Records.Where(r => r.PayloadBytes is null && r.Outcome == "pending").ToList();
         foreach (var record in legacy) { record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; }
-        if (legacy.Count > 0) Save();
+        // Never block sync start: memory keeps the migration and the next save writes it.
+        if (legacy.Count > 0)
+        {
+            try { Save(); }
+            catch (Exception e) { System.Diagnostics.Trace.WriteLine("Device outbox migration not saved yet: " + e.Message); }
+        }
     }
     public void MarkLegacyUncertain(Guid commandId)
     {
