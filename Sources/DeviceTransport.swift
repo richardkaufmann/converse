@@ -410,11 +410,12 @@ final class DeviceSyncService: ObservableObject {
             peer.handshake = handshake; sendRaw(peer, message)
         } catch { disconnect(peer) }
     }
-    private func sendRaw(_ peer: DevicePeer, _ message: Data) {
-        guard message.count <= 65535 else { disconnect(peer); return }
-        if let testSink = peer.testSink { testSink(message); return }
+    private func sendRaw(_ peer: DevicePeer, _ message: Data, completion: ((Bool) -> Void)? = nil) {
+        guard message.count <= 65535 else { completion?(false); disconnect(peer); return }
+        if let testSink = peer.testSink { testSink(message); completion?(true); return }
         let framed = Data([UInt8((message.count >> 8) & 255), UInt8(message.count & 255)])
         peer.connection.send(content: framed + message, completion: .contentProcessed { [weak self, weak peer] error in
+            completion?(error == nil)
             if error != nil, let peer { self?.disconnect(peer) }
         })
     }
@@ -647,17 +648,28 @@ extension DeviceSyncService {
         return displayName(for: id, fallback: reported) + "\nReported name: " + reported + "\n" + status +
             "\nGroup: " + (currentGroup?.name ?? "None") + "\nDevice ID: " + id + endpoint
     }
-    private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
-        guard peer.alive, var keys = peer.keys else { return }
+    private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope, completion: ((Bool) -> Void)? = nil) {
+        guard peer.alive, var keys = peer.keys else { completion?(false); return }
+        // Network callbacks use the connection's main queue. Count every chunk
+        // so a large acknowledgment produces one completion, including failure.
+        var remaining = 0
+        var completed = false
+        func finish(_ success: Bool) {
+            guard !completed else { return }
+            if !success { completed = true; completion?(false); return }
+            remaining -= 1
+            if remaining == 0 { completed = true; completion?(true) }
+        }
         do {
             let framed = try DeviceFrame.encode(envelope)
+            remaining = (framed.count + 59_999) / 60_000
             var offset = 0
             while offset < framed.count {
                 let chunk = Data(framed.dropFirst(offset).prefix(60_000)); offset += chunk.count
-                sendRaw(peer, try keys.sender.encrypt(chunk))
+                sendRaw(peer, try keys.sender.encrypt(chunk), completion: completion == nil ? nil : finish)
             }
             peer.keys = keys
-        } catch { disconnect(peer) }
+        } catch { finish(false); disconnect(peer) }
     }
     private func disconnect(_ peer: DevicePeer, preserveDeviceState: Bool = false) {
         if let home = peer.hello?.deviceID { switchboardQueueReports.removeValue(forKey: home) }
@@ -865,6 +877,10 @@ extension DeviceSyncService {
     func sidebarPayloadForTesting() -> DeviceSidebarPayload { sidebarPayload() }
     func publishSidebarForTesting() { publishSidebarIfChanged() }
     private func publishSidebarIfChanged() {
+        #if os(macOS)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.sidebarPublish, measurement) }
+        #endif
         guard started, peers.values.contains(where: { $0.trustedReady }) else { return }
         // Compare content, not a transport counter. Sending a snapshot itself
         // advances homeSeq; including it caused another send on every idle poll.
@@ -1682,7 +1698,10 @@ extension DeviceSyncService {
         knownGroups = groupStore?.state.groups ?? []
         trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID && (!groupsEnabled || (currentGroup != nil && $0.groupID == currentGroup?.id)) } ?? []
     }
-    private func groupAdvertisement() -> NWListener.Service {
+    private func groupAdvertisement() -> NWListener.Service? {
+        // Loopback transport fixtures must not publish onto the real LAN or
+        // depend on Bonjour availability. Discovery fixtures opt in by name.
+        guard !isTestEnvironment || testingDiscoveryPrefix != nil else { return nil }
         var hints: [String: String] = ["device": identity?.deviceID ?? ""]
         if let group = currentGroup { hints.merge(["group": group.id, "name": group.name, "creator": group.creator]) { _, new in new } }
         return NWListener.Service(name: (testingDiscoveryPrefix ?? "") + deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
@@ -2353,6 +2372,10 @@ extension DeviceSyncService {
         return lotProposals[id] == nil
     }
     func editLot(_ id: String, operation: LotOperation) throws {
+        #if os(iOS)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotLocalEdit, measurement) }
+        #endif
         guard lotCanEdit(id), var editor = lotEditors[id] else { throw ParkingLotError.message("This lot is not currently editable. Take it again when its home is connected.") }
         if editor.unconfirmedCount >= LotEditing.maximumPending { freezeLot(id, reason: "Too many edits are awaiting confirmation. Copy unsaved text before taking the lot again."); throw ParkingLotError.message("Save queue is full.") }
         try editor.enqueue(operation); lotEditors[id] = editor; sendNextLotEdit(id)
@@ -2362,6 +2385,9 @@ extension DeviceSyncService {
         do {
             if let edit = try editor.beginNext() {
                 lotEditors[id] = editor; lotSent[id] = Date(); lotStarted[id] = Date()
+                #if os(iOS)
+                PerformanceCapture.shared.startRoundTrip(edit.mutationID)
+                #endif
                 sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit", boot: edit.homeBoot, sessionID: id, epoch: edit.leaseEpoch, payload: try LotEditing.encoded(edit)))
             } else if editor.unconfirmedCount == 0 {
                 if lotHandoffs.remove(id) != nil {
@@ -2377,6 +2403,9 @@ extension DeviceSyncService {
     }
     private func freezeLot(_ id: String, reason: String, cleanReason: String? = nil) {
         guard var editor = lotEditors[id] else { return }
+        #if os(iOS)
+        if let edit = editor.inFlight { PerformanceCapture.shared.abandonRoundTrip(edit.mutationID) }
+        #endif
         if editor.unconfirmedCount > 0 { lotRecovery[id] = editor.projected }
         editor.frozenReason = editor.unconfirmedCount == 0 ? (cleanReason ?? reason) : reason; lotEditors[id] = editor
         lotProposals.removeValue(forKey: id)
@@ -2502,6 +2531,9 @@ extension DeviceSyncService {
                     editor.frozenReason = nil; lotEditors[id] = editor
                 } else {
                     if let previous = lotEditors[id], previous.unconfirmedCount > 0 { lotRecovery[id] = previous.projected }
+                    #if os(iOS)
+                    if let previous = lotEditors[id]?.inFlight { PerformanceCapture.shared.abandonRoundTrip(previous.mutationID) }
+                    #endif
                     lotEditors[id] = try LotEditQueue(snapshot: snapshot, author: deviceName)
                     lotSent.removeValue(forKey: id); lotStarted.removeValue(forKey: id)
                     lotHandoffs.remove(id); lotReleases.remove(id); lotProposals.removeValue(forKey: id)
@@ -2511,10 +2543,17 @@ extension DeviceSyncService {
                 lotRenewed[id] = Date()
                 for hash in snapshot.document.rows.flatMap({ $0.images ?? [] }) { fetchBlob(globalID: id, hash: hash) }
             case "lot.edit.ack":
+                #if os(iOS)
+                let measurement = PerformanceCapture.shared.begin()
+                defer { PerformanceCapture.shared.end(.lotAckApply, measurement) }
+                #endif
                 guard let data = envelope.payload, var editor = lotEditors[id] else { return true }
                 let ack = try JSONDecoder().decode(LotEditAck.self, from: data)
                 if editor.inFlight?.mutationID != ack.mutationID { return true }
                 try editor.acknowledge(ack); lotEditors[id] = editor; lotSent.removeValue(forKey: id); lotStarted.removeValue(forKey: id)
+                #if os(iOS)
+                PerformanceCapture.shared.finishRoundTrip(ack.mutationID)
+                #endif
                 for hash in editor.saved.document.rows.flatMap({ $0.images ?? [] }) { fetchBlob(globalID: id, hash: hash) }
                 sendNextLotEdit(id)
             case "lot.lease.renewed": lotRenewed[id] = Date()
@@ -2638,12 +2677,22 @@ extension DeviceSyncService {
         return true
     }
     private func receiveLotEdit(_ peer: DevicePeer, _ envelope: DeviceEnvelope, lot: ParkingLotStore) throws {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotEditHandling, measurement) }
+        func acknowledge(_ ack: LotEditAck) throws {
+            let encoding = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.lotAckEncodeQueue, encoding) }
+            sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID,
+                epoch: envelope.epoch, payload: try LotEditing.encoded(ack)), completion: measurement == nil ? nil : { success in
+                    PerformanceCapture.shared.end(success ? .lotEditToAckProcessed : .lotAckSendFailed, measurement)
+                })
+        }
         guard let data = envelope.payload, let stream = lotStreams[lot.id], !stream.barrier else { throw ParkingLotError.message("This lot is paused for review.") }
         let edit = try JSONDecoder().decode(LotEdit.self, from: data)
         let exactHash = try LotEditing.digest(edit)
         if let receipt = stream.receipts[edit.mutationID] {
             guard receipt.0 == exactHash else { throw ParkingLotError.message("A mutation ID was reused with different contents.") }
-            sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: try LotEditing.encoded(receipt.1))); return
+            try acknowledge(receipt.1); return
         }
         let snapshot = try lotSnapshot(lot, epoch: envelope.epoch!)
         try edit.validate(against: snapshot, sequence: stream.sequence)
@@ -2659,14 +2708,18 @@ extension DeviceSyncService {
                 guard let path = lotImagePaths[lot.id]?[hash], FileManager.default.fileExists(atPath: path) else { throw ParkingLotError.message("Image has not been stored for this lot.") }; return path
             } }
         }
-        try withLotPermit(lot.id) { try lot.commitRemote(local) }
+        let commit = PerformanceCapture.shared.begin()
+        do {
+            defer { PerformanceCapture.shared.end(.lotEditCommit, commit) }
+            try withLotPermit(lot.id) { try lot.commitRemote(local) }
+        }
         let ack = LotEditAck(mutationID: edit.mutationID, sequence: edit.sequence, snapshot: next)
         stream.receipts[edit.mutationID] = (exactHash, ack); stream.order.append(edit.mutationID)
         if stream.order.count > 32 { stream.receipts.removeValue(forKey: stream.order.removeFirst()) }
         stream.history.append(try LotEditing.digest(snapshot.document.rows)); stream.history.append(try LotEditing.digest(result.rows))
         if stream.history.count > 202 { stream.history.removeFirst(stream.history.count - 202) }
         stream.sequence += 1; stream.lastSnapshot = next.digest
-        sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: try LotEditing.encoded(ack)))
+        try acknowledge(ack)
     }
     #endif
 }

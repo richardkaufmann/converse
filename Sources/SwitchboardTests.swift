@@ -173,7 +173,10 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         check(pump { a.testingPort != nil && b.testingPort != nil }, "Group tell listeners start in isolated stores")
         a.createGroup(name: "Tell QA")
         b.joinGroupByAddress(host: "127.0.0.1", port: Int(a.testingPort!))
-        guard pump({ a.groupRequests.first != nil && b.pairingPrompt != nil }) else { check(false, "Group tell join reaches review"); return }
+        guard pump({ a.groupRequests.first != nil && b.pairingPrompt != nil }) else {
+            fputs("Group tell diagnostics: A status=\(a.serviceStatus), outcome=\(a.lastOutcome), denied=\(a.localNetworkDenied); B status=\(b.serviceStatus), outcome=\(b.lastOutcome), denied=\(b.localNetworkDenied)\n", stderr)
+            check(false, "Group tell join reaches review"); return
+        }
         a.reviewGroupRequest(a.groupRequests[0]); a.approveGroupReview(); b.confirmPairing()
         let aid = a.identity!.deviceID, bid = b.identity!.deviceID
         guard pump({ a.homes[bid]?.rows.contains(where: { $0.sessionID == target.id }) == true && b.homes[aid]?.online == true }) else { check(false, "Group tell homes exchange directory metadata"); return }

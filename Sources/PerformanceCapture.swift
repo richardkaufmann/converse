@@ -1,0 +1,227 @@
+import Foundation
+
+/// Bounded, opt-in timings. Operation names are closed: no text, paths, titles,
+/// session IDs, key characters or provider payloads enter the capture.
+final class PerformanceCapture {
+    static let shared = PerformanceCapture()
+    enum Operation: String, Codable, CaseIterable {
+        case mainQueueDelay, keyDelivery, keyHandling, textInsertion, transcriptRender
+        case archiveSnapshot, archiveEncodeWrite, checkedSave, sidebarPublish
+        case mouseHover, dragDelivery, dragHandling, dragFrameWait, dragApply, resizeDraw, wrapThaw
+        case lotEditHandling, lotEditCommit, lotAckEncodeQueue, lotEditToAckProcessed, lotAckSendFailed
+        case lotRoundTrip, lotAckApply, lotLocalEdit, lotTextUpdate, lotTextLayout, lotInputToChange
+    }
+    struct Span { let start: Double; let generation: Int; let mainThread: Bool }
+    struct Event: Codable {
+        let operation: Operation
+        let uptime: Double
+        let milliseconds: Double
+        let mainThread: Bool
+    }
+    struct Summary: Codable {
+        var count = 0
+        var totalMilliseconds = 0.0
+        var maximumMilliseconds = 0.0
+        // <=8, <=16, <=50, <=100, <=250, >250 ms.
+        var buckets = [Int](repeating: 0, count: 6)
+        mutating func add(_ milliseconds: Double) {
+            count += 1; totalMilliseconds += milliseconds
+            maximumMilliseconds = max(maximumMilliseconds, milliseconds)
+            let index = [8.0, 16, 50, 100, 250].firstIndex { milliseconds <= $0 } ?? 5
+            buckets[index] += 1
+        }
+    }
+    struct Snapshot: Codable {
+        let schemaVersion: Int
+        let startedAt: Date
+        let measuredAt: Date
+        let version: String
+        let build: String
+        let summaries: [String: Summary]
+        let slowEvents: [Event]
+        let droppedSlowEvents: Int
+        let pendingRoundTrips: Int
+        let droppedRoundTrips: Int
+    }
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "local.richard.Converse.performance", qos: .utility)
+    private var timer: DispatchSourceTimer?
+    private var active = false, pendingProbe = false, dirty = false
+    private var generation = 0, ticks = 0, dropped = 0
+    private var startedAt = Date()
+    private var summaries: [String: Summary] = [:]
+    private var events: [Event] = []
+    // IDs exist only in memory for matching receipts; never export them.
+    private var roundTrips: [UUID: Span] = [:]
+    private var droppedRoundTrips = 0
+    private var destination: URL?
+    private let capacity = 512
+    var enabled: Bool { lock.lock(); defer { lock.unlock() }; return active }
+    var file: URL? { lock.lock(); defer { lock.unlock() }; return destination }
+
+    func configure(folder: URL, enabled: Bool, sampleMainQueue: Bool = true) {
+        lock.lock()
+        let finalSnapshot = active ? snapshot() : nil
+        let previousDestination = destination
+        generation += 1
+        let token = generation
+        active = enabled; pendingProbe = false; dirty = enabled
+        startedAt = Date(); summaries = [:]; events = []; dropped = 0
+        roundTrips = [:]; droppedRoundTrips = 0
+        destination = folder.appendingPathComponent("Performance Diagnostics/performance.json")
+        lock.unlock()
+        queue.async {
+            self.timer?.cancel(); self.timer = nil; self.ticks = 0
+            if let finalSnapshot, let previousDestination {
+                self.write(finalSnapshot, to: previousDestination)
+            }
+            guard enabled, sampleMainQueue else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(25))
+            timer.setEventHandler { [weak self = self] in self?.tick(generation: token) }
+            self.timer = timer; timer.resume()
+        }
+    }
+    func begin() -> Span? {
+        lock.lock(); defer { lock.unlock() }
+        return active ? Span(start: ProcessInfo.processInfo.systemUptime, generation: generation, mainThread: Thread.isMainThread) : nil
+    }
+    func end(_ operation: Operation, _ span: Span?) {
+        guard let span else { return }
+        record(operation, since: span.start, generation: span.generation, mainThread: span.mainThread)
+    }
+    func startRoundTrip(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        guard active, roundTrips[id] == nil else { return }
+        guard roundTrips.count < 128 else { droppedRoundTrips += 1; dirty = true; return }
+        roundTrips[id] = Span(start: ProcessInfo.processInfo.systemUptime, generation: generation, mainThread: false)
+        dirty = true
+    }
+    func finishRoundTrip(_ id: UUID) {
+        lock.lock(); let span = roundTrips.removeValue(forKey: id); if span != nil { dirty = true }; lock.unlock()
+        end(.lotRoundTrip, span)
+    }
+    func abandonRoundTrip(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if roundTrips.removeValue(forKey: id) != nil { droppedRoundTrips += 1; dirty = true }
+    }
+    /// Flush asynchronously before offering the timing-only JSON for export.
+    func prepareExport(_ completion: @escaping (URL?) -> Void) {
+        queue.async {
+            self.writeSnapshot()
+            self.lock.lock(); let file = self.destination; self.lock.unlock()
+            let available = file.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+            DispatchQueue.main.async { completion(available) }
+        }
+    }
+    func delivery(since timestamp: Double, operation: Operation = .keyDelivery) {
+        guard timestamp > 0, let span = begin() else { return }
+        record(operation, since: timestamp, generation: span.generation, mainThread: true)
+    }
+    private func record(_ operation: Operation, since start: Double, generation token: Int, mainThread: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        record(operation, milliseconds: (now - start) * 1000, uptime: now, generation: token, mainThread: mainThread)
+    }
+    private func record(_ operation: Operation, milliseconds: Double, uptime: Double, generation token: Int, mainThread: Bool) {
+        guard milliseconds.isFinite, milliseconds >= 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard active, token == generation else { return }
+        summaries[operation.rawValue, default: Summary()].add(milliseconds)
+        if milliseconds >= 50 {
+            if events.count == capacity { events.removeFirst(); dropped += 1 }
+            events.append(Event(operation: operation, uptime: uptime, milliseconds: milliseconds, mainThread: mainThread))
+        }
+        dirty = true
+    }
+    private func tick(generation token: Int) {
+        lock.lock()
+        let shouldProbe = active && generation == token && !pendingProbe
+        if shouldProbe { pendingProbe = true }
+        lock.unlock()
+        if shouldProbe {
+            let start = ProcessInfo.processInfo.systemUptime
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.record(.mainQueueDelay, since: start, generation: token, mainThread: true)
+                self.lock.lock()
+                if self.generation == token { self.pendingProbe = false }
+                self.lock.unlock()
+            }
+        }
+        ticks += 1
+        if ticks % 20 == 0 { writeSnapshot() }
+    }
+    private func snapshot() -> Snapshot {
+        Snapshot(schemaVersion: 1, startedAt: startedAt, measuredAt: Date(),
+                 version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                 build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                 summaries: summaries, slowEvents: events, droppedSlowEvents: dropped,
+                 pendingRoundTrips: roundTrips.count, droppedRoundTrips: droppedRoundTrips)
+    }
+    /// Runs on the diagnostic queue. Never makes the UI wait on disk I/O.
+    private func writeSnapshot() {
+        lock.lock()
+        guard active, dirty, let destination else { lock.unlock(); return }
+        let value = snapshot(); dirty = false
+        lock.unlock()
+        write(value, to: destination)
+    }
+    private func write(_ value: Snapshot, to destination: URL) {
+        do {
+            let parent = destination.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(value).write(to: destination, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        } catch { /* Observation must never change session behavior. */ }
+    }
+    // Deterministic tests use the same accumulator and writer without timers.
+    func recordForTesting(_ operation: Operation, milliseconds: Double) {
+        guard let span = begin() else { return }
+        record(operation, milliseconds: milliseconds, uptime: span.start, generation: span.generation, mainThread: span.mainThread)
+    }
+    func flushForTesting() { queue.sync { writeSnapshot() } }
+}
+
+func performanceCaptureSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-performance-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let capture = PerformanceCapture()
+    capture.configure(folder: root, enabled: false, sampleMainQueue: false)
+    capture.recordForTesting(.transcriptRender, milliseconds: 200); capture.flushForTesting()
+    check(!FileManager.default.fileExists(atPath: capture.file!.path), "Disabled performance capture writes no diagnostic data")
+    capture.configure(folder: root, enabled: true, sampleMainQueue: false)
+    capture.recordForTesting(.textInsertion, milliseconds: 2)
+    capture.recordForTesting(.textInsertion, milliseconds: -1)
+    capture.recordForTesting(.textInsertion, milliseconds: .nan)
+    for _ in 0..<600 { capture.recordForTesting(.transcriptRender, milliseconds: 75) }
+    capture.flushForTesting()
+    do {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+        check(snapshot.slowEvents.count == 512 && snapshot.droppedSlowEvents == 88, "Performance events stay bounded while preserving dropped-event count")
+        check(snapshot.summaries["transcriptRender"]?.count == 600 && snapshot.summaries["transcriptRender"]?.buckets[3] == 600 && snapshot.summaries["textInsertion"]?.count == 1, "Performance summaries retain all valid timings, including fast operations")
+        let stale = capture.begin()
+        capture.configure(folder: root, enabled: true, sampleMainQueue: false)
+        capture.end(.checkedSave, stale); capture.flushForTesting()
+        let reset = try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+        check(reset.summaries.isEmpty, "An old capture span cannot contaminate a newly started capture")
+        let requests = (0..<130).map { _ in UUID() }
+        requests.forEach(capture.startRoundTrip)
+        capture.startRoundTrip(requests[0]) // A retry must not reset its clock.
+        capture.finishRoundTrip(UUID()) // An unrelated receipt completes nothing.
+        capture.finishRoundTrip(requests[0]); capture.finishRoundTrip(requests[0])
+        capture.abandonRoundTrip(requests[1]); capture.flushForTesting()
+        let roundTripData = try Data(contentsOf: capture.file!)
+        let trips = try decoder.decode(PerformanceCapture.Snapshot.self, from: roundTripData)
+        check(trips.summaries["lotRoundTrip"]?.count == 1 && trips.pendingRoundTrips == 126 && trips.droppedRoundTrips == 3,
+              "Round-trip timings match each receipt once, stay bounded and disclose unfinished or dropped requests")
+        let json = String(decoding: roundTripData, as: UTF8.self)
+        check(!requests.contains { json.contains($0.uuidString) }, "Round-trip matching IDs never enter exported timings")
+        capture.configure(folder: root, enabled: true, sampleMainQueue: false)
+        capture.finishRoundTrip(requests[2]); capture.flushForTesting()
+        let restarted = try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+        check(restarted.pendingRoundTrips == 0 && restarted.summaries["lotRoundTrip"] == nil,
+              "A receipt from an earlier capture cannot contaminate the next capture")
+    } catch { check(false, "Performance capture fixture: " + error.localizedDescription) }
+}

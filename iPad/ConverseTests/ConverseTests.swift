@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testPerformanceCaptureMatchesReceiptsAndKeepsTimingsPrivate() {
+        performanceCaptureSelfTests { passed, description in XCTAssertTrue(passed, description) }
+    }
     func testCopySelectionPreservesLinkDestinations() {
         let view = TailTextView()
         let text = NSMutableAttributedString(string: "References: Café 🐈 and https://example.com")
@@ -76,13 +79,21 @@ final class ConverseTests: XCTestCase {
         let host = UIHostingController(rootView: PadRoot(model: model))
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { model.phoneKeyboard.hide(); window.isHidden = true; scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) }
-        try await Task.sleep(for: .milliseconds(300))
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in XCTFail("Initial portrait request failed: \(error)") }
+        try await eventually("Rotation fixture starts in portrait") {
+            window.bounds.height > window.bounds.width && scene.interfaceOrientation.isPortrait
+        }
+        try await eventually("Rotation fixture mounts its draft editor") {
+            Self.views(host.view).compactMap { $0 as? TailTextView }.contains { $0.text.contains("Rotation draft 0") }
+        }
         let editor = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? TailTextView }.first { $0.text.contains("Rotation draft 0") })
         model.phoneKeyboard.show(ids[0])
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertTrue(editor.isFirstResponder)
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeLeft)) { error in XCTFail("Rotation request failed: \(error)") }
-        try await Task.sleep(for: .seconds(1))
+        try await eventually("Rotation fixture reaches landscape") {
+            window.bounds.width > window.bounds.height && scene.interfaceOrientation.isLandscape
+        }
         host.view.layoutIfNeeded()
         XCTAssertGreaterThan(window.bounds.width, window.bounds.height, "The fixture must actually rotate")
         XCTAssertEqual(host.view.bounds.width, window.bounds.width, accuracy: 1)
@@ -90,7 +101,9 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(editor.isFirstResponder)
         XCTAssertEqual(model.draft(ids[0]).text, "Rotation draft 0")
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
-        try await Task.sleep(for: .seconds(1))
+        try await eventually("Rotation fixture returns to portrait") {
+            window.bounds.height > window.bounds.width && scene.interfaceOrientation.isPortrait
+        }
         XCTAssertLessThan(window.bounds.width, window.bounds.height)
         XCTAssertTrue(editor.isFirstResponder)
     }
@@ -1505,16 +1518,37 @@ extension ConverseTests {
         let selectionImage = XCTAttachment(image: UIGraphicsImageRenderer(bounds: selectionWindow.bounds).image { _ in selectionWindow.drawHierarchy(in: selectionWindow.bounds, afterScreenUpdates: true) })
         selectionImage.name = "Selected lot entries at 24pt"; selectionImage.lifetime = .keepAlways; add(selectionImage)
         selectionWindow.isHidden = true
+        let timingFolder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-timing-" + UUID().uuidString)
+        let capture = PerformanceCapture.shared
+        capture.configure(folder: timingFolder, enabled: true, sampleMainQueue: false)
+        defer {
+            capture.configure(folder: timingFolder, enabled: false, sampleMainQueue: false)
+            capture.flushForTesting(); try? FileManager.default.removeItem(at: timingFolder)
+        }
+        func timings() throws -> PerformanceCapture.Snapshot {
+            capture.flushForTesting()
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: XCTUnwrap(capture.file)))
+        }
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Typed on phone"))
         let flight = try XCTUnwrap(service.lotEditors[id]?.inFlight)
+        XCTAssertEqual(try timings().pendingRoundTrips, 1, "Actual edit dispatch starts the round-trip clock")
         XCTAssertEqual(service.lotEditors[id]?.saved.document.revision, 12, "Optimistic typing does not claim a saved revision")
         let result = try flight.operation.applying(to: snapshot.document, author: "iPhone")
         let saved = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: snapshot.name, document: result)
         let ack = LotEditAck(mutationID: flight.mutationID, sequence: flight.sequence, snapshot: saved)
+        let unrelatedAck = LotEditAck(mutationID: UUID(), sequence: flight.sequence, snapshot: saved)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(unrelatedAck)))
+        XCTAssertEqual(try timings().pendingRoundTrips, 1, "An unrelated acknowledgment cannot finish the measurement")
         service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+        XCTAssertEqual(try timings().summaries["lotRoundTrip"]?.count, 1, "Actual acknowledgment handling measures a mutation once")
+        XCTAssertEqual(try timings().pendingRoundTrips, 0)
         XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0); XCTAssertEqual(service.lotEditors[id]?.saved.document.rows[1].text, "Typed on phone")
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Unconfirmed words to recover"))
         service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.stolen", boot: 9, sessionID: id, epoch: 5))
+        XCTAssertEqual(try timings().pendingRoundTrips, 0, "Displacement removes the abandoned in-flight timer")
+        XCTAssertEqual(try timings().droppedRoundTrips, 1, "Displacement is reported as abandoned, not a fast acknowledgment")
         XCTAssertFalse(service.lotCanEdit(id)); XCTAssertFalse(model.state.placements.contains(id))
         XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Unconfirmed words to recover", "Displacement retains an explicit manual recovery copy")
         model.assign(id, pane: 0)

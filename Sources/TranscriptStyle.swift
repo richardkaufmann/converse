@@ -99,6 +99,10 @@ struct TranscriptFollowState {
 enum TranscriptStyle {
     static func trafficSummary(_ source: String, queued: Bool = false, resolveName: (String) -> String? = { _ in nil }) -> String? {
         let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Every render asks about ordinary history too. Reject it before
+        // splitting, flattening and scanning the entire message body.
+        guard text.hasPrefix("[Converse message from ") || text.hasPrefix("[Converse switchboard")
+                || text.hasPrefix("Switchboard:") || text.hasPrefix("```converse\n") else { return nil }
         func clipped(_ value: String, limit: Int = 100) -> String {
             let flat = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             return flat.count > limit ? String(flat.prefix(limit - 1)) + "…" : flat
