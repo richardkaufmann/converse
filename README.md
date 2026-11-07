@@ -71,7 +71,7 @@ The second is a news tracker looking at a curated news feed (general politics, s
 [![News Checker's illustrated summary of its curated politics, sports and AI datacenter news feed](docs/news-checker.jpg)](docs/news-checker.jpg)
 <!-- readme-only:end -->
 
-The rest of this README walks through installing Converse, and then using it. A friendly suggestion: AI wrote what follows (it’s kind of grim, to be honest). Let AI read the details! You tell App Support what you want to do; it can work through the instructions with you. Install the app on a Mac or Windows PC, and the support agent will walk you through provisioning your first provider on that system. From there you can just chat and have it help set up multiple systems (including headless Linux), agents, whatever. It’ll ask for what it needs. You can give feedback too: “File a bug about blah blah blah” gets a report ready for GitHub. You review it and send it. No Discord account needed.
+The rest of this README walks through installing Converse, and then using it. A friendly suggestion: AI wrote what follows (it’s kind of grim, to be honest). Let AI read the details! You tell App Support what you want to do; it can work through the instructions with you. Install the app on a Mac or Windows PC, and the support agent will walk you through provisioning your first provider on that system. From there you can just chat and have it help set up multiple systems (including headless Linux), agents, whatever. It’ll ask for what it needs. You can give feedback too: “File a bug about blah blah blah” gets a report ready for GitHub. You review it, then submit it with your GitHub account. Discord isn’t involved.
 
 Enjoy.
 
