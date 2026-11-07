@@ -74,6 +74,19 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
         check(first.messages[0].images.count == 1 && first.messages[0].images[0].hasPrefix(target.folder.appendingPathComponent("Attachments/" + first.id.uuidString).path) && FileManager.default.contents(atPath: first.messages[0].images[0]) != nil, "Imported images are stored with the new session")
         check(first.messages[1].text.contains("[chart](file:///tmp/private.png)") && !first.messages[1].text.contains("![chart]"), "Imported local image embeds become plain links, so no local file is captured")
         check(target.importResponseImages(first) == false, "Imported text cannot pull files from this Mac into the transcript")
+        // Defense in depth: even text that slipped past neutralization never captures.
+        check(imported.allSatisfy { $0.messages.allSatisfy { $0.imported == true } }, "Every imported message is marked as imported")
+        let planted = root.appendingPathComponent("planted.png"); try? png.write(to: planted)
+        let bypass = "![x](" + planted.path + ")", original = first.messages[1].text
+        let control = target.create(entry); control.messages = [Message(role: "assistant", text: bypass)]
+        check(target.importResponseImages(control) && control.messages[0].images.count == 1, "The planted local image is otherwise capturable")
+        target.sessions.removeAll { $0 === control }
+        first.messages[1].text = bypass
+        check(!target.importResponseImages(first) && first.messages[1].images.isEmpty && first.messages[1].text == bypass, "An imported reply never captures a local file, even past neutralization")
+        target.save()
+        let replanted = Store(folder: target.folder).sessions.first { $0.id == first.id }?.messages[1]
+        check(replanted?.imported == true && replanted?.images.isEmpty == true && replanted?.text == bypass, "Loading an imported session never captures local files")
+        first.messages[1].text = original; target.save()
         let reloaded = Store(folder: target.folder)
         check(reloaded.sessions.contains { $0.id == first.id && $0.isUnboundImport && $0.importedTranscriptPending && $0.messages.count == 2 }, "Unbound imported sessions survive relaunch")
         let newLot = result.lots.first

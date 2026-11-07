@@ -437,6 +437,16 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(streamed?.messages.last?.text.contains("![Leak](") == true && imageValidations == 0 && session.messages.last?.images.isEmpty == true, "Sending a transcript to a viewer never fetches or resolves a web image")
         session.messages.removeAll { $0.id == webImage.id }
         Store.shared.responseImageLoader.validate = savedValidate
+        // A viewer's transcript request never captures local files named by imported text.
+        let plantedFile = root.appendingPathComponent("planted.png")
+        try NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!.write(to: plantedFile)
+        let plantedReply = Message(role: "assistant", text: "![Planted](" + plantedFile.absoluteString + ")", imported: true)
+        session.messages.append(plantedReply)
+        captured = []
+        home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptRequest.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(DeviceTranscriptRequest(beforeOffset: session.messages.count))))
+        let plantedStream = try capturedEnvelopes().compactMap { frame in frame.kind == DeviceMessageKind.transcriptSnapshot.rawValue ? frame.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) } : nil }.first
+        check(plantedStream != nil && session.messages.last?.images.isEmpty == true && session.messages.last?.text.contains("![Planted](") == true, "A peer transcript request never captures local files for imported replies")
+        session.messages.removeAll { $0.id == plantedReply.id }
         captured = []
         captured = []
         let renameID = UUID()

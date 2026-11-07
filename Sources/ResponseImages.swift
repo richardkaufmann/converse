@@ -67,12 +67,10 @@ extension Store {
         let working = URL(fileURLWithPath: NSString(string: session.entry.directory).expandingTildeInPath).standardizedFileURL
         if working.path != "/" && working.path != NSHomeDirectory() { roots.append(working) }
         var changed = false
-        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].text.contains("![") {
+        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].imported != true && session.messages[index].text.contains("![") {
             let items = ResponseImages.capture(session.messages[index].text, roots: roots, destination: output)
             guard !items.isEmpty else { continue }
-            let text = NSMutableString(string: session.messages[index].text)
-            for item in items.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-            session.messages[index].text = text as String
+            session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, items.map { ($0.range, $0.caption) })
             for item in items where !session.messages[index].images.contains(item.file.path) { session.messages[index].images.append(item.file.path) }
             changed = true
         }
@@ -100,9 +98,7 @@ extension Store {
                 do {
                     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     try png.write(to: file, options: .atomic)
-                    let text = NSMutableString(string: session.messages[index].text)
-                    for item in refs.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-                    session.messages[index].text = text as String
+                    session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, refs.map { ($0.range, $0.caption) })
                     if !session.messages[index].images.contains(file.path) { session.messages[index].images.append(file.path) }
                 } catch { session.messages.append(Message(role: "notice", text: "Image could not be saved. Its link remains available.")) }
             case .failure:
@@ -203,6 +199,26 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         let unavailable = MarkdownText.render("![Missing](" + spaced.absoluteString + ")")
         check(unavailable.string.contains("Image not displayed") && unavailable.string.contains("full%20page.png"), "Uncaptured local images retain an explicit fallback path")
         check(ConverseExchange.neutralizeLocalImages("![Raw](file://" + spaced.path + ")").hasPrefix("[Raw]"), "Imported raw-space local embeds remain neutralized")
+        for planted in ["!![x](/tmp/a.png)", "!!![x](/tmp/a.png)", "!!!!![x](file:///tmp/a.png)", "!![x](< /tmp/a.png>)", "!![x](FILE:///tmp/a.png) !![y](/tmp/b.png)"] {
+            let neutral = ConverseExchange.neutralizeLocalImages(planted)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.contains("[x]("), "Stacked image markers cannot rebuild a local embed: " + planted)
+        }
+        let mixed = ConverseExchange.neutralizeLocalImages("![web](https://example.com/w.png)\n!![local](/tmp/a.png) ![two](https://example.com/v.png)")
+        check(mixed == "![web](https://example.com/w.png)\n[local](/tmp/a.png) ![two](https://example.com/v.png)" && TranscriptStyle.imageReferences(mixed).count == 2, "Neutralizing local embeds leaves web images intact")
+        // Separate web and local scans can enclose one another; rendering must never raise.
+        let nested = "![a](file:///x ![](https://y.co/i.png" + String(repeating: " ", count: 40) + ")"
+        let nestedRefs = TranscriptStyle.imageReferences(nested).map(\.range) + TranscriptStyle.localImageReferences(nested).map(\.range)
+        check(nestedRefs.count == 2 && nestedRefs.contains { outer in nestedRefs.contains { $0 != outer && NSIntersectionRange($0, outer).length > 0 } }, "Nested image fixture really produces overlapping references")
+        let nestedOutput = TranscriptStyle.imageLinks(nested)
+        check(nestedOutput.hasPrefix("Image not displayed: a: [") && !nestedOutput.contains("!["), "An image reference enclosing another renders once without raising")
+        let nestedRender = MarkdownText.render(nested + "\nafter").string
+        check(nestedRender.hasPrefix("Image not displayed: a: ") && nestedRender.trimmingCharacters(in: .newlines).hasSuffix("after"), "Overlapping image references render through Markdown")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 4), "X"), (NSRange(location: 2, length: 1), "Y")]) == "aXf", "Splice keeps the outer of nested ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 2, length: 3), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXdef", "Splice keeps the earlier of partly overlapping ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 2), "X"), (NSRange(location: 1, length: 2), "Y")]).count == 5, "Splice applies identical ranges once")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 3, length: 2), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXYf", "Splice applies adjacent ranges in order")
+        check(TranscriptStyle.splice("abc", [(NSRange(location: 2, length: 9), "X"), (NSRange(location: 9, length: 1), "Y"), (NSRange(location: 0, length: 1), "Z")]) == "Zbc", "Splice ignores ranges beyond the text")
+        check(TranscriptStyle.imageLinks("See ![one](https://example.com/1.png) and ![](https://example.com/2.png)\n![three](/tmp/missing-3.png)") == "See one: [https://example.com/1.png](https://example.com/1.png) and [https://example.com/2.png](https://example.com/2.png)\nImage not displayed: three: [file:///tmp/missing-3.png](file:///tmp/missing-3.png)", "Single and multiple image fallbacks render as before")
         if let fixture = ProcessInfo.processInfo.environment["CONVERSE_RESPONSE_IMAGE_FIXTURE"] {
             let file = URL(fileURLWithPath: fixture)
             let captured = ResponseImages.capture("![Full-page regression](" + file.absoluteString + ")", roots: [file.deletingLastPathComponent()], destination: output)

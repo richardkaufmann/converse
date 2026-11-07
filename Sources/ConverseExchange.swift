@@ -176,9 +176,18 @@ enum ConverseExchange {
     }
     /// Local image embeds in imported text become ordinary links, so Converse
     /// never copies a file from this Mac into the imported conversation.
+    /// Removing one `!` can expose another (`!![x](/a.png)`), so repeat until
+    /// nothing the transcript would capture as a local image remains.
     static func neutralizeLocalImages(_ text: String) -> String {
         let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
-        return expression.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
+        var result = text, previous: String
+        repeat {
+            previous = result
+            result = expression.stringByReplacingMatches(in: result, range: NSRange(location: 0, length: (result as NSString).length), withTemplate: "[$1]($2")
+            result = TranscriptStyle.splice(result, TranscriptStyle.localImageReferences(result).map { (NSRange(location: $0.range.location, length: 1), "") })
+        } while result != previous
+        assert(TranscriptStyle.localImageReferences(result).isEmpty)
+        return result
     }
     static func unique(_ name: String, among taken: Set<String>, limit: Int) -> String {
         guard taken.contains(name) else { return name }
@@ -244,7 +253,7 @@ extension Store {
                     let images = try message.images.prefix(ConverseExchange.maxImagesPerMessage).compactMap { try writeImage($0, to: directory) }
                     let text = ConverseExchange.neutralizeLocalImages(message.text)
                     guard !text.isEmpty || !images.isEmpty else { return nil }
-                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt))
+                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt), imported: true)
                 }
                 if let note = ProviderHandoff.noteText(record.handoff) {
                     // The exported note travels as a record, so the late-bound provider starts from it.
