@@ -476,6 +476,12 @@ struct PadTranscript: UIViewRepresentable {
     }
     static func scaleFonts(_ text: NSMutableAttributedString, factor: CGFloat) {
         guard factor != 1 else { return }
+        // Live NSTextStorage otherwise notifies its layout manager after every
+        // font run. With a caret at the end of a long transcript, UIKit can
+        // regenerate all preceding glyphs for every notification and block the
+        // main thread long enough for the iOS watchdog to terminate the app.
+        text.beginEditing()
+        defer { text.endEditing() }
         text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
             if let font = value as? UIFont { text.addAttribute(.font, value: font.withSize(font.pointSize * factor), range: range) }
         }

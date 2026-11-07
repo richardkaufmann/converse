@@ -61,6 +61,39 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(model.draft(ids[0]).text, "Stable draft 0")
         XCTAssertEqual(model.draft(ids[1]).text, "Stable draft 1")
     }
+    func testPhoneRotationWithKeyboardPreservesFullWidthAndDraft() async throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw XCTSkip("Phone rotation acceptance fixture") }
+        let service = try service(), model = PadModel(service: service)
+        let home = String(repeating: "b", count: 64)
+        let ids = (0..<2).map { _ in DeviceGlobalID(home: home, session: UUID()).string }
+        for (index, id) in ids.enumerated() {
+            model.state.placements[index] = id
+            model.state.drafts[id] = PadDraft(text: "Rotation draft \(index)", dirty: true)
+            service.remoteLeases[id] = UInt64(index + 1)
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: PadRoot(model: model))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { model.phoneKeyboard.hide(); window.isHidden = true; scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) }
+        try await Task.sleep(for: .milliseconds(300))
+        let editor = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? TailTextView }.first { $0.text.contains("Rotation draft 0") })
+        model.phoneKeyboard.show(ids[0])
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(editor.isFirstResponder)
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeLeft)) { error in XCTFail("Rotation request failed: \(error)") }
+        try await Task.sleep(for: .seconds(1))
+        host.view.layoutIfNeeded()
+        XCTAssertGreaterThan(window.bounds.width, window.bounds.height, "The fixture must actually rotate")
+        XCTAssertEqual(host.view.bounds.width, window.bounds.width, accuracy: 1)
+        XCTAssertGreaterThan(editor.bounds.width, window.bounds.width * 0.75, "A phone pane must fill landscape width instead of retaining its portrait width")
+        XCTAssertTrue(editor.isFirstResponder)
+        XCTAssertEqual(model.draft(ids[0]).text, "Rotation draft 0")
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertLessThan(window.bounds.width, window.bounds.height)
+        XCTAssertTrue(editor.isFirstResponder)
+    }
     func testPhoneKeyboardExplicitShowHideAndPaneTransfer() async throws {
         let keyboard = PhoneKeyboardController()
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
@@ -1648,6 +1681,39 @@ extension ConverseTests {
         XCTAssertEqual((view.textStorage.attribute(.font, at: bold, effectiveRange: nil) as? UIFont)?.pointSize, 16, "Restyling cannot compound the previous zoom")
     }
 
+    func testTranscriptFontResizeBatchesLiveStorageLayout() throws {
+        final class EditCounter: NSObject, NSTextStorageDelegate {
+            var edits = 0
+            func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorage.EditActions, range editedRange: NSRange, changeInLength delta: Int) {
+                edits += 1
+            }
+        }
+        let view = TailTextView.native()
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let text = NSMutableAttributedString()
+        for index in 0..<300 {
+            let font = index.isMultiple(of: 2) ? UIFont.systemFont(ofSize: 16) : UIFont.boldSystemFont(ofSize: 16)
+            text.append(NSAttributedString(string: "Paragraph \(index): text with different font runs.\n", attributes: [.font: font]))
+        }
+        view.textStorage.setAttributedString(text)
+        view.selectedRange = NSRange(location: text.length, length: 0)
+        view.layoutIfNeeded()
+        let counter = EditCounter(); view.textStorage.delegate = counter
+        let selection = view.selectedRange
+        let start = CACurrentMediaTime()
+        PadTranscript.scaleFonts(view.textStorage, factor: 1.5)
+        print("Transcript live font resize: \(CACurrentMediaTime() - start)s; \(counter.edits) storage notifications")
+        XCTAssertEqual(counter.edits, 1, "Font resizing must invalidate live layout once, not once per font run")
+        XCTAssertEqual(view.textStorage.string, text.string)
+        XCTAssertEqual(view.selectedRange, selection)
+        view.textStorage.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            let font = value as! UIFont
+            let old = text.attribute(.font, at: range.location, effectiveRange: nil) as! UIFont
+            XCTAssertEqual(font.pointSize, 24)
+            XCTAssertEqual(font.fontDescriptor.symbolicTraits, old.fontDescriptor.symbolicTraits)
+        }
+    }
+
     func testLotSelectionRangesAndBatchActionsPreserveUnselectedRows() throws {
         let heading = ParkingLotRow(heading: true, text: "Now")
         let parent = ParkingLotRow(heading: false, text: "Parent", parentID: heading.id)
@@ -1789,5 +1855,79 @@ extension ConverseTests {
         XCTAssertFalse(gesture.gestureRecognizer(gesture, shouldReceive: touch), "An ordinary finger drag remains scrolling or text selection")
         touch.inputType = .indirectPointer; touch.point.x = 450
         XCTAssertFalse(gesture.gestureRecognizer(gesture, shouldReceive: touch), "A pointer in a neighboring pane cannot start this lot's selection")
+    }
+}
+
+extension ConverseTests {
+    func testLargeLotPhoneResponsiveness() async throws {
+        try await exerciseLargeLotPhone(streaming: false)
+    }
+    func testLargeLotPhoneWhileConversationStreams() async throws {
+        try await exerciseLargeLotPhone(streaming: true)
+    }
+    private func exerciseLargeLotPhone(streaming: Bool) async throws {
+        XCTAssertEqual(EditableLotPane.links(in: "https://example.com https://example.com file:///Users/someone/private.txt me@example.org").map(\.scheme), ["https", "mailto"], "Only explicit web and email links open on the viewing device; home file paths stay text")
+        let service = try service(); service.editableLotsEnabled = true
+        let model = PadModel(service: service)
+        service.deviceNameOverride = "iPhone"
+        let home = String(repeating: "e", count: 64), lot = UUID(), id = DeviceGlobalID(home: String(repeating: "e", count: 64), session: lot).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.hello!.capabilities.append(LotEditing.capability); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        let sidebar = DeviceSidebarRow(globalID: id, sessionID: lot, title: "Mobile Roadmap", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "edit", status: "Parking Lot", busy: false, queued: 0, queuePaused: false)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: [sidebar]))))
+        model.assign(id, pane: 0)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 9, sessionID: id, epoch: 4))
+        let heading = ParkingLotRow(heading: true, text: "Things to build")
+        let item = ParkingLotRow(heading: false, text: "Edit this item on your phone", notes: [ParkingLotNote(author: "Richard", text: "Keep my note")], parentID: heading.id, tag: .green)
+        let child = ParkingLotRow(heading: false, text: "Keep nested items with their parent", done: true, parentID: item.id)
+        let snapshot = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: "Mobile Roadmap", document: ParkingLotDocument(revision: 12, rows: [heading, item, child] + (0..<120).map { index in ParkingLotRow(heading: false, text: "Entry \(index): " + String(repeating: "Long wrapped video notes with links https://example.com/video and multiple sentences. ", count: 8), parentID: heading.id) }))
+        service.handleEnvelope(peer, try snapshot.envelope())
+        let conversation = DeviceGlobalID(home: home, session: UUID()).string
+        if streaming {
+            model.state.placements[1] = conversation
+            service.remoteLeases[conversation] = 5
+            let messages = (0..<100).map { index in DeviceWireMessage(id: UUID(), role: index.isMultiple(of: 2) ? "user" : "assistant", text: "Message \(index)\n" + String(repeating: "Long conversation text with **formatting** and [links](https://example.com).\n", count: 10)) }
+            service.remoteTranscripts[conversation] = DeviceTranscriptPayload(globalID: conversation, homeSeq: 1, epoch: 5, messages: messages, draft: "Preserve this draft", draftVersion: 1, busy: true, status: "Working", title: "Streaming conversation", engine: "codex")
+        }
+        let host = UIHostingController(rootView: PadRoot(model: model))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; service.suspendViewer() }
+        host.view.frame = window.bounds
+        let start = Date()
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(200))
+        print("LARGE_LOT initial layout seconds", Date().timeIntervalSince(start))
+        let text = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotEntryTextView }.first { $0.text == item.text })
+        XCTAssertTrue(text.becomeFirstResponder())
+        try await Task.sleep(for: .seconds(2)) // Separate cold keyboard startup from steady editing.
+        for index in 0..<60 {
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.lease.renewed", boot: 9, sessionID: id, epoch: 4))
+            XCTAssertTrue(service.lotCanEdit(id), service.lotEditors[id]?.frozenReason ?? "Editor unavailable")
+            let began = Date()
+            if streaming { service.remoteTranscripts[conversation]?.messages[99].text += " Streamed token \(index)." }
+            text.insertText("x")
+            let queue = try XCTUnwrap(service.lotEditors[id])
+            let flight = try XCTUnwrap(queue.inFlight)
+            let savedDocument = try flight.operation.applying(to: queue.saved.document, author: queue.author)
+            let saved = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: snapshot.name, document: savedDocument)
+            let ack = LotEditAck(mutationID: flight.mutationID, sequence: flight.sequence, snapshot: saved)
+            service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+            try await Task.sleep(for: .milliseconds(50))
+            host.view.layoutIfNeeded()
+            XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0)
+            print("LARGE_LOT edit", index, "seconds", Date().timeIntervalSince(began))
+            XCTAssertLessThan(Date().timeIntervalSince(began), 2, "Main-thread editing must remain responsive with a long outline")
+        }
+        text.resignFirstResponder()
+        let scroll = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) })
+        for page in 1...5 {
+            scroll.setContentOffset(CGPoint(x: 0, y: page * 550), animated: false)
+            try await Task.sleep(for: .milliseconds(100)); host.view.layoutIfNeeded()
+        }
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows.first { $0.id == item.id }?.text.filter { $0 == "x" }.count, 60)
     }
 }
