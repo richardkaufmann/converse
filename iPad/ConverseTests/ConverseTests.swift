@@ -1965,3 +1965,94 @@ extension ConverseTests {
         XCTAssertEqual(service.lotEditors[id]?.projected.rows.first { $0.id == item.id }?.text.filter { $0 == "x" }.count, 60)
     }
 }
+
+
+extension ConverseTests {
+    func testLotBacklogCountsUnacknowledgedCharacters() {
+        let row = ParkingLotRow(heading: false, text: "prefix suffix")
+        var edited = row
+        edited.text = "prefix 12345678901suffix"
+        XCTAssertEqual(LotTextBacklog.count(saved: [row], projected: [edited]), 11)
+        XCTAssertEqual(LotTextBacklog.count(saved: [edited], projected: [edited]), 0, "Acknowledgement drains the text backlog")
+        XCTAssertEqual(LotTextBacklog.difference("12345678901", ""), 11, "Deletions also await acknowledgement")
+        XCTAssertEqual(LotTextBacklog.difference("abc", "xyz"), 3, "Equal-length replacements must not disappear")
+        XCTAssertEqual(LotTextBacklog.difference("a👨‍👩‍👧‍👦b", "ab"), 1, "Count graphemes, not UTF-16 units")
+        XCTAssertEqual(LotTextBacklog.count(saved: [], projected: [row]), row.text.count)
+        XCTAssertEqual(LotTextBacklog.count(saved: [row], projected: []), row.text.count)
+    }
+    func testLotSaveGaugeWaitsForPauseAndDoesNotMoveLayout() async throws {
+        let row = ParkingLotRow(heading: false, text: "")
+        var edited = row; edited.text = "12345678901"
+        let host = UIHostingController(rootView: LotSaveGauge(saved: [row], projected: [edited], activity: 0, pending: true))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 200, height: 50)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func pixels() -> Data? {
+            host.view.layoutIfNeeded()
+            return UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true) }.pngData()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let hidden = pixels(), size = host.view.intrinsicContentSize
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNotEqual(pixels(), hidden, "Eleven unacknowledged characters appear after the pause")
+        host.rootView = LotSaveGauge(saved: [row], projected: [edited], activity: 1, pending: true)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(pixels(), hidden, "Resuming input immediately hides the gauge")
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNotEqual(pixels(), hidden)
+        host.rootView = LotSaveGauge(saved: [edited], projected: [edited], activity: 1, pending: false)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(pixels(), hidden, "An acknowledgement hides it without any Saved text")
+        edited.text = "1234567890"
+        host.rootView = LotSaveGauge(saved: [row], projected: [edited], activity: 2, pending: true)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(pixels(), hidden, "Ten characters never show a gauge")
+        XCTAssertEqual(host.view.intrinsicContentSize, size, "The status rail never changes layout size")
+    }
+    func testLotReturnFocusAndCaretLayout() async throws {
+        let service = try service(); service.editableLotsEnabled = true
+        let model = PadModel(service: service)
+        let home = String(repeating: "e", count: 64), lot = UUID()
+        let id = DeviceGlobalID(home: home, session: lot).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test")
+        peer.hello!.capabilities.append(LotEditing.capability); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        let sidebar = DeviceSidebarRow(globalID: id, sessionID: lot, title: "Return check", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "edit", status: "Parking Lot", busy: false, queued: 0, queuePaused: false)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: [sidebar]))))
+        model.assign(id, pane: 0)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 9, sessionID: id, epoch: 4))
+        let heading = ParkingLotRow(heading: true, text: "Return and save feedback")
+        let item = ParkingLotRow(heading: false, text: "Press Return here", parentID: heading.id)
+        let snapshot = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: "Return check", document: ParkingLotDocument(revision: 1, rows: [heading, item]))
+        service.handleEnvelope(peer, try snapshot.envelope())
+        let host = UIHostingController(rootView: EditableLotPane(id: id, pane: 0, model: model))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 600, height: 700)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; service.suspendViewer() }
+        try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+        let entry = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotEntryTextView }.first { $0.text == item.text })
+        XCTAssertTrue(entry.becomeFirstResponder())
+        try await Task.sleep(for: .milliseconds(150))
+        entry.selectedRange = NSRange(location: (entry.text as NSString).length, length: 0)
+        // Programmatic insertText bypasses shouldChangeTextIn. Deliver the
+        // keyboard delegate callback, which rejects the newline and splits.
+        XCTAssertEqual(entry.delegate?.textView?(entry, shouldChangeTextIn: entry.selectedRange, replacementText: "\n"), false)
+        try await Task.sleep(for: .milliseconds(500)); host.view.layoutIfNeeded()
+        let preAttachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+        preAttachment.name = "Return layout before assertions"; preAttachment.lifetime = .keepAlways; add(preAttachment)
+        let blank = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotEntryTextView }.first { $0.text.isEmpty && $0.isFirstResponder })
+        XCTAssertEqual(blank.selectedRange, NSRange(location: 0, length: 0))
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows.count, 3)
+        let caret = blank.caretRect(for: blank.beginningOfDocument)
+        XCTAssertLessThan(caret.minY, blank.font!.lineHeight / 2, "Caret belongs to the first line of the empty editor")
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) })
+        attachment.name = "Return creates an aligned empty item"; attachment.lifetime = .keepAlways; add(attachment)
+        blank.insertText("Next item")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows.last?.text, "Next item")
+        XCTAssertTrue(blank.isFirstResponder)
+    }
+}
