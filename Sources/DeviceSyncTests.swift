@@ -600,7 +600,7 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let unknownQuery = UUID()
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandQuery.rawValue, sessionID: globalString, commandID: unknownQuery, epoch: granted?.epoch))
         let unknownAck = try capturedEnvelopes().first { $0.commandID == unknownQuery && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
-        check(unknownAck?.outcome == "rejected" && unknownAck?.detail == DeviceCommandBinding.unrecordedDetail && home.commandStoreForTesting?.records[unknownQuery] == nil,
+        check(unknownAck?.outcome == "rejected" && unknownAck?.detail == DeviceCommandBinding.unrecordedDetail && unknownAck?.query == true && home.commandStoreForTesting?.records[unknownQuery] == nil,
               "Mac home answers a status query for an unrecorded send explicitly: nothing was applied there")
         check(home.commandStoreForTesting?.records[firstRename]?.hashScheme == DeviceCommandBinding.canonicalScheme, "New home command records name the canonical hash scheme")
         session.title = "Renamed remotely"
@@ -951,9 +951,27 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let unsentID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Never arrived"))
         if let unsent = viewer.outbox.first(where: { $0.commandID == unsentID }) { viewer.queryOutbox(unsent) }
         check(try newViewerFrames().contains { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.commandID == unsentID }, "Check home sends a status query under the original ID")
-        if let unsentID { viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: unsentID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: DeviceCommandBinding.unrecordedDetail, epoch: 6)))) }
+        // Check home clicked twice before either answer: both answers are
+        // marked as query replies, so neither costs the lease.
+        if let unsent = viewer.outbox.first(where: { $0.commandID == unsentID }) { viewer.queryOutbox(unsent) }
+        func queryAnswer(_ id: UUID) throws -> DeviceEnvelope {
+            DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: id, epoch: 6,
+                           payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: DeviceCommandBinding.unrecordedDetail, epoch: 6, query: true)))
+        }
+        if let unsentID { viewer.handleEnvelope(fakeHome, try queryAnswer(unsentID)); viewer.handleEnvelope(fakeHome, try queryAnswer(unsentID)) }
         check(viewer.remoteLeases[gid] == 6 && viewer.outbox.first { $0.commandID == unsentID }.map { $0.outcome == "rejected" && $0.detail == DeviceCommandBinding.unrecordedDetail } == true,
-              "A status-query reply for an unrecorded send resolves it without dropping the viewer's display lease")
+              "Status-query replies for an unrecorded send resolve it without dropping the viewer's display lease, even when Check home was clicked twice")
+        // A real command ack interleaved with an outstanding query is still a
+        // command ack: rejected drops the lease.
+        let raceID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Interleaved"))
+        if let race = viewer.outbox.first(where: { $0.commandID == raceID }) { viewer.queryOutbox(race) }
+        if let raceID {
+            viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: raceID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: "Stale or missing display lease. Take the session again.", epoch: 6))))
+        }
+        check(raceID != nil && viewer.remoteLeases[gid] == nil, "A rejected command ack drops the lease even while a status query for the same ID is outstanding")
+        viewer.remoteLeases[gid] = 6
+        if let raceID { viewer.handleEnvelope(fakeHome, try queryAnswer(raceID)) }
+        check(viewer.remoteLeases[gid] == 6, "The late query answer after that command ack doesn't drop the retaken lease")
         let refusedID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Refused"))
         if let refusedID { viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: refusedID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "rejected", detail: "Stale or missing display lease. Take the session again.", epoch: 6)))) }
         check(refusedID != nil && viewer.remoteLeases[gid] == nil, "A rejected command ack still drops the viewer's display lease")

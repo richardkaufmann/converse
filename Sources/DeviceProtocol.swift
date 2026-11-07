@@ -315,6 +315,8 @@ struct DeviceAckPayload: Codable, Equatable {
     var outcome: String
     var detail: String? = nil
     var epoch: UInt64? = nil
+    /// True on a home's answer to a status query. Older homes omit it.
+    var query: Bool? = nil
 }
 
 struct DeviceDraftPayload: Codable, Equatable {

@@ -653,6 +653,8 @@ public sealed class DeviceAckPayload
     [JsonPropertyName("outcome")] public string Outcome { get; set; } = "";
     [JsonPropertyName("detail")] public string? Detail { get; set; }
     [JsonPropertyName("epoch")] public ulong? Epoch { get; set; }
+    /// True on a home's answer to a status query. Older homes omit it.
+    [JsonPropertyName("query")] public bool? Query { get; set; }
 }
 
 public sealed class DeviceDraftPayload

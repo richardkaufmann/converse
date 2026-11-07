@@ -1351,6 +1351,8 @@ MdnsChecks.RunGroupDevices(Check);
         // never given a new ID; Resend asks home instead.
         var legacyOutbox = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = gid, Payload = new DeviceCommandPayload { Action = "rename", Text = "Old" }, PayloadHash = "h", Epoch = viewer.RemoteLeases[gid] };
         viewer.OutboxStoreForTest.Add(legacyOutbox);
+        var queryAcks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload? Ack)>();
+        viewer.AckReceivedForTest += (id, ack) => queryAcks.Enqueue((id, ack));
         sent.Clear();
         Check(!await viewer.RetryOutboxAsync(legacyOutbox)
             && sent.Any(e => e.Kind == DeviceKind.CommandQuery && e.CommandID == legacyOutbox.CommandID) && !sent.Any(e => e.Kind == DeviceKind.Command)
@@ -1359,6 +1361,8 @@ MdnsChecks.RunGroupDevices(Check);
         Check(await Until(() => viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID) is { Outcome: "rejected", Detail: DeviceCommandBinding.UnrecordedDetail })
             && homeSession.Title != "Old",
             "Home's answer resolves the legacy record: it never reached home, so nothing was applied");
+        Check(queryAcks.Any(q => q.Id == legacyOutbox.CommandID && q.Ack?.Query == true),
+            "Core home marks its status-query answer as a query reply");
         viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");

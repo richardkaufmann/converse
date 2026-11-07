@@ -1805,11 +1805,11 @@ public sealed partial class DeviceSyncService : IDisposable
         return false;
     }
 
-    private async Task SendAckAsync(Peer peer, Guid commandId, string? sessionId, string outcome, string? detail = null, ulong? epoch = null) =>
+    private async Task SendAckAsync(Peer peer, Guid commandId, string? sessionId, string outcome, string? detail = null, ulong? epoch = null, bool? query = null) =>
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         {
             Kind = DeviceKind.CommandAck, SessionID = sessionId, CommandID = commandId, Epoch = epoch,
-            Payload = DeviceJson.Encode(new DeviceAckPayload { Outcome = outcome, Detail = detail, Epoch = epoch }),
+            Payload = DeviceJson.Encode(new DeviceAckPayload { Outcome = outcome, Detail = detail, Epoch = epoch, Query = query }),
         });
 
     private async Task ExecuteHomeCommandAsync(Peer peer, DeviceEnvelope envelope)
@@ -2161,7 +2161,7 @@ public sealed partial class DeviceSyncService : IDisposable
                     if (_commands.Records.TryGetValue(queryId, out var record) &&
                         (record.Origin != peerHome || record.SessionID != envelope.SessionID)) break;
                     await SendAckAsync(peer, queryId, envelope.SessionID, _commands.Outcome(queryId) ?? "rejected",
-                        _commands.Records.ContainsKey(queryId) ? "Home record lookup." : DeviceCommandBinding.UnrecordedDetail, envelope.Epoch);
+                        _commands.Records.ContainsKey(queryId) ? "Home record lookup." : DeviceCommandBinding.UnrecordedDetail, envelope.Epoch, query: true);
                 }
                 break;
             case DeviceKind.CommandAck:
