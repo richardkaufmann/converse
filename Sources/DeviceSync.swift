@@ -74,6 +74,9 @@ struct DeviceCommandRecord: Codable, Equatable {
     var updatedAt: Date
     var sessionID: String = ""
     var payloadHash: String = ""
+    // Absent on records written before canonical binding: those keep raw
+    // byte hashes, so only an identical legacy retry still matches.
+    var hashScheme: String? = nil
 }
 
 // Persisted before CLI start. A record left running across restart becomes
@@ -92,14 +95,16 @@ final class DeviceCommandStore {
             try save()
         }
     }
-    func begin(id: UUID, origin: String, sessionID: String = "", payloadHash: String = "") throws -> Bool {
+    func begin(id: UUID, origin: String, sessionID: String = "", payloadHash: String = "", hashScheme: String? = nil) throws -> Bool {
         guard records[id] == nil else { return false }
-        records[id] = DeviceCommandRecord(id: id, origin: origin, outcome: .accepted, updatedAt: Date(), sessionID: sessionID, payloadHash: payloadHash)
+        records[id] = DeviceCommandRecord(id: id, origin: origin, outcome: .accepted, updatedAt: Date(), sessionID: sessionID, payloadHash: payloadHash, hashScheme: hashScheme)
         try save(); return true
     }
-    func bindingMatches(id: UUID, origin: String, sessionID: String, payloadHash: String) -> Bool {
-        guard let record = records[id] else { return false }
-        return record.origin == origin && record.sessionID == sessionID && record.payloadHash == payloadHash
+    // Compares under the scheme the record was written with.
+    func bindingMatches(id: UUID, origin: String, sessionID: String, payload: Data) -> Bool {
+        guard let record = records[id], record.origin == origin, record.sessionID == sessionID,
+              let hash = DeviceCommandBinding.hash(payload, scheme: record.hashScheme) else { return false }
+        return record.payloadHash == hash
     }
     func markRunning(id: UUID) throws { try update(id: id, outcome: .running) }
     func markCompleted(id: UUID) throws { try update(id: id, outcome: .completed) }
@@ -144,8 +149,8 @@ struct DeviceDraftTracker {
 }
 
 // Viewer outbox: submitted content and its command ID persist until an
-// authoritative home ack. Retries reuse the same ID; uncertain entries are
-// never resent automatically.
+// authoritative home ack. Retries reuse the same ID and the exact bytes
+// first sent; uncertain entries are never resent automatically.
 struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var id: UUID { commandID }
     var commandID: UUID
@@ -155,6 +160,9 @@ struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var epoch: UInt64 = 0
     var outcome: String = "pending"
     var detail: String? = nil
+    // Absent on records saved by earlier versions, which cannot be resent.
+    var payloadData: Data? = nil
+    static let legacyDetail = "Saved by an earlier Converse version, so it cannot be resent exactly. Check home for its result."
 }
 
 enum DeviceDraftRecovery {
@@ -170,6 +178,15 @@ final class DeviceOutboxStore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         file = folder.appendingPathComponent("device-outbox.json")
         if let data = try? Data(contentsOf: file) { records = (try? JSONDecoder().decode([DeviceOutboxRecord].self, from: data)) ?? [] }
+        // Re-encoding a legacy payload could differ from what home bound, and
+        // a fresh command ID could apply it twice. Only Check home is safe.
+        let legacy = records.indices.filter { records[$0].payloadData == nil && records[$0].outcome == "pending" }
+        for index in legacy { records[index].outcome = "uncertain"; records[index].detail = DeviceOutboxRecord.legacyDetail }
+        if !legacy.isEmpty { try save() }
+    }
+    func markLegacyUncertain(commandID: UUID) throws {
+        guard let index = records.firstIndex(where: { $0.commandID == commandID }) else { return }
+        records[index].outcome = "uncertain"; records[index].detail = DeviceOutboxRecord.legacyDetail; try save()
     }
     func add(_ record: DeviceOutboxRecord) throws { records.removeAll { $0.commandID == record.commandID }; records.append(record); try save() }
     func resolve(commandID: UUID, outcome: String, detail: String?) throws {

@@ -1386,6 +1386,16 @@ public sealed partial class DeviceSyncService : IDisposable
 
     // Completed acks leave the outbox; tests read their receipt detail here.
     internal event Action<Guid, DeviceAckPayload>? AckReceivedForTest;
+    internal event Action<DeviceEnvelope>? EnvelopeSentForTest;
+    internal DeviceOutboxStore OutboxStoreForTest => _outbox;
+    internal DeviceCommandStore CommandStoreForTest => _commands;
+    // Sends hand-built bytes under an existing command ID (binding interop).
+    internal async Task<bool> SendRawCommandForTestAsync(string globalId, Guid commandId, byte[] payload)
+    {
+        if (DeviceGlobalID.Parse(globalId) is not { } parsed || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Home) is not { } peer) return false;
+        await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.Command, SessionID = globalId, CommandID = commandId, Epoch = epoch, Payload = payload });
+        return true;
+    }
     internal void ExpireJoinForTest(Guid requestId)
     {
         if (_sponsoredRequests.TryGetValue(requestId, out var live))
@@ -1607,6 +1617,7 @@ public sealed partial class DeviceSyncService : IDisposable
     internal async Task SendEnvelopeAsync(Peer peer, DeviceEnvelope envelope)
     {
         if (peer.Keys is null) return;
+        EnvelopeSentForTest?.Invoke(envelope);
         var framed = DeviceFrame.Encode(envelope);
         // Encrypt under the send lock: each Encrypt advances the Noise nonce,
         // so concurrent sends that encrypted first and then raced for the
@@ -1810,12 +1821,22 @@ public sealed partial class DeviceSyncService : IDisposable
         // advertises switchboard-teach-v1 sends it with epoch 0.
         var teaching = command.Action == "teachSwitchboard" && envelope.Epoch == 0 && peer.Hello.Capabilities.Contains("switchboard-teach-v1");
         if (!teaching && !await RequireLeaseAsync(peer, envelope, session)) return;
-        var payloadHash = DeviceBlob.Sha256Hex(envelope.Payload);
-        if (!_commands.Begin(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash))
+        // New records bind the canonical form; existing records compare under
+        // their own scheme, so a legacy raw record never silently accepts a
+        // re-encoded retry. Content that cannot be canonicalized faithfully
+        // is refused, never trimmed.
+        var payloadHash = DeviceCommandBinding.Hash(envelope.Payload, DeviceCommandBinding.CanonicalScheme);
+        if (payloadHash is null && !_commands.Records.ContainsKey(commandId))
         {
-            await SendAckAsync(peer, commandId, envelope.SessionID,
-                _commands.BindingMatches(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash) ? _commands.Outcome(commandId) ?? "rejected" : "rejected",
-                "Already recorded on home.", envelope.Epoch);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "rejected", "Command content is not unambiguous JSON. Nothing was applied.", envelope.Epoch);
+            return;
+        }
+        if (!_commands.Begin(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash ?? "", DeviceCommandBinding.CanonicalScheme))
+        {
+            if (_commands.BindingMatches(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", envelope.Payload))
+                await SendAckAsync(peer, commandId, envelope.SessionID, _commands.Outcome(commandId) ?? "rejected", "Already recorded on home.", envelope.Epoch);
+            else
+                await SendAckAsync(peer, commandId, envelope.SessionID, "rejected", "Command ID reused with different content.", envelope.Epoch);
             return;
         }
         string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
@@ -2374,9 +2395,11 @@ public sealed partial class DeviceSyncService : IDisposable
             return active.Payload.Action == command.Action && active.Payload.PendingID == command.PendingID
                 ? active.CommandID : null;
         }
-        var payloadData = DeviceJson.Encode(command);
+        // Canonical bytes, stored and resent verbatim, the same form the Mac
+        // and iPad clients send.
+        var payloadData = DeviceCommandBinding.Encode(command);
         var record = new DeviceOutboxRecord
-        { CommandID = Guid.NewGuid(), SessionID = globalId, Payload = command, PayloadHash = DeviceBlob.Sha256Hex(payloadData), Epoch = epoch };
+        { CommandID = Guid.NewGuid(), SessionID = globalId, Payload = command, PayloadHash = DeviceBlob.Sha256Hex(payloadData), Epoch = epoch, PayloadBytes = payloadData };
         _outbox.Add(record);
         Changed?.Invoke();
         await SendEnvelopeAsync(peer, new DeviceEnvelope
@@ -2473,6 +2496,15 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public async Task<bool> RetryOutboxAsync(DeviceOutboxRecord record)
     {
+        // Never re-encode a legacy record or give it a new ID: ask home.
+        if (record.PayloadBytes is not { } payload)
+        {
+            _outbox.MarkLegacyUncertain(record.CommandID);
+            LastOutcome = DeviceOutboxRecord.LegacyDetail;
+            Changed?.Invoke();
+            await QueryOutboxAsync(record);
+            return false;
+        }
         var parsed = DeviceGlobalID.Parse(record.SessionID);
         if (parsed is null || !RemoteLeases.TryGetValue(record.SessionID, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before resending."; return false; }
@@ -2481,7 +2513,7 @@ public sealed partial class DeviceSyncService : IDisposable
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         {
             Kind = DeviceKind.Command, SessionID = record.SessionID, CommandID = record.CommandID,
-            Epoch = epoch, Payload = DeviceJson.Encode(record.Payload),
+            Epoch = epoch, Payload = payload,
         });
         return true;
     }

@@ -16,6 +16,10 @@ if (args.FirstOrDefault() == "--echo-stdin")
 }
 if (args.Length == 3 && args[0] == "--mac-parking-interop")
     return await MacParkingInteropChecks.Run(args[1], int.Parse(args[2]));
+if (args.Length == 3 && args[0] == "--mac-command-interop")
+    return await CommandBindingInteropChecks.RunViewer(args[1], int.Parse(args[2]));
+if (args.Length == 2 && args[0] == "--core-command-home")
+    return await CommandBindingInteropChecks.RunHome(args[1]);
 var failures = 0;
 var failedLabels = new List<string>();
 void Check(bool ok, string label)
@@ -268,7 +272,10 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     {
         var commands = new DeviceCommandStore(root);
         var id = Guid.NewGuid();
-        Check(commands.Begin(id, "device-a", "s1", "h1") && !commands.Begin(id, "device-a", "s1", "h1") && !commands.BindingMatches(id, "device-a", "s2", "h1"), "Dedup binds origin session hash");
+        var boundBytes = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"h1\"}");
+        var boundHash = DeviceCommandBinding.Hash(boundBytes, DeviceCommandBinding.CanonicalScheme)!;
+        Check(commands.Begin(id, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme) && !commands.Begin(id, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme)
+            && commands.BindingMatches(id, "device-a", "s1", boundBytes) && !commands.BindingMatches(id, "device-a", "s2", boundBytes) && !commands.BindingMatches(id, "device-b", "s1", boundBytes), "Dedup binds origin session hash");
         commands.MarkRunning(id);
         Check(new DeviceCommandStore(root).Outcome(id) == "uncertain", "Running command recovers as uncertain");
         var outbox = new DeviceOutboxStore(root);
@@ -283,6 +290,113 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         homeDraft.Apply("s", 5, "preserved");
         viewerDraft.Adopt("s", 5, "preserved");
         Check(viewerDraft.Bump("s", "edit") == 6 && homeDraft.Apply("s", 6, "edit"), "New holder adopts home draft version");
+    }
+    finally { Cleanup(root); }
+}
+
+// Command binding: shared canonical vectors (also run by the Swift suite),
+// versioned home hash schemes and exact-byte viewer outbox records.
+{
+    var root = Directory.CreateTempSubdirectory("converse-binding-").FullName;
+    try
+    {
+        string? vectorFile = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null && vectorFile is null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "Tests", "command-payload-canonical-vectors.json"))) vectorFile = Path.Combine(dir.FullName, "Tests", "command-payload-canonical-vectors.json");
+        var vectors = vectorFile is null ? new List<System.Text.Json.JsonElement>()
+            : System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(vectorFile)).RootElement.GetProperty("vectors").EnumerateArray().ToList();
+        var mismatched = new List<string>();
+        foreach (var vector in vectors)
+        {
+            var input = vector.TryGetProperty("inputHex", out var hex) ? Convert.FromHexString(hex.GetString()!) : Utf8(vector.GetProperty("input").GetString()!);
+            byte[]? output;
+            try { output = DeviceCommandBinding.Canonical(input); } catch (DeviceCommandBinding.UnbindableException) { output = null; }
+            var reject = vector.TryGetProperty("reject", out var r) && r.GetBoolean();
+            var ok = reject ? output is null : output is not null && output.SequenceEqual(Utf8(vector.GetProperty("canonical").GetString()!));
+            if (!ok) mismatched.Add(vector.GetProperty("name").GetString()!);
+        }
+        Check(vectors.Count >= 80 && mismatched.Count == 0, "Core command canonicalization matches every shared vector" + (mismatched.Count == 0 ? "" : ": " + string.Join(", ", mismatched)));
+        // Remote payloads are canonicalized while a home handles the
+        // connection: key count, nesting and size must not turn into a stall.
+        // The Swift suite runs the same shapes and bounds.
+        (byte[]? Output, double Seconds) TimedCanonical(byte[] input)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            byte[]? output;
+            try { output = DeviceCommandBinding.Canonical(input); } catch (DeviceCommandBinding.UnbindableException) { output = null; }
+            return (output, clock.Elapsed.TotalSeconds);
+        }
+        var manyKeys = "{\"action\":\"injectAll\",\"blobHashes\":[],\"extra\":{" + string.Join(",", Enumerable.Range(0, 32_000).Select(i => "\"field" + i + "\":0")) + "}}";
+        var manyKeysRun = TimedCanonical(Utf8(manyKeys));
+        Check(manyKeysRun.Output?.Length == Utf8(manyKeys).Length && manyKeysRun.Seconds < 0.25, $"Core canonicalizes a 32,000-key object in under 250 ms ({(int)(manyKeysRun.Seconds * 1000)} ms)");
+        var reversedKeys = "{" + string.Join(",", Enumerable.Range(0, 32_000).Reverse().Select(i => "\"k" + i + "\":0")) + "}";
+        var reversedRun = TimedCanonical(Utf8(reversedKeys));
+        Check(reversedRun.Output is { } reversedOutput && System.Text.Encoding.UTF8.GetString(reversedOutput).StartsWith("{\"k0\":0,\"k1\":0,\"k10\":0,", StringComparison.Ordinal) && reversedRun.Seconds < 0.25,
+            $"Core sorts 32,000 reversed keys in under 250 ms ({(int)(reversedRun.Seconds * 1000)} ms)");
+        var duplicateRun = TimedCanonical(Utf8(manyKeys[..^2] + ",\"field0\":1}}"));
+        Check(duplicateRun.Output is null && duplicateRun.Seconds < 0.25, "Core rejects a duplicate after 32,000 keys in under 250 ms");
+        // Worst case near the size cap: unsorted objects at every level move
+        // their contents once per level.
+        var deep = "[" + string.Join(",", Enumerable.Repeat("\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"", 118_000)) + "]";
+        for (var level = 0; level < DeviceCommandBinding.MaxDepth - 1; level++) deep = "{\"z\":0,\"a\":" + deep + "}";
+        var deepRun = TimedCanonical(Utf8(deep));
+        Check(deepRun.Output?.Length == Utf8(deep).Length && deepRun.Seconds < 1, $"Core canonicalizes a 3.9 MB payload with unsorted objects at every nesting level in under 1 s ({(int)(deepRun.Seconds * 1000)} ms)");
+        var atLimit = new byte[DeviceCommandBinding.MaxBytes];
+        System.Array.Fill(atLimit, (byte)' ');
+        Utf8("\"x\"").CopyTo(atLimit, 0);
+        Check(TimedCanonical(atLimit).Output?.SequenceEqual(Utf8("\"x\"")) == true, "Core accepts a payload of exactly the 4 MiB size limit");
+        string? oversizeReason = null;
+        try { DeviceCommandBinding.Canonical([.. atLimit, (byte)' ']); } catch (DeviceCommandBinding.UnbindableException error) { oversizeReason = error.Message; }
+        Check(oversizeReason == "Payload exceeds 4194304 bytes.", "Core rejects a payload over the size limit with an explicit reason");
+        var overDeep = new string('[', DeviceCommandBinding.MaxDepth + 1) + new string(']', DeviceCommandBinding.MaxDepth + 1);
+        Check(TimedCanonical(Utf8(overDeep)).Output is null && TimedCanonical(Utf8(overDeep[1..^1])).Output is not null, "Core nesting limit is exactly 64 levels");
+        string? duplicateReason = null;
+        try { DeviceCommandBinding.Canonical(Utf8("{\"a\":1,\"\\u0061\":2}")); } catch (DeviceCommandBinding.UnbindableException error) { duplicateReason = error.Message; }
+        Check(duplicateReason?.StartsWith("Duplicate object key", StringComparison.Ordinal) == true, "Core names an escaped duplicate key");
+        var typed = new DeviceCommandPayload { Action = "rename", Text = "X" };
+        Check(DeviceCommandBinding.Encode(typed).SequenceEqual(Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}")),
+            "Core viewer command bytes are canonical, matching the Mac and iPad client");
+        const string canonical = DeviceCommandBinding.CanonicalScheme;
+        var sorted = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}");
+        var permuted = Utf8("{\"text\":\"X\",\"blobHashes\":[],\"action\":\"rename\"}");
+        var changed = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Y\"}");
+        var extraA = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var extraAPermuted = Utf8("{\"zExtra\":{\"a\":2,\"b\":1},\"text\":\"X\",\"action\":\"rename\",\"blobHashes\":[]}");
+        var extraB = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\",\"zExtra\":{\"b\":1,\"a\":3}}");
+        // Archive written by an earlier home: no HashScheme, raw byte hash.
+        var legacyId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(root, "device-commands.json"),
+            "[{\"Id\":\"" + legacyId + "\",\"Origin\":\"a\",\"Outcome\":\"completed\",\"UpdatedAt\":\"2026-01-01T00:00:00Z\",\"SessionID\":\"s1\",\"PayloadHash\":\"" + DeviceBlob.Sha256Hex(permuted) + "\"}]");
+        var store = new DeviceCommandStore(root);
+        Check(store.Records[legacyId].HashScheme is null && store.Outcome(legacyId) == "completed", "An earlier Core home's command archive decodes with no hash scheme");
+        Check(store.BindingMatches(legacyId, "a", "s1", permuted) && !store.BindingMatches(legacyId, "a", "s1", sorted),
+            "A legacy raw Core record matches only an identical raw retry, never a permuted one");
+        var canonicalId = Guid.NewGuid();
+        var extraId = Guid.NewGuid();
+        store.Begin(canonicalId, "a", "s1", DeviceCommandBinding.Hash(permuted, canonical)!, canonical);
+        store.Begin(extraId, "a", "s1", DeviceCommandBinding.Hash(extraA, canonical)!, canonical);
+        var reloaded = new DeviceCommandStore(root);
+        Check(reloaded.Records[canonicalId].HashScheme == canonical && reloaded.Records[legacyId].HashScheme is null
+            && reloaded.BindingMatches(canonicalId, "a", "s1", sorted) && reloaded.BindingMatches(canonicalId, "a", "s1", permuted)
+            && !reloaded.BindingMatches(canonicalId, "a", "s1", changed),
+            "Core canonical records survive reload and bind content, not key order");
+        Check(reloaded.BindingMatches(extraId, "a", "s1", extraAPermuted) && !reloaded.BindingMatches(extraId, "a", "s1", extraB) && !reloaded.BindingMatches(extraId, "a", "s1", sorted),
+            "Core keeps unknown fields in the binding: dropping or changing one is different content");
+        // Viewer outbox: exact bytes survive restart; earlier records cannot be resent.
+        var outboxRoot = Path.Combine(root, "outbox");
+        var outbox = new DeviceOutboxStore(outboxRoot);
+        outbox.Add(new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = "home/s", Payload = typed, PayloadHash = DeviceBlob.Sha256Hex(permuted), Epoch = 3, PayloadBytes = permuted });
+        var restarted = new DeviceOutboxStore(outboxRoot).Records.Single();
+        Check(restarted.PayloadBytes is { } kept && kept.SequenceEqual(permuted) && restarted.Outcome == "pending", "Core outbox records keep their exact payload bytes across restart");
+        var legacyRoot = Path.Combine(root, "legacy-outbox");
+        Directory.CreateDirectory(legacyRoot);
+        var legacyOutboxId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(legacyRoot, "device-outbox.json"),
+            "[{\"CommandID\":\"" + legacyOutboxId + "\",\"SessionID\":\"home/s\",\"Payload\":{\"action\":\"rename\",\"text\":\"Old\",\"blobHashes\":[]},\"PayloadHash\":\"h\",\"Epoch\":3,\"Outcome\":\"pending\",\"Detail\":null}]");
+        var legacyRecord = new DeviceOutboxStore(legacyRoot).Records.Single();
+        Check(legacyRecord.CommandID == legacyOutboxId && legacyRecord.PayloadBytes is null && legacyRecord.Outcome == "uncertain" && legacyRecord.Detail == DeviceOutboxRecord.LegacyDetail
+            && legacyRecord.Payload.Text == "Old" && new DeviceOutboxStore(legacyRoot).Records.Single().Outcome == "uncertain",
+            "An earlier Core version's pending outbox record loads as uncertain with Check home, keeping its ID and content");
     }
     finally { Cleanup(root); }
 }
@@ -642,6 +756,9 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         var acks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload Ack)>();
         viewer.AckReceivedForTest += (id, ack) => acks.Enqueue((id, ack));
         DeviceAckPayload? LastAck(Guid? id) => acks.LastOrDefault(a => a.Id == id).Ack;
+        // Exact command bytes as first sent, so duplicates resend them verbatim.
+        var sentCommands = new System.Collections.Concurrent.ConcurrentDictionary<Guid, byte[]>();
+        viewer.EnvelopeSentForTest += e => { if (e.Kind == DeviceKind.Command && e.CommandID is { } sentId && e.Payload is { } sentBytes) sentCommands.TryAdd(sentId, sentBytes); };
         Peer? Link(DeviceSyncService from, string to) =>
             ((Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(from)!)
                 .Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == to);
@@ -680,11 +797,51 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && !homeSession.ResumeAfterInterrupt && homeRunner.Prompts.Count == 1,
             "Inject all on an emptied queue appends no notice, never interrupts the running turn and sends nothing again");
         await viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
-        { Kind = DeviceKind.Command, SessionID = gid, CommandID = race, Epoch = viewer.RemoteLeases[gid], Payload = DeviceJson.Encode(new DeviceCommandPayload { Action = "injectAll" }) });
+        { Kind = DeviceKind.Command, SessionID = gid, CommandID = race, Epoch = viewer.RemoteLeases[gid], Payload = sentCommands[race!.Value] });
         Check(await Until(() => acks.Count(a => a.Id == race) == 2) && LastAck(race) is { Outcome: "completed", Detail: "Already recorded on home." }
             && home.CommandReceipts.Count(r => r.Id == race && r.Outcome == "completed") == 1
             && homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && !homeSession.Interrupted && homeRunner.Prompts.Count == 1,
             "A duplicate no-op Inject all command ID is answered from its receipt, never applied twice");
+        // Same command ID, hand-permuted bytes: answered from the receipt and
+        // applied once. Changed content, unknown fields included, is refused.
+        async Task<DeviceAckPayload?> BindingAck(Guid commandId, string json)
+        {
+            var before = acks.Count(a => a.Id == commandId);
+            await viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+            { Kind = DeviceKind.Command, SessionID = gid, CommandID = commandId, Epoch = viewer.RemoteLeases[gid], Payload = Utf8(json) });
+            return await Until(() => acks.Count(a => a.Id == commandId) > before) ? LastAck(commandId) : null;
+        }
+        var titleBefore = homeSession.Title;
+        var firstRename = Guid.NewGuid();
+        var secondRename = Guid.NewGuid();
+        var firstAck = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var secondAck = await BindingAck(secondRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding B\"}");
+        Check(firstAck?.Outcome == "completed" && secondAck?.Outcome == "completed" && homeSession.Title == "Binding B", "Core home applies hand-built commands carrying unknown fields");
+        var permutedRetry = await BindingAck(firstRename, "{\"zExtra\":{\"a\":2,\"b\":1},\"text\":\"Binding A\",\"blobHashes\":[],\"action\":\"rename\"}");
+        var spacedRetry = await BindingAck(firstRename, " {\n \"blobHashes\" : [ ], \"zExtra\":{\"b\":1,\"a\":2}, \"action\":\"rename\", \"text\":\"Binding A\" } ");
+        Check(permutedRetry is { Outcome: "completed", Detail: "Already recorded on home." } && spacedRetry is { Outcome: "completed", Detail: "Already recorded on home." } && homeSession.Title == "Binding B",
+            "Core home answers a key-permuted retry of the same command ID from its receipt and never re-applies it");
+        var changedText = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding C\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var changedExtra = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\",\"zExtra\":{\"b\":1,\"a\":3}}");
+        var droppedExtra = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\"}");
+        Check(new[] { changedText, changedExtra, droppedExtra }.All(a => a is { Outcome: "rejected", Detail: "Command ID reused with different content." }) && homeSession.Title == "Binding B",
+            "Core home rejects a reused command ID with changed text or a changed or missing unknown field, applying nothing");
+        var duplicateField = Guid.NewGuid();
+        var ambiguous = await BindingAck(duplicateField, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding D\",\"text\":\"Binding E\"}");
+        Check(ambiguous?.Outcome == "rejected" && homeSession.Title == "Binding B" && home.CommandReceipts.All(r => r.Id != duplicateField),
+            "Core home explicitly refuses a command whose content cannot be bound faithfully, recording and applying nothing");
+        // A command recorded by an earlier Core home keeps raw-byte comparison.
+        var legacyRename = Guid.NewGuid();
+        const string legacyJson = "{\"text\":\"Binding L\",\"action\":\"rename\",\"blobHashes\":[]}";
+        home.CommandStoreForTest.Begin(legacyRename, viewer.DeviceId, gid, DeviceBlob.Sha256Hex(Utf8(legacyJson)));
+        home.CommandStoreForTest.MarkCompleted(legacyRename);
+        var legacyRaw = await BindingAck(legacyRename, legacyJson);
+        var legacyPermuted = await BindingAck(legacyRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding L\"}");
+        Check(legacyRaw is { Outcome: "completed", Detail: "Already recorded on home." } && legacyPermuted is { Outcome: "rejected", Detail: "Command ID reused with different content." }
+            && homeSession.Title == "Binding B" && home.CommandReceipts.Single(r => r.Id == legacyRename).HashScheme is null
+            && home.CommandReceipts.Single(r => r.Id == firstRename).HashScheme == DeviceCommandBinding.CanonicalScheme,
+            "A legacy raw Core record matches an identical raw retry and rejects a permuted one without executing it");
+        homeSession.Title = titleBefore;
         var started = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "inject", PendingID = last.Id });
         Check(started is not null && await Until(() => LastAck(started) is { Outcome: "completed", Detail: SessionStore.InjectItemGone }
             && viewer.Unresolved(gid).All(r => r.CommandID != started))
@@ -1157,9 +1314,30 @@ MdnsChecks.RunGroupDevices(Check);
         Check(await Until(() =>
             viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == failed)?.Detail == "Home record lookup."),
             "Outbox query returns the authoritative home outcome");
-        Check(await viewer.RetryOutboxAsync(record)
+        var sent = new System.Collections.Concurrent.ConcurrentQueue<DeviceEnvelope>();
+        viewer.EnvelopeSentForTest += sent.Enqueue;
+        // Reload the outbox from disk, as after a restart, and retry from it.
+        var fromDisk = new DeviceOutboxStore(viewerRoot).Records.Single(r => r.CommandID == failed);
+        Check(fromDisk.PayloadBytes is { } diskBytes && diskBytes.SequenceEqual(DeviceCommandBinding.Encode(new DeviceCommandPayload { Action = "submit", Text = "  " })),
+            "Core outbox persists the exact canonical bytes it sent");
+        Check(await viewer.RetryOutboxAsync(fromDisk)
             && await Until(() => viewer.Unresolved(gid).Any(r => r.CommandID == failed && r.Outcome == "failed")),
             "Retry resends under the original ID and home dedups the replay");
+        Check(sent.Where(e => e.Kind == DeviceKind.Command && e.CommandID == failed).Select(e => e.Payload!).SingleOrDefault() is { } resent && resent.SequenceEqual(fromDisk.PayloadBytes!),
+            "After reload, Core Resend same ID sends byte-identical payload bytes");
+        // A record saved by an earlier version has no bytes: never re-encoded,
+        // never given a new ID; Resend asks home instead.
+        var legacyOutbox = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = gid, Payload = new DeviceCommandPayload { Action = "rename", Text = "Old" }, PayloadHash = "h", Epoch = viewer.RemoteLeases[gid] };
+        viewer.OutboxStoreForTest.Add(legacyOutbox);
+        sent.Clear();
+        Check(!await viewer.RetryOutboxAsync(legacyOutbox)
+            && sent.Any(e => e.Kind == DeviceKind.CommandQuery && e.CommandID == legacyOutbox.CommandID) && !sent.Any(e => e.Kind == DeviceKind.Command)
+            && viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID).Detail is DeviceOutboxRecord.LegacyDetail or "Home record lookup.",
+            "Resending a legacy Core record queries home under its original ID and sends no re-encoded command");
+        Check(await Until(() => viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID) is { Outcome: "rejected", Detail: "Home record lookup." })
+            && homeSession.Title != "Old",
+            "Home's answer resolves the legacy record: it never reached home, so nothing was applied");
+        viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");
     }

@@ -128,6 +128,109 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(try DeviceCommandStore(folder: root).outcome(id: doneID) == .completed, "Completed command outcome survives reload")
     } catch { check(false, "Command store failed: " + error.localizedDescription) }
 
+    // Command binding: shared canonical vectors (also run by the Core suite),
+    // versioned home hash schemes and exact-byte viewer outbox records.
+    do {
+        let vectorFile = URL(fileURLWithPath: FileManager.default.currentDirectoryPath + "/Tests/command-payload-canonical-vectors.json")
+        let vectors = ((try JSONSerialization.jsonObject(with: Data(contentsOf: vectorFile))) as? [String: Any])?["vectors"] as? [[String: Any]] ?? []
+        var mismatched: [String] = []
+        for vector in vectors {
+            var input = Data((vector["input"] as? String ?? "").utf8)
+            if let hex = vector["inputHex"] as? String {
+                let digits = Array(hex.utf8)
+                input = Data(stride(from: 0, to: digits.count, by: 2).map { UInt8(String(decoding: digits[$0..<$0 + 2], as: UTF8.self), radix: 16)! })
+            }
+            let output = try? DeviceCommandBinding.canonical(input)
+            let expected = (vector["canonical"] as? String).map { Data($0.utf8) }
+            if vector["reject"] as? Bool == true ? output != nil : output == nil || output != expected { mismatched.append(vector["name"] as? String ?? "?") }
+        }
+        check(vectors.count >= 80 && mismatched.isEmpty, "Swift command canonicalization matches every shared vector" + (mismatched.isEmpty ? "" : ": " + mismatched.joined(separator: ", ")))
+        // Remote payloads are canonicalized on the home's connection queue:
+        // key count, nesting and size must not turn into a stall. The Core
+        // suite runs the same shapes and bounds.
+        func timedCanonical(_ input: Data) -> (output: Data?, seconds: Double) {
+            let start = Date(); let output = try? DeviceCommandBinding.canonical(input)
+            return (output, Date().timeIntervalSince(start))
+        }
+        let manyKeys = "{\"action\":\"injectAll\",\"blobHashes\":[],\"extra\":{" + (0..<32_000).map { "\"field" + String($0) + "\":0" }.joined(separator: ",") + "}}"
+        let manyKeysRun = timedCanonical(Data(manyKeys.utf8))
+        check(manyKeysRun.output?.count == manyKeys.utf8.count && manyKeysRun.seconds < 0.25, "Swift canonicalizes a 32,000-key object in under 250 ms (" + String(Int(manyKeysRun.seconds * 1000)) + " ms)")
+        let reversedKeys = "{" + (0..<32_000).reversed().map { "\"k" + String($0) + "\":0" }.joined(separator: ",") + "}"
+        let reversedRun = timedCanonical(Data(reversedKeys.utf8))
+        check(reversedRun.output.map { String(decoding: $0, as: UTF8.self).hasPrefix("{\"k0\":0,\"k1\":0,\"k10\":0,") } == true && reversedRun.seconds < 0.25, "Swift sorts 32,000 reversed keys in under 250 ms (" + String(Int(reversedRun.seconds * 1000)) + " ms)")
+        let duplicateLast = Data((manyKeys.dropLast(2) + ",\"field0\":1}}").utf8)
+        let duplicateRun = timedCanonical(duplicateLast)
+        check(duplicateRun.output == nil && duplicateRun.seconds < 0.25, "Swift rejects a duplicate after 32,000 keys in under 250 ms")
+        // Worst case near the size cap: unsorted objects at every level move
+        // their contents once per level.
+        var deep = "[" + Array(repeating: "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"", count: 118_000).joined(separator: ",") + "]"
+        for _ in 0..<(DeviceCommandBinding.maxDepth - 1) { deep = "{\"z\":0,\"a\":" + deep + "}" }
+        let deepRun = timedCanonical(Data(deep.utf8))
+        check(deepRun.output?.count == deep.utf8.count && deepRun.seconds < 1, "Swift canonicalizes a 3.9 MB payload with unsorted objects at every nesting level in under 1 s (" + String(Int(deepRun.seconds * 1000)) + " ms)")
+        let limit = DeviceCommandBinding.maxBytes
+        let atLimit = Data("\"x\"".utf8) + Data(repeating: 0x20, count: limit - 3)
+        check((try? DeviceCommandBinding.canonical(atLimit)) == Data("\"x\"".utf8), "Swift accepts a payload of exactly the 4 MiB size limit")
+        do { _ = try DeviceCommandBinding.canonical(atLimit + Data(" ".utf8)); check(false, "Swift rejects a payload over the size limit") }
+        catch let error as DeviceCommandBinding.Unbindable { check(error.reason == "Payload exceeds 4194304 bytes.", "Swift rejects a payload over the size limit with an explicit reason") }
+        catch { check(false, "Swift rejects a payload over the size limit with an explicit reason") }
+        let overDeep = Data((String(repeating: "[", count: DeviceCommandBinding.maxDepth + 1) + String(repeating: "]", count: DeviceCommandBinding.maxDepth + 1)).utf8)
+        check(((try? DeviceCommandBinding.canonical(overDeep)) == nil) && (try? DeviceCommandBinding.canonical(overDeep.dropFirst().dropLast())) != nil, "Swift nesting limit is exactly 64 levels")
+        do { _ = try DeviceCommandBinding.canonical(Data(#"{"a":1,"a":2}"#.utf8)); check(false, "Swift names an escaped duplicate key") }
+        catch let error as DeviceCommandBinding.Unbindable { check(error.reason.hasPrefix("Duplicate object key"), "Swift names an escaped duplicate key") }
+        catch { check(false, "Swift names an escaped duplicate key") }
+        let typed = DeviceCommandPayload(action: "rename", text: "X")
+        let encodings = Set((0..<500).compactMap { _ in try? DeviceCommandBinding.encode(typed) })
+        check(encodings == [Data(#"{"action":"rename","blobHashes":[],"text":"X"}"#.utf8)], "Viewer command bytes are canonical and identical on every encode, matching the Core client")
+        let canonical = DeviceCommandBinding.canonicalScheme
+        let sorted = Data(#"{"action":"rename","blobHashes":[],"text":"X"}"#.utf8)
+        let permuted = Data(#"{"text":"X","blobHashes":[],"action":"rename"}"#.utf8)
+        let changed = Data(#"{"action":"rename","blobHashes":[],"text":"Y"}"#.utf8)
+        let extraA = Data(#"{"action":"rename","blobHashes":[],"text":"X","zExtra":{"b":1,"a":2}}"#.utf8)
+        let extraAPermuted = Data(#"{"zExtra":{"a":2,"b":1},"text":"X","action":"rename","blobHashes":[]}"#.utf8)
+        let extraB = Data(#"{"action":"rename","blobHashes":[],"text":"X","zExtra":{"b":1,"a":3}}"#.utf8)
+        let bindingRoot = root.appendingPathComponent("binding")
+        try FileManager.default.createDirectory(at: bindingRoot, withIntermediateDirectories: true)
+        // Archive written by an earlier home: no hashScheme, raw byte hash.
+        let legacyID = UUID()
+        let legacyArchive = #"[{"id":""# + legacyID.uuidString + #"","origin":"a","outcome":"completed","updatedAt":700000000,"sessionID":"s1","payloadHash":""# + DeviceBlob.sha256Hex(permuted) + #""}]"#
+        try Data(legacyArchive.utf8).write(to: bindingRoot.appendingPathComponent("device-commands.json"))
+        let bindingStore = try DeviceCommandStore(folder: bindingRoot)
+        check(bindingStore.records[legacyID]?.hashScheme == nil && bindingStore.outcome(id: legacyID) == .completed, "An earlier home's command archive decodes with no hash scheme")
+        check(bindingStore.bindingMatches(id: legacyID, origin: "a", sessionID: "s1", payload: permuted) && !bindingStore.bindingMatches(id: legacyID, origin: "a", sessionID: "s1", payload: sorted),
+              "A legacy raw record matches only an identical raw retry, never a permuted one")
+        let canonicalID = UUID(), extraID = UUID()
+        _ = try bindingStore.begin(id: canonicalID, origin: "a", sessionID: "s1", payloadHash: DeviceCommandBinding.hash(permuted, scheme: canonical)!, hashScheme: canonical)
+        _ = try bindingStore.begin(id: extraID, origin: "a", sessionID: "s1", payloadHash: DeviceCommandBinding.hash(extraA, scheme: canonical)!, hashScheme: canonical)
+        let reloadedBinding = try DeviceCommandStore(folder: bindingRoot)
+        check(reloadedBinding.records[canonicalID]?.hashScheme == canonical && reloadedBinding.records[legacyID]?.hashScheme == nil
+              && reloadedBinding.bindingMatches(id: canonicalID, origin: "a", sessionID: "s1", payload: sorted) && reloadedBinding.bindingMatches(id: canonicalID, origin: "a", sessionID: "s1", payload: permuted)
+              && !reloadedBinding.bindingMatches(id: canonicalID, origin: "a", sessionID: "s1", payload: changed),
+              "Canonical records survive reload and bind content, not key order")
+        check(reloadedBinding.bindingMatches(id: extraID, origin: "a", sessionID: "s1", payload: extraAPermuted) && !reloadedBinding.bindingMatches(id: extraID, origin: "a", sessionID: "s1", payload: extraB)
+              && !reloadedBinding.bindingMatches(id: extraID, origin: "a", sessionID: "s1", payload: sorted),
+              "Unknown fields stay part of the binding: dropping or changing one is different content")
+        check(!reloadedBinding.bindingMatches(id: canonicalID, origin: "a", sessionID: "s1", payload: Data(#"{"action":"rename","action":"rename","blobHashes":[],"text":"X"}"#.utf8)),
+              "A payload with a duplicated field never matches a canonical record")
+        // Viewer outbox: exact bytes survive restart; earlier records cannot be resent.
+        let outboxRoot = root.appendingPathComponent("binding-outbox")
+        let bytesOutbox = try DeviceOutboxStore(folder: outboxRoot)
+        let exact = DeviceOutboxRecord(commandID: UUID(), sessionID: "home/s", payload: typed, payloadHash: DeviceBlob.sha256Hex(permuted), epoch: 3, payloadData: permuted)
+        try bytesOutbox.add(exact)
+        let restartedOutbox = try DeviceOutboxStore(folder: outboxRoot).records.first
+        check(restartedOutbox?.payloadData == permuted && restartedOutbox?.outcome == "pending",
+              "Outbox records keep their exact payload bytes across restart")
+        let legacyOutboxID = UUID()
+        let legacyOutbox = #"[{"commandID":""# + legacyOutboxID.uuidString + #"","sessionID":"home/s","payload":{"action":"rename","text":"Old","blobHashes":[]},"payloadHash":"h","epoch":3,"outcome":"pending"}]"#
+        let legacyRoot = root.appendingPathComponent("binding-legacy-outbox")
+        try FileManager.default.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
+        try Data(legacyOutbox.utf8).write(to: legacyRoot.appendingPathComponent("device-outbox.json"))
+        let legacyRecord = try DeviceOutboxStore(folder: legacyRoot).records.first
+        let legacyPersisted = try DeviceOutboxStore(folder: legacyRoot).records.first?.outcome
+        check(legacyRecord?.commandID == legacyOutboxID && legacyRecord?.payloadData == nil && legacyRecord?.outcome == "uncertain" && legacyRecord?.detail == DeviceOutboxRecord.legacyDetail
+              && legacyRecord?.payload.text == "Old" && legacyPersisted == "uncertain",
+              "An earlier version's pending outbox record loads as uncertain with Check home, keeping its ID and content")
+    } catch { check(false, "Command binding fixtures failed: " + error.localizedDescription) }
+
     // Draft versions, blob hashes, trust pinning, and global session identity.
     var drafts = DeviceDraftTracker()
     check(drafts.apply(session: sessionID.uuidString, version: 2, text: "new") && !drafts.apply(session: sessionID.uuidString, version: 1, text: "old") && drafts.text(session: sessionID.uuidString) == "new", "Stale draft patches cannot overwrite newer home drafts")
@@ -166,8 +269,9 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         check(reloadedOutbox.records.first?.commandID == record.commandID && reloadedOutbox.records.first?.outcome == "uncertain" && reloadedOutbox.records.first?.payload.text == "keep me", "Viewer outbox retains text and same command ID as uncertain")
         let bound = try DeviceCommandStore(folder: root.appendingPathComponent("bound"))
         let boundID = UUID()
-        _ = try bound.begin(id: boundID, origin: "a", sessionID: "s1", payloadHash: "h1")
-        check(bound.bindingMatches(id: boundID, origin: "a", sessionID: "s1", payloadHash: "h1") && !bound.bindingMatches(id: boundID, origin: "a", sessionID: "s2", payloadHash: "h1"), "Dedup binds origin, session and payload hash")
+        let boundBytes = Data(#"{"action":"rename","blobHashes":[],"text":"h1"}"#.utf8)
+        _ = try bound.begin(id: boundID, origin: "a", sessionID: "s1", payloadHash: DeviceCommandBinding.hash(boundBytes, scheme: DeviceCommandBinding.canonicalScheme)!, hashScheme: DeviceCommandBinding.canonicalScheme)
+        check(bound.bindingMatches(id: boundID, origin: "a", sessionID: "s1", payload: boundBytes) && !bound.bindingMatches(id: boundID, origin: "a", sessionID: "s2", payload: boundBytes) && !bound.bindingMatches(id: boundID, origin: "b", sessionID: "s1", payload: boundBytes), "Dedup binds origin, session and payload hash")
         check(DeviceIdentity.keychainDecision(status: errSecItemNotFound) && !DeviceIdentity.keychainDecision(status: errSecAuthFailed), "Only missing Keychain item may create a new identity")
         var sweepClock = Date(timeIntervalSinceReferenceDate: 5_000)
         let sweeping = DeviceLeaseManager(now: { sweepClock }, ttl: 10)
@@ -459,6 +563,41 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: renameID, epoch: granted?.epoch, payload: renamePayload))
         let ackCount = try capturedEnvelopes().filter { $0.kind == DeviceMessageKind.commandAck.rawValue }.count
         check(session.title == "Renamed remotely" && ackCount >= 2, "Service harness applies valid command once and acks duplicate without reapplying")
+        // Same command ID, hand-permuted bytes: answered from the receipt and
+        // applied once. Changed content, unknown fields included, is refused.
+        func bindingAck(_ commandID: UUID, _ json: String) throws -> DeviceAckPayload? {
+            captured = []
+            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: granted?.epoch, payload: Data(json.utf8)))
+            return try capturedEnvelopes().first { $0.commandID == commandID && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }
+        }
+        let firstRename = UUID(), secondRename = UUID()
+        let firstAck = try bindingAck(firstRename, #"{"action":"rename","blobHashes":[],"text":"Binding A","zExtra":{"b":1,"a":2}}"#)
+        let secondAck = try bindingAck(secondRename, #"{"action":"rename","blobHashes":[],"text":"Binding B"}"#)
+        check(firstAck?.outcome == "completed" && secondAck?.outcome == "completed" && session.title == "Binding B", "Mac home applies hand-built commands carrying unknown fields")
+        let permutedRetry = try bindingAck(firstRename, #"{"zExtra":{"a":2,"b":1},"text":"Binding A","blobHashes":[],"action":"rename"}"#)
+        let spacedRetry = try bindingAck(firstRename, " {\n \"blobHashes\" : [ ], \"zExtra\":{\"b\":1,\"a\":2}, \"action\":\"rename\", \"text\":\"Binding A\" } ")
+        check(permutedRetry?.outcome == "completed" && permutedRetry?.detail == "Already recorded on home." && spacedRetry?.outcome == "completed" && spacedRetry?.detail == "Already recorded on home." && session.title == "Binding B",
+              "Mac home answers a key-permuted retry of the same command ID from its receipt and never re-applies it")
+        let changedText = try bindingAck(firstRename, #"{"action":"rename","blobHashes":[],"text":"Binding C","zExtra":{"b":1,"a":2}}"#)
+        let changedExtra = try bindingAck(firstRename, #"{"action":"rename","blobHashes":[],"text":"Binding A","zExtra":{"b":1,"a":3}}"#)
+        let droppedExtra = try bindingAck(firstRename, #"{"action":"rename","blobHashes":[],"text":"Binding A"}"#)
+        check([changedText, changedExtra, droppedExtra].allSatisfy { $0?.outcome == "rejected" && $0?.detail == "Command ID reused with different content." } && session.title == "Binding B",
+              "Mac home rejects a reused command ID with changed text or a changed or missing unknown field, applying nothing")
+        let duplicateField = UUID()
+        let ambiguous = try bindingAck(duplicateField, #"{"action":"rename","blobHashes":[],"text":"Binding D","text":"Binding E"}"#)
+        check(ambiguous?.outcome == "rejected" && session.title == "Binding B" && home.commandStoreForTesting?.records[duplicateField] == nil,
+              "Mac home explicitly refuses a command whose content cannot be bound faithfully, recording and applying nothing")
+        // A command recorded by an earlier home keeps raw-byte comparison.
+        let legacyRename = UUID(), legacyBytes = #"{"text":"Binding L","action":"rename","blobHashes":[]}"#
+        _ = try home.commandStoreForTesting?.begin(id: legacyRename, origin: peer.hello?.deviceID ?? "", sessionID: globalString, payloadHash: DeviceBlob.sha256Hex(Data(legacyBytes.utf8)))
+        try home.commandStoreForTesting?.markCompleted(id: legacyRename)
+        let legacyRaw = try bindingAck(legacyRename, legacyBytes)
+        let legacyPermuted = try bindingAck(legacyRename, #"{"action":"rename","blobHashes":[],"text":"Binding L"}"#)
+        check(legacyRaw?.outcome == "completed" && legacyRaw?.detail == "Already recorded on home." && legacyPermuted?.outcome == "rejected" && legacyPermuted?.detail == "Command ID reused with different content."
+              && session.title == "Binding B" && home.commandStoreForTesting?.records[legacyRename]?.hashScheme == nil,
+              "A legacy raw home record matches an identical raw retry and rejects a permuted one without executing it")
+        check(home.commandStoreForTesting?.records[firstRename]?.hashScheme == DeviceCommandBinding.canonicalScheme, "New home command records name the canonical hash scheme")
+        session.title = "Renamed remotely"
         captured = []
         let patch = DeviceDraftPayload(version: (snapshot?.draftVersion ?? 0) + 1, text: "transferred draft", imageHashes: [DeviceBlob.sha256Hex(draftBytes)])
         home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.draftPatch.rawValue, sessionID: globalString, epoch: granted?.epoch, payload: try JSONEncoder().encode(patch)))
@@ -506,23 +645,24 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         session.pending = [last]
         session.pending.removeFirst(); session.messages.append(Message(role: "user", text: last.text)) // runNext started it.
         let messagesBefore = session.messages.map(\.id)
-        func raceInject(_ command: DeviceCommandPayload, commandID: UUID) throws -> (ack: DeviceAckPayload?, snapshot: DeviceTranscriptPayload?) {
+        // Duplicates resend the identical bytes, as the viewer outbox does.
+        func raceInject(_ payload: Data, commandID: UUID) throws -> (ack: DeviceAckPayload?, snapshot: DeviceTranscriptPayload?) {
             captured = []
-            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: granted?.epoch, payload: try JSONEncoder().encode(command)))
+            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: granted?.epoch, payload: payload))
             let frames = try capturedEnvelopes()
             return (frames.first { $0.commandID == commandID && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) },
                     frames.first { $0.kind == DeviceMessageKind.transcriptSnapshot.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) })
         }
-        let raceID = UUID()
-        let emptyInject = try raceInject(DeviceCommandPayload(action: "injectAll"), commandID: raceID)
+        let raceID = UUID(), raceBytes = try JSONEncoder().encode(DeviceCommandPayload(action: "injectAll"))
+        let emptyInject = try raceInject(raceBytes, commandID: raceID)
         check(emptyInject.ack?.outcome == "completed" && emptyInject.ack?.detail == Store.injectNothingQueued && emptyInject.snapshot?.pending.isEmpty == true,
               "Inject all after automatic dequeue started the last prompt completes as a quiet no-op and refreshes the queue")
         check(session.messages.map(\.id) == messagesBefore && !session.interrupted && !session.resumeAfterInterrupt && session.injectionTargetID == nil && session.pending.isEmpty && session.busy,
               "Inject all on an emptied queue appends no notice, never interrupts the running turn and sends nothing again")
-        let duplicateRace = try raceInject(DeviceCommandPayload(action: "injectAll"), commandID: raceID)
+        let duplicateRace = try raceInject(raceBytes, commandID: raceID)
         check(duplicateRace.ack?.outcome == "completed" && duplicateRace.ack?.detail == "Already recorded on home." && session.messages.map(\.id) == messagesBefore && !session.interrupted,
               "A duplicate no-op Inject all command ID is answered from its receipt, never applied twice")
-        let startedInject = try raceInject(DeviceCommandPayload(action: "inject", pendingID: last.id), commandID: UUID())
+        let startedInject = try raceInject(try JSONEncoder().encode(DeviceCommandPayload(action: "inject", pendingID: last.id)), commandID: UUID())
         check(startedInject.ack?.outcome == "completed" && startedInject.ack?.detail == Store.injectItemGone && session.messages.map(\.id) == messagesBefore && !session.interrupted,
               "Inject now for a message that already started reports it is gone without a notice or interrupt")
         session.messages.removeAll { $0.text == last.text && $0.role == "user" }
@@ -539,9 +679,9 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         func obligationState() -> [String] { session.switchboardObligations.map { "\($0.id) \($0.promptID) \($0.state) \($0.finishedAt == nil)" } }
         let obligationsBefore = obligationState()
         session.pending = [keepFirst, dropMiddle, keepLast]; session.queuePaused = true
-        func removeAck(_ id: UUID?, commandID: UUID = UUID(), epoch: UInt64? = nil) throws -> (ack: DeviceAckPayload?, snapshot: DeviceTranscriptPayload?) {
+        func removeAck(_ id: UUID?, commandID: UUID = UUID(), epoch: UInt64? = nil, payload: Data? = nil) throws -> (ack: DeviceAckPayload?, snapshot: DeviceTranscriptPayload?) {
             captured = []
-            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: epoch ?? granted?.epoch, payload: try JSONEncoder().encode(DeviceCommandPayload(action: "removeQueued", pendingID: id))))
+            home.handleEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalString, commandID: commandID, epoch: epoch ?? granted?.epoch, payload: try payload ?? JSONEncoder().encode(DeviceCommandPayload(action: "removeQueued", pendingID: id))))
             let frames = try capturedEnvelopes()
             return (frames.first { $0.commandID == commandID && $0.kind == DeviceMessageKind.commandAck.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) },
                     frames.first { $0.kind == DeviceMessageKind.transcriptSnapshot.rawValue }?.payload.flatMap { try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: $0) })
@@ -549,13 +689,13 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         let unleasedRemove = try removeAck(dropMiddle.id, epoch: (granted?.epoch ?? 0) + 99)
         let leaseFreeRemove = try removeAck(dropMiddle.id, epoch: 0)
         check(unleasedRemove.ack?.outcome == "rejected" && leaseFreeRemove.ack?.outcome == "rejected" && session.pending.count == 3, "Single removal requires the current display lease; it has no lease-free exemption")
-        let removeID = UUID()
-        let removed = try removeAck(dropMiddle.id, commandID: removeID)
+        let removeID = UUID(), removeBytes = try JSONEncoder().encode(DeviceCommandPayload(action: "removeQueued", pendingID: dropMiddle.id))
+        let removed = try removeAck(dropMiddle.id, commandID: removeID, payload: removeBytes)
         check(removed.ack?.outcome == "completed" && session.pending.map(\.id) == [keepFirst.id, keepLast.id] && removed.snapshot?.pending.map(\.id) == [keepFirst.id, keepLast.id], "Remote Remove takes exactly one queued message and refreshes the viewer's queue in order")
         check(session.pending[0].switchboardHop == 2 && session.pending[0].originGroupID == "group-a" && session.pending[0].originHomeID == "peer-home" && session.pending[0].agentRunReserved == true && session.pending[0].autonomous == true
               && session.pending[1].durabilityIDs == keepLast.durabilityIDs && session.pending[1].components?.map(\.text) == ["part one", "part two"], "Remaining queued messages keep their hop, origin, reservation and merged components")
         check(obligationState() == obligationsBefore, "Single removal leaves switchboard obligations exactly as Clear queue does")
-        let duplicate = try removeAck(dropMiddle.id, commandID: removeID)
+        let duplicate = try removeAck(dropMiddle.id, commandID: removeID, payload: removeBytes)
         check(duplicate.ack?.outcome == "completed" && duplicate.ack?.detail == "Already recorded on home." && session.pending.map(\.id) == [keepFirst.id, keepLast.id], "A duplicate Remove command ID is acknowledged from its receipt, never applied twice")
         let staleRemove = try removeAck(dropMiddle.id)
         let absentRemove = try removeAck(UUID())
@@ -771,6 +911,35 @@ func deviceSyncSelfTests(_ check: (Bool, String) -> Void) {
         _ = try newViewerFrames()
         viewer.restoreAvailableDisplays()
         check(try newViewerFrames().isEmpty, "Explicit Park cancels automatic display restoration")
+        // Exact bytes: what is first sent is stored, and every retry, including
+        // after restart, resends it unchanged rather than re-encoding.
+        viewer.remoteLeases[gid] = 6
+        let bytesID = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Exact bytes"))
+        let firstSend = try newViewerFrames().first { $0.commandID == bytesID && $0.kind == DeviceMessageKind.command.rawValue }?.payload
+        check(bytesID != nil && firstSend != nil && firstSend == viewer.outbox.first { $0.commandID == bytesID }?.payloadData
+              && firstSend == Data(#"{"action":"rename","blobHashes":[],"text":"Exact bytes"}"#.utf8), "Viewer stores the exact canonical bytes it sends")
+        try viewer.configureForTesting(folder: viewer.storageFolder) // Restart: reload stores from disk.
+        viewer.remoteLeases[gid] = 6
+        let reloadedSend = viewer.outbox.first { $0.commandID == bytesID }
+        if let reloadedSend { viewer.retryOutbox(reloadedSend) }
+        let resent = try newViewerFrames().first { $0.commandID == bytesID && $0.kind == DeviceMessageKind.command.rawValue }?.payload
+        check(reloadedSend?.payloadData == firstSend && resent == firstSend, "After restart, Resend same ID sends byte-identical payload bytes")
+        // A record saved by an earlier version has no bytes: never re-encoded,
+        // never given a new ID; it loads as uncertain and Resend asks home.
+        let legacyID = UUID()
+        let legacyOutbox = #"[{"commandID":""# + legacyID.uuidString + #"","sessionID":""# + gid + #"","payload":{"action":"rename","text":"Old","blobHashes":[]},"payloadHash":"h","epoch":6,"outcome":"pending"}]"#
+        try Data(legacyOutbox.utf8).write(to: viewer.storageFolder.appendingPathComponent("device-outbox.json"))
+        try viewer.configureForTesting(folder: viewer.storageFolder)
+        viewer.remoteLeases[gid] = 6
+        let legacyRecord = viewer.outbox.first { $0.commandID == legacyID }
+        check(legacyRecord?.outcome == "uncertain" && legacyRecord?.detail == DeviceOutboxRecord.legacyDetail, "A legacy outbox record surfaces as uncertain with Check home after upgrade")
+        if var stale = legacyRecord { stale.outcome = "pending"; viewer.retryOutbox(stale) }
+        let legacyFrames = try newViewerFrames()
+        check(legacyFrames.contains { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.commandID == legacyID } && !legacyFrames.contains { $0.kind == DeviceMessageKind.command.rawValue }
+              && viewer.outbox.first { $0.commandID == legacyID }?.outcome == "uncertain" && viewer.outbox.count == 1,
+              "Resending a legacy record queries home under its original ID and sends no re-encoded command")
+        viewer.handleEnvelope(fakeHome, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: gid, commandID: legacyID, epoch: 6, payload: try JSONEncoder().encode(DeviceAckPayload(outcome: "completed", detail: "Home record lookup.", epoch: 6))))
+        check(viewer.outbox.isEmpty && viewer.completedCommands.contains(legacyID), "Home's answer to the query resolves the legacy record")
 
     } catch { check(false, "Viewer harness failed: " + error.localizedDescription) }
     do {
@@ -862,6 +1031,71 @@ func runIPadHomeFixture() {
         }
         service.suspendViewer()
     } catch { fputs("iPad interop fixture failed: " + error.localizedDescription + "\n", stderr); exit(1) }
+}
+
+// Opt-in Mac viewer against an isolated Core home (windows/src/Converse.Core.Tests
+// --core-command-home). scripts/command-binding-interop.sh runs both directions.
+func runCoreCommandInterop(host: String, port: Int) -> Int32 {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          let folderPath = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"], folderPath.contains("converse-command-binding.") else { return 2 }
+    var failures = 0
+    func check(_ ok: Bool, _ label: String) { print((ok ? "PASS: " : "FAIL: ") + label); if !ok { failures += 1 } }
+    func pump(_ done: () -> Bool, seconds: TimeInterval = 30) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done() && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+        return done()
+    }
+    let viewer = DeviceSyncService()
+    defer { viewer.suspendViewer() }
+    do {
+        viewer.deviceNameOverride = "Isolated Mac command viewer"
+        try viewer.configureForTesting(folder: URL(fileURLWithPath: folderPath)); try viewer.enableGroupsForTesting(); try viewer.startNetworkForTesting()
+    } catch { print("FAIL: Mac viewer setup: " + error.localizedDescription); return 1 }
+    var acks: [UUID: [DeviceAckPayload]] = [:]
+    viewer.commandAckObserverForTesting = { acks[$0, default: []].append($1) }
+    viewer.joinGroupByAddress(host: host, port: port)
+    guard pump({ viewer.pairingPrompt != nil }) else { print("FAIL: Core home join prompt; " + viewer.serviceStatus + "; " + viewer.lastOutcome); return 1 }
+    viewer.confirmPairing()
+    let title = "Core command fixture"
+    guard pump({ viewer.homes.values.contains { $0.rows.contains { $0.title == title } } }), let row = viewer.homes.values.flatMap(\.rows).first(where: { $0.title == title }) else {
+        print("FAIL: Mac viewer discovers the isolated Core home session; " + viewer.serviceStatus + "; " + viewer.lastOutcome); return 1
+    }
+    let gid = row.globalID
+    viewer.isPlaced = { $0 == gid } // An unplaced lease is released on the next tick.
+    viewer.acquireRemote(globalID: gid)
+    guard pump({ viewer.remoteLeases[gid] != nil && viewer.remoteTranscripts[gid] != nil }) else { print("FAIL: Mac viewer takes the Core session"); return 1 }
+    print("PASS: Mac viewer joins and takes the isolated Core home session")
+    func currentTitle() -> String { viewer.remoteTranscripts[gid]?.title ?? "" }
+    func raw(_ id: UUID, _ payload: Data) -> DeviceAckPayload? {
+        let before = acks[id]?.count ?? 0
+        guard viewer.sendRawCommandForTesting(globalID: gid, commandID: id, payload: payload) else { return nil }
+        return pump({ (acks[id]?.count ?? 0) > before }, seconds: 15) ? acks[id]?.last : nil
+    }
+    func settle() { _ = pump({ false }, seconds: 0.5) }
+    guard let first = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Binding A")) else { print("FAIL: Mac viewer sends a command"); return 1 }
+    let firstBytes = viewer.outbox.first { $0.commandID == first }?.payloadData
+    check(pump({ acks[first]?.last?.outcome == "completed" }), "Core home applies a Mac command")
+    let second = viewer.sendRemoteCommand(globalID: gid, command: DeviceCommandPayload(action: "rename", text: "Binding B"))
+    check(second != nil && pump({ second.flatMap { acks[$0]?.last?.outcome } == "completed" && currentTitle() == "Binding B" }), "Core home applies a second Mac command")
+    let exact = firstBytes.flatMap { raw(first, $0) }
+    let permuted = raw(first, Data(#"{"text":"Binding A","blobHashes":[],"action":"rename"}"#.utf8))
+    settle()
+    check(exact?.outcome == "completed" && exact?.detail == "Already recorded on home." && permuted?.outcome == "completed" && permuted?.detail == "Already recorded on home." && currentTitle() == "Binding B",
+          "Core home dedupes exact and key-permuted Mac re-sends of one command ID, applying it once")
+    let changed = raw(first, Data(#"{"action":"rename","blobHashes":[],"text":"Binding C"}"#.utf8))
+    settle()
+    check(changed?.outcome == "rejected" && changed?.detail == "Command ID reused with different content." && currentTitle() == "Binding B", "Core home rejects a Mac command ID reused with different text")
+    let extra = UUID()
+    let extraFirst = raw(extra, Data(#"{"action":"rename","blobHashes":[],"text":"Binding D","zExtra":{"b":1,"a":2}}"#.utf8))
+    let extraPermuted = raw(extra, Data(#"{"zExtra":{"a":2,"b":1},"text":"Binding D","action":"rename","blobHashes":[]}"#.utf8))
+    let extraChanged = raw(extra, Data(#"{"action":"rename","blobHashes":[],"text":"Binding D","zExtra":{"b":1,"a":3}}"#.utf8))
+    settle()
+    check(extraFirst?.outcome == "completed" && extraPermuted?.outcome == "completed" && extraPermuted?.detail == "Already recorded on home."
+          && extraChanged?.outcome == "rejected" && extraChanged?.detail == "Command ID reused with different content." && currentTitle() == "Binding D",
+          "Core home binds unknown fields from the Mac: permuted re-send dedupes, a changed value is rejected")
+    viewer.releaseRemote(globalID: gid)
+    check(failures == 0, "Mac viewer to Core home command binding complete")
+    return failures == 0 ? 0 : 1
 }
 
 // Real sockets, independent keys and concurrent approval requests. Platform

@@ -203,3 +203,12 @@ and reopening the lot and image after a client restart. It does not alter the
 production app, profile, Group, or firewall. The native pane isolation check
 also skips first-run onboarding so onboarding cannot replace its selected
 fixture session during delayed-render checks.
+
+Remote commands bind their ID to the canonical form of the payload JSON
+(`canonical-v1`; earlier records keep raw byte hashes), and every viewer
+resends the exact bytes it first sent. On a Mac with the .NET SDK,
+`scripts/command-binding-interop.sh` checks this both ways over real sockets:
+the Core viewer (`--mac-command-interop`) against the isolated Mac fixture,
+then the Mac viewer (`--core-command-interop`) against an isolated Core home
+(`--core-command-home`). Each direction re-sends one command ID with exact,
+key-permuted and changed bytes.

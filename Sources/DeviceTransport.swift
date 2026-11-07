@@ -222,7 +222,7 @@ final class DeviceSyncService: ObservableObject {
         commandStore = try DeviceCommandStore(folder: folder)
         stateStore = try DeviceSyncStateStore(folder: folder)
         draftStore = try DeviceDraftStore(folder: folder)
-        outboxStore = try DeviceOutboxStore(folder: folder)
+        outboxStore = try DeviceOutboxStore(folder: folder); outbox = outboxStore?.records ?? []
         try loadParticipantIntents()
         boot = stateStore?.beginBoot() ?? 0
         let store = stateStore
@@ -230,6 +230,13 @@ final class DeviceSyncService: ObservableObject {
         started = true
     }
     func adoptPeerForTesting(_ peer: DevicePeer) { peers[peer.id] = peer }
+    var commandStoreForTesting: DeviceCommandStore? { commandStore }
+    var commandAckObserverForTesting: ((UUID, DeviceAckPayload) -> Void)?
+    // Sends hand-built bytes under an existing command ID (binding interop).
+    func sendRawCommandForTesting(globalID: String, commandID: UUID, payload: Data) -> Bool {
+        guard isTestEnvironment, let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return false }
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalID, commandID: commandID, epoch: epoch, payload: payload)); return true
+    }
     var testingPort: UInt16? { listener?.port.flatMap { $0.rawValue > 0 ? $0.rawValue : nil } }
     private var testingDiscoveryPrefix: String?
     func startNetworkForTesting(discoveryPrefix: String? = nil) throws {
@@ -983,11 +990,19 @@ extension DeviceSyncService {
         let teaching = command.action == "teachSwitchboard" && envelope.epoch == 0 && peer.hello?.capabilities.contains("switchboard-teach-v1") == true
         guard teaching || requireLease(peer, envelope, session) else { return }
         guard let origin = peer.hello?.deviceID, let commandStore else { return }
-        let payloadHash = DeviceBlob.sha256Hex(data)
+        // New records bind the canonical form; existing records compare
+        // under their own scheme, so a legacy raw record never silently
+        // accepts a re-encoded retry.
+        let payloadHash = DeviceCommandBinding.hash(data, scheme: DeviceCommandBinding.canonicalScheme)
         let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
         do {
-            guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) else {
-                if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) {
+            // Content that cannot be canonicalized faithfully is refused, never trimmed.
+            guard commandStore.records[commandID] != nil || payloadHash != nil else {
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command content is not unambiguous JSON. Nothing was applied.", epoch: envelope.epoch)
+                return
+            }
+            guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash ?? "", hashScheme: DeviceCommandBinding.canonicalScheme) else {
+                if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payload: data) {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Already recorded on home.", epoch: envelope.epoch)
                 } else {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command ID reused with different content.", epoch: envelope.epoch)
@@ -1296,6 +1311,8 @@ extension DeviceSyncService {
             }
         #endif
         case DeviceMessageKind.commandAck.rawValue:
+            if let observe = commandAckObserverForTesting, let commandID = envelope.commandID, let idString = envelope.sessionID, DeviceGlobalID(idString)?.home == peerHome,
+               let ack = envelope.payload.flatMap({ try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }) { observe(commandID, ack) }
             // Bind to authenticated home + exact outbox session. A different
             // paired peer that somehow knows an ID cannot complete it.
             if let commandID = envelope.commandID, let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome,
@@ -1544,16 +1561,22 @@ extension DeviceSyncService {
         guard let global = DeviceGlobalID(globalID), let epoch, let peer = peerForHome(global.home) else {
             lastOutcome = "Take the session again before sending."; return nil
         }
-        guard let payloadData = try? JSONEncoder().encode(command) else { return nil }
-        let record = DeviceOutboxRecord(commandID: UUID(), sessionID: globalID, payload: command, payloadHash: DeviceBlob.sha256Hex(payloadData), epoch: epoch)
+        // Canonical bytes, stored and resent verbatim: JSONEncoder key order
+        // is not stable, even within one process.
+        guard let payloadData = try? DeviceCommandBinding.encode(command) else { return nil }
+        let record = DeviceOutboxRecord(commandID: UUID(), sessionID: globalID, payload: command, payloadHash: DeviceBlob.sha256Hex(payloadData), epoch: epoch, payloadData: payloadData)
         do { try outboxStore?.add(record); outbox = outboxStore?.records ?? outbox } catch { lastOutcome = "Could not save outgoing message. Nothing sent."; return nil }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalID, commandID: record.commandID, epoch: epoch, payload: payloadData))
         return record.commandID
     }
     func retryOutbox(_ record: DeviceOutboxRecord) {
+        // Never re-encode a legacy record or give it a new ID: ask home.
+        guard let payloadData = record.payloadData else {
+            try? outboxStore?.markLegacyUncertain(commandID: record.commandID); outbox = outboxStore?.records ?? outbox
+            lastOutcome = DeviceOutboxRecord.legacyDetail; queryOutbox(record); return
+        }
         let epoch = record.payload.action == "teachSwitchboard" && canTeachRemote(record.sessionID) ? 0 : remoteLeases[record.sessionID]
-        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch, let peer = peerForHome(global.home),
-              let payloadData = try? JSONEncoder().encode(record.payload) else { lastOutcome = "Take the session again before retrying."; return }
+        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch, let peer = peerForHome(global.home) else { lastOutcome = "Take the session again before retrying."; return }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: record.sessionID, commandID: record.commandID, epoch: epoch, payload: payloadData))
     }
     func queryOutbox(_ record: DeviceOutboxRecord) {
