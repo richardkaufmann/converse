@@ -22,14 +22,14 @@ def summarize(capture):
     events = capture["slowEvents"]
     if 'pendingRoundTrips' in capture:
         lines.append(f"\nRound trips still pending: {capture['pendingRoundTrips']}; dropped or abandoned: {capture.get('droppedRoundTrips', 0)}. Completed timings exclude these requests.")
-    stalls = [event for event in events if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw")]
+    stalls = [event for event in events if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "sessionScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw")]
     lines.append(f"\nRetained delay events: {len(stalls)}; overwritten slow events: {capture['droppedSlowEvents']}")
     for stall in sorted(stalls, key=lambda event: event["milliseconds"], reverse=True)[:10]:
         end = stall["uptime"]
         start = end - stall["milliseconds"] / 1000
         overlapping = set()
         for event in events:
-            if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "lotAckSendFailed") or not event["mainThread"]:
+            if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "sessionScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "lotAckSendFailed") or not event["mainThread"]:
                 continue
             event_start = event["uptime"] - event["milliseconds"] / 1000
             if event_start < end and event["uptime"] > start:

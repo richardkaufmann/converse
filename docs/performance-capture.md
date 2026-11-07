@@ -1,4 +1,4 @@
-# Investigating typing stalls
+# Investigating typing and scrolling stalls
 
 On Mac, open **Converse → Settings → Debug** and enable **performance telemetry**. Set **Start in** (0–60 seconds) and **Run for** (5–300 seconds), then press **Go**. Return to the affected pane and type or scroll normally. You can close Settings; the capture continues and stops automatically. **Cancel** or turning telemetry off cancels the pending or active run. Telemetry starts disabled on the next app launch.
 
@@ -9,7 +9,8 @@ For scripted launches, `CONVERSE_PERFORMANCE_DIAGNOSTICS=1` retains the continuo
 Run `python3 scripts/summarize-performance.py /path/to/performance.json` to compare:
 
 - Main-queue scheduling delay and time from a keyboard event's timestamp until the composer handles it.
-- Keyboard handling, text insertion and transcript rendering. Mac Parking Lots also record key delivery, key handling, text insertion, layout, scroll-event delivery and scroll-handler duration.
+- Keyboard handling, text insertion and transcript rendering. Mac Parking Lots also record key delivery, key handling, text insertion and layout.
+- Upward and downward mouse-wheel/trackpad scroll-event delivery and handler duration, separately for session transcripts (`sessionScrollDelivery`, `sessionScrollHandling`) and Parking Lots (`lotScrollDelivery`, `lotScrollHandling`), including momentum events. These aggregate both directions and do not record content or scroll positions.
 - Archive snapshot creation, background encoding/writing, and synchronous checked saves (including waiting for the archive queue).
 - Sidebar snapshot publication to connected devices.
 - Mac-hosted Parking Lot edit handling, durable commit, acknowledgment encoding/queueing,

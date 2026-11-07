@@ -1790,7 +1790,12 @@ final class ConversationScrollView: NSScrollView {
         followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
         scheduleResume(); refreshLatest()
     }
-    override func scrollWheel(with event: NSEvent) { super.scrollWheel(with: event); recordScroll() }
+    override func scrollWheel(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .sessionScrollDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.sessionScrollHandling, measurement) }
+        super.scrollWheel(with: event); recordScroll()
+    }
     func followLatest() {
         guard !settlingTail, let text = documentView as? ConversationTextView else { return }
         settlingTail = true; defer { settlingTail = false }

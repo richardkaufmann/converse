@@ -10,6 +10,7 @@ final class PerformanceCapture {
         case mouseHover, dragDelivery, dragHandling, dragFrameWait, dragApply, resizeDraw, wrapThaw
         case lotEditHandling, lotEditCommit, lotAckEncodeQueue, lotEditToAckProcessed, lotAckSendFailed
         case lotKeyDelivery, lotKeyHandling, lotTextInsertion, lotScrollDelivery, lotScrollHandling
+        case sessionScrollDelivery, sessionScrollHandling
         case lotRoundTrip, lotAckApply, lotLocalEdit, lotTextUpdate, lotTextLayout, lotInputToChange
     }
     struct Span { let start: Double; let generation: Int; let mainThread: Bool }
