@@ -2643,6 +2643,14 @@ struct ScrollingConversation: NSViewRepresentable {
             defer { PerformanceCapture.shared.end(.transcriptRender, measurement) }
             let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
+            let profile = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE"] == "1" && ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil
+            var checkpoint = began
+            func stage(_ label: String) {
+                guard profile else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                print(String(format: "PROFILE %@ %.3f ms", label, (now - checkpoint) * 1000))
+                checkpoint = now
+            }
             defer {
                 let elapsed = ProcessInfo.processInfo.systemUptime - began
                 if elapsed > 0.15 { NSLog("Converse slow transcript render: %.0f ms, %d messages, %d prepared images", elapsed * 1000, session.messages.count, imagePreparationCount) }
@@ -2713,6 +2721,7 @@ struct ScrollingConversation: NSViewRepresentable {
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
+            stage("prepare")
             let document = NSMutableAttributedString(string: "")
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
@@ -2825,6 +2834,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
+            stage("assemble-history")
             historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
@@ -2864,7 +2874,9 @@ struct ScrollingConversation: NSViewRepresentable {
                 text.setSelectedRange(NSRange(location: start, length: min(selection.length, document.length - start)))
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
+            stage("replace-storage")
             text.layoutManager?.ensureLayout(for: text.textContainer!)
+            stage("ensure-layout")
             text.fitDocumentHeight()
             if addedAttachment {
                 nativeScroll?.jumpToLatest()
@@ -2883,7 +2895,9 @@ struct ScrollingConversation: NSViewRepresentable {
             if let storage = text.textStorage {
                 text.hasImageLinks = (prefix > 0 && text.hasImageLinks) || ConversationTextView.containsImageLinks(storage, in: NSRange(location: prefix, length: max(0, min(text.inputStart, storage.length) - prefix)))
             }
+            stage("height-scroll")
             text.refreshDecorations(); text.refreshImageHover()
+            stage("decorations")
             rendering = false
         }
     }
@@ -4300,6 +4314,26 @@ if CommandLine.arguments.contains("--groups-self-test") {
     var failures = 0
     converseGroupSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
     exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--transcript-render-profile") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    for count in [100, 600, 1200] {
+        let session = Session(entry: Entry(name: "Synthetic render profile", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
+        session.messages = (0..<count).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Message \($0): " + String(repeating: "Retained history with **formatting** and https://example.com/a. ", count: 8)) }
+        let text = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let coordinator = ScrollingConversation.Coordinator(session)
+        text.delegate = coordinator
+        print("CASE \(count) initial")
+        coordinator.render(text)
+        for update in 1...3 {
+            session.messages[session.messages.count - 1].text += " Streamed suffix."
+            print("CASE \(count) suffix \(update)")
+            coordinator.render(text)
+        }
+    }
+    exit(0)
 }
 if CommandLine.arguments.contains("--conversation-layout-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
