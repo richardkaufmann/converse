@@ -2365,6 +2365,16 @@ public sealed partial class DeviceSyncService : IDisposable
         return record.CommandID;
     }
 
+    // Composer submission includes its latest keystroke, even when the UI's
+    // throttled draft patch has not fired. Independent command submissions
+    // retain their existing semantics and do not consume unrelated drafts.
+    public async Task<Guid?> SendRemoteComposerAsync(string globalId, string text, string[] hashes)
+    {
+        await SendRemoteDraftAsync(globalId, text);
+        return await SendRemoteCommandAsync(globalId,
+            new DeviceCommandPayload { Action = "submit", Text = text, BlobHashes = hashes });
+    }
+
     public async Task SendRemoteDraftAsync(string globalId, string text)
     {
         var parsed = DeviceGlobalID.Parse(globalId);

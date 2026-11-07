@@ -118,6 +118,8 @@ public sealed partial class ConversationPane : UserControl
 
     private int _draftSeq;
 
+    private Task _draftWrites = Task.CompletedTask;
+
     private DateTime _lastDraftFlush = DateTime.MinValue;
 
     private int _localCap = 200;
@@ -1561,13 +1563,19 @@ public sealed partial class ConversationPane : UserControl
             FlushDraft(selected, text);
             return;
         }
-        _ = Task.Run(async () =>
+        _ = FlushLaterAsync();
+        async Task FlushLaterAsync()
         {
             await Task.Delay(300);
-            if (seq != _draftSeq) return;
-            _lastDraftFlush = DateTime.UtcNow;
-            FlushDraft(selected, text);
-        });
+            // Validate and enqueue on the UI thread, together with Send.
+            // A background check followed by a write could race the clear.
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (seq != _draftSeq) return;
+                _lastDraftFlush = DateTime.UtcNow;
+                FlushDraft(selected, text);
+            });
+        }
     }
 
 
@@ -1582,12 +1590,25 @@ public sealed partial class ConversationPane : UserControl
         }
         else if (selected.GlobalID is { } globalId)
         {
-            _ = _host.Devices.SendRemoteDraftAsync(globalId, text);
+            _ = QueueDraftWrite(() => _host.Devices.SendRemoteDraftAsync(globalId, text));
         }
     }
 
 
-    // Sidebar rows are immutable snapshots. Refresh their metadata even
+    // All remote patches and composer submissions share an ordered queue.
+    // A newer keystroke queued while Send awaits the wire must follow it.
+    private Task QueueDraftWrite(Func<Task> write)
+    {
+        var previous = _draftWrites;
+        return _draftWrites = RunAsync();
+        async Task RunAsync()
+        {
+            try { await previous; } catch { /* a failed older patch must not block a retry */ }
+            await write();
+        }
+    }
+
+    // Sidebar rows update in place. Refresh pane metadata even
     // when the pane assignment is unchanged, without resetting its editor.
     internal void RefreshSessionMetadata(SidebarSession? session)
     {
@@ -2148,8 +2169,7 @@ public sealed partial class ConversationPane : UserControl
         {
             // Draft stays until home ack completes (outbox in core service).
             var hashes = _host.RemoteHashes.GetValueOrDefault(globalId)?.ToArray() ?? Array.Empty<string>();
-            await _host.Devices.SendRemoteCommandAsync(globalId,
-                new DeviceCommandPayload { Action = "submit", Text = text, BlobHashes = hashes });
+            await QueueDraftWrite(() => _host.Devices.SendRemoteComposerAsync(globalId, text, hashes));
         }
         _host.RequestRefresh();
         DraftBox.Focus(FocusState.Programmatic);

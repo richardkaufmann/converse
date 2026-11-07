@@ -6,21 +6,84 @@ using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using System.Text.Json.Nodes;
 using WinRT.Interop;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 
 namespace Converse.App;
 
 // Sidebar outline: one header per home (This PC, each paired computer),
 // sessions beneath their home, nothing else. Nearby undiscovered devices
 // live only in the Connect dialog, never inline with conversations.
-public abstract record SidebarItem(string Key);
+public abstract record SidebarItem(string Key) : INotifyPropertyChanged
+{
+    public event PropertyChangedEventHandler? PropertyChanged;
+    protected void Changed(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    public abstract void UpdateFrom(SidebarItem snapshot);
+}
 public sealed record SidebarHeader(string Key, string Title, string Status, bool Offline = false, bool CanCreate = false,
     string? DeviceID = null, string Details = "", bool CanRename = false) : SidebarItem(Key)
 {
+
+    public string Title { get; private set; } = Title;
+    public string Status { get; private set; } = Status;
+    public bool Offline { get; private set; } = Offline;
+    public bool CanCreate { get; private set; } = CanCreate;
+    public string? DeviceID { get; private set; } = DeviceID;
+    public string Details { get; private set; } = Details;
+    public bool CanRename { get; private set; } = CanRename;
+    public override void UpdateFrom(SidebarItem snapshot)
+    {
+        var next = (SidebarHeader)snapshot;
+        if (Title != next.Title) { Title = next.Title; Changed(nameof(Title)); }
+        if (Status != next.Status) { Status = next.Status; Changed(nameof(Status)); Changed(nameof(HasStatus)); }
+        if (Offline != next.Offline) { Offline = next.Offline; Changed(nameof(Offline)); Changed(nameof(Opacity)); Changed(nameof(Weight)); }
+        if (CanCreate != next.CanCreate) { CanCreate = next.CanCreate; Changed(nameof(CanCreate)); }
+        if (DeviceID != next.DeviceID) { DeviceID = next.DeviceID; Changed(nameof(DeviceID)); }
+        if (Details != next.Details) { Details = next.Details; Changed(nameof(Details)); }
+        if (CanRename != next.CanRename) { CanRename = next.CanRename; Changed(nameof(CanRename)); }
+    }
     public double Opacity => Offline ? 0.3 : 1;
     public bool HasStatus => Status.Length > 0;
     public Windows.UI.Text.FontWeight Weight => Offline ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.SemiBold;
 }
-public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false, string Engine = "", string Model = "", bool IsAgent = false) : SidebarItem(Key) { public bool CanEdit => Engine != "parking"; }
+public sealed record SidebarSession(string Key, string Title, string Subtitle, string? GlobalID, Guid? LocalSessionID, bool ShowPark, bool ShowClose, bool ShowPlace, bool ShowGreyClose = false, bool PActive = false, bool In1 = false, bool In2 = false, bool In3 = false, string Engine = "", string Model = "", bool IsAgent = false) : SidebarItem(Key)
+{
+    public string Title { get; private set; } = Title;
+    public string Subtitle { get; private set; } = Subtitle;
+    public string? GlobalID { get; private set; } = GlobalID;
+    public Guid? LocalSessionID { get; private set; } = LocalSessionID;
+    public bool ShowPark { get; private set; } = ShowPark;
+    public bool ShowClose { get; private set; } = ShowClose;
+    public bool ShowPlace { get; private set; } = ShowPlace;
+    public bool ShowGreyClose { get; private set; } = ShowGreyClose;
+    public bool PActive { get; private set; } = PActive;
+    public bool In1 { get; private set; } = In1;
+    public bool In2 { get; private set; } = In2;
+    public bool In3 { get; private set; } = In3;
+    public string Engine { get; private set; } = Engine;
+    public string Model { get; private set; } = Model;
+    public bool IsAgent { get; private set; } = IsAgent;
+    public override void UpdateFrom(SidebarItem snapshot)
+    {
+        var next = (SidebarSession)snapshot;
+        if (Title != next.Title) { Title = next.Title; Changed(nameof(Title)); }
+        if (Subtitle != next.Subtitle) { Subtitle = next.Subtitle; Changed(nameof(Subtitle)); }
+        if (GlobalID != next.GlobalID) { GlobalID = next.GlobalID; Changed(nameof(GlobalID)); }
+        if (LocalSessionID != next.LocalSessionID) { LocalSessionID = next.LocalSessionID; Changed(nameof(LocalSessionID)); }
+        if (ShowPark != next.ShowPark) { ShowPark = next.ShowPark; Changed(nameof(ShowPark)); }
+        if (ShowClose != next.ShowClose) { ShowClose = next.ShowClose; Changed(nameof(ShowClose)); }
+        if (ShowPlace != next.ShowPlace) { ShowPlace = next.ShowPlace; Changed(nameof(ShowPlace)); }
+        if (ShowGreyClose != next.ShowGreyClose) { ShowGreyClose = next.ShowGreyClose; Changed(nameof(ShowGreyClose)); }
+        if (PActive != next.PActive) { PActive = next.PActive; Changed(nameof(PActive)); }
+        if (In1 != next.In1) { In1 = next.In1; Changed(nameof(In1)); }
+        if (In2 != next.In2) { In2 = next.In2; Changed(nameof(In2)); }
+        if (In3 != next.In3) { In3 = next.In3; Changed(nameof(In3)); }
+        if (Engine != next.Engine) { Engine = next.Engine; Changed(nameof(Engine)); Changed(nameof(CanEdit)); }
+        if (Model != next.Model) { Model = next.Model; Changed(nameof(Model)); }
+        if (IsAgent != next.IsAgent) { IsAgent = next.IsAgent; Changed(nameof(IsAgent)); }
+    }
+    public bool CanEdit => Engine != "parking";
+}
 
 public sealed class SidebarTemplateSelector : DataTemplateSelector
 {
@@ -69,6 +132,7 @@ public sealed partial class MainWindow : Window
     private bool _suppressSelection;
 
     private string _sidebarSignature = "";
+    private readonly ObservableCollection<SidebarItem> _sidebarItems = new();
 
     private readonly Dictionary<string, RequestAnswerState> _answerStates = new();
 
@@ -121,6 +185,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Sidebar.ItemsSource = _sidebarItems;
         ResetDemoItem.Visibility = SetupPreview.Demo ? Visibility.Visible : Visibility.Collapsed;
         AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Converse.ico"));
         var folder = Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR") ?? Path.Combine(
@@ -630,13 +695,28 @@ public sealed partial class MainWindow : Window
         if (signature == _sidebarSignature) return;
         _sidebarSignature = signature;
         _suppressSelection = true;
-        Sidebar.ItemsSource = items;
+        // Preserve the collection, rows, containers, selection and scroll
+        // position when only a remote status/title changes.
+        for (var index = 0; index < items.Count; index++)
+        {
+            var next = items[index];
+            var existing = _sidebarItems.FirstOrDefault(row => row.Key == next.Key && row.GetType() == next.GetType());
+            if (existing is null) _sidebarItems.Insert(index, next);
+            else
+            {
+                var oldIndex = _sidebarItems.IndexOf(existing);
+                if (oldIndex != index) _sidebarItems.Move(oldIndex, index);
+                existing.UpdateFrom(next);
+            }
+        }
+        while (_sidebarItems.Count > items.Count) _sidebarItems.RemoveAt(_sidebarItems.Count - 1);
         // The focused pane's row stays highlighted; nothing is highlighted
         // when no pane is focused.
         var focusKey = _focusedPane >= 1 ? _placements.KeyIn(_focusedPane) : null;
-        Sidebar.SelectedItem = focusKey is not null
-            ? items.OfType<SidebarSession>().FirstOrDefault(i => i.Key == focusKey)
+        var selected = focusKey is not null
+            ? _sidebarItems.OfType<SidebarSession>().FirstOrDefault(i => i.Key == focusKey)
             : null;
+        if (!ReferenceEquals(Sidebar.SelectedItem, selected)) Sidebar.SelectedItem = selected;
         _suppressSelection = false;
     }
 
@@ -704,6 +784,41 @@ public sealed partial class MainWindow : Window
     }
 
 
+    private async Task RunSidebarTrafficCheckAsync()
+    {
+        var fixtures = Enumerable.Range(0, 45).Select(n => new ChatSession {
+            Title = "Sidebar traffic fixture " + n, Entry = _store.Entries.First(e => e.Engine == "codex")
+        }).ToList();
+        _store.Sessions.AddRange(fixtures);
+        _placements.Assign("local:" + fixtures[20].Id, 1); _focusedPane = 1;
+        Refresh(); Sidebar.UpdateLayout(); await Task.Delay(100);
+        Sidebar.ScrollIntoView(_sidebarItems.OfType<SidebarSession>().Single(r => r.LocalSessionID == fixtures[20].Id));
+        await Task.Delay(200); Sidebar.UpdateLayout();
+        T? Find<T>(DependencyObject parent) where T : DependencyObject {
+            if (parent is T match) return match;
+            for (var n = 0; n < VisualTreeHelper.GetChildrenCount(parent); n++)
+                if (Find<T>(VisualTreeHelper.GetChild(parent, n)) is { } found) return found;
+            return null;
+        }
+        var scroll = Find<ScrollViewer>(Sidebar) ?? throw new InvalidOperationException("No sidebar scroller");
+        var offset = scroll.VerticalOffset;
+        if (offset <= 0) throw new InvalidOperationException("Sidebar fixture did not scroll");
+        var source = Sidebar.ItemsSource;
+        var selected = Sidebar.SelectedItem;
+        var container = Sidebar.ContainerFromItem(selected);
+        if (container is null) throw new InvalidOperationException("Selected sidebar row is not realized");
+        for (var tick = 0; tick < 12; tick++)
+        {
+            foreach (var session in fixtures) { session.Busy = tick % 2 == 0; session.Status = "Streaming " + tick; }
+            Refresh(); Sidebar.UpdateLayout(); await Task.Delay(30);
+            if (!ReferenceEquals(source, Sidebar.ItemsSource) || !ReferenceEquals(selected, Sidebar.SelectedItem) ||
+                !ReferenceEquals(container, Sidebar.ContainerFromItem(selected)) || Math.Abs(scroll.VerticalOffset - offset) > 1)
+                throw new InvalidOperationException("Sidebar traffic replaced rows/selection or moved the scroll position");
+        }
+        if (selected is not SidebarSession row || !row.Subtitle.Contains("Streaming 11"))
+            throw new InvalidOperationException("Stable sidebar rows did not update their status");
+    }
+
     internal async Task RunPaneResetCheckAsync()
     {
         // Only called by the isolated temp-profile UI test entry point.
@@ -763,6 +878,7 @@ public sealed partial class MainWindow : Window
         Require(deviceHeader.Title == "QA desktop label · this device" && deviceHeader.CanRename && deviceHeader.Details.Contains(_devices.DeviceId)
             && deviceHeader.Details.Contains(originalDeviceName) && _devices.DeviceName == originalDeviceName, "Device display label or hover identity is wrong");
         Require(Title == "Converse " + VersionBuild && !Title.Contains("Development"), "Window title omits bundled release version/build");
+        await RunSidebarTrafficCheckAsync();
     }
 
     private void OnRemoteCreateMenu(object sender, RoutedEventArgs e)

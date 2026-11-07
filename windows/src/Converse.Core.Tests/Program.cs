@@ -358,6 +358,20 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Concurrent multi-threaded sends keep the encrypted link and display lease intact");
         var commandId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed from viewer" });
         Check(commandId is not null && await Until(() => homeSession.Title == "Renamed from viewer" && viewer.Unresolved(gid).Count == 0), "Loopback rename applies once on home and clears outbox");
+        // Reproduce typing a final character and immediately pressing Return:
+        // the home still has the previous throttled draft, but Send has all of it.
+        await viewer.SendRemoteDraftAsync(gid, "testing.  you there\n");
+        Check(await Until(() => homeSession.Draft == "testing.  you there\n"), "Composer fixture has the penultimate draft on home");
+        var sentText = "testing.  you there?\n";
+        var sent = await viewer.SendRemoteComposerAsync(gid, sentText, Array.Empty<string>());
+        Check(sent is not null && await Until(() => !homeSession.Busy &&
+            homeSession.Messages.Any(m => m.Role == "user" && m.Text == sentText)), "Composer submit reaches home");
+        Check(await Until(() => homeSession.Draft == "" && viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Draft == ""),
+            "Composer submit consumes the final draft on home and viewer");
+        Check(homeSession.Messages.Count(m => m.Role == "user" && m.Text == sentText) == 1,
+            "Composer submits exactly once");
+        await viewer.SendRemoteDraftAsync(gid, "new typing after send");
+        Check(await Until(() => homeSession.Draft == "new typing after send"), "New typing after submit is preserved");
         home.SetAcceptingWork(false);
         var drainRename = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "rename", Text = "Renamed during drain" });
         Check(drainRename is not null && await Until(() => homeSession.Title == "Renamed during drain" && viewer.Unresolved(gid).Count == 0), "Drain still applies non-work commands such as rename");
