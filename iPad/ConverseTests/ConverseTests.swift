@@ -1984,6 +1984,9 @@ extension ConverseTests {
         let row = ParkingLotRow(heading: false, text: "")
         var edited = row; edited.text = "12345678901"
         let host = UIHostingController(rootView: LotSaveGauge(saved: [row], projected: [edited], activity: 0, pending: true))
+        // This fixture renders only the six-point rail, not a whole screen.
+        // An iPhone's status/home safe areas can consume its 50-point window.
+        host.safeAreaRegions = []
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 200, height: 50)
         window.rootViewController = host; window.makeKeyAndVisible()
