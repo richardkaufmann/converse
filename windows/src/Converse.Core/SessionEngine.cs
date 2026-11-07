@@ -53,11 +53,18 @@ public sealed class ChatMessage
     public List<string> Images { get; set; } = new();
     public DateTime? CreatedAt { get; set; }
     public string? FinalReply { get; set; }
+    // Inject all parts, so a typed prompt merged with switchboard traffic
+    // stays visible. Presentation only; Text is what was sent.
+    public List<MessageComponent>? Components { get; set; }
 }
 
 public sealed class PendingPrompt
 {
     public List<Guid>? ComponentIDs { get; set; }
+    // Where each prompt combined by Inject all sits in Text, for the transcript.
+    public List<MessageComponent>? Components { get; set; }
+    // Typed in a local or remote composer; stays visible after Inject all.
+    public bool Typed { get; set; }
     public bool ClearDisplayBeforeReply { get; set; }
     public int AppControlDepth { get; set; }
     public bool Autonomous { get; set; }
@@ -437,7 +444,7 @@ public sealed class SessionStore
         if (text.Length == 0 && images.Count > 0) text = "Please examine the attached image.";
         if (session.Busy || session.Pending.Count > 0)
         {
-            session.Pending.Add(new PendingPrompt { Text = text, Images = images });
+            session.Pending.Add(new PendingPrompt { Text = text, Images = images, Typed = true });
             session.QueuePaused = false;
             if (!session.Busy) RunNext(session);
             Save();
@@ -469,7 +476,7 @@ public sealed class SessionStore
         session.Pending.RemoveAt(0);
         foreach (var item in session.SwitchboardObligations.Where(o => o.PromptID == next.Id || next.ComponentIDs?.Contains(o.PromptID) == true))
         { item.State = item.Kind == "request" ? "submitted" : "resolved"; item.FinishedAt = null; }
-        AppendUserMessage(session, next.Text, next.Images);
+        AppendUserMessage(session, next.Text, next.Images, next.Components);
         if (next.ClearDisplayBeforeReply) session.ClearedThroughMessageID = session.Messages.LastOrDefault()?.Id;
         _ = RunTurnAsync(session, next.Text, next.Images, authority);
     }
@@ -509,6 +516,7 @@ public sealed class SessionStore
                     Text = string.Join("\n\n", merge.Select(p => p.Text)),
                     Images = merge.SelectMany(p => p.Images).ToList(),
                     ComponentIDs = merge.SelectMany(p => (p.ComponentIDs ?? new()).Append(p.Id)).Distinct().ToList(),
+                    Components = MergedComponents(merge),
                     Autonomous = merge.Any(p => p.Autonomous || p.AgentRunReserved),
                     AgentRunReserved = merge.Any(p => p.AgentRunReserved),
                     Hop = merge.Max(p => p.Hop),
@@ -538,6 +546,23 @@ public sealed class SessionStore
         return null;
     }
 
+    // Each part keeps its own kind; an already merged part contributes its
+    // recorded parts, shifted to where its text lands in the new merge.
+    private static List<MessageComponent>? MergedComponents(IReadOnlyList<PendingPrompt> merge)
+    {
+        var result = new List<MessageComponent>();
+        var offset = 0;
+        foreach (var prompt in merge)
+        {
+            if (prompt.Components is { Count: > 1 } parts && parts[0].Offset == 0 && parts[^1].Offset + parts[^1].Length == prompt.Text.Length
+                && parts.Zip(parts.Skip(1)).All(pair => pair.Second.Offset == pair.First.Offset + pair.First.Length + SwitchboardPresentation.InjectSeparator.Length))
+                result.AddRange(parts.Select(part => new MessageComponent { Offset = offset + part.Offset, Length = part.Length, Kind = part.Kind }));
+            else result.Add(new MessageComponent { Offset = offset, Length = prompt.Text.Length, Kind = SwitchboardPresentation.ComponentKind(prompt.Text, prompt.Typed) });
+            offset += prompt.Text.Length + SwitchboardPresentation.InjectSeparator.Length;
+        }
+        return result.Count > 1 ? result : null;
+    }
+
     // Mac injectNothingQueued/injectItemGone parity: automatic dequeue can
     // win the race with an inject request. These results are quiet no-ops,
     // not failures: nothing is interrupted, sent again or noted.
@@ -561,11 +586,11 @@ public sealed class SessionStore
         return null;
     }
 
-    private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images)
+    private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images, List<MessageComponent>? components = null)
     {
         var first = !session.Messages.Any(m => m.Role == "user");
         session.Messages.Add(new ChatMessage
-        { Role = "user", Text = text, Images = new List<string>(images), CreatedAt = DateTime.UtcNow });
+        { Role = "user", Text = text, Images = new List<string>(images), CreatedAt = DateTime.UtcNow, Components = components });
         if (first && (session.Title == "New session" || session.Title == session.Entry.Name))
             session.Title = text.Length <= 45 ? text : text[..45];
     }

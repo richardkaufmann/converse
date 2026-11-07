@@ -100,7 +100,7 @@ public sealed partial class ConversationPane : UserControl
     // streaming tick only re-renders the final message block and appends
     // any new ones; anything else takes a full block swap (cheap visual
     // swap, not a document rebuild).
-    private List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)> _renderedLines = new();
+    private List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> _renderedLines = new();
 
     private string? _lastChangeKey;
 
@@ -178,18 +178,18 @@ public sealed partial class ConversationPane : UserControl
     // captions render immediately).
     private readonly HashSet<string> _imageFetching = new();
 
-    private (List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)> Lines, int Hidden) VisibleLines()
+    private (List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> Lines, int Hidden) VisibleLines()
     {
-        List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)>? lines = null;
+        List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)>? lines = null;
         if (_selected?.LocalSessionID is { } localId)
             lines = _host.Store.Sessions.FirstOrDefault(s => s.Id == localId)?.DisplayedMessages
                 .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList(), m.CreatedAt)).ToList();
+                .Select(m => (m.Role, m.Text, m.Images.Where(File.Exists).Take(8).ToList(), m.CreatedAt, m.Components)).ToList();
         else if (_selected?.GlobalID is { } globalId)
             lines = _host.Devices.RemoteTranscripts.GetValueOrDefault(globalId)?.Messages
                 .Where(m => (m.Role is "user" or "assistant" || m.Role == "notice" && !SwitchboardPresentation.IsQueueReceipt(m.Text) && SwitchboardPresentation.Summary(m.Text) is not null) && !string.IsNullOrEmpty(m.Text))
-                .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes), m.CreatedAt)).ToList();
-        if (lines is null) return (new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)>(), 0);
+                .Select(m => (m.Role, m.Text, RemoteImages(globalId, m.ImageHashes), m.CreatedAt, m.Components)).ToList();
+        if (lines is null) return (new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)>(), 0);
         var cap = _selected?.LocalSessionID is not null ? _localCap : lines.Count;
         var hidden = Math.Max(0, lines.Count - cap);
         if (hidden > 0) lines = lines.Skip(hidden).ToList();
@@ -268,7 +268,7 @@ public sealed partial class ConversationPane : UserControl
             _draftText = "";
             SetDraftBox();
             _lastChangeKey = null;
-            SyncLines(new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)>(), 0, caretToEnd: true);
+            SyncLines(new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)>(), 0, caretToEnd: true);
             RenderBanners();
             UpdateEarlier();
             UpdateHint();
@@ -748,11 +748,11 @@ public sealed partial class ConversationPane : UserControl
     // visual elements — no transcript document is ever mutated, which
     // retires by construction the SetText crash class, the seam/tracker
     // bookkeeping, and the backspace hole of the single-document editor.
-    private static bool SameLine((string Role, string Text, List<string> Images, DateTime? CreatedAt) a, (string Role, string Text, List<string> Images, DateTime? CreatedAt) b)
+    private static bool SameLine((string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) a, (string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) b)
         => a.Role == b.Role && a.Text == b.Text && a.CreatedAt == b.CreatedAt && a.Images.SequenceEqual(b.Images);
 
 
-    private static bool LinesEqual(List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)> a, List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)> b)
+    private static bool LinesEqual(List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> a, List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> b)
     {
         if (a.Count != b.Count) return false;
         for (var i = 0; i < a.Count; i++) if (!SameLine(a[i], b[i])) return false;
@@ -760,7 +760,7 @@ public sealed partial class ConversationPane : UserControl
     }
 
 
-    private void SyncLines(List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)> lines, int hiddenMessages, bool caretToEnd)
+    private void SyncLines(List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)> lines, int hiddenMessages, bool caretToEnd)
     {
         var key = (_selected?.Key ?? "none") + "|" + hiddenMessages;
         // Message numbers: every visible message is numbered in order,
@@ -854,7 +854,7 @@ public sealed partial class ConversationPane : UserControl
         }
     }
 
-    private Border BuildMessageBlock((string Role, string Text, List<string> Images, DateTime? CreatedAt) line, int number)
+    private Border BuildMessageBlock((string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) line, int number)
     {
         var isUser = line.Role == "user";
         var showNumbers = _host.Layout.ShowLineNumbers;
@@ -889,12 +889,18 @@ public sealed partial class ConversationPane : UserControl
         var blocks = isUser
             ? new List<MdBlock> { new MdText(flat, new List<MdRun>()) }
             : MarkdownBlocks.Parse(flat);
-        if (SwitchboardPresentation.Summary(flat, resolveName: SwitchboardName) is { } summary)
+        TextBlock TrafficRow(string summary, string detail)
         {
             var row = new TextBlock { Text = summary, FontSize = 16, MaxLines = 1, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = new SolidColorBrush(Microsoft.UI.Colors.DarkOrange) };
-            ToolTipService.SetToolTip(row, line.Text);
-            body.Children.Add(row);
+            ToolTipService.SetToolTip(row, detail);
+            return row;
         }
+        // Inject all can merge traffic with typed input: each part renders on its own.
+        if (isUser && SwitchboardPresentation.Segments(flat, flat == line.Text ? line.Components : null, SwitchboardName) is { } segments)
+            foreach (var segment in segments)
+                body.Children.Add(segment.Summary is { } part ? TrafficRow(part, segment.Text) : RenderMdBlock(new MdText(segment.Text.Trim('\n'), new List<MdRun>()), isUser));
+        else if (SwitchboardPresentation.Summary(flat, resolveName: SwitchboardName) is { } summary)
+            body.Children.Add(TrafficRow(summary, line.Text));
         else foreach (var block in blocks) body.Children.Add(RenderMdBlock(block, isUser));
         if (body.Children.Count == 0) body.Children.Add(new RichTextBlock { FontSize = 16 });
         // Inline response images (Mac message.images parity): the caption
@@ -1145,7 +1151,7 @@ public sealed partial class ConversationPane : UserControl
     // Right-click copy per message (Mac spec): Copy acts on this block's
     // selection, whole Prompt/Response copy below it, and no Cut/Paste
     // anywhere near history.
-    private void AttachBlockMenu(Border border, (string Role, string Text, List<string> Images, DateTime? CreatedAt) line)
+    private void AttachBlockMenu(Border border, (string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components) line)
     {
         var copySelection = new MenuFlyoutItem { Text = "Copy" };
         var menu = new MenuFlyout();
@@ -1629,7 +1635,7 @@ public sealed partial class ConversationPane : UserControl
         _draftText = "";
         _notice = null; _noticeUtc = null;
         // The identity check forces a sync even for an empty new session.
-        _renderedLines = new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt)>();
+        _renderedLines = new List<(string Role, string Text, List<string> Images, DateTime? CreatedAt, List<MessageComponent>? Components)>();
         _lastChangeKey = null;
         _ownScrolls = 0;
         _lastSentText = null;
@@ -1978,7 +1984,7 @@ public sealed partial class ConversationPane : UserControl
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var preview = new TextBlock
             {
-                Text = SwitchboardPresentation.Summary(text, queued: true) ?? text.Replace("\r", " ").Replace("\n", " "),
+                Text = SwitchboardPresentation.QueueSummary(text) ?? text.Replace("\r", " ").Replace("\n", " "),
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,

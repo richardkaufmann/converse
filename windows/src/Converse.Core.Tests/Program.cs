@@ -702,6 +702,34 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && viewer.Unresolved(gid).All(r => r.CommandID != merge)
             && homeRunner.Prompts.LastOrDefault() == "merge a\n\nmerge b" && !homeSession.Busy && homeSession.Pending.Count == 0),
             "Inject all with queued items still merges them into one turn");
+        // A queued tell merged with typed input (Mac 941BAB1E parity): the
+        // transcript records each part; text, prompt and durability are unchanged.
+        var tellText = $"[Converse message from ClaudeConverse · session peer/one · delivery {Guid.NewGuid()} · hop 2/100]\nDiagnosis\n[Reply to request {Guid.NewGuid()}]";
+        var queuedTell = new PendingPrompt { Text = tellText, Autonomous = true, Hop = 2 };
+        var queuedTyped = new PendingPrompt { Text = "OK, propose: make 148", Typed = true };
+        homeSession.QueuePaused = true;
+        homeSession.Pending.AddRange(new[] { queuedTell, queuedTyped });
+        var tellObligation = new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/one", SourceName = "ClaudeConverse", PromptID = queuedTell.Id };
+        homeSession.SwitchboardObligations.Add(tellObligation);
+        homeStore.Save();
+        var mixed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        var mergedText = tellText + "\n\nOK, propose: make 148";
+        ChatMessage? MergedUser() => homeSession.Messages.ToArray().LastOrDefault(m => m.Role == "user");
+        Check(mixed is not null && await Until(() => LastAck(mixed) is { Outcome: "completed" } && !homeSession.Busy && homeSession.Pending.Count == 0 && homeRunner.Prompts.LastOrDefault() == mergedText),
+            "Inject all of a tell and typed input sends the byte-identical merged prompt");
+        var mergedUser = MergedUser();
+        Check(mergedUser?.Text == mergedText && mergedUser.Components is [{ Offset: 0, Kind: "traffic" } tellPart, { Kind: "human" } typedPart]
+            && tellPart.Length == tellText.Length && typedPart.Offset == tellText.Length + 2 && typedPart.Length == "OK, propose: make 148".Length,
+            "The merged message records where the tell and the typed prompt sit");
+        Check(homeSession.SwitchboardObligations.Any(o => o.Id == tellObligation.Id && o.State == "submitted"), "The merged tell's request obligation is submitted exactly as before");
+        homeSession.SwitchboardObligations.RemoveAll(o => o.Id == tellObligation.Id);
+        var reloadedStore = new SessionStore(homeRoot, new FakeRunner());
+        var reloadedUser = reloadedStore.Sessions.FirstOrDefault(s => s.Id == homeSession.Id)?.Messages.LastOrDefault(m => m.Role == "user");
+        Check(reloadedUser?.Text == mergedText && reloadedUser.Components?.Select(c => (c.Offset, c.Length, c.Kind)).SequenceEqual(mergedUser!.Components!.Select(c => (c.Offset, c.Length, c.Kind))) == true,
+            "Merged components survive archive save and load");
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Messages.LastOrDefault(m => m.Role == "user") is { Components.Count: 2 } wire && wire.Text == mergedText
+            && SwitchboardPresentation.Segments(wire.Text, wire.Components) is [{ Summary: "Received reply from ClaudeConverse · Diagnosis" }, { Summary: null, Text: "OK, propose: make 148" }]),
+            "The remote transcript snapshot carries components and the viewer renders the typed part visibly");
         // Both sends start before either ack returns: the second must reuse
         // the outstanding command instead of sending a duplicate interrupt.
         // Earlier completed inject records may not be pruned yet; count only new ones.

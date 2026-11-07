@@ -26,6 +26,8 @@ struct PendingPrompt: Codable, Identifiable {
     var originGroupID: String? = nil
     var originHomeID: String? = nil
     var components: [PendingPrompt]? = nil
+    /// Typed in a local or remote composer; stays visible after Inject all.
+    var typed: Bool? = nil
     var originParticipants: [GroupMessageOrigin]? = nil
     var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
     var agentRunReserved: Bool? = nil
@@ -42,6 +44,10 @@ struct PendingPrompt: Codable, Identifiable {
     var images: [String]
     /// This prompt and, after Inject all, the prompts combined into it.
     var durabilityIDs: Set<UUID> { Set([id] + (components ?? []).map(\.id)) }
+    /// Where each combined prompt sits in the merged text, for the transcript.
+    var messageComponents: [MessageComponent]? {
+        TranscriptStyle.components(joining: (components ?? []).map { ($0.text, TranscriptStyle.componentKind($0.text, typed: $0.typed == true)) }, into: text)
+    }
 }
 // Applied after login-shell startup, consistently for turns, catalog queries and login.
 // Credentials stay in CLI stores; Converse only retains a label and directory.
@@ -553,7 +559,7 @@ struct PendingMessagesView: View {
             }
             ForEach(session.pending) { prompt in
                 HStack {
-                    Text(TranscriptStyle.trafficSummary(prompt.text, queued: true) ?? (prompt.text.isEmpty ? "Attached image" : prompt.text)).help(prompt.text).foregroundStyle(TranscriptStyle.isTraffic(prompt.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                    Text(TranscriptStyle.queueSummary(prompt.text, components: prompt.messageComponents) ?? (prompt.text.isEmpty ? "Attached image" : prompt.text)).help(prompt.text).foregroundStyle(TranscriptStyle.queueSummary(prompt.text, components: prompt.messageComponents) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
                     if session.pending.count == 1 {
                         Button(session.queuePaused ? "Resume queue" : "Pause queue") {

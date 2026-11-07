@@ -259,6 +259,9 @@ public sealed class DeviceWireMessage
     [JsonPropertyName("imageHashes")] public string[] ImageHashes { get; set; } = Array.Empty<string>();
     // Optional UTC Unix seconds shared with Swift; absent in old peers/history.
     [JsonPropertyName("createdAtUnixSeconds")] public double? CreatedAtUnixSeconds { get; set; }
+    // Inject all parts (UTF-16 ranges of Text), shared with Swift. Older
+    // peers omit and ignore it; viewers then use the conservative text split.
+    [JsonPropertyName("components")] public List<MessageComponent>? Components { get; set; }
     [JsonIgnore] public DateTime? CreatedAt
     {
         get => CreatedAtUnixSeconds is { } seconds && double.IsFinite(seconds)
@@ -267,6 +270,19 @@ public sealed class DeviceWireMessage
         set => CreatedAtUnixSeconds = value is { } date ? (date.ToUniversalTime() - DateTime.UnixEpoch).TotalSeconds : null;
     }
 
+}
+
+/// One part of a message that Inject all combined from several queued
+/// prompts (Swift MessageComponent parity): a UTF-16 range of the stored text
+/// and how it renders. Presentation only; the stored text stays authoritative.
+public sealed class MessageComponent
+{
+    public const string Traffic = "traffic", Human = "human", Plain = "text";
+    [JsonPropertyName("offset")] public int Offset { get; set; }
+    [JsonPropertyName("length")] public int Length { get; set; }
+    /// "traffic" may collapse to its own summary. "human" (typed in a
+    /// composer) and "text" (anything else) always stay visible.
+    [JsonPropertyName("kind")] public string Kind { get; set; } = Plain;
 }
 
 public sealed class DevicePendingDto

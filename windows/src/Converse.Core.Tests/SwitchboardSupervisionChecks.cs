@@ -187,6 +187,70 @@ static class SwitchboardSupervisionChecks
             check(two.Pending.Count == 2 && two.Pending[0] is { OriginHomeID: var first, Text: "mine\n\npeer\n\nlater" } && first == peer
                 && two.Pending[1] == fromOther,
                 "Inject all never merges prompts from different Group senders under one origin");
+
+            // Inject all merging traffic with typed input (Mac 941BAB1E parity).
+            var typing = Busy(); typing.Draft = "typed while busy"; store.Submit(typing);
+            check(typing.Pending.SingleOrDefault() is { Typed: true, Text: "typed while busy" }, "Composer input is marked typed in the queue");
+            var request = Guid.NewGuid();
+            string Envelope(string body, bool expected, Guid? replyTo) =>
+                $"[Converse message from ClaudeConverse · session abc · delivery {Guid.NewGuid()} · hop 2/100]\n{body}" + DeviceSyncService.ReplyInstruction(Guid.NewGuid(), expected, replyTo);
+            var reply = Envelope("Read-only diagnosis", false, request); var ask = Envelope("Which build?", true, null);
+            const string typed = "OK, propose: make 148\n\nSecond paragraph.";
+            const string replySummary = "Received reply from ClaudeConverse · Read-only diagnosis", askSummary = "Received ask from ClaudeConverse · Which build?";
+            var replyPrompt = new PendingPrompt { Text = reply, Autonomous = true, Hop = 2 };
+            var typedPrompt = new PendingPrompt { Text = typed, Typed = true };
+            var agentHuman = Busy(replyPrompt, typedPrompt);
+            store.InjectPending(agentHuman);
+            var merged = agentHuman.Pending.Single();
+            check(merged.Text == reply + "\n\n" + typed && merged.ComponentIDs!.Contains(replyPrompt.Id) && merged.ComponentIDs.Contains(typedPrompt.Id)
+                && merged.Components is [{ Offset: 0, Kind: "traffic" } a, { Kind: "human" } b] && a.Length == reply.Length && b.Offset == reply.Length + 2 && b.Length == typed.Length,
+                "Inject all records the traffic and typed parts without changing the merged text or durability IDs");
+            check(SwitchboardPresentation.Segments(merged.Text, merged.Components) is [{ Summary: replySummary } r, { Summary: null } h] && r.Text == reply && h.Text == typed,
+                "Agent then human: the reply collapses to its own summary and the typed prompt stays visible in full");
+            agentHuman.Pending.Add(new PendingPrompt { Text = ask, Autonomous = true, Hop = 1 });
+            store.InjectPending(agentHuman);
+            var remerged = agentHuman.Pending.Single();
+            check(remerged.Components?.Select(c => c.Kind).SequenceEqual(new[] { "traffic", "human", "traffic" }) == true
+                && SwitchboardPresentation.Segments(remerged.Text, remerged.Components)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, null, askSummary }) == true,
+                "Merging an already merged prompt keeps each recorded part: two summaries plus the visible typed text");
+            var humanAgent = Busy(new PendingPrompt { Text = typed, Typed = true }, new PendingPrompt { Text = reply, Hop = 2, Autonomous = true });
+            store.InjectPending(humanAgent);
+            check(SwitchboardPresentation.Segments(humanAgent.Pending[0].Text, humanAgent.Pending[0].Components) is [{ Summary: null } typedFirst, { Summary: replySummary }] && typedFirst.Text == typed,
+                "Human then agent: typed text first, then the reply's own summary");
+            var trafficOnly = Busy(new PendingPrompt { Text = reply, Hop = 2, Autonomous = true }, new PendingPrompt { Text = ask, Hop = 1, Autonomous = true });
+            store.InjectPending(trafficOnly);
+            check(SwitchboardPresentation.Segments(trafficOnly.Pending[0].Text, trafficOnly.Pending[0].Components)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, askSummary }) == true,
+                "Traffic-only merges still collapse, one summary per message");
+            var lookalike = Busy(new PendingPrompt { Text = "Switchboard: why did it fail?", Typed = true }, new PendingPrompt { Text = "and this", Typed = true });
+            store.InjectPending(lookalike);
+            check(SwitchboardPresentation.Segments(lookalike.Pending[0].Text, lookalike.Pending[0].Components) is [{ Summary: null, Text: "Switchboard: why did it fail?\n\nand this" }],
+                "Typed text that looks like a switchboard line never collapses once merged");
+            check(SwitchboardPresentation.Segments("plain one\n\nplain two", new List<MessageComponent> { new() { Offset = 0, Length = 9, Kind = "human" }, new() { Offset = 11, Length = 9, Kind = "text" } }) is null
+                && SwitchboardPresentation.Segments(reply, null) is null && SwitchboardPresentation.Segments(typed, null) is null,
+                "Unmerged traffic and plain messages, and merges with no traffic, render whole exactly as before");
+            var forged = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = merged.Text.Length + 5, Length = 3, Kind = "human" } };
+            var hiding = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = reply.Length + 2, Length = 4, Kind = "traffic" } };
+            check(SwitchboardPresentation.Segments(merged.Text, forged) is [{ Summary: replySummary }, { Summary: null }] && SwitchboardPresentation.Segments(merged.Text, hiding) is [{ Summary: replySummary }, { Summary: null } rest] && rest.Text == typed,
+                "Out-of-range ranges, or ranges leaving text uncovered, fall back to the conservative split instead of hiding text");
+            // Archived shape without metadata: reply envelope, separator, typed text.
+            check(SwitchboardPresentation.Segments(reply + "\n\n" + typed, null) is [{ Summary: replySummary }, { Summary: null } legacyTyped] && legacyTyped.Text == typed,
+                "Old merged messages split after the reply's delivery block and show the remainder unattributed and in full");
+            check(SwitchboardPresentation.Segments(ask + "\n\n" + typed, null) is [{ Summary: askSummary }, { Summary: null }]
+                && SwitchboardPresentation.Segments(reply + "\n\n" + ask + "\n\n" + typed, null)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, askSummary, null }) == true
+                && SwitchboardPresentation.Segments(Envelope("Both", true, request) + "\n\n" + typed, null)?.LastOrDefault() is { Summary: null, Text: typed },
+                "Old merges split after Reply expected blocks and after each of several envelopes");
+            check(SwitchboardPresentation.Segments(Envelope("Status\n\nsecond paragraph", false, null), null) is null,
+                "A single envelope, including multi-paragraph tells without a delivery block, still collapses as before");
+            var unsafeText = reply + "\ntrailing text without the separator";
+            check(SwitchboardPresentation.Segments(unsafeText, null) is [{ Summary: null } whole] && whole.Text == unsafeText, "Content after a delivery block that cannot be split safely shows the whole message expanded");
+            check(SwitchboardPresentation.QueueSummary(reply) == "Queued reply from ClaudeConverse · Read-only diagnosis" && SwitchboardPresentation.QueueSummary(reply + "\n\n" + typed) is null,
+                "Queue rows summarize whole traffic only and never hide merged typed input");
+            var wire = DeviceJson.Decode<DeviceWireMessage>(DeviceJson.Encode(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = merged.Text, Components = merged.Components }));
+            var olderPeer = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[]}"));
+            var swiftShape = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[],\"components\":[{\"offset\":0,\"length\":1,\"kind\":\"traffic\"}]}"));
+            check(wire.Components?.Select(c => (c.Offset, c.Length, c.Kind)).SequenceEqual(merged.Components!.Select(c => (c.Offset, c.Length, c.Kind))) == true && olderPeer.Components is null
+                && swiftShape.Components is [{ Offset: 0, Length: 1, Kind: "traffic" }] && !System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(new DeviceWireMessage { Text = "x" })).Contains("components"),
+                "The transcript DTO carries components in the Swift shape when present and omits them otherwise");
         }
         finally { try { Directory.Delete(root, true); } catch { } }
     }

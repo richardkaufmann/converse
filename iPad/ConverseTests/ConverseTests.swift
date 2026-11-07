@@ -520,6 +520,38 @@ final class ConverseTests: XCTestCase {
             window.isHidden = true
         }
     }
+    // Inject all merged a reply with typed input (941BAB1E): the typed part
+    // stays visible whether the home sent components or not.
+    func testMergedTrafficKeepsTypedPromptVisible() throws {
+        let reply = "[Converse message from ClaudeConverse · session abc · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+        let typed = "OK, propose: make 148 on Mac have a Debug pane."
+        let text = reply + "\n\n" + typed
+        let wireJSON = #"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","role":"user","text":"#
+            + String(data: try JSONEncoder().encode(text), encoding: .utf8)!
+            + #","imageHashes":[],"components":[{"offset":0,"length":"# + String((reply as NSString).length) + #","kind":"traffic"},{"offset":"#
+            + String((reply as NSString).length + 2) + #","length":"# + String((typed as NSString).length) + #","kind":"human"}]}"#
+        let recorded = try JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON.utf8))
+        XCTAssertEqual(recorded.components?.map(\.kind), ["traffic", "human"], "The snapshot DTO decodes components from the home")
+        let legacy = DeviceWireMessage(id: UUID(), role: "user", text: text)
+        for message in [recorded, legacy] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "Received reply from ClaudeConverse · Read-only diagnosis").location, 0, "The reply collapses to its own summary")
+            XCTAssertFalse(view.text.contains("[Reply to request"))
+            let typedColor = try XCTUnwrap(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor)
+            XCTAssertNotEqual(typedColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic)
+            XCTAssertNotNil(view.textStorage.attribute(.link, at: 0, effectiveRange: nil), "Tapping the summary still opens its full message")
+            XCTAssertEqual(coordinator.trafficDetails.values.sorted(), [reply], "Details hold only the switchboard part")
+            XCTAssertFalse(view.trafficBlocks.contains { NSIntersectionRange($0, typedRange).length > 0 }, "Typed text keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)

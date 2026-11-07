@@ -202,6 +202,38 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         store.injectPending(session)
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.last?.text == "answer: one\n\ntwo" && session.draft == "untouched", engine + " Inject all resumes paused queue as one ordered turn without changing draft")
+        let plainMerge = session.messages.last { $0.role == "user" }
+        check(plainMerge?.components?.map(\.kind) == ["text", "text"] && TranscriptStyle.segments(plainMerge?.text ?? "", components: plainMerge?.components) == nil,
+              engine + " Inject all of plain prompts records its parts and still renders whole as before")
+        // A queued tell merged with a prompt typed while busy (941BAB1E).
+        let tell = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nDiagnosis\n[Reply to request " + UUID().uuidString + "]"
+        session.draft = "slow"; store.submit(session)
+        pump { session.messages.last?.text == "partial" }
+        let tellPrompt = PendingPrompt(switchboardHop: 2, autonomous: true, text: tell, images: [])
+        session.pending.append(tellPrompt)
+        let tellObligation = SwitchboardObligation(id: UUID(), source: "peer/one", sourceName: "ClaudeConverse", promptID: tellPrompt.id)
+        session.switchboardObligations.append(tellObligation)
+        session.draft = "OK, propose: make 148"; store.submit(session)
+        let typedQueued = session.pending.last
+        check(typedQueued?.typed == true && session.pending.first?.typed == nil, engine + " composer input is marked typed in the queue; delivered traffic is not")
+        session.draft = "untouched"
+        store.injectPending(session)
+        let mergedPending = session.pending.first
+        check(mergedPending?.durabilityIDs == Set([mergedPending?.id, tellPrompt.id, typedQueued?.id].compactMap { $0 }) && mergedPending?.text == tell + "\n\nOK, propose: make 148",
+              engine + " Inject all keeps the merged text and every part's durability ID")
+        pump { !session.busy && session.pending.isEmpty }
+        let mergedUser = session.messages.last { $0.role == "user" }
+        let tellLength = (tell as NSString).length
+        check(mergedUser?.text == tell + "\n\nOK, propose: make 148" && session.messages.last?.text == "answer: " + tell + "\n\nOK, propose: make 148",
+              engine + " the stored message and the provider input are byte-identical to the plain merge")
+        check(mergedUser?.components == [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: tellLength + 2, length: 21, kind: "human")],
+              engine + " the merged message records where the tell and the typed prompt sit")
+        let reloaded = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(session.saved)))
+        check(reloaded.messages.last { $0.role == "user" }?.components == mergedUser?.components && reloaded.messages.last { $0.role == "user" }?.text == mergedUser?.text,
+              engine + " merged components survive archive save and load")
+        check(session.switchboardObligations.first { $0.id == tellObligation.id }.map { $0.state == "submitted" && $0.promptID == tellPrompt.id } == true,
+              engine + " the merged tell's request obligation is submitted exactly as before")
+        session.switchboardObligations.removeAll { $0.id == tellObligation.id }
         session.switchboardEnabled = true
         session.draft = "switchboard-output:```converse\n{\"command\":\"list-sessions\"}\n```"
         store.submit(session)
