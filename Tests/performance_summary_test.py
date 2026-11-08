@@ -34,6 +34,11 @@ class PerformanceSummaryTests(unittest.TestCase):
                 self.assertIn(operation + " 90.0 ms", text)
                 self.assertIn("no instrumented slow main-thread operation overlapped", text)
 
+    def test_rolling_capture_discloses_window_and_capacity_loss(self):
+        text = summary.summarize(self.capture(schemaVersion=3, historySeconds=60, droppedSamples=12))
+        self.assertIn("Rolling history: 60 seconds", text)
+        self.assertIn("samples dropped at capacity: 12", text)
+
     def test_unknown_schema_rejected(self):
         with self.assertRaises(ValueError):
             summary.summarize(self.capture(schemaVersion=999))

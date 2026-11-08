@@ -39,6 +39,8 @@ final class PerformanceCapture {
         let measuredAt: Date
         let version: String
         let build: String
+        let historySeconds: Double
+        let droppedSamples: Int
         let summaries: [String: Summary]
         let slowEvents: [Event]
         let droppedSlowEvents: Int
@@ -54,24 +56,42 @@ final class PerformanceCapture {
     private var generation = 0, ticks = 0, dropped = 0
     private var pendingProbeStart: Double?
     private var startedAt = Date()
-    private var summaries: [String: Summary] = [:]
     private var events: [Event] = []
+    private var eventHead = 0
+    private var historySeconds: TimeInterval = 60
+    private var droppedSamples: [(uptime: Double, count: Int)] = []
+    private var frozen: Snapshot?
+    private let uptime: () -> Double
+    init(uptime: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) { self.uptime = uptime }
+    static func clampedHistory(_ seconds: Double) -> Double { seconds.isFinite ? min(600, max(30, seconds)) : 60 }
+    static func recordingDefault(info: [String: Any], environment: [String: String]) -> Bool {
+        if let override = environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] { return override == "1" }
+        return info["ConverseDevelopmentBuild"] as? Bool == true || info["ConverseTestProvider"] != nil
+    }
+    var retainedSeconds: Double { lock.lock(); defer { lock.unlock() }; return historySeconds }
+    func setHistory(seconds: Double) {
+        lock.lock(); defer { lock.unlock() }
+        historySeconds = Self.clampedHistory(seconds)
+        if active { prune(now: uptime()); dirty = true }
+    }
     // IDs exist only in memory for matching receipts; never export them.
     private var roundTrips: [UUID: Span] = [:]
     private var droppedRoundTrips = 0
     private var destination: URL?
-    private let capacity = 512
+    private let capacity = 50_000
+    private let slowCapacity = 512
     var enabled: Bool { lock.lock(); defer { lock.unlock() }; return active }
     var file: URL? { lock.lock(); defer { lock.unlock() }; return destination }
 
-    func configure(folder: URL, enabled: Bool, sampleMainQueue: Bool = true) {
+    func configure(folder: URL, enabled: Bool, sampleMainQueue: Bool = true, historySeconds: Double = 60) {
         lock.lock()
         let finalSnapshot = active ? snapshot() : nil
         let previousDestination = destination
         generation += 1
         let token = generation
         active = enabled; pendingProbe = false; pendingProbeStart = nil; dirty = enabled
-        startedAt = Date(); summaries = [:]; events = []; dropped = 0
+        startedAt = Date(); events = []; eventHead = 0; dropped = 0; droppedSamples = []; frozen = nil
+        self.historySeconds = Self.clampedHistory(historySeconds)
         roundTrips = [:]; droppedRoundTrips = 0
         destination = folder.appendingPathComponent("Performance Diagnostics/performance.json")
         lock.unlock()
@@ -89,7 +109,7 @@ final class PerformanceCapture {
     }
     func begin() -> Span? {
         lock.lock(); defer { lock.unlock() }
-        return active ? Span(start: ProcessInfo.processInfo.systemUptime, generation: generation, mainThread: Thread.isMainThread) : nil
+        return active ? Span(start: uptime(), generation: generation, mainThread: Thread.isMainThread) : nil
     }
     func end(_ operation: Operation, _ span: Span?) {
         guard let span else { return }
@@ -99,7 +119,7 @@ final class PerformanceCapture {
         lock.lock(); defer { lock.unlock() }
         guard active, roundTrips[id] == nil else { return }
         guard roundTrips.count < 128 else { droppedRoundTrips += 1; dirty = true; return }
-        roundTrips[id] = Span(start: ProcessInfo.processInfo.systemUptime, generation: generation, mainThread: false)
+        roundTrips[id] = Span(start: uptime(), generation: generation, mainThread: false)
         dirty = true
     }
     func finishRoundTrip(_ id: UUID) {
@@ -129,7 +149,7 @@ final class PerformanceCapture {
                 userInfo: [NSLocalizedDescriptionKey: "No capture is running."])))
             return
         }
-        let final = snapshot()
+        let final = snapshot(); frozen = final
         active = false; generation += 1; dirty = false; pendingProbe = false
         roundTrips = [:]
         lock.unlock()
@@ -144,27 +164,30 @@ final class PerformanceCapture {
         record(operation, since: timestamp, generation: span.generation, mainThread: true)
     }
     private func record(_ operation: Operation, since start: Double, generation token: Int, mainThread: Bool) {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = uptime()
         record(operation, milliseconds: (now - start) * 1000, uptime: now, generation: token, mainThread: mainThread)
     }
     private func record(_ operation: Operation, milliseconds: Double, uptime: Double, generation token: Int, mainThread: Bool) {
         guard milliseconds.isFinite, milliseconds >= 0 else { return }
         lock.lock(); defer { lock.unlock() }
         guard active, token == generation else { return }
-        summaries[operation.rawValue, default: Summary()].add(milliseconds)
-        if milliseconds >= 50 {
-            if events.count == capacity { events.removeFirst(); dropped += 1 }
-            events.append(Event(operation: operation, uptime: uptime, milliseconds: milliseconds, mainThread: mainThread))
+        prune(now: uptime)
+        if events.count - eventHead >= capacity {
+            eventHead += 1
+            if let last = droppedSamples.indices.last, Int(droppedSamples[last].uptime) == Int(uptime) {
+                droppedSamples[last].count += 1
+            } else { droppedSamples.append((uptime, 1)) }
         }
+        events.append(Event(operation: operation, uptime: uptime, milliseconds: milliseconds, mainThread: mainThread))
         dirty = true
     }
     private func tick(generation token: Int) {
         lock.lock()
         let shouldProbe = active && generation == token && !pendingProbe
-        if shouldProbe { pendingProbe = true; pendingProbeStart = ProcessInfo.processInfo.systemUptime }
+        if shouldProbe { pendingProbe = true; pendingProbeStart = uptime() }
         lock.unlock()
         if shouldProbe {
-            let start = ProcessInfo.processInfo.systemUptime
+            let start = uptime()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.record(.mainQueueDelay, since: start, generation: token, mainThread: true)
@@ -176,18 +199,32 @@ final class PerformanceCapture {
         ticks += 1
         if ticks % 20 == 0 { writeSnapshot() }
     }
+    // Amortized deque pruning; recording never shifts the whole buffer per event.
+    private func prune(now: Double) {
+        let cutoff = now - historySeconds
+        while eventHead < events.count && events[eventHead].uptime < cutoff { eventHead += 1 }
+        if eventHead > 2048 && eventHead * 2 >= events.count {
+            events.removeFirst(eventHead); eventHead = 0
+        }
+        droppedSamples.removeAll { $0.uptime < cutoff }
+        roundTrips = roundTrips.filter { $0.value.start >= cutoff }
+    }
     private func snapshot() -> Snapshot {
-        Snapshot(schemaVersion: 2, startedAt: startedAt, measuredAt: Date(),
+        if !active, let frozen { return frozen }
+        let now = uptime()
+        prune(now: now)
+        return Snapshot(schemaVersion: 3, startedAt: max(startedAt, Date().addingTimeInterval(-historySeconds)), measuredAt: Date(),
                  version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
                  build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-                 summaries: summaries, slowEvents: events, droppedSlowEvents: dropped,
+                 historySeconds: historySeconds, droppedSamples: droppedSamples.reduce(0) { $0 + $1.count },
+                 summaries: [:], slowEvents: Array(events.dropFirst(eventHead)), droppedSlowEvents: 0,
                  pendingRoundTrips: roundTrips.count, droppedRoundTrips: droppedRoundTrips,
-                 unfinishedMainQueueDelayMilliseconds: pendingProbeStart.map { max(0, (ProcessInfo.processInfo.systemUptime - $0) * 1000) })
+                 unfinishedMainQueueDelayMilliseconds: pendingProbeStart.map { max(0, (now - $0) * 1000) })
     }
     /// Runs on the diagnostic queue. Never makes the UI wait on disk I/O.
     private func writeSnapshot() {
         lock.lock()
-        guard active, dirty, let destination else { lock.unlock(); return }
+        guard active, let destination else { lock.unlock(); return }
         let value = snapshot(); dirty = false
         lock.unlock()
         write(value, to: destination)
@@ -195,7 +232,19 @@ final class PerformanceCapture {
     private func write(_ value: Snapshot, to destination: URL) {
         try? writeChecked(value, to: destination)
     }
-    private func writeChecked(_ value: Snapshot, to destination: URL) throws {
+    private func writeChecked(_ raw: Snapshot, to destination: URL) throws {
+        // Summarize on the diagnostics worker, outside the recording lock.
+        var summaries: [String: Summary] = [:]
+        var slow: [Event] = []
+        for event in raw.slowEvents {
+            summaries[event.operation.rawValue, default: Summary()].add(event.milliseconds)
+            if event.milliseconds >= 50 { slow.append(event) }
+        }
+        let value = Snapshot(schemaVersion: raw.schemaVersion, startedAt: raw.startedAt, measuredAt: raw.measuredAt,
+            version: raw.version, build: raw.build, historySeconds: raw.historySeconds, droppedSamples: raw.droppedSamples,
+            summaries: summaries, slowEvents: Array(slow.suffix(slowCapacity)), droppedSlowEvents: max(0, slow.count - slowCapacity),
+            pendingRoundTrips: raw.pendingRoundTrips, droppedRoundTrips: raw.droppedRoundTrips,
+            unfinishedMainQueueDelayMilliseconds: raw.unfinishedMainQueueDelayMilliseconds)
         let parent = destination.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
@@ -251,6 +300,43 @@ func performanceCaptureSelfTests(_ check: (Bool, String) -> Void) {
         check(restarted.pendingRoundTrips == 0 && restarted.summaries["lotRoundTrip"] == nil,
               "A receipt from an earlier capture cannot contaminate the next capture")
     } catch { check(false, "Performance capture fixture: " + error.localizedDescription) }
+    var clock = 1000.0
+    let rolling = PerformanceCapture(uptime: { clock })
+    rolling.configure(folder: root, enabled: true, sampleMainQueue: false, historySeconds: 60)
+    rolling.recordForTesting(.keyDelivery, milliseconds: 200)
+    clock += 59
+    rolling.recordForTesting(.keyDelivery, milliseconds: 3)
+    clock += 2
+    rolling.flushForTesting()
+    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+    func readRolling() -> PerformanceCapture.Snapshot? {
+        (try? Data(contentsOf: rolling.file!)).flatMap { try? decoder.decode(PerformanceCapture.Snapshot.self, from: $0) }
+    }
+    check(readRolling()?.summaries["keyDelivery"]?.count == 1 && readRolling()?.summaries["keyDelivery"]?.maximumMilliseconds == 3 && readRolling()?.slowEvents.isEmpty == true,
+          "Rolling history expires old slow events and their summary maxima while retaining newer fast samples")
+    rolling.setHistory(seconds: 30)
+    clock += 31; rolling.flushForTesting()
+    check(readRolling()?.summaries.isEmpty == true && readRolling()?.historySeconds == 30,
+          "Shrinking the window and idle time expire summary samples")
+    rolling.setHistory(seconds: 600)
+    rolling.recordForTesting(.keyHandling, milliseconds: 71)
+    let done = DispatchSemaphore(value: 0)
+    rolling.finish { _ in done.signal() }
+    check(done.wait(timeout: .now() + 3) == .success, "Pause writes its frozen buffer")
+    let paused = try? Data(contentsOf: rolling.file!)
+    clock += 1000; rolling.recordForTesting(.keyHandling, milliseconds: 90); rolling.flushForTesting()
+    check(paused != nil && paused == (try? Data(contentsOf: rolling.file!)), "Paused buffer remains byte-identical after time advances and new events arrive")
+    check(PerformanceCapture.clampedHistory(1) == 30 && PerformanceCapture.clampedHistory(900) == 600 && PerformanceCapture.clampedHistory(.nan) == 60,
+          "History duration clamps to 30–600 seconds with a 60-second default")
+    check(!PerformanceCapture.recordingDefault(info: [:], environment: [:]) &&
+          PerformanceCapture.recordingDefault(info: ["ConverseTestProvider": "Codex"], environment: [:]) &&
+          !PerformanceCapture.recordingDefault(info: ["ConverseTestProvider": "Codex"], environment: ["CONVERSE_PERFORMANCE_DIAGNOSTICS": "0"]),
+          "Public builds default off, TEST builds default on, and explicit environment off wins")
+    rolling.configure(folder: root, enabled: true, sampleMainQueue: false)
+    for _ in 0..<50_010 { rolling.recordForTesting(.textInsertion, milliseconds: 1) }
+    rolling.flushForTesting()
+    check(readRolling()?.summaries["textInsertion"]?.count == 50_000 && readRolling()?.droppedSamples == 10,
+          "Exceptional event floods remain memory-bounded and disclose incomplete summaries")
     // Exercise the real scheduler while deliberately withholding the main run loop.
     let timed = PerformanceCapture()
     let run = PerformanceCaptureRun(capture: timed)

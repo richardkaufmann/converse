@@ -5,7 +5,7 @@ import json
 
 
 def summarize(capture):
-    if capture.get("schemaVersion") not in (1, 2):
+    if capture.get("schemaVersion") not in (1, 2, 3):
         raise ValueError("Unsupported performance capture schema")
     lines = [f"Converse {capture.get('version')} ({capture.get('build')})",
              f"Capture: {capture.get('startedAt')} to {capture.get('measuredAt')}",
@@ -16,6 +16,8 @@ def summarize(capture):
         mean = value["totalMilliseconds"] / count if count else 0
         slow = sum(value["buckets"][3:])
         lines.append(f"{name:25} {count:6} {mean:10.2f} {value['maximumMilliseconds']:10.2f} {slow:9}")
+    if "historySeconds" in capture:
+        lines.append(f"\nRolling history: {capture['historySeconds']:g} seconds; samples dropped at capacity: {capture.get('droppedSamples', 0)}.")
     unfinished = capture.get("unfinishedMainQueueDelayMilliseconds")
     if unfinished is not None:
         lines.append(f"\nMain-queue probe still blocked at capture end: at least {unfinished:.1f} ms; excluded from completed-delay statistics.")
