@@ -1418,12 +1418,74 @@ MdnsChecks.RunGroupDevices(Check);
         viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");
+        // A connection arriving while the heartbeat is sending must not end the sweep.
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => home.DisplayHolder(homeSession.Id)?.Device == viewer.DeviceId), "Heartbeat fixture holds a display lease");
+        var homePeers = (Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(home)!;
+        var arriving = new Peer { Id = Guid.NewGuid(), Client = new System.Net.Sockets.TcpClient(), IsInitiator = false };
+        var arrivedMidSweep = false;
+        void ArriveMidSweep(DeviceEnvelope envelope)
+        {
+            if (arrivedMidSweep || envelope.Kind is not (DeviceKind.LeaseExpired or DeviceKind.LeaseStolen)) return;
+            arrivedMidSweep = true; homePeers[arriving.Id] = arriving;
+        }
+        home.EnvelopeSentForTest += ArriveMidSweep;
+        home.LeasesForTest.ExpireForTest(homeSession.Id);
+        Exception? sweepFailure = null;
+        try { await home.HeartbeatPassAsync(1); }
+        catch (Exception e) { sweepFailure = e; }
+        home.EnvelopeSentForTest -= ArriveMidSweep;
+        homePeers.Remove(arriving.Id);
+        Check(arrivedMidSweep && sweepFailure is null, "A connection added during the lease sweep cannot end the heartbeat pass" + (sweepFailure is null ? "" : ": " + sweepFailure.Message));
+        // One failed pass must not stop the loop for the life of the process.
+        var beatRoot = Path.Combine(homeRoot, "heartbeat");
+        Directory.CreateDirectory(beatRoot);
+        using var beat = new DeviceSyncService(beatRoot, new SessionStore(beatRoot, new FakeRunner()), "BeatPC");
+        var beatPasses = 0;
+        beat.HeartbeatInterval = TimeSpan.FromMilliseconds(10);
+        beat.HeartbeatPassStartingForTest = () => Interlocked.Increment(ref beatPasses) == 1 ? throw new InvalidOperationException("injected heartbeat failure") : Task.CompletedTask;
+        await beat.StartAsync(0);
+        Check(await Until(() => Volatile.Read(ref beatPasses) >= 3), "The heartbeat loop survives an exception in one pass");
     }
     finally
     {
         Cleanup(homeRoot);
         Cleanup(viewerRoot);
     }
+}
+
+// Lease, outbox and draft state is shared by connection loops and the heartbeat.
+{
+    var root = Directory.CreateTempSubdirectory("converse-sync-state-").FullName;
+    try
+    {
+        var leases = new DeviceLeaseManager(ttlSeconds: 0);
+        var outbox = new DeviceOutboxStore(root);
+        var drafts = new DeviceDraftTracker();
+        var collisions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var tasks = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            try
+            {
+                for (var i = 0; i < 200; i++)
+                {
+                    var id = Guid.NewGuid();
+                    leases.Acquire(id, "device"); leases.Holder(id); leases.SweepExpired();
+                    outbox.Add(new DeviceOutboxRecord { CommandID = id, SessionID = "s" + worker });
+                    outbox.MarkUncertain("s" + worker);
+                    _ = outbox.Records.Count(record => record.Outcome == "pending");
+                    outbox.Resolve(id, "completed", null);
+                    drafts.Bump("shared", "text " + i); drafts.AdoptIfNewer("shared", (ulong)i, "older");
+                }
+            }
+            catch (Exception e) { collisions.Enqueue(e); }
+        })).ToArray();
+        Task.WaitAll(tasks);
+        Check(collisions.IsEmpty, "Concurrent lease, outbox and draft updates never collide" + (collisions.TryPeek(out var collision) ? ": " + collision.Message : ""));
+        Check(outbox.Records.Count == 0 && new DeviceOutboxStore(root).Records.Count == 0 && drafts.Version("shared") >= 1600,
+            "Concurrent outbox and draft updates lose nothing");
+    }
+    finally { Cleanup(root); }
 }
 
 // AtomicJson: concurrent saves of one store cannot collide on Windows.
@@ -2575,12 +2637,20 @@ await CheckGroupLeave();
     Check(ResponseImages.ParseWebRefs("![w](https://example.com/w_(1).png)").Single().Url == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses");
     var unbalanced = ResponseImages.ParseFileRefs("![x](/tmp/a(b.png) and more)");
     Check(unbalanced.Count == 1 && unbalanced[0].Path == "/tmp/a(b.png" && unbalanced[0].Length == "![x](/tmp/a(b.png)".Length, "An unbalanced parenthesis keeps the original first-closer match");
-    var overlong = "![x](/tmp/a(" + new string('b', 5000) + ").png)";
-    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 5000), "A target past the bound is not extended");
+    var overlong = "![x](/tmp/a(" + new string('b', 4080) + ")" + new string('c', 20) + ".png)";
+    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 4080), "A target past the bound is not extended");
+    Check(ResponseImages.ParseFileRefs("![x](/tmp/" + new string('a', 5000) + ".png)").Count == 0, "A target beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![" + new string('x', 513) + "](/tmp/a.png)").Count == 0, "A caption beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![a[b](/tmp/a.png)").Count == 0, "A bracket inside a caption means it is not an image");
     var hostile = string.Concat(Enumerable.Repeat("![x](/tmp/a()", 20000));
     var hostileClock = System.Diagnostics.Stopwatch.StartNew();
     var hostileRefs = ResponseImages.ParseFileRefs(hostile);
     Check(hostileRefs.Count == ResponseImages.MaxImages && hostileClock.ElapsedMilliseconds < 2000, "Repeated open parentheses stay bounded");
+    // The limit is generous: unbounded scans take minutes on this input, and a loaded machine must not fail it.
+    var unclosed = string.Concat(Enumerable.Repeat("![x](a", 200_000));
+    var unclosedClock = System.Diagnostics.Stopwatch.StartNew();
+    Check(ResponseImages.ParseFileRefs(unclosed).Count == 0 && ResponseImages.ParseWebRefs(unclosed).Count == 0 && unclosedClock.Elapsed < TimeSpan.FromSeconds(30),
+        "Repeated unclosed image openers on one line stay bounded");
     var web = ResponseImages.ParseFileRefs("![w](https://example.com/a.png)");
     Check(web.Count == 0 && ResponseImages.ParseWebRefs("![w](https://example.com/a.png)").Count == 1,
         "HTTPS refs route to the web parser, not the file parser");

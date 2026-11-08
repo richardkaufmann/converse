@@ -445,7 +445,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private readonly DeviceLeaseManager _leases;
     private readonly DeviceDraftTracker _drafts = new();
     private readonly Dictionary<Guid, Peer> _peers = new();
-    private readonly Dictionary<string, string> _blobPaths = new();
+    private readonly ConcurrentDictionary<string, string> _blobPaths = new();
     private readonly Dictionary<string, List<byte>> _staged = new();
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, TaskCompletionSource<string?>> _blobDownloads = new();
@@ -822,37 +822,49 @@ public sealed partial class DeviceSyncService : IDisposable
         }
     }
 
+    internal TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
+    internal Func<Task>? HeartbeatPassStartingForTest { get; set; }
+
     private async Task HeartbeatLoopAsync(CancellationToken token)
     {
         var ticks = 0;
         while (!token.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(5), token).ContinueWith(_ => { });
+            await Task.Delay(HeartbeatInterval, token).ContinueWith(_ => { });
             if (token.IsCancellationRequested) break;
             ticks++;
-            if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
-            await ReportEngagementAsync();
-            if (ticks % 6 == 0) await ReconnectFabricAsync();
-            foreach (var expired in _leases.SweepExpired())
+            // Nothing observes this loop: an escaped exception would end lease
+            // sweeps, heartbeats and fabric reconnects until restart.
+            try { await HeartbeatPassAsync(ticks); }
+            catch (Exception e) { if (!token.IsCancellationRequested) System.Diagnostics.Trace.WriteLine("Device heartbeat pass failed: " + e.Message); }
+        }
+    }
+
+    internal async Task HeartbeatPassAsync(int ticks)
+    {
+        if (HeartbeatPassStartingForTest is { } starting) await starting();
+        if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
+        await ReportEngagementAsync();
+        if (ticks % 6 == 0) await ReconnectFabricAsync();
+        foreach (var expired in _leases.SweepExpired())
+        {
+            foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == expired.Device).ToList())
             {
-                foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == expired.Device))
+                peer.LeasedSessions.Remove(expired.Session);
+                await SendEnvelopeAsync(peer, new DeviceEnvelope
                 {
-                    peer.LeasedSessions.Remove(expired.Session);
-                    await SendEnvelopeAsync(peer, new DeviceEnvelope
-                    {
-                        Kind = peer.Hello?.Capabilities.Contains("lease-resume-v1") == true ? DeviceKind.LeaseExpired : DeviceKind.LeaseStolen, Boot = _boot,
-                        SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(), Epoch = expired.Epoch,
-                    });
-                }
+                    Kind = peer.Hello?.Capabilities.Contains("lease-resume-v1") == true ? DeviceKind.LeaseExpired : DeviceKind.LeaseStolen, Boot = _boot,
+                    SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(), Epoch = expired.Epoch,
+                });
             }
-            await RestoreAvailableDisplaysAsync();
-            foreach (var (globalId, epoch) in RemoteLeases.ToList())
-            {
-                var parsed = DeviceGlobalID.Parse(globalId);
-                var peer = parsed is null ? null : PeerForHome(parsed.Value.Home);
-                if (peer is not null)
-                    await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseHeartbeat, SessionID = globalId, Epoch = epoch });
-            }
+        }
+        await RestoreAvailableDisplaysAsync();
+        foreach (var (globalId, epoch) in RemoteLeases.ToList())
+        {
+            var parsed = DeviceGlobalID.Parse(globalId);
+            var peer = parsed is null ? null : PeerForHome(parsed.Value.Home);
+            if (peer is not null)
+                await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseHeartbeat, SessionID = globalId, Epoch = epoch });
         }
     }
 
@@ -1420,6 +1432,7 @@ public sealed partial class DeviceSyncService : IDisposable
     internal event Action<Guid, DeviceAckPayload>? AckReceivedForTest;
     internal event Action<DeviceEnvelope>? EnvelopeSentForTest;
     internal DeviceOutboxStore OutboxStoreForTest => _outbox;
+    internal DeviceLeaseManager LeasesForTest => _leases;
     internal DeviceCommandStore CommandStoreForTest => _commands;
     // Sends hand-built bytes under an existing command ID (binding interop).
     internal async Task<bool> SendRawCommandForTestAsync(string globalId, Guid commandId, byte[] payload)
@@ -1774,8 +1787,7 @@ public sealed partial class DeviceSyncService : IDisposable
         var end = Math.Clamp(beforeOffset ?? total, 0, total);
         var start = Math.Max(0, end - 200);
         var draftKey = session.Id.ToString("D");
-        if (_drafts.Text(draftKey) is null) _drafts.Adopt(draftKey, Math.Max(1UL, _drafts.Version(draftKey)), session.Draft);
-        else if (_drafts.Text(draftKey) != session.Draft) _drafts.Bump(draftKey, session.Draft);
+        _drafts.Reconcile(draftKey, session.Draft);
         var payload = new DeviceTranscriptPayload
         {
             GlobalID = new DeviceGlobalID(DeviceId, session.Id).ToString(),
@@ -2099,7 +2111,7 @@ public sealed partial class DeviceSyncService : IDisposable
                     // local pane parks in the UI refresh below via
                     // DisplayHolder; remote holders get lease.stolen here.
                     if (result.Displaced is { } displaced && displaced != peerHome)
-                        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == displaced))
+                        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == displaced).ToList())
                         {
                             old.LeasedSessions.Remove(leased.Id);
                             await SendEnvelopeAsync(old, new DeviceEnvelope
@@ -2166,9 +2178,10 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (DeviceGlobalID.Parse(transcript.GlobalID)?.Home != peerHome) break;
                 if (transcript.Epoch is null || RemoteLeases.GetValueOrDefault(transcript.GlobalID) != transcript.Epoch) break;
                 if (RemoteTranscripts.TryGetValue(transcript.GlobalID, out var existing) && transcript.HomeSeq <= existing.HomeSeq) break;
+                // Adopt first: typing that follows this snapshot must not reuse its version.
+                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteTranscripts[transcript.GlobalID] = existing is not null && transcript.Prepend
                     ? MergePrepend(existing, transcript) : transcript;
-                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteOffline.Remove(transcript.GlobalID);
                 Changed?.Invoke();
                 break;

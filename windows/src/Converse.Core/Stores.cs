@@ -8,6 +8,8 @@ public sealed class DeviceLeaseManager
     private readonly Func<DateTimeOffset> _now;
     private readonly TimeSpan _ttl;
     private readonly Func<Dictionary<Guid, ulong>, bool>? _persistEpochs;
+    // Connection loops and the heartbeat sweep run concurrently.
+    private readonly object _gate = new();
     private readonly Dictionary<Guid, (string Device, ulong Epoch, DateTimeOffset ExpiresAt)> _leases = new();
     private Dictionary<Guid, ulong> _epochs;
     private readonly ulong _initialEpoch;
@@ -24,63 +26,89 @@ public sealed class DeviceLeaseManager
 
     public (bool Granted, ulong Epoch, string? Displaced) Acquire(Guid session, string device)
     {
-        string? displaced = _leases.TryGetValue(session, out var old) && old.Device != device ? old.Device : null;
-        var current = _epochs.TryGetValue(session, out var saved) ? saved : _initialEpoch;
-        if (current == ulong.MaxValue) return (false, current, null);
-        var epoch = current + 1;
-        var candidate = new Dictionary<Guid, ulong>(_epochs) { [session] = epoch };
-        // Fail closed: never grant an epoch that cannot be persisted.
-        if (_persistEpochs is not null && !_persistEpochs(candidate))
-            return (false, _epochs.GetValueOrDefault(session), null);
-        _epochs = candidate;
-        _leases[session] = (device, epoch, _now() + _ttl);
-        return (true, epoch, displaced);
+        lock (_gate)
+        {
+            string? displaced = _leases.TryGetValue(session, out var old) && old.Device != device ? old.Device : null;
+            var current = _epochs.TryGetValue(session, out var saved) ? saved : _initialEpoch;
+            if (current == ulong.MaxValue) return (false, current, null);
+            var epoch = current + 1;
+            var candidate = new Dictionary<Guid, ulong>(_epochs) { [session] = epoch };
+            // Fail closed: never grant an epoch that cannot be persisted.
+            if (_persistEpochs is not null && !_persistEpochs(candidate))
+                return (false, _epochs.GetValueOrDefault(session), null);
+            _epochs = candidate;
+            _leases[session] = (device, epoch, _now() + _ttl);
+            return (true, epoch, displaced);
+        }
     }
 
     public (bool Granted, ulong Epoch, string? Displaced) Resume(Guid session, string device, ulong expectedEpoch)
     {
-        if (!_epochs.TryGetValue(session, out var current) || current != expectedEpoch ||
-            (Holder(session) is { } holder && holder.Device != device)) return (false, _epochs.GetValueOrDefault(session), null);
-        return Acquire(session, device);
+        lock (_gate)
+        {
+            if (!_epochs.TryGetValue(session, out var current) || current != expectedEpoch ||
+                (Holder(session) is { } holder && holder.Device != device)) return (false, _epochs.GetValueOrDefault(session), null);
+            return Acquire(session, device);
+        }
     }
 
     public bool Validate(Guid session, string device, ulong epoch)
     {
-        if (!_leases.TryGetValue(session, out var lease)) return false;
-        if (lease.ExpiresAt <= _now()) { _leases.Remove(session); return false; }
-        return lease.Device == device && lease.Epoch == epoch;
+        lock (_gate)
+        {
+            if (!_leases.TryGetValue(session, out var lease)) return false;
+            if (lease.ExpiresAt <= _now()) { _leases.Remove(session); return false; }
+            return lease.Device == device && lease.Epoch == epoch;
+        }
     }
 
     public bool Heartbeat(Guid session, string device, ulong epoch)
     {
-        if (!Validate(session, device, epoch)) return false;
-        _leases[session] = (device, epoch, _now() + _ttl);
-        return true;
+        lock (_gate)
+        {
+            if (!Validate(session, device, epoch)) return false;
+            _leases[session] = (device, epoch, _now() + _ttl);
+            return true;
+        }
     }
 
     public void Release(Guid session, string device, ulong epoch)
     {
-        if (_leases.TryGetValue(session, out var lease) && lease.Device == device && lease.Epoch == epoch)
-            _leases.Remove(session);
+        lock (_gate)
+            if (_leases.TryGetValue(session, out var lease) && lease.Device == device && lease.Epoch == epoch)
+                _leases.Remove(session);
     }
 
     public void ForceRelease(Guid session, string device)
     {
-        if (_leases.TryGetValue(session, out var lease) && lease.Device == device) _leases.Remove(session);
+        lock (_gate)
+            if (_leases.TryGetValue(session, out var lease) && lease.Device == device) _leases.Remove(session);
     }
 
     public (string Device, ulong Epoch)? Holder(Guid session)
     {
-        if (!_leases.TryGetValue(session, out var lease) || lease.ExpiresAt <= _now()) return null;
-        return (lease.Device, lease.Epoch);
+        lock (_gate)
+        {
+            if (!_leases.TryGetValue(session, out var lease) || lease.ExpiresAt <= _now()) return null;
+            return (lease.Device, lease.Epoch);
+        }
+    }
+
+    internal void ExpireForTest(Guid session)
+    {
+        lock (_gate)
+            if (_leases.TryGetValue(session, out var lease)) _leases[session] = (lease.Device, lease.Epoch, _now().AddSeconds(-1));
     }
 
     public List<(Guid Session, string Device, ulong Epoch)> SweepExpired()
     {
-        var expired = _leases.Where(pair => pair.Value.ExpiresAt <= _now())
-            .Select(pair => (pair.Key, pair.Value.Device, pair.Value.Epoch)).ToList();
-        foreach (var entry in expired) _leases.Remove(entry.Key);
-        return expired;
+        lock (_gate)
+        {
+            var expired = _leases.Where(pair => pair.Value.ExpiresAt <= _now())
+                .Select(pair => (pair.Key, pair.Value.Device, pair.Value.Epoch)).ToList();
+            foreach (var entry in expired) _leases.Remove(entry.Key);
+            return expired;
+        }
     }
 }
 
@@ -202,16 +230,19 @@ public sealed class DeviceOutboxRecord
 public sealed class DeviceOutboxStore
 {
     private readonly string _file;
-    public List<DeviceOutboxRecord> Records { get; } = new();
+    // Acks and disconnects from different homes arrive concurrently.
+    private readonly object _gate = new();
+    private readonly List<DeviceOutboxRecord> _records = new();
+    public List<DeviceOutboxRecord> Records { get { lock (_gate) return new(_records); } }
     public DeviceOutboxStore(string folder)
     {
         Directory.CreateDirectory(folder);
         _file = Path.Combine(folder, "device-outbox.json");
         if (File.Exists(_file))
-            Records = JsonSerializer.Deserialize<List<DeviceOutboxRecord>>(File.ReadAllBytes(_file)) ?? new();
+            _records = JsonSerializer.Deserialize<List<DeviceOutboxRecord>>(File.ReadAllBytes(_file)) ?? new();
         // Re-encoding a legacy payload could differ from what home bound, and
         // a fresh command ID could apply it twice. Only Check home is safe.
-        var legacy = Records.Where(r => r.PayloadBytes is null && r.Outcome == "pending").ToList();
+        var legacy = _records.Where(r => r.PayloadBytes is null && r.Outcome == "pending").ToList();
         foreach (var record in legacy) { record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; }
         // Never block sync start: memory keeps the migration and the next save writes it.
         if (legacy.Count > 0)
@@ -222,72 +253,107 @@ public sealed class DeviceOutboxStore
     }
     public void MarkLegacyUncertain(Guid commandId)
     {
-        var record = Records.FirstOrDefault(r => r.CommandID == commandId);
-        if (record is null) return;
-        record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; Save();
+        lock (_gate)
+        {
+            var record = _records.FirstOrDefault(r => r.CommandID == commandId);
+            if (record is null) return;
+            record.Outcome = "uncertain"; record.Detail = DeviceOutboxRecord.LegacyDetail; Save();
+        }
     }
     public void Add(DeviceOutboxRecord record)
     {
-        Records.RemoveAll(r => r.CommandID == record.CommandID);
-        Records.Add(record); Save();
+        lock (_gate)
+        {
+            _records.RemoveAll(r => r.CommandID == record.CommandID);
+            _records.Add(record); Save();
+        }
     }
     // Only success removes the record; failures retain content for recovery.
     public void Resolve(Guid commandId, string outcome, string? detail)
     {
-        var record = Records.FirstOrDefault(r => r.CommandID == commandId);
-        if (record is null) return;
-        if (outcome == "completed") Records.Remove(record);
-        else { record.Outcome = outcome; record.Detail = detail; }
-        Save();
+        lock (_gate)
+        {
+            var record = _records.FirstOrDefault(r => r.CommandID == commandId);
+            if (record is null) return;
+            if (outcome == "completed") _records.Remove(record);
+            else { record.Outcome = outcome; record.Detail = detail; }
+            Save();
+        }
     }
     public void MarkUncertain(string sessionId)
     {
-        foreach (var record in Records.Where(r => r.SessionID == sessionId && r.Outcome == "pending"))
+        lock (_gate)
         {
-            record.Outcome = "uncertain";
-            record.Detail = "Home disconnected before acknowledgment. Check home before retrying.";
+            foreach (var record in _records.Where(r => r.SessionID == sessionId && r.Outcome == "pending"))
+            {
+                record.Outcome = "uncertain";
+                record.Detail = "Home disconnected before acknowledgment. Check home before retrying.";
+            }
+            Save();
         }
-        Save();
     }
-    public void Remove(Guid commandId) { Records.RemoveAll(r => r.CommandID == commandId); Save(); }
+    public void Remove(Guid commandId) { lock (_gate) { _records.RemoveAll(r => r.CommandID == commandId); Save(); } }
     // Resend under the original ID keeps the payload; only the lease epoch
     // and pending state move forward. Home dedups replays by ID.
     public void Requeue(Guid commandId, ulong epoch)
     {
-        var record = Records.FirstOrDefault(r => r.CommandID == commandId);
-        if (record is null) return;
-        record.Epoch = epoch; record.Outcome = "pending"; record.Detail = null; Save();
+        lock (_gate)
+        {
+            var record = _records.FirstOrDefault(r => r.CommandID == commandId);
+            if (record is null) return;
+            record.Epoch = epoch; record.Outcome = "pending"; record.Detail = null; Save();
+        }
     }
-    private void Save() => AtomicJson.Write(_file, Records);
+    // Serializes under the gate: AtomicJson encodes before taking its own.
+    private void Save() { lock (_gate) AtomicJson.Write(_file, _records); }
 }
 
 // Draft versions keyed by routing key (home session UUID string at home,
 // full global ID on viewers). Versions never regress on snapshot adoption.
 public sealed class DeviceDraftTracker
 {
+    private readonly object _gate = new();
     private readonly Dictionary<string, ulong> _versions = new();
     private readonly Dictionary<string, string> _texts = new();
     public bool Apply(string session, ulong version, string text)
     {
-        if (version <= _versions.GetValueOrDefault(session)) return false;
-        _versions[session] = version; _texts[session] = text; return true;
+        lock (_gate)
+        {
+            if (version <= _versions.GetValueOrDefault(session)) return false;
+            _versions[session] = version; _texts[session] = text; return true;
+        }
     }
-    public string? Text(string session) => _texts.GetValueOrDefault(session);
-    public ulong Version(string session) => _versions.GetValueOrDefault(session);
+    public string? Text(string session) { lock (_gate) return _texts.GetValueOrDefault(session); }
+    public ulong Version(string session) { lock (_gate) return _versions.GetValueOrDefault(session); }
     public ulong Bump(string session, string text)
     {
-        var next = Version(session) + 1;
-        Apply(session, next, text);
-        return next;
+        lock (_gate)
+        {
+            var next = Version(session) + 1;
+            Apply(session, next, text);
+            return next;
+        }
     }
     public void Adopt(string session, ulong version, string text)
     {
-        _versions[session] = version; _texts[session] = text;
+        lock (_gate) { _versions[session] = version; _texts[session] = text; }
     }
     public bool AdoptIfNewer(string session, ulong version, string text)
     {
-        if (version <= Version(session)) return false;
-        Adopt(session, version, text); return true;
+        lock (_gate)
+        {
+            if (version <= Version(session)) return false;
+            Adopt(session, version, text); return true;
+        }
+    }
+    // Adopts or bumps as one step, so a concurrent edit cannot regress the version.
+    public void Reconcile(string session, string text)
+    {
+        lock (_gate)
+        {
+            if (Text(session) is null) Adopt(session, Math.Max(1UL, Version(session)), text);
+            else if (Text(session) != text) Bump(session, text);
+        }
     }
 }
 

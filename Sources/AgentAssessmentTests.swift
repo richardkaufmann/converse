@@ -234,6 +234,17 @@ import Foundation
     let store = Store(folder: root)
     let agent = store.createAgent(title: "KAOS Steward"); agent.agent?.enabled = false
     agent.agent?.recordAssessment(.revision(first), now: now)
+    do {
+        let revokedLot = UUID()
+        var discord = AgentConfig(); discord.assessment = first
+        discord.assessment?.facts = [AgentAssessments.missingInput("lot." + revokedLot.uuidString, label: "Private orchard", now: now),
+                                     AgentFact(id: "lot." + revokedLot.uuidString + ".open", label: "Private orchard open", value: "7", kind: .measured, source: "lot", observedAt: now)]
+        func sharedFacts() -> String { String(describing: AgentRuntime.discordSessionInformation(agent, config: discord)["assessment"] ?? "") }
+        discord.watchedSessions = [revokedLot]
+        check(sharedFacts().contains("Private orchard"), "Discord session information includes a permitted lot's facts")
+        discord.watchedSessions = []
+        check(!sharedFacts().contains("Private orchard") && !sharedFacts().contains(revokedLot.uuidString), "Discord session information drops a revoked lot's names and counts")
+    }
     let service = PortraitService()
     var calls = 0, prompts: [String] = [], gate: CheckedContinuation<Void, Never>?, holdNext = false, failNext = false
     func png(_ color: NSColor) -> Data {
@@ -311,6 +322,12 @@ import Foundation
     Task { @MainActor in outcomes.append(await service.request(agent, store: store, origin: .menu, force: true)) }
     spin { outcomes.count == 12 }
     check(calls == 7 && agent.agent?.portrait?.failures == nil && outcomes[11].image?.sourceRevision == 5, "Refresh retries immediately and a success clears the failure")
+    do {
+        // Card bodies re-evaluate on every tick and publish.
+        let latest = agent.agent?.portrait?.latest, before = PortraitImageCache.loads
+        let shown = PortraitImageCache.image(latest), again = PortraitImageCache.image(latest)
+        check(shown != nil && shown === again && PortraitImageCache.loads == before + 1, "A portrait card loads its image once however often it re-evaluates")
+    }
     // Window demand: subscribed windows request on turns (debounced); closing ends it.
     service.debounceSeconds = 0.05
     service.agentTurned(agent, store: store)
@@ -385,6 +402,25 @@ import Foundation
         queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin(0.05) { false }
         queuedService.unsubscribe(viewer)
         check(queuedService.imageLoads == loads && starts == 2, "Uncovering unchanged cached portraits neither decodes nor generates")
+        do {
+            let repaired = store.createAgent(title: "Repaired"); repaired.agent?.enabled = false
+            repaired.agent?.assessment = first; repaired.agent?.portraitMinMinutes = 0
+            let repairService = PortraitService(); repairService.clock = { now }
+            var made = 0, finished = 0
+            repairService.generator = { _ in made += 1; return png(.green) }
+            func requested(_ origin: PortraitOrigin) {
+                let target = finished + 1
+                Task { @MainActor in _ = await repairService.request(repaired, store: store, origin: origin); finished += 1 }
+                spin { finished == target }
+            }
+            requested(.menu)
+            let path = repaired.agent?.portrait?.latest?.path ?? "", loaded = repairService.imageLoads
+            requested(.window)
+            check(made == 1 && repairService.imageLoads == loaded, "A cached window request with its PNG on disk neither decodes nor generates")
+            try? FileManager.default.removeItem(atPath: path)
+            requested(.window)
+            check(made == 2 && FileManager.default.fileExists(atPath: repaired.agent?.portrait?.latest?.path ?? ""), "A window request repairs a missing portrait PNG by regenerating it")
+        }
         queuedAgent.agent?.assessment?.contentHash = "deferred content"
         queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin { queuedService.hasDeferred(queuedAgent.id) }
         var refreshed = false

@@ -15,8 +15,10 @@ public static class ResponseImages
 
     public sealed record Captured(int Start, int Length, string Caption, byte[] Bytes);
 
+    // Captions stop at any bracket, and caption and target are bounded and
+    // never backtrack (Mac parity), so an unclosed opener costs a bounded scan.
     private static readonly Regex RefPattern = new(
-        @"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)",
+        @"!\[((?>[^\[\]\r\n]{0,512}))\]\(\s*(?:<([^>\r\n]{1,4096})>|((?>[^\s\)]{1,4096})))\s*\)",
         RegexOptions.Compiled);
 
     private const int MaxTargetLength = 4096;

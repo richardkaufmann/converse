@@ -70,6 +70,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         pendingChrome = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
+    var chromeRefreshPending: Bool { pendingChrome != nil }
     private static func onlyTextDiffers(_ a: [ParkingLotRow], _ b: [ParkingLotRow]) -> Bool {
         a.count == b.count && zip(a, b).allSatisfy {
             $0.id == $1.id && $0.heading == $1.heading && $0.parentID == $1.parentID && $0.tag == $1.tag && $0.done == $1.done && $0.images == $1.images && $0.notes == $1.notes

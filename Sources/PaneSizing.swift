@@ -297,6 +297,10 @@ enum PaneSizing {
         }
         return result
     }
+    static func mountedPanes(in window: NSWindow) -> Int {
+        guard let outer = split(in: window.contentView), outer.arrangedSubviews.count == 2 else { return 0 }
+        return split(in: outer.arrangedSubviews[1])?.arrangedSubviews.count ?? 0
+    }
     @discardableResult
     static func apply(to window: NSWindow, sidebar: CGFloat, paneCount: Int, weights: [CGFloat] = []) -> Bool {
         // Intermediate divider positions must not reflow existing transcripts.
@@ -434,14 +438,25 @@ final class WindowPaneLayout {
             sidebarLimit = 480; restoreSidebarCap = nil
         }
         schedule()
-        // A late-mounting pane (remote transcript, heavy history) can miss the
-        // short retries and stay narrow. One last attempt a second later adopts
-        // it; if layout already settled this succeeds immediately as a no-op.
-        let token = revision
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.revision == token else { return }
-            self.schedule()
+        scheduleLastAttempt()
+    }
+    private var lastAttempt: DispatchWorkItem?
+    // A late-mounting pane (remote transcript, heavy history) can miss the
+    // short retries and stay narrow. One last attempt a second later adopts
+    // it; if layout already settled this succeeds immediately as a no-op.
+    // A mount bumping the revision must not cancel it. It also bounds the
+    // wait for a pane that never mounts (a forgotten remote home): the panes
+    // that did mount are arranged, thawed and populated rather than left blank.
+    private func scheduleLastAttempt(restart: Bool = true) {
+        guard restart || lastAttempt == nil else { return }
+        lastAttempt?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lastAttempt = nil; self.revision += 1
+            self.arrange(self.revision, attempts: 0, acceptingMounted: true)
         }
+        lastAttempt = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
     }
     private var contentSignature = ""
     // Replacing what a pane shows (session → Parking Lot, etc.) swaps the split's
@@ -455,11 +470,7 @@ final class WindowPaneLayout {
         guard !first, paneCount > 0 else { return }
         placementWrapping.freeze(in: window?.contentView)
         schedule()
-        let token = revision
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.revision == token else { return }
-            self.schedule()
-        }
+        scheduleLastAttempt()
     }
     private func windowResized() {
         guard !applying else { return }
@@ -516,18 +527,24 @@ final class WindowPaneLayout {
         }
         sweep(contentView)
     }
-    private func arrange(_ token: Int, attempts: Int) {
+    private func arrange(_ token: Int, attempts: Int, acceptingMounted: Bool = false) {
         cancelStaleDrags()
         guard token == revision, !draggingDivider, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
         let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : countChangeSidebar ?? PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
         applying = true
-        let success = PerformanceCapture.shared.measure(.paneArrangement) { PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights) }
+        var success = PerformanceCapture.shared.measure(.paneArrangement) { PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights) }
+        if !success, acceptingMounted {
+            _ = PaneSizing.apply(to: window, sidebar: sidebar, paneCount: PaneSizing.mountedPanes(in: window))
+            success = true
+        }
         applying = false
         if !success {
             if attempts > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.arrange(token, attempts: attempts - 1) } }
             // A remote pane can mount after these short retries. Its native
-            // layout notification will retry; do not adopt intermediate widths.
+            // layout notification or the last attempt retries; do not adopt
+            // intermediate widths before then.
+            else { scheduleLastAttempt(restart: false) }
             return
         }
         lastWidth = width; lastSidebar = PaneSizing.sidebarWidth(in: window) ?? sidebar
@@ -752,6 +769,38 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 999) - PaneSizing.collapsedSidebar) < 2 && layout.weights == savedWeights, "A collapsed sidebar stays minimized during resizing and preserves session-pane proportions")
     layout.setSidebarCollapsed(false); settle()
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - expandedSidebar) < 2, "The pin restores the previous native sidebar width after resizing")
+    // A pane counted by placements may never mount (a forgotten remote home),
+    // or mount after the short retries. Neither may strand the mounted panes.
+    func waitUntil(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(8)
+        while !condition() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        return condition()
+    }
+    func mountedTranscript(render: @escaping () -> Void) -> (scroll: ConversationScrollView, text: NSTextView) {
+        let scroll = ConversationScrollView(frame: inner.arrangedSubviews[0].bounds)
+        let text = NSTextView(frame: inner.arrangedSubviews[0].bounds)
+        text.textContainer!.widthTracksTextView = true
+        scroll.documentView = text; scroll.initialRenderPending = true; scroll.renderWhenAttached = render
+        inner.arrangedSubviews[0].addSubview(scroll)
+        return (scroll, text)
+    }
+    // The mount reschedules asynchronously, so the placement below is pending
+    // when it does: the same revision bump that used to cancel the last attempt.
+    var ghostRendered = false
+    let ghost = mountedTranscript { ghostRendered = true }
+    layout.setPaneCount(4)
+    check(!ghost.text.textContainer!.widthTracksTextView && !ghostRendered, "A pending placement holds a mounted transcript until it is arranged")
+    check(waitUntil { ghostRendered && ghost.text.textContainer!.widthTracksTextView && !ghost.scroll.initialRenderPending }, "A pane that never mounts cannot leave its neighbours blank or frozen, even after a mount bumps the revision")
+    check(layout.paneCount == 4 && inner.arrangedSubviews.count == 3 && sizes().max()! - sizes().min()! < 2, "The fallback arranges the panes that did mount")
+    ghost.scroll.removeFromSuperview()
+    var lateRendered = false
+    layout.setPaneCount(3); settle()
+    let neighbour = mountedTranscript { lateRendered = true }
+    layout.setPaneCount(4)
+    check(waitUntil { lateRendered && neighbour.text.textContainer!.widthTracksTextView }, "A pane still mounting after the short retries does not blank its neighbours")
+    inner.addArrangedSubview(NSView()); layout.transcriptMounted()
+    check(waitUntil { inner.arrangedSubviews.count == 4 && sizes().max()! - sizes().min()! < 2 }, "A pane that mounts after the fallback joins at an equal width (panes: \(sizes()))")
+    neighbour.scroll.removeFromSuperview()
     window.close()
     swiftUIPaneCountSelfTests(check)
     paneMountSelfTests(check)
