@@ -223,6 +223,23 @@ class HelpContentTests(unittest.TestCase):
             self.assertEqual([video['id'] for video in book['videos']], [video['id'] for video in self.video_manifest()['videos']])
             self.assertEqual(book['topics'][-1]['id'], 'videos')
 
+    def test_help_does_not_describe_the_public_repository_as_private(self):
+        # "If the repository is private" in App Support's research prompt is about
+        # whichever repository is being read, so only this wording is stale.
+        stale = re.compile(r'sign-in required|this repository is private|sign into github with an authorized|private github readme|repository remains private', re.I)
+        generated = {'bin', 'obj', 'build', '.build', 'DerivedData'}
+        files = [root / 'README.md']
+        for folder in ('Sources', 'iPad', 'windows', 'linux', 'scripts', 'docs'):
+            files += [path for path in (root / folder).rglob('*')
+                      if path.suffix in {'.swift', '.cs', '.xaml', '.py', '.md', '.json', '.strings', '.xcstrings', '.html'}
+                      and path.is_file() and not generated.intersection(path.relative_to(root).parts)]
+        self.assertGreater(len(files), 100)
+        for path in files:
+            with self.subTest(path=str(path.relative_to(root))):
+                self.assertIsNone(stale.search(path.read_text(errors='ignore')))
+        for name in ('SetupHelp.swift', 'ConverseApp.swift'):
+            self.assertIn('Link("GitHub README", destination: ConverseAbout.readme)', (root / 'iPad/Converse' / name).read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -8,7 +8,7 @@ The single-scene SwiftUI app uses the same physical protocol, Noise crypto, Keyc
 
 The same app and pairing protocol now support iPhone. Portrait is the primary layout: one session fills the screen; selecting a second stacks the two vertically. The quiet stacked-rectangles button in the top bar has a 44-point touch target and opens **Sessions**. Check or uncheck up to two sessions, grouped by home. Unchecking parks that display without stopping work on the home. A third session cannot silently replace one already selected.
 
-The sheet also contains New session, Groups / Pair a computer, Help, About, message numbers and the private GitHub README link. Per-session actions remain in each pane's ellipsis button. There is no permanently visible phone sidebar. The iPad retains its sidebar and three-pane layout.
+The sheet also contains New session, Groups / Pair a computer, Help, About, message numbers and the GitHub README link. Per-session actions remain in each pane's ellipsis button. There is no permanently visible phone sidebar. The iPad retains its sidebar and three-pane layout.
 
 Opening the software keyboard gives the editing session the available height and collapses the other session to a tappable title strip. Hide the keyboard to return to the two-session stack. Landscape remains supported; short windows show one expanded session and the other title strip to preserve readable transcript space. Drafts, selected sessions and device identity survive backgrounding through the existing stores and lease recovery protocol.
 

@@ -69,8 +69,7 @@ struct PadHelp: View {
     var body: some View {
         NavigationStack {
             List {
-                Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
-                    Text("This repository is private. Sign into GitHub with an authorized account to open it. The same documentation is available offline below.").font(.caption).foregroundStyle(.secondary) }
+                Section { Link("GitHub README", destination: ConverseAbout.readme) }
                 if let book {
                     if let security = book.topics.first(where: { $0.id == "security-and-privacy" }) {
                         NavigationLink("Security and privacy") { ScrollView { Text(security.plainText).textSelection(.enabled).padding() }.navigationTitle("Security and privacy") }
@@ -167,7 +166,7 @@ struct PadAbout: View {
             Form {
                 Section { Text("Converse " + ConverseAbout.versionBuild).font(.title2.bold()) }
                 Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("GPLv3 or later · licensing details", destination: ConverseAbout.licenseURL) }
-                Section { ForEach(ConverseAbout.links, id: \.title) { Link($0.title, destination: $0.url) }; Link("GitHub README (sign-in required)", destination: ConverseAbout.readme) }
+                Section { ForEach(ConverseAbout.links, id: \.title) { Link($0.title, destination: $0.url) }; Link("GitHub README", destination: ConverseAbout.readme) }
                 Section("Performance diagnostics") {
                     Toggle("Record performance timings", isOn: $captureTimings)
                         .onChange(of: captureTimings) { _, enabled in
