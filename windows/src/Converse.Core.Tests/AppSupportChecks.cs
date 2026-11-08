@@ -147,22 +147,22 @@ internal static class AppSupportChecks
 
                 var session = store.CreateAgent("Art fallback", false);
                 session.Agent!.Settings.Model = "muse-spark-1.3"; session.Agent.Settings.GenerateArt = true; session.Agent.Settings.Enabled = true; session.Agent.Settings.ArtDirection = "Watercolor";
-                var keyReads = 0;
+                var keyReads = 0; var imageRequests = 0;
                 devices.Agents.ReadSecret = name => name == "meta" && keyReads++ == 0 ? "fixture-key" : null;
                 devices.Agents.Request = async (request, token) =>
                 {
-                    if (request.RequestUri!.AbsolutePath.EndsWith("/images/generations")) throw new HttpRequestException("image service down");
+                    if (request.RequestUri!.AbsolutePath.EndsWith("/images/generations")) { imageRequests++; throw new HttpRequestException("image service down"); }
                     await Task.Yield();
                     var reply = new JsonObject { ["reply"] = "Completed CLI-style reply", ["attention"] = "", ["memory"] = "", ["tell"] = new JsonArray(), ["artPrompt"] = "A cheerful lighthouse", ["scoreboard"] = new JsonObject { ["summary"] = "Steady progress", ["sentiment"] = "up", ["metrics"] = new JsonArray() } };
                     return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
                 };
-                bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.Last().Role == "notice" && session.Messages.Last().Text == AgentArtPolicy.Unavailable
+                bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.All(m => m.Images.Count == 0) && imageRequests == 0 && session.Agent!.AssessmentProblem == "No assessment returned this turn."
                     && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget?.Summary == "Steady progress";
                 session.Draft = "Check progress"; store.Submit(session); await WaitIdle(session);
-                check(KeptReply(), "A missing Meta key for mood art keeps the completed reply and the loop, with a quiet notice");
+                check(KeptReply(), "Agent turns generate no art: the reply and loop are kept, a missing assessment is only marked stale");
                 keyReads = 0; devices.Agents.ReadSecret = name => name == "meta" ? "fixture-key" : null; session.Agent.Widget = null; session.Agent.ArtAtUtc = null; session.Agent.ArtMood = null;
                 session.Draft = "Check again"; store.Submit(session); await WaitIdle(session);
-                check(KeptReply(), "An image API failure keeps the completed reply and the loop, with a quiet notice");
+                check(KeptReply(), "A legacy artPrompt field is ignored: no image request, no transcript attachment");
                 devices.Agents.ReadSecret = _ => null; session.Agent.Settings.Enabled = false;
                 session.Draft = "Run once"; store.Submit(session); await WaitIdle(session);
                 check(session.Agent.Attention.Contains(AgentPolicy.MissingMetaKey), "Run once without a Meta key says how to fix it");

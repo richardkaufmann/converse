@@ -26,13 +26,20 @@ static class AgentChecks
         haAgent.Apply(oldEditor);
         check(haAgent.Settings.HomeAssistantRead == true && haAgent.Settings.HomeAssistantEntities == "sensor.office_temperature", "Older Windows editors preserve Home Assistant scope");
         var artNow = D("2026-11-04T15:00:00Z");
-        var artBoard = AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } });
-        check(AgentArtPolicy.ShouldRegenerate(artNow, null, false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-1), true, false, false), "Windows art: first art and edited direction regenerate immediately");
-        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-10), false, true, true) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, true, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, false, true), "Windows art: mood or scoreboard changes wait for the 30 minute minimum");
-        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-5.9), false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-6), false, false, false), "Windows art: unchanged art refreshes at 6 hours");
-        check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
-            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
-            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
+        // Assessments: host-owned measured values, revision vs heartbeat, malformed never fatal.
+        var measured = AgentAssessments.Measured(new JsonObject { ["observedAt"] = "2026-11-04T14:00:00Z", ["openIssues"] = 4 }, "kaos/converse", artNow);
+        var raw = JsonNode.Parse("{\"summary\":\"Two bugs remain.\",\"status\":\"at-risk\",\"facts\":[{\"id\":\"github.openIssues\",\"kind\":\"measured\",\"value\":\"999\"},{\"id\":\"users\",\"label\":\"Users\",\"kind\":\"measured\",\"value\":\"5000\"},{\"label\":\"Ship tonight\",\"value\":\"Likely\",\"kind\":\"judgment\",\"detail\":{\"why\":[\"tests\",{\"docs\":true}]}}],\"detail\":{\"risks\":{\"top\":\"renderer\"}}}");
+        var first = AgentAssessments.Evaluate(raw, measured, null, artNow);
+        check(first.Kind == AgentAssessmentOutcome.Revision && first.Record!.Revision == 1 && first.Record.Facts[0].Value == "4" && first.Record.Facts[1].Value == AgentAssessments.Unavailable && first.Record.Facts[2].Detail?["why"] is JsonArray,
+            "Windows assessment: measured values come from the host, unknown measurements read Unavailable, nested detail is kept");
+        var again = AgentAssessments.Evaluate(JsonNode.Parse(raw!.ToJsonString().Replace("Two bugs remain.", "  two bugs   remain. ")), measured, first.Record, artNow.AddMinutes(5));
+        check(again.Kind == AgentAssessmentOutcome.Heartbeat && again.Record!.Revision == 1 && again.Record.Heartbeats == 1, "Windows assessment: unchanged content is a heartbeat");
+        var moved = AgentAssessments.Measured(new JsonObject { ["openIssues"] = 5 }, "kaos/converse", artNow);
+        check(AgentAssessments.Evaluate(raw, moved, again.Record, artNow.AddMinutes(10)) is { Kind: AgentAssessmentOutcome.Revision, Record.Revision: 2 }, "Windows assessment: a changed measurement is a new revision");
+        foreach (var bad in new JsonNode?[] { null, JsonValue.Create("fine"), JsonNode.Parse("{\"status\":\"done\"}"), JsonNode.Parse("{\"summary\":\"x\",\"status\":\"great\"}") })
+            check(AgentAssessments.Evaluate(bad, measured, first.Record, artNow).Kind == AgentAssessmentOutcome.Rejected, "Windows assessment: malformed input is rejected, not fatal");
+        var persisted = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(new AgentConfig { Assessment = first.Record }));
+        check(persisted.Assessment?.ContentHash == first.Record.ContentHash && persisted.Assessment.Facts.Count == 3, "Windows assessment persists with the agent");
         var transientErrors = new Exception[] { new AgentHttpStatusException(503, false), new AgentHttpStatusException(429, false), new AgentHttpStatusException(400, false), new HttpRequestException("lost"),
             new TaskCanceledException("timeout", new TimeoutException()), new IOException("reset"), new InvalidOperationException("Something nobody anticipated."), new FormatException("odd"),
             new InvalidOperationException("Home Assistant scope changed during the run. Retry with the new settings.") };
