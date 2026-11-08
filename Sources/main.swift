@@ -2684,6 +2684,13 @@ struct ScrollingConversation: NSViewRepresentable {
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
         }
+        // Test seams exercise the native link delegate without opening Finder.
+        var localImageIsHome: (() -> Bool)?
+        var localImageReveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
+        var localImageNotice: (String, NSWindow?) -> Void = { message, window in
+            let alert = NSAlert(); alert.messageText = "Image not available here"; alert.informativeText = message
+            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        }
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
             if let url, url.scheme == "converse-disclosure", let id = url.host.flatMap(UUID.init(uuidString:)),
@@ -2691,6 +2698,15 @@ struct ScrollingConversation: NSViewRepresentable {
                text.textStorage?.attribute(TranscriptDisclosure.attribute, at: charIndex, effectiveRange: nil) as? String == id.uuidString {
                 if !expandedDisclosures.insert(id).inserted { expandedDisclosures.remove(id) }
                 disclosureNeedsRender = true; render(text); return true
+            }
+            if let url, url.isFileURL, let storage = textView.textStorage,
+               charIndex >= 0, charIndex < storage.length,
+               storage.attribute(LocalImageFallback.attribute, at: charIndex, effectiveRange: nil) as? URL == url {
+                let home = localImageIsHome?() ?? Store.shared.sessions.contains(where: { $0 === session })
+                if let notice = LocalImageFallback.follow(url, onHome: home, reveal: localImageReveal) {
+                    localImageNotice(notice, textView.window)
+                }
+                return true
             }
             if let url, AppSupport.handleLink(url) { return true }
             if let url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
@@ -2928,14 +2944,21 @@ struct ScrollingConversation: NSViewRepresentable {
             let currentIDs = Set(messages.map(\.id))
             disclosureCache = disclosureCache.filter { currentIDs.contains($0.key) }
             preparedMessages = preparedMessages.filter { currentIDs.contains($0.key) }
-            var common = 0
+            // Retention removes a leading range. Keep the remaining occurrences
+            // and their native layout instead of assembling the whole tail again.
+            var dropped = 0, common = 0
             if let previous {
-                while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
+                if let first = messages.first, previous.first != first,
+                   let index = previous.firstIndex(of: first) { dropped = index }
+                while common < min(previous.count - dropped, messages.count) && previous[dropped + common] == messages[common] { common += 1 }
             }
+            let candidateRemoval = dropped > 0 && dropped < messageStarts.count ? messageStarts[dropped] : 0
+            let removedLabels = text.messageLabels.filter { $0.location < candidateRemoval }.count
+            let numberingCompatible = previousNumberOffset + removedLabels == session.messageNumberOffset
             let dateEnvironment = Locale.current.identifier + "|" + TimeZone.current.identifier
             renderNames.removeAll(keepingCapacity: true); missingRenderNames.removeAll(keepingCapacity: true)
             var reusable = 0
-            if !firstRender && !restyle && !disclosureChanged && previousNumberOffset == session.messageNumberOffset && assembledFontSize == text.fontSize {
+            if !firstRender && !restyle && !disclosureChanged && numberingCompatible && assembledFontSize == text.fontSize {
                 for message in messages.prefix(common) {
                     guard previousMessageNumbers[message.id] == session.messageNumbers[message.id] else { break }
                     // Mutable names, locale and image files can invalidate an
@@ -2952,11 +2975,16 @@ struct ScrollingConversation: NSViewRepresentable {
                     reusable += 1
                 }
             }
-            var unchangedPrefix = reusable == previous?.count ? historyEnd
-                : (reusable < messageStarts.count ? messageStarts[reusable] : 0)
-            if reusable == 0 || unchangedPrefix > min(assembledDocument.length, current.length) {
-                reusable = 0; unchangedPrefix = 0
+            var oldReuseEnd = dropped + reusable == previous?.count ? historyEnd
+                : (dropped + reusable < messageStarts.count ? messageStarts[dropped + reusable] : 0)
+            var removedPrefix = candidateRemoval
+            if reusable == 0 || oldReuseEnd > min(assembledDocument.length, current.length) || oldReuseEnd < removedPrefix {
+                reusable = 0; oldReuseEnd = 0; removedPrefix = 0; dropped = 0
             }
+            let unchangedPrefix = oldReuseEnd - removedPrefix
+            let trimAnchor = removedPrefix > 0 ? text.resizeAnchor().map {
+                ConversationTextView.ResizeAnchor(character: max(0, $0.character - removedPrefix), viewportY: $0.viewportY)
+            } : nil
             renderedAttachments = session.attachments
             historyBuildCount += 1
             let selection = text.selectedRange()
@@ -2972,7 +3000,8 @@ struct ScrollingConversation: NSViewRepresentable {
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
             stage("prepare")
             let document = assembledDocument
-            document.deleteCharacters(in: NSRange(location: unchangedPrefix, length: document.length - unchangedPrefix))
+            document.deleteCharacters(in: NSRange(location: oldReuseEnd, length: document.length - oldReuseEnd))
+            if removedPrefix > 0 { document.deleteCharacters(in: NSRange(location: 0, length: removedPrefix)) }
             assembledFontSize = text.fontSize
             let imagePaths = Set(messages.flatMap(\.images) + session.attachments)
             assembledImageSignatures = assembledImageSignatures.filter { imagePaths.contains($0.key) }
@@ -2996,12 +3025,20 @@ struct ScrollingConversation: NSViewRepresentable {
                 preview.addAttributes(base.merging([.paragraphStyle: imageStyle]) { _, new in new }, range: NSRange(location: 0, length: preview.length))
                 document.append(preview); return true
             }
-            text.messageLabels.removeAll { $0.location >= unchangedPrefix }
+            text.messageLabels = text.messageLabels.filter { $0.location >= removedPrefix && $0.location < oldReuseEnd }.map {
+                var label = $0; label.location -= removedPrefix; return label
+            }
             var messageNumber = text.messageLabels.last?.number ?? max(0, session.messageNumberOffset)
-            text.userBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
-            text.trafficBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
-            text.copyBlocks.removeAll { $0.range.location >= unchangedPrefix || NSMaxRange($0.range) > unchangedPrefix }
-            messageStarts = Array(messageStarts.prefix(reusable))
+            func retainedRange(_ range: NSRange) -> NSRange? {
+                guard range.location >= removedPrefix, range.location < oldReuseEnd, NSMaxRange(range) <= oldReuseEnd else { return nil }
+                return NSRange(location: range.location - removedPrefix, length: range.length)
+            }
+            text.userBlocks = text.userBlocks.compactMap(retainedRange)
+            text.trafficBlocks = text.trafficBlocks.compactMap(retainedRange)
+            text.copyBlocks = text.copyBlocks.compactMap { block in
+                retainedRange(block.range).map { .init(range: $0, role: block.role, source: block.source, formatted: block.formatted) }
+            }
+            messageStarts = messageStarts.dropFirst(dropped).prefix(reusable).map { $0 - removedPrefix }
             for message in messages.dropFirst(reusable) {
                 messageAssemblyCount += 1
                 messageStarts.append(document.length)
@@ -3056,7 +3093,10 @@ struct ScrollingConversation: NSViewRepresentable {
             lastReplacementStart = prefix
             text.readOnlyFinder.noteClientStringWillChange()
             if prefix > 0 {
-                text.textStorage?.replaceCharacters(in: NSRange(location: prefix, length: current.length - prefix), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
+                text.textStorage?.beginEditing()
+                text.textStorage?.replaceCharacters(in: NSRange(location: oldReuseEnd, length: current.length - oldReuseEnd), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
+                if removedPrefix > 0 { text.textStorage?.deleteCharacters(in: NSRange(location: 0, length: removedPrefix)) }
+                text.textStorage?.endEditing()
             } else { text.textStorage?.setAttributedString(document) }
             text.configureDraftImageButtons()
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
@@ -3066,8 +3106,9 @@ struct ScrollingConversation: NSViewRepresentable {
             if session.draft.isEmpty && selection.length == 0 && !text.explicitCursor { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else {
-                let start = min(selection.location, document.length)
-                text.setSelectedRange(NSRange(location: start, length: min(selection.length, document.length - start)))
+                let start = min(max(0, selection.location - removedPrefix), document.length)
+                let end = min(max(0, NSMaxRange(selection) - removedPrefix), document.length)
+                text.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             stage("replace-storage")
@@ -3081,7 +3122,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if let nativeScroll { nativeScroll.followLatest() }
                 else { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
             }
-            else if let anchor { text.restore(anchor) }
+            else if let anchor = trimAnchor ?? anchor { text.restore(anchor) }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
@@ -3878,6 +3919,21 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.render(text); compareCold("first duplicate occurrence removed")
     session.messages = uniqueMessages
     coordinator.render(text); compareCold("unique history restored")
+    session.messages = (0..<80).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Retained message \($0) **bold**") }
+    session.messageNumberOffset = 0
+    coordinator.render(text)
+    let beforeTrimAssemblies = coordinator.messageAssemblyCount
+    session.messages.removeFirst(2); session.messageNumberOffset = 2
+    coordinator.render(text); compareCold("front trim with stable numbers")
+    check(coordinator.messageAssemblyCount == beforeTrimAssemblies, "Front trim retains assembled messages without rebuilding them")
+    session.messages.removeFirst(2); session.messageNumberOffset = 4
+    session.messages.append(Message(role: "assistant", text: "New tail after trim"))
+    coordinator.render(text); compareCold("front trim plus append")
+    check(coordinator.messageAssemblyCount == beforeTrimAssemblies + 1, "Front trim plus append assembles only the new tail")
+    session.messages.removeFirst()
+    coordinator.render(text); compareCold("front trim without numbering offset falls back")
+    session.messages = uniqueMessages; session.messageNumberOffset = 0
+    coordinator.render(text)
     let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("converse-assembly-" + UUID().uuidString + ".png")
     defer { try? FileManager.default.removeItem(at: imageURL) }
     func writeImage(_ color: NSColor, modified: TimeInterval) {
@@ -4736,6 +4792,12 @@ if CommandLine.arguments.contains("--scoreboard-focus-self-test") {
     MainActor.assumeIsolated { agentScoreboardFocusSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } } }
     exit(failures == 0 ? 0 : 1)
 }
+if CommandLine.arguments.contains("--payload-fixture-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    transcriptPayloadFixtureSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--response-images-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     var failures = 0
@@ -4822,6 +4884,13 @@ if CommandLine.arguments.contains("--transcript-render-profile") {
         print("COUNTS preparedMessages=\(coordinator.messagePreparationCount) preparedImages=\(coordinator.imagePreparationCount) assembledMessages=\(coordinator.messageAssemblyCount)")
     }
     exit(0)
+}
+if CommandLine.arguments.contains("--fabric-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    deviceFabricSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--conversation-layout-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }

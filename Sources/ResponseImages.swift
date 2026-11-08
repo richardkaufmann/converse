@@ -58,6 +58,20 @@ enum ResponseImages {
     }
 }
 
+/// Explicit navigation for a local image that could not be imported. Never
+/// widen capture roots or open the referenced file as an executable/document.
+enum LocalImageFallback {
+    static let attribute = NSAttributedString.Key("Converse.localImageFallback")
+    static func follow(_ url: URL, onHome: Bool,
+                       exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                       reveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }) -> String? {
+        guard onHome else { return "This image is a local file on the session's home device. Open this conversation on its home Mac to reveal it, or ask the assistant to send it as a Converse attachment." }
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { return "This is not a local image path on this Mac." }
+        guard exists(url.path) else { return "The image file is no longer available at " + url.path + ". Ask the assistant to recreate it or send it as a Converse attachment." }
+        reveal(url); return nil
+    }
+}
+
 extension Store {
     func responseImageFolder(_ session: Session) -> URL { folder.appendingPathComponent("Attachments").appendingPathComponent(session.id.uuidString).appendingPathComponent("Outputs") }
     func responseImageTeaching(_ session: Session) -> String {
@@ -195,6 +209,45 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         check(images.count == 1 && bytes?.prefix(8) == Data([137,80,78,71,13,10,26,10]), "Response image references become bounded managed PNG attachments")
         check(images.first.map { (source as NSString).substring(with: $0.range).hasPrefix("![Grasshopper]") } == true, "Response image ranges preserve Unicode transcript offsets")
         let outside = root.appendingPathComponent("outside.jpg"); try Data(contentsOf: input).write(to: outside)
+        let fallbackSpaced = root.appendingPathComponent("image with spaces.png")
+        try Data(contentsOf: input).write(to: fallbackSpaced)
+        let fallbackSource = "![Local picture](" + fallbackSpaced.absoluteString + ")"
+        check(ResponseImages.capture(fallbackSource, roots: [allowed], destination: output).isEmpty,
+              "Clickable fallback does not broaden permitted attachment imports")
+        let fallbackSession = Session(entry: Entry(name: "Fallback QA", command: "/usr/bin/false", directory: root.path, engine: "codex"))
+        fallbackSession.messages = [Message(role: "assistant", text: fallbackSource)]
+        let fallbackText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let fallbackCoordinator = ScrollingConversation.Coordinator(fallbackSession)
+        fallbackCoordinator.render(fallbackText)
+        var target: URL?, position = -1, revealed: [URL] = [], notices: [String] = []
+        fallbackText.textStorage?.enumerateAttribute(LocalImageFallback.attribute, in: NSRange(location: 0, length: fallbackText.inputStart)) { value, range, _ in
+            if let url = value as? URL { target = url; position = range.location }
+        }
+        check(target == fallbackSpaced && position >= 0 && fallbackText.textStorage?.attribute(.link, at: max(0, position), effectiveRange: nil) as? URL == fallbackSpaced,
+              "Native local fallback retains a clickable file URL with spaces")
+        fallbackCoordinator.localImageIsHome = { true }
+        fallbackCoordinator.localImageReveal = { revealed.append($0) }
+        fallbackCoordinator.localImageNotice = { message, _ in notices.append(message) }
+        if let target, position >= 0 {
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed == [fallbackSpaced] && notices.isEmpty, "Native fallback click reveals the exact local file")
+            fallbackCoordinator.localImageIsHome = { false }
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed.count == 1 && notices.last?.contains("home device") == true, "Remote fallback click explains the home path without opening a local file")
+            fallbackCoordinator.localImageIsHome = { true }
+            try FileManager.default.removeItem(at: fallbackSpaced)
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed.count == 1 && notices.last?.contains("no longer available") == true, "Missing local fallback reports the path without opening Finder")
+        }
+        var probedRemoteDisk = false
+        _ = LocalImageFallback.follow(fallbackSpaced, onHome: false, exists: { _ in probedRemoteDisk = true; return true }, reveal: { _ in check(false, "Remote path must never reveal") })
+        check(!probedRemoteDisk, "Remote image fallback does not even probe the viewer's filesystem")
+        let arbitrary = MarkdownText.inline("[Run](file:///tmp/example.command)")
+        check(arbitrary.attribute(.link, at: 0, effectiveRange: nil) == nil,
+              "Ordinary file links do not gain the image fallback navigation privilege")
+        check(fallbackSession.messages.first?.text == fallbackSource && fallbackSession.messages.first?.images.isEmpty == true,
+              "Fallback navigation leaves stored source and attachment ownership unchanged")
+
         let escape = allowed.appendingPathComponent("escape.jpg"); try FileManager.default.createSymbolicLink(at: escape, withDestinationURL: outside)
         check(ResponseImages.capture("![private](" + escape.absoluteString + ")", roots: [allowed], destination: output).isEmpty, "Response image imports reject symlink escapes")
         let quoted = "```md\n![Example](" + input.absoluteString + ")\n```\n[ordinary link](" + input.absoluteString + ")\n![remote](https://example.invalid/image.jpg)"

@@ -996,3 +996,45 @@ func switchboardTrailingFenceSelfTests(_ check: (Bool, String) -> Void) {
     let teaching = store.switchboardTeaching(store.create(Entry(name: "Teach", command: "unused", directory: NSTemporaryDirectory(), engine: "claude")))
     check(teaching.contains("LAST thing in your final reply") && teaching.contains("one command block per reply") && !teaching.contains("ENTIRE") && !teaching.contains("no delivery error"), "Session teaching says the command block must be last, one per reply")
 }
+
+// Optional local acceptance fixture; the source file stays outside the repository.
+// Run only in an isolated QA profile. No source text is printed in the results.
+func transcriptPayloadFixtureSelfTests(_ check: (Bool, String) -> Void) {
+    guard let path = ProcessInfo.processInfo.environment["CONVERSE_PAYLOAD_FIXTURE"] else {
+        check(false, "CONVERSE_PAYLOAD_FIXTURE is required"); return
+    }
+    do {
+        let messages = try JSONDecoder().decode([Message].self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let old = Store.shared.collapseTranscriptPayloads
+        defer { Store.shared.collapseTranscriptPayloads = old }
+        Store.shared.collapseTranscriptPayloads = true
+        check(!messages.isEmpty, "Actual saved payload fixture contains messages")
+        for (index, message) in messages.enumerated() {
+            let source = Store.visibleText(message.text)
+            let label = "stored payload \(index + 1) (\(source.count) characters)"
+            guard let parsed = TranscriptDisclosure.parse(source, role: message.role) else {
+                check(false, "Parser recognizes " + label); continue
+            }
+            let session = Session(entry: Entry(name: "Payload QA", command: "/usr/bin/false", directory: NSTemporaryDirectory(), engine: "codex"))
+            session.messages = [message]; session.draft = "Draft stays intact"
+            let fixture = PaneTextFixture(session)
+            check(fixture.text.string.contains(parsed.summary) && fixture.text.string.count < source.count,
+                  "Native collapsed rendering recognizes " + label)
+            check(fixture.text.copyBlocks.first?.source == source && session.messages == [message], "Copy and stored text remain complete for " + label)
+            var position: Int?
+            fixture.text.textStorage?.enumerateAttribute(TranscriptDisclosure.attribute, in: NSRange(location: 0, length: fixture.text.inputStart)) { value, range, _ in
+                if value as? String == message.id.uuidString { position = range.location }
+            }
+            if let position {
+                _ = fixture.coordinator.textView(fixture.text, clickedOnLink: URL(string: "converse-disclosure://" + message.id.uuidString)!, at: position)
+                check(fixture.text.string.contains(parsed.details), "Click expands complete " + label)
+            } else { check(false, "Native disclosure link exists for " + label) }
+            fixture.coordinator.expandedDisclosures = []
+            Store.shared.collapseTranscriptPayloads = false; fixture.coordinator.render(fixture.text)
+            check(!fixture.text.string.contains("▸ " + parsed.summary), "Setting disables collapse for " + label)
+            Store.shared.collapseTranscriptPayloads = true; fixture.coordinator.render(fixture.text)
+            check(fixture.text.string.contains("▸ " + parsed.summary) && session.draft == "Draft stays intact" && session.messages == [message],
+                  "Setting restores collapse without changing source/draft for " + label)
+        }
+    } catch { check(false, "Payload fixture could not be read: " + error.localizedDescription) }
+}
