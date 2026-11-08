@@ -167,9 +167,11 @@ enum PortraitPrompt {
         }
         let key = Self.cacheKey(agent: session.id, config: config)
         if !force, config.portrait?.latest?.cacheKey == key {
-            // Visibility notifications need metadata only. Never read/decode PNGs on uncover.
-            if origin == .window { return outcome(session, store: store, cached: true, loadPNG: false) }
-            if let bytes = load(config.portrait?.latest, agent: session.id, store: store) {
+            // Visibility notifications need metadata only. Never read/decode PNGs on uncover;
+            // a missing file falls through and regenerates.
+            if origin == .window {
+                if let path = config.portrait?.latest?.path, FileManager.default.fileExists(atPath: path) { return outcome(session, store: store, cached: true, loadPNG: false) }
+            } else if let bytes = load(config.portrait?.latest, agent: session.id, store: store) {
                 return outcome(session, store: store, cached: true, loadedPNG: bytes)
             }
         }

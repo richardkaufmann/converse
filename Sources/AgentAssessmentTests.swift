@@ -402,6 +402,25 @@ import Foundation
         queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin(0.05) { false }
         queuedService.unsubscribe(viewer)
         check(queuedService.imageLoads == loads && starts == 2, "Uncovering unchanged cached portraits neither decodes nor generates")
+        do {
+            let repaired = store.createAgent(title: "Repaired"); repaired.agent?.enabled = false
+            repaired.agent?.assessment = first; repaired.agent?.portraitMinMinutes = 0
+            let repairService = PortraitService(); repairService.clock = { now }
+            var made = 0, finished = 0
+            repairService.generator = { _ in made += 1; return png(.green) }
+            func requested(_ origin: PortraitOrigin) {
+                let target = finished + 1
+                Task { @MainActor in _ = await repairService.request(repaired, store: store, origin: origin); finished += 1 }
+                spin { finished == target }
+            }
+            requested(.menu)
+            let path = repaired.agent?.portrait?.latest?.path ?? "", loaded = repairService.imageLoads
+            requested(.window)
+            check(made == 1 && repairService.imageLoads == loaded, "A cached window request with its PNG on disk neither decodes nor generates")
+            try? FileManager.default.removeItem(atPath: path)
+            requested(.window)
+            check(made == 2 && FileManager.default.fileExists(atPath: repaired.agent?.portrait?.latest?.path ?? ""), "A window request repairs a missing portrait PNG by regenerating it")
+        }
         queuedAgent.agent?.assessment?.contentHash = "deferred content"
         queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin { queuedService.hasDeferred(queuedAgent.id) }
         var refreshed = false
