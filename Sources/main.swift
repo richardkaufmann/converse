@@ -843,7 +843,7 @@ final class Store: ObservableObject {
             prompt += "\n\n" + localContext(s, directory: directory)
             let imageFolder = responseImageFolder(s)
             try? FileManager.default.createDirectory(at: imageFolder, withIntermediateDirectories: true)
-            prompt += "\n" + responseImageTeaching(s)
+            prompt += "\n" + ResponseImages.deliveryReminder(output: imageFolder)
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && usesInteractiveMuse {

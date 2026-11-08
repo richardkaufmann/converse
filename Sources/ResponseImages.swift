@@ -5,6 +5,10 @@ import ImageIO
 // Explicit image references become managed attachments. File imports stay
 // inside permitted roots; HTTPS downloads use a bounded, credential-free client.
 enum ResponseImages {
+    /// Keep recurring prompt overhead small; the complete explanation lives in Teach.
+    static func deliveryReminder(output: URL) -> String {
+        "[Converse image output: save images in \(output.path); embed each as ![caption](\(output.appendingPathComponent("name.png").absoluteString)) using its real filename, on its own line in the SAME final reply, outside code and before any converse fence. Saving alone does not display it. Do not open a desktop viewer.]"
+    }
     // Local screenshots may be much larger than the attachment sent to peers.
     // Keep network downloads and normalized output at their existing 8 MB limit.
     static let localInputLimit = 32_000_000
@@ -174,6 +178,10 @@ enum ImageLinkSuspicion {
 }
 
 func responseImageSelfTests(_ check: (Bool, String) -> Void) {
+    let reminderOutput = URL(fileURLWithPath: "/Users/example/Library/Application Support/Converse/Attachments/00000000-0000-0000-0000-000000000000/Outputs")
+    let reminder = ResponseImages.deliveryReminder(output: reminderOutput)
+    check(reminder.count < 650 && !reminder.contains("\n"), "Per-turn image reminder stays one line under 650 characters for a normal session path")
+    check(TranscriptStyle.localImageReferences(reminder).first?.url == reminderOutput.appendingPathComponent("name.png"), "Compact image reminder example resolves through the real image parser, including spaces")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-response-images-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     do {
