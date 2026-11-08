@@ -449,7 +449,7 @@ struct PerformanceDebugView: View {
                 get: { capture.recording || capture.paused },
                 set: { capture.setMonitoringEnabled($0, folder: Store.shared.folder) }))
                 .disabled(capture.busy)
-            Text("On starts monitoring and remembers your choice for the next launch. Use Record and Pause beside the window title to capture a stutter.")
+            Text("On starts monitoring and remembers your choice for the next launch. Click PERF MONITORING beside the window title to pause or record: red is recording, grey is paused.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("Keep a rolling buffer of typing, rendering, saving and main-thread timings locally. No conversations, key characters or credentials are recorded. Nothing is uploaded.")
                 .foregroundStyle(.secondary)
@@ -464,7 +464,7 @@ struct PerformanceDebugView: View {
             }
             Text(capture.status).foregroundStyle(.secondary).accessibilityIdentifier("performanceCaptureStatus")
             if let error = capture.exportError { Text(error).foregroundStyle(.red) }
-            Text("You can close Settings while monitoring. Pause freezes the recent buffer. Off also disables monitoring at launch. Record starts a new buffer; Export saves the last paused buffer, which stays saved until you pause again.")
+            Text("You can close Settings while monitoring. Clicking the red PERF MONITORING button freezes the recent buffer; clicking it again when grey starts a new buffer. Off also disables monitoring at launch. Export saves the last paused buffer, which stays saved until you pause again.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("GitHub banner").font(.headline)
