@@ -1321,6 +1321,9 @@ final class ParkingOutlineText: NSTextView {
         item("New heading below", key: "\r", modifiers: .shift) { owner.add(heading: true, after: entry) }
         item("New item below", key: "\r") { owner.add(heading: false, after: entry) }
         menu.addItem(.separator())
+        if selectedRange().length > 0 {
+            item("Copy", key: "c", modifiers: .command) { self.copy(nil) }
+        }
         item(entry.row.heading ? "Copy Heading" : "Copy Item") { owner.copyEntry(entry.row.id, cut: false) }
         item(entry.row.heading ? "Cut Heading" : "Cut Item") { owner.copyEntry(entry.row.id, cut: true) }
         item("Paste") { self.paste(nil) }
@@ -2303,6 +2306,14 @@ func parkingAtomicLinkSelfTests(_ check: (Bool, String) -> Void) {
     check(linkRuns() == [NSRange(location: 3, length: 15)] && visible() == "go https://x.com/a", "Bare URLs style as before once the caret leaves them")
     let bareMenu = menu(at: 5)
     check(!bareMenu.contains("Remove Link") && bareMenu.contains("Edit Link…") && bareMenu.contains("Copy Link Address"), "Bare URLs offer Edit Link and Copy Link Address without Remove Link")
+    place(0, 2)
+    let selectionMenu = menu(at: 0)
+    check(text.selectedRange().length == 2, "Right-clicking inside selected text keeps the selection")
+    check(selectionMenu.contains("Copy"), "Right-clicking selected text offers a regular Copy")
+    check((selectionMenu.firstIndex(of: "Copy") ?? .max) < (selectionMenu.firstIndex(of: "Copy Item") ?? -1),
+          "Regular Copy comes before Copy Item in the right-click menu")
+    place(0, 0)
+    check(!menu(at: 1).contains("Copy"), "Right-clicking with no selection offers Copy Item without a regular Copy")
     window.close()
 }
 
