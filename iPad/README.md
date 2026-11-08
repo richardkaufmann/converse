@@ -101,7 +101,7 @@ Mobile uses the Mac’s lot car, shared blue shoe, agent marker and imported-pro
 
 ## Agents (0.5.22)
 
-Use + beside a capable remote home to create an agent there. Agent Setup / Loop is available in the pane’s fixed-width **⋯ Session actions** menu and its sidebar actions panel. The menu also offers Run once and Assessment. Settings include objective, optional repository, explicit session scope, fixed or text schedule, maximum turns per loop and scoreboard cadence. The editor previews the schedule; home validates it and rejects stale revisions. Creation and control do not change display leases. The agent’s loop status, attention and flexible scoreboard arrive in transcript snapshots, with images fetched by verified content hash. Execution and secrets stay on the desktop home; iPad suspension does not stop the home loop.
+Use + beside a capable remote home to create an agent there. Agent Setup / Loop is available in the pane’s fixed-width **⋯ Session actions** menu and its sidebar actions panel. The menu also offers Run once and Assessment. Settings include objective, optional repository, explicit session scope, fixed or text schedule and maximum turns per loop. The editor previews the schedule; home validates it and rejects stale revisions. Creation and control do not change display leases. The agent’s loop status, attention and assessment arrive in transcript snapshots, with images fetched by verified content hash. Execution and secrets stay on the desktop home; iPad suspension does not stop the home loop.
 
 Agent reports render Markdown headings, bullets and fenced code. Pipe tables become wrapping labelled records suitable for narrow panes; archived Markdown stays unchanged.
 

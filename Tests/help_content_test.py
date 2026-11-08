@@ -125,6 +125,21 @@ class HelpContentTests(unittest.TestCase):
         self.assertGreaterEqual(workspace.count('Button("Configure…")'), 2,
                                 'Agent and non-agent sidebar menus both keep a Configure route')
 
+    def test_current_docs_and_menus_use_assessments_and_portraits(self):
+        readme = (root / 'README.md').read_text()
+        self.assertNotIn('## Agents and project scoreboards', readme)
+        self.assertIn('## Agents, assessments and portraits', readme)
+        self.assertNotIn('Numbers and scoreboards stay out of the art', readme)
+        ipad = (root / 'iPad/README.md').read_text()
+        self.assertNotIn('scoreboard cadence', ipad)
+        self.assertNotIn('flexible scoreboard', ipad)
+        self.assertNotIn('Text = "Scoreboard"',
+                         (root / 'windows/src/Converse.Windows/ConversationPane.xaml.cs').read_text())
+        self.assertNotIn('run once and scoreboard',
+                         (root / 'windows/src/Converse.Windows/ConversationPane.xaml').read_text())
+        self.assertNotIn('filename="scoreboard.png"', (root / 'Sources/AgentDiscord.swift').read_text())
+        self.assertNotIn('filename=\\"scoreboard.png\\"', (root / 'Sources/AgentDiscord.swift').read_text())
+
     def test_readme_only_blocks_preserve_surrounding_prose_and_code_examples(self):
         source = '# App\nBefore\n<!-- readme-only:start -->\n![Art](docs/art.jpg)\n\n*Caption*\n<!-- readme-only:end -->\nAfter\n```html\n<!-- readme-only:start -->\nExample\n<!-- readme-only:end -->\n```\n'
         markdown = generator.build_book(source)['topics'][0]['markdown']

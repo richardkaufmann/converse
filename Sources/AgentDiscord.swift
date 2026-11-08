@@ -88,7 +88,7 @@ enum AgentDiscord {
                 request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
                 var bytes = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n".utf8)
                 bytes.append(json)
-                bytes.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"scoreboard.png\"\r\nContent-Type: image/png\r\n\r\n".utf8))
+                bytes.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n".utf8))
                 bytes.append(image); bytes.append(Data("\r\n--\(boundary)--\r\n".utf8)); request.httpBody = bytes
             } else { request.httpBody = json }
         }
@@ -214,7 +214,7 @@ enum AgentDiscord {
             body["message_reference"] = ["message_id": replyingTo, "channel_id": channel, "fail_if_not_exists": false]
         }
         if let nonce { body["nonce"] = String(nonce.prefix(25)); body["enforce_nonce"] = true }
-        if image != nil { body["attachments"] = [["id": 0, "filename": "scoreboard.png"]] }
+        if image != nil { body["attachments"] = [["id": 0, "filename": "image.png"]] }
         let raw = try await call("channels/\(channel)/messages", token: token, api: api, body: body, image: image)
         guard let row = raw as? [String: Any], row["channel_id"] as? String == channel,
               let id = row["id"] as? String, (try? AgentDiscord.channelID(id)) != nil else {

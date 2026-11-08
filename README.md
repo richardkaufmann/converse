@@ -315,7 +315,7 @@ You can change its objective or pause **Enable automatic loop**. A daily desktop
 
 An agent can assess evidence and ask a coding session to act; selecting a CLI-backed model does not give the agent that coding CLI's unrestricted tool environment. If you want it to edit a project, use a coding session for that work and explicitly allow the agent to communicate with it.
 
-## Agents and project scoreboards
+## Agents, assessments and portraits
 
 ### Give the agent evidence for its objective
 
@@ -382,7 +382,7 @@ You can ask from anywhere:
 - From your phone, ask Jolly: “get me a portrait of KAOS Steward.” Jolly waits for the picture and caption, or tells you why there isn't one.
 - In Discord: `@Converse KAOS Steward: get me a portrait`. The bot posts the picture with the same caption. This needs **Share assessments and portraits** in that agent's setup, and the bot needs **Attach Files** permission.
 
-Portraits use Muse Image and need a Meta key. They're painted from the agent's name, its objective, its assessment summary and mood, a shared fleet style so the grid looks like one family, and your **Portrait art direction** in Agent Setup. Numbers and scoreboards stay out of the art (the facts live in the Assessments table). If you want stylistic lettering, such as a movie-poster title, say so in the art direction.
+Portraits use Muse Image and need a Meta key. They're painted from the agent's name, its objective, its assessment summary and mood, a shared fleet style so the grid looks like one family, and your **Portrait art direction** in Agent Setup. Numbers stay out of the art (the facts live in the Assessments table). If you want stylistic lettering, such as a movie-poster title, say so in the art direction.
 
 Portraits don't run up a bill. An unchanged assessment reuses the cached portrait, however often you ask. A changed one is repainted at most every 10 minutes per agent (change it in Agent Setup), and **Refresh** always tries right away. If several people ask at once, they share one painting. If the image service refuses or fails, the last portrait stays with a “couldn't refresh” note, Converse waits longer before trying again, and the agent's own work is never held up.
 

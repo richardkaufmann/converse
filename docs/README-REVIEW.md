@@ -58,7 +58,7 @@ installation. We need honest blockers, not invented setup steps.
   coalesce overdue intervals into one check, then wait the next interval. It is
   not installed in production yet. Paused queues/loops stay paused.
 - Help's topic IDs are native link targets. The first-session/first-agent/Group,
-  security, agents-and-project-scoreboards, jolly-mac and accounts IDs remain.
+  security, agents-assessments-and-portraits, jolly-mac and accounts IDs remain.
 
 ## Review received and revisions
 
