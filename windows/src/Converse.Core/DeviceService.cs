@@ -445,7 +445,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private readonly DeviceLeaseManager _leases;
     private readonly DeviceDraftTracker _drafts = new();
     private readonly Dictionary<Guid, Peer> _peers = new();
-    private readonly Dictionary<string, string> _blobPaths = new();
+    private readonly ConcurrentDictionary<string, string> _blobPaths = new();
     private readonly Dictionary<string, List<byte>> _staged = new();
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, TaskCompletionSource<string?>> _blobDownloads = new();
@@ -1787,8 +1787,7 @@ public sealed partial class DeviceSyncService : IDisposable
         var end = Math.Clamp(beforeOffset ?? total, 0, total);
         var start = Math.Max(0, end - 200);
         var draftKey = session.Id.ToString("D");
-        if (_drafts.Text(draftKey) is null) _drafts.Adopt(draftKey, Math.Max(1UL, _drafts.Version(draftKey)), session.Draft);
-        else if (_drafts.Text(draftKey) != session.Draft) _drafts.Bump(draftKey, session.Draft);
+        _drafts.Reconcile(draftKey, session.Draft);
         var payload = new DeviceTranscriptPayload
         {
             GlobalID = new DeviceGlobalID(DeviceId, session.Id).ToString(),
@@ -2179,9 +2178,10 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (DeviceGlobalID.Parse(transcript.GlobalID)?.Home != peerHome) break;
                 if (transcript.Epoch is null || RemoteLeases.GetValueOrDefault(transcript.GlobalID) != transcript.Epoch) break;
                 if (RemoteTranscripts.TryGetValue(transcript.GlobalID, out var existing) && transcript.HomeSeq <= existing.HomeSeq) break;
+                // Adopt first: typing that follows this snapshot must not reuse its version.
+                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteTranscripts[transcript.GlobalID] = existing is not null && transcript.Prepend
                     ? MergePrepend(existing, transcript) : transcript;
-                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteOffline.Remove(transcript.GlobalID);
                 Changed?.Invoke();
                 break;

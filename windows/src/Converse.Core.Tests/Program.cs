@@ -1454,6 +1454,40 @@ MdnsChecks.RunGroupDevices(Check);
     }
 }
 
+// Lease, outbox and draft state is shared by connection loops and the heartbeat.
+{
+    var root = Directory.CreateTempSubdirectory("converse-sync-state-").FullName;
+    try
+    {
+        var leases = new DeviceLeaseManager(ttlSeconds: 0);
+        var outbox = new DeviceOutboxStore(root);
+        var drafts = new DeviceDraftTracker();
+        var collisions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var tasks = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            try
+            {
+                for (var i = 0; i < 200; i++)
+                {
+                    var id = Guid.NewGuid();
+                    leases.Acquire(id, "device"); leases.Holder(id); leases.SweepExpired();
+                    outbox.Add(new DeviceOutboxRecord { CommandID = id, SessionID = "s" + worker });
+                    outbox.MarkUncertain("s" + worker);
+                    _ = outbox.Records.Count(record => record.Outcome == "pending");
+                    outbox.Resolve(id, "completed", null);
+                    drafts.Bump("shared", "text " + i); drafts.AdoptIfNewer("shared", (ulong)i, "older");
+                }
+            }
+            catch (Exception e) { collisions.Enqueue(e); }
+        })).ToArray();
+        Task.WaitAll(tasks);
+        Check(collisions.IsEmpty, "Concurrent lease, outbox and draft updates never collide" + (collisions.TryPeek(out var collision) ? ": " + collision.Message : ""));
+        Check(outbox.Records.Count == 0 && new DeviceOutboxStore(root).Records.Count == 0 && drafts.Version("shared") >= 1600,
+            "Concurrent outbox and draft updates lose nothing");
+    }
+    finally { Cleanup(root); }
+}
+
 // AtomicJson: concurrent saves of one store cannot collide on Windows.
 {
     var root = Directory.CreateTempSubdirectory("converse-atomic-").FullName;
