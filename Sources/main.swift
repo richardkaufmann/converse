@@ -3566,6 +3566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let equals = v.addItem(withTitle: "Bigger", action: #selector(biggerText(_:)), keyEquivalent: "=")
         equals.target = self; equals.isHidden = true; equals.allowsKeyEquivalentWhenHidden = true
         v.addItem(.separator())
+        v.addItem(withTitle: "Galleries…", action: #selector(showGalleries), keyEquivalent: "").target = self
         v.addItem(withTitle: "Assessments", action: #selector(showAssessments), keyEquivalent: "").target = self
         v.addItem(withTitle: "Portraits", action: #selector(showPortraits), keyEquivalent: "").target = self
         v.addItem(withTitle: "Group", action: #selector(showGroupMap), keyEquivalent: "").target = self
@@ -3610,6 +3611,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
+    @objc func showGalleries() { MainActor.assumeIsolated { GalleryWindows.shared.showPicker() } }
     @objc func showAssessments() { MainActor.assumeIsolated { AgentBoardWindows.shared.showAssessments() } }
     @objc func showPortraits() { MainActor.assumeIsolated { AgentBoardWindows.shared.showPortraits() } }
     @objc func showGroupMap() { GroupMapWindows.shared.show() }
@@ -4787,6 +4789,16 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         print("Catalog: " + snapshot.models.map { $0.id + " [" + $0.efforts.joined(separator: ", ") + "]" }.joined(separator: "; "))
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+}
+if CommandLine.arguments.contains("--gallery-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    MainActor.assumeIsolated {
+        agentAssessmentSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+        agentAssessmentRuntimeSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+        gallerySelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    }
+    exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--scoreboard-focus-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }

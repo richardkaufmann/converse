@@ -167,7 +167,8 @@ enum AgentPolicy {
                 }
                 // An orphan marker must never fall through to a private run.
                 guard config.discordActiveRequestID == nil else { throw AgentFailure.message("Discord request recovery is pending. Nothing was sent to the model.") }
-                let token = config.hasRepository ? try self.keyReader("github") : nil
+                let token = config.hasRepository ? (try? self.keyReader("github")) : nil
+                var missingInputs: [AgentFact] = []
                 // Every turn assesses, so host measurements are taken every turn.
                 let snapshot = await self.api.metrics(repository: config.repository, token: token)
                 try Task.checkCancellation()
@@ -189,10 +190,13 @@ enum AgentPolicy {
                 let discordScope = session.agent ?? config
                 var discordBatch: AgentDiscordBatch?
                 if discordScope.discordRead == true {
-                    guard let bot = try self.keyReader("discordBot") else { throw AgentFailure.message("Add a Converse bot token in Agent Setup to read Discord.") }
-                    let channel = try AgentDiscord.channelID(discordScope.discordChannelID ?? "")
-                    let after = discordScope.discordCursorChannel == channel ? discordScope.discordLastMessageID : nil
-                    discordBatch = try await self.discordClient.read(channel: channel, after: after, token: bot, api: self.api)
+                    do {
+                        guard let bot = try self.keyReader("discordBot"), !bot.isEmpty else { throw AgentFailure.message("Discord token unavailable") }
+                        let channel = try AgentDiscord.channelID(discordScope.discordChannelID ?? "")
+                        let after = discordScope.discordCursorChannel == channel ? discordScope.discordLastMessageID : nil
+                        discordBatch = try await self.discordClient.read(channel: channel, after: after, token: bot, api: self.api)
+                    } catch is CancellationError { throw CancellationError() }
+                    catch { missingInputs.append(AgentAssessments.missingInput("discord", label: "Discord input", now: Date())) }
                     try Task.checkCancellation()
                     guard session.agent?.discordRead == true, session.agent?.discordChannelID == discordScope.discordChannelID else {
                         throw AgentFailure.message("Discord scope changed during the run. Run again with the new settings.")
@@ -205,6 +209,9 @@ enum AgentPolicy {
                     homeAssistantEvidence = await AgentHomeAssistant().evidence(address: haScope.homeAssistantURL ?? "",
                         token: haToken ?? "", entityText: haScope.homeAssistantEntities ?? "")
                     try Task.checkCancellation()
+                    if (homeAssistantEvidence as? [String: Any])?["error"] != nil || ((homeAssistantEvidence as? [String: Any])?["entities"] as? [[String: String]])?.contains(where: { $0["error"] != nil }) == true {
+                        missingInputs.append(AgentAssessments.missingInput("homeAssistant", label: "Home Assistant input", now: Date()))
+                    }
                     guard session.agent?.homeAssistantRead == true,
                           session.agent?.homeAssistantURL == haScope.homeAssistantURL,
                           session.agent?.homeAssistantEntities == haScope.homeAssistantEntities else {
@@ -238,8 +245,12 @@ enum AgentPolicy {
                 let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
                 let repositoryEvidence: Any = current.hasRepository && current.repository == snapshot.repository ? try JSONSerialization.jsonObject(with: encoder.encode(snapshot)) : NSNull()
                 let allowedLots = ParkingLotLibrary.shared.lots.filter { current.allows(local: $0.id, home: service.localDeviceID) }
-                let parkingEvidence: Any = allowedLots.count == 1 ? try allowedLots[0].evidence() : NSNull()
-                let parkingLotsEvidence: [[String: Any]] = try allowedLots.map { ["id": $0.id.uuidString, "name": $0.name, "document": try $0.evidence()] }
+                var parkingLotsEvidence: [[String: Any]] = []
+                for lot in allowedLots {
+                    do { parkingLotsEvidence.append(["id": lot.id.uuidString, "name": lot.name, "document": try lot.evidence()]) }
+                    catch { missingInputs.append(AgentAssessments.missingInput("lot." + lot.id.uuidString, label: lot.name, now: Date())) }
+                }
+                let parkingEvidence: Any = allowedLots.count == 1 ? (parkingLotsEvidence.first?["document"] ?? NSNull()) : NSNull()
                 // Host measurements for the assessment, re-measured every turn.
                 // The model references them by id and can never supply their values.
                 let versions = service.installedVersionEvidence()
@@ -247,7 +258,7 @@ enum AgentPolicy {
                     lots: allowedLots.filter { $0.error.isEmpty }.map { AgentLotScoreboard.measure(id: $0.id, home: service.localDeviceID, name: $0.name, document: $0.document, now: Date()) },
                     repository: current.hasRepository ? current.repository : nil, snapshot: snapshot,
                     discord: discordBatch.map { (count: $0.messages.filter { !$0.automated }.count, atLimit: $0.atLimit, channel: $0.channel) },
-                    versions: versions, now: Date())
+                    versions: versions, now: Date()) + missingInputs
                 let measuredEvidence: [[String: Any]] = measuredFacts.map { fact in
                     ["id": fact.id, "label": fact.label, "value": fact.value, "source": fact.source, "observedAt": fact.observedAt.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull()]
                 }
