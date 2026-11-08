@@ -197,6 +197,14 @@ public sealed partial class MainWindow : Window
         _devices = new DeviceSyncService(folder, _store, SetupPreview.Demo ? "Converse Demo · " + Environment.MachineName : null);
         _devices.IsViewerPlaced = id => PanePlacements.Load(_dataFolder).PaneOf("remote:" + id) is not null;
         InitializeAgents();
+        // Keys, clicks and scrolling anywhere in this window mean the human is here.
+        if (Content is UIElement inputRoot)
+        {
+            void NoteInput() => _devices.NoteHumanInput();
+            inputRoot.AddHandler(UIElement.KeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => NoteInput()), true);
+            inputRoot.AddHandler(UIElement.PointerPressedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => NoteInput()), true);
+            inputRoot.AddHandler(UIElement.PointerWheelChangedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => NoteInput()), true);
+        }
         // No modal pairing prompt: joins surface as codes in the Groups
         // dialog, where both sides compare all eight groups. (The
         // PairingConfirmation callback stays for headless tests only.)

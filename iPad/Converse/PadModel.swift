@@ -129,6 +129,7 @@ final class PadModel: ObservableObject {
     func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id); lotViews.removeValue(forKey: id) }
     func draft(_ id: String) -> PadDraft { state.drafts[id] ?? PadDraft() }
     func edit(_ id: String, text: String) {
+        service.noteHumanInput()
         var draft = draft(id); draft.text = text; draft.dirty = true; state.drafts[id] = draft
         persist() // Always durable locally, including unacknowledged/offline text.
         edits[id]?.cancel()

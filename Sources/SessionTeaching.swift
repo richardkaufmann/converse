@@ -52,6 +52,11 @@ struct SessionTeachingBanner: View {
                 Divider()
             }
         }
+        // App Support's pane places its own banner; opted-in agents get theirs here.
+        if session.feedbackRepository != nil && !session.supportAssistant {
+            Color.clear.frame(height: 1).background { FeedbackInvitationSurface() }
+            FeedbackInvitationBanner(session: session)
+        }
     }
 }
 

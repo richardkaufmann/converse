@@ -78,6 +78,9 @@ struct AgentSetupView: View {
                         }
                         Text("CLI models use the selected login. Meta API models, portraits and voice use the Meta key. Catalog visibility does not guarantee access. CLI agents use supplied evidence; hosted web research currently requires a Meta API model.").font(.caption).foregroundStyle(.secondary)
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
+                        Toggle("Show the feedback banner for this repository", isOn: Binding(get: { settings.feedbackBanner == true }, set: { settings.feedbackBanner = $0 }))
+                            .disabled(settings.repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .help("A blue banner on this agent invites people to open this repository, star it or file an issue. It appears once per installed release, after twenty completed conversation turns.")
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
                         Text(settings.objective != session.agent?.objective ? "Timing is read from the objective when you save. Say how often to run, e.g. “run every five minutes while the US market is open”."
@@ -94,6 +97,8 @@ struct AgentSetupView: View {
                                 Stepper("no later than " + AgentPacing.durationText(minutes: settings.paceMaxMinutes), value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: settings.paceMaxMinutes >= 120 ? 60 : 5)
                             }.font(.caption)
                         }
+                        Toggle("Only run when I’ve been active since the last turn", isOn: Binding(get: { settings.requiresEngagement == true }, set: { settings.requiresEngagement = $0 }))
+                            .help("Saves tokens while you’re away. A scheduled turn waits, with no model call or assessment, until you type, click or touch Converse on any device in your Group. Having the app open doesn’t count. When you come back it runs once right away and normal timing resumes. Run once, Jolly, Discord and other direct requests still run.")
                         Text("Every turn updates this agent's assessment against the objective above.").font(.caption).foregroundStyle(.secondary)
                         Text("Portrait art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
@@ -236,7 +241,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             try AgentSecrets.update("homeAssistant", value: homeAssistantToken, remove: removeSecrets.contains("homeAssistant"))
-            current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
+            current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed; current.feedbackBanner = settings.feedbackBanner
             let notice = migrationNotice
             try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())
             try current.setPortraitInterval(minutes: settings.portraitMinutes)
@@ -262,7 +267,7 @@ struct AgentControls: View {
             TimelineView(.periodic(from: .now, by: 5)) { context in
                 HStack(spacing: 8) {
                     ConversationActivity(busy: session.busy, status: "Agent thinking", waiting: false)
-                    let loop = session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off"
+                    let loop = session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count, lastEngaged: DeviceSyncService.shared.lastEngagedAt) ?? "Loop off"
                     StatusMenu(help: loop + (session.agent.map { "\n" + $0.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) } ?? "")
                                + "\nClick to pause or resume the loop, stop this run or run once.") {
                         AgentRunControls(session: session, runOnce: true)
@@ -659,6 +664,7 @@ struct RemoteAgentSetupView: View {
                 Text("Homes that read timing from the objective use it instead; describe how often to run there.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
+                Toggle("Only run when I’ve been active since the last turn", isOn: Binding(get: { settings.requiresEngagement == true }, set: { settings.requiresEngagement = $0 }))
                 TextField("Portrait art direction", text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
                 Text("Speech requires Start talking on the viewing Mac.").font(.caption).foregroundStyle(.secondary)
                 Toggle("Allow configured Discord alerts", isOn: $settings.discord)

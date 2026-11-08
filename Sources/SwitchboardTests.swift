@@ -431,6 +431,8 @@ func groupSwitchboardSelfTests(_ check: (Bool, String) -> Void) {
         let spoof = DeviceTellPayload(groupID: b.currentGroup!.id, source: DeviceGlobalID(home: String(repeating: "f", count: 64), session: source.id).string, sourceTitle: "Spoof", target: gid, text: "No", hop: 1)
         b.handleEnvelope(fake, DeviceEnvelope(kind: "participant.tell", commandID: UUID(), payload: try JSONEncoder().encode(spoof)))
         check(target.pending.count == before, "Authenticated peer cannot forge another home's switchboard sender identity")
+        a.noteHumanInput()
+        check(pump { b.lastEngagedAt != nil }, "Human input on one Group device reaches the agent host over the authenticated transport")
         // Ordinary tells, no replyExpected, over the real authenticated transport.
         _ = sb.deliverSwitchboard(from: target, to: sourceGlobal, text: "Mutual remote queue", id: UUID(), hop: 1)
         check(pump { source.pending.contains { $0.text.contains("Mutual remote queue") } }, "Mutual-queue fixture receives an ordinary remote tell")

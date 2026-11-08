@@ -466,6 +466,16 @@ struct PerformanceDebugView: View {
             if let error = capture.exportError { Text(error).foregroundStyle(.red) }
             Text("You can close Settings while monitoring. Pause freezes the recent buffer. Off also disables monitoring at launch. Record starts a new buffer; Export saves the last paused buffer, which stays saved until you pause again.")
                 .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text("GitHub banner").font(.headline)
+            if Store.shared.sessions.contains(where: { $0.feedbackRepository != nil }) {
+                Button("Trigger GitHub banner") { FeedbackInvitation.shared.triggerTestBanner() }
+                Text("Shows the blue banner now, beside each agent that enables it. This is only a test: it doesn’t count as this release’s invitation or record that you gave feedback. Close it with its X.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("No agent shows the feedback banner yet. Turn on “Show the feedback banner for this repository” in Agent Setup to test it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Spacer()
         }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
     }

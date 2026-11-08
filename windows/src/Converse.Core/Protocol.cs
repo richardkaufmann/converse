@@ -34,6 +34,7 @@ public sealed class DeviceEnvelope
 public static class DeviceKind
 {
     public const string Hello = "hello";
+    public const string Engagement = "engagement";
     public const string SidebarSnapshot = "sidebar.snapshot";
     public const string LeaseAcquire = "lease.acquire";
     public const string LeaseGranted = "lease.granted";
@@ -434,6 +435,40 @@ public static class DeviceCommandBinding
         }
 
         private void Escape(byte letter) { Output.Add((byte)'\\'); Output.Add(letter); }
+    }
+}
+
+// The latest real human input on this device and anywhere in the Group.
+// Mirrors DeviceEngagement in Sources/DeviceSync.swift: a report carries the
+// input's age, never a clock time, and each device reports only its own input.
+public sealed class DeviceEngagementReport
+{
+    [JsonPropertyName("ageSeconds")] public double AgeSeconds { get; set; }
+}
+
+public sealed class DeviceEngagement
+{
+    public const string Capability = "engagement-v1";
+    public static readonly TimeSpan ReportInterval = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan MaxReportAge = TimeSpan.FromDays(30);
+    public DateTime? Local { get; private set; }
+    public DateTime? Latest { get; private set; }
+    public void RecordLocal(DateTime nowUtc)
+    {
+        if (Local is null || nowUtc > Local) Local = nowUtc;
+        if (Latest is null || nowUtc > Latest) Latest = nowUtc;
+    }
+    public void RecordPeer(DeviceEngagementReport report, DateTime receivedUtc)
+    {
+        if (!double.IsFinite(report.AgeSeconds) || report.AgeSeconds < 0 || report.AgeSeconds > MaxReportAge.TotalSeconds) return;
+        var at = receivedUtc.AddSeconds(-report.AgeSeconds);
+        if (Latest is null || at > Latest) Latest = at;
+    }
+    public DeviceEngagementReport? Report(DateTime? lastReported, DateTime? lastSent, DateTime nowUtc)
+    {
+        if (Local is not { } local || (lastReported is { } reported && local <= reported)) return null;
+        if (lastSent is { } sent && nowUtc - sent < ReportInterval) return null;
+        return new DeviceEngagementReport { AgeSeconds = Math.Max(0, (nowUtc - local).TotalSeconds) };
     }
 }
 

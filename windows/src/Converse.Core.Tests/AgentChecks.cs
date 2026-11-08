@@ -180,6 +180,31 @@ static class AgentChecks
             deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
             check(calls == 2 && agent.Agent.Settings.RemainingRuns == before, "Agent scheduler persists one activation without depleting the schedule and coalesces ticks");
             check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and assessment survive archive reload");
+            // Dormant agent: a masked turn spends nothing and runs once on return.
+            var callsBeforeDormant = calls;
+            var dormantNow = DateTime.UtcNow.AddSeconds(-1);
+            agent.Agent.Settings.RequiresEngagement = true; agent.Agent.LastLoopUtc = dormantNow; agent.Agent.NextRunUtc = dormantNow;
+            home.Agents.Tick(dormantNow.AddSeconds(1)); home.Agents.Tick(dormantNow.AddSeconds(1));
+            await Task.Delay(50);
+            check(calls == callsBeforeDormant && agent.Pending.Count == 0 && agent.Agent.NextRunUtc == dormantNow && agent.Agent.LoopStatus.StartsWith("Waiting for you"),
+                "Windows masks a due turn with no engagement: no provider call, nothing queued, deadline kept, Waiting for you shown");
+            viewer.NoteHumanInput();
+            deadline = DateTime.UtcNow.AddSeconds(5); while (home.LastEngagedUtc is null && DateTime.UtcNow < deadline) await Task.Delay(10);
+            check(home.LastEngagedUtc is not null, "Human input on a Group device reaches the agent host over the authenticated transport");
+            var returnedAt = home.LastEngagedUtc!.Value.AddSeconds(1);
+            home.Agents.Tick(returnedAt); home.Agents.Tick(returnedAt);
+            deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
+            check(calls == callsBeforeDormant + 1 && agent.Agent.NextRunUtc > returnedAt && !agent.Agent.LoopStatus.StartsWith("Waiting for you"), "Windows runs the masked turn once on return and resumes pacing");
+            agent.Agent.Settings.RequiresEngagement = null; calls = callsBeforeDormant;
+            var unitEngagement = new DeviceEngagement();
+            var unitNow = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+            check(unitEngagement.Report(null, null, unitNow) is null, "A device with no input reports nothing");
+            unitEngagement.RecordLocal(unitNow);
+            check(unitEngagement.Report(null, null, unitNow.AddSeconds(4))?.AgeSeconds == 4, "A reconnecting device reports its last input's age");
+            check(unitEngagement.Report(unitNow, unitNow, unitNow.AddSeconds(100)) is null, "An input already reported is not sent again");
+            unitEngagement.RecordPeer(new DeviceEngagementReport { AgeSeconds = -1 }, unitNow.AddSeconds(500));
+            check(unitEngagement.Latest == unitNow, "Malformed report ages are ignored");
+            check(new AgentConfig().Settings.RequiresEngagement is null && !new AgentConfig { LastLoopUtc = unitNow }.AwaitingEngagement(null), "Waiting for the human is off by default on Core agents");
             var created = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Created remotely");
             check(created.Outcome == "completed" && store.Sessions.Any(s => s.Title == "Created remotely" && s.Agent is not null), "Viewer creates a paused agent on the selected home");
             home.SetAcceptingWork(false);

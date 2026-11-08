@@ -7,6 +7,38 @@ enum DeviceBlob {
     static let maxBlob = 25_000_000
 }
 
+// The latest real human input on this device and anywhere in the Group. A
+// report says how long ago the input happened, never a clock time, so device
+// clock skew cannot strand someone who came back. Each device reports only its
+// own input, directly to the agent hosts it can reach, so reports cannot echo.
+// An offline device sends nothing; on reconnect it reports its last input with
+// that input's age. Held in memory only: peers report again after a restart.
+struct DeviceEngagement: Equatable {
+    static let capability = "engagement-v1"
+    static let kind = "engagement"
+    // First input goes at once; steady use sends at most one report this often.
+    static let reportInterval: TimeInterval = 30
+    static let maxReportAge: TimeInterval = 30 * 86400
+    struct Report: Codable, Equatable { var ageSeconds: Double }
+    private(set) var local: Date?
+    private(set) var latest: Date?
+    // Only real input handlers call this. Agents, the switchboard and
+    // automation deliver prompts through other paths and never reach it.
+    mutating func recordLocal(at now: Date) {
+        local = max(local ?? now, now); latest = max(latest ?? now, now)
+    }
+    mutating func recordPeer(_ report: Report, receivedAt now: Date) {
+        guard report.ageSeconds.isFinite, (0...Self.maxReportAge).contains(report.ageSeconds) else { return }
+        let at = now.addingTimeInterval(-report.ageSeconds)
+        latest = max(latest ?? at, at)
+    }
+    func report(lastReported: Date?, lastSent: Date?, now: Date) -> Report? {
+        guard let local, local > (lastReported ?? .distantPast) else { return nil }
+        if let lastSent, now.timeIntervalSince(lastSent) < Self.reportInterval { return nil }
+        return Report(ageSeconds: max(0, now.timeIntervalSince(local)))
+    }
+}
+
 struct DeviceLease: Equatable {
     var device: String
     var epoch: UInt64

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 // Prompt caching, auto loop pacing, art throttle and API-key footer label.
 // Fixtures only: no network, no credentials.
@@ -167,4 +168,81 @@ import Foundation
     let footerStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-footer-" + UUID().uuidString))
     let footerAgent = footerStore.createAgent(title: "Footer fixture", persist: false)
     check(footerStore.sessionLoginLabel(footerAgent) == "API Key", "Session login label names the API key for Meta API agents")
+    agentEngagementSelfTests(check)
+}
+
+// Dormant agents: a masked turn spends nothing and runs once on return.
+@MainActor func agentEngagementSelfTests(_ check: (Bool, String) -> Void) {
+    let t = Date(timeIntervalSince1970: 2_000_000_000)
+    check(AgentConfig().requiresEngagement == nil && !AgentConfig().awaitingEngagement(lastEngaged: nil), "Waiting for the human is off by default")
+    var never = AgentConfig(); never.requiresEngagement = true
+    check(!never.awaitingEngagement(lastEngaged: nil), "An agent's first scheduled turn has no earlier turn to wait on")
+    var retrying = AgentConfig(); retrying.requiresEngagement = true; retrying.lastLoopAt = t; retrying.transientFailures = 2
+    check(!retrying.awaitingEngagement(lastEngaged: nil), "Retries of a failed turn are not masked")
+    let legacy = try! JSONDecoder().decode(DeviceAgentSettings.self, from: JSONEncoder().encode(AgentConfig().wire(home: "h")))
+    check(legacy.requiresEngagement == false, "Agent settings carry the option to other devices")
+
+    let store = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-engage-" + UUID().uuidString))
+    let service = DeviceSyncService(); store.switchboardService = service
+    let news = store.createAgent(title: "News checker", persist: false)
+    news.agent?.enabled = true; news.agent?.autoPace = false; news.agent?.requiresEngagement = true
+    news.agent?.lastLoopAt = t.addingTimeInterval(-900); news.agent?.nextRunAt = t
+    let assessedAt = t.addingTimeInterval(-7200)
+    news.agent?.assessment = AgentAssessment(summary: "Quiet", status: .onTrack, facts: [], revision: 1, contentHash: "abc", updatedAt: assessedAt, checkedAt: assessedAt)
+    var starts = 0
+    store.startAgentRun = { session, _ in starts += 1; session.busy = true }
+    let runtime = AgentRuntime()
+    func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    func status(_ now: Date) -> String { news.agent!.loopStatus(at: now, busy: news.busy, queuePaused: false, pendingCount: 0, lastEngaged: service.lastEngagedAt) }
+
+    for offset in [0.0, 5, 3600] { runtime.tick(store: store, now: t.addingTimeInterval(offset)); settle() }
+    check(starts == 0 && news.pending.isEmpty && news.agent?.nextRunAt == t && news.agent?.lastLoopAt == t.addingTimeInterval(-900),
+          "A due turn with no engagement makes no provider call, queues nothing and keeps its deadline")
+    check(status(t.addingTimeInterval(3600)).hasPrefix("Waiting for you") && !status(t.addingTimeInterval(3600)).contains("check due"), "A dormant agent says it is waiting for you")
+    let dormant = news.agent!.widgetContent(now: t.addingTimeInterval(3600))
+    check(dormant.freshness == .aging && dormant.problem == nil && news.agent?.assessmentProblem == nil && news.agent?.attention.isEmpty == true,
+          "A dormant assessment ages by time and is not marked as an error")
+
+    store.enqueueSwitchboard(news, text: "Another agent asks for work", hop: 1); settle()
+    check(service.lastEngagedAt == nil && starts == 1 && news.agent?.lastLoopAt == t.addingTimeInterval(-900), "Switchboard traffic runs its own turn but is not engagement")
+    news.busy = false; news.pending = []
+    store.queueAgentRun(news); settle()
+    check(service.lastEngagedAt == nil && starts == 2, "Run once still runs while dormant, and queueing it is not engagement")
+    news.busy = false; news.pending = []; starts = 0
+
+    let older = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp), isInitiator: false, displayName: "Older")
+    older.trustedReady = true; older.hello = DeviceHello(deviceID: String(repeating: "a", count: 64), deviceName: "Older", converseVersion: "test")
+    let report = try! JSONEncoder().encode(DeviceEngagement.Report(ageSeconds: 1))
+    service.handleEnvelope(older, DeviceEnvelope(kind: DeviceEngagement.kind, payload: report))
+    check(service.lastEngagedAt == nil, "A peer that does not advertise engagement cannot wake an agent")
+
+    // The iPhone's clock is irrelevant: the home stamps the report on receipt.
+    service.receiveEngagementForTesting(DeviceEngagement.Report(ageSeconds: 5), receivedAt: t.addingTimeInterval(3700))
+    check(service.lastEngagedAt == t.addingTimeInterval(3695), "A report's age is measured against the receiving device's clock")
+    let returned = t.addingTimeInterval(3705)
+    for offset in [0.0, 1, 2] { runtime.tick(store: store, now: returned.addingTimeInterval(offset)); settle(); news.busy = offset == 0 ? true : news.busy }
+    check(starts == 1 && news.agent?.lastLoopAt == returned && (news.agent?.nextRunAt ?? t) > returned, "Coming back runs the masked turn once, never several, and resumes normal pacing")
+
+    news.busy = false; news.pending = []
+    let nextDue = news.agent!.nextRunAt!
+    runtime.tick(store: store, now: nextDue); settle()
+    check(starts == 1 && status(nextDue).hasPrefix("Waiting for you"), "Without new engagement the following due turn is masked again")
+    service.noteHumanInput(now: nextDue.addingTimeInterval(10))
+    runtime.tick(store: store, now: nextDue.addingTimeInterval(11)); settle()
+    check(starts == 2, "Real local input releases the next masked turn")
+
+    var engagement = DeviceEngagement()
+    check(engagement.report(lastReported: nil, lastSent: nil, now: t) == nil, "A device with no input reports nothing")
+    engagement.recordLocal(at: t)
+    let sent = engagement.report(lastReported: nil, lastSent: nil, now: t.addingTimeInterval(4))
+    check(sent?.ageSeconds == 4, "A device reconnecting after input reports that input's age")
+    check(engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(100)) == nil, "An input already reported is not sent again")
+    engagement.recordLocal(at: t.addingTimeInterval(1))
+    check(engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(10)) == nil && engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(31)) != nil,
+          "Reports are throttled, with a trailing report for the last input")
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: -1), receivedAt: t.addingTimeInterval(500))
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: .infinity), receivedAt: t.addingTimeInterval(500))
+    check(engagement.latest == t.addingTimeInterval(1), "Malformed report ages are ignored")
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: 10), receivedAt: t.addingTimeInterval(100))
+    check(engagement.latest == t.addingTimeInterval(90) && engagement.local == t.addingTimeInterval(1), "Peer input moves the Group's latest time but is never reported onward")
 }

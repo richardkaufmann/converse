@@ -102,6 +102,7 @@ public sealed partial class MainWindow
             panel.Children.Add(new TextBlock { Text = local is null ? "Home Assistant access is set on the agent's home computer." : "Read only. Choose up to 32 entities; their states, names and observation times go to the selected model, never the token. Use HTTPS outside a trusted local network. Tokens stay on this computer.", TextWrapping = TextWrapping.Wrap });
             var objective = new TextBox { Header = "Objective and success criteria", Text = settings.Objective, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 90 }; panel.Children.Add(objective);
             var enabled = new CheckBox { Content = "Enable automatic loop", IsChecked = settings.Enabled }; panel.Children.Add(enabled);
+            var waits = new CheckBox { Content = "Only run when I’ve been active since the last turn", IsChecked = settings.RequiresEngagement == true }; panel.Children.Add(waits);
             var seconds = new NumberBox { Header = "Fixed interval · minutes", Value = settings.IntervalSeconds / 60, Minimum = 1, Maximum = 525600 }; panel.Children.Add(seconds);
             var schedule = new TextBox { Header = "Text schedule · leave blank for fixed interval", Text = settings.ScheduleText ?? "", PlaceholderText = "every 20 minutes while the US stock market is open" }; panel.Children.Add(schedule);
             var zone = new TextBox { Header = "Time zone", Text = settings.ScheduleTimeZone ?? "America/New_York" }; panel.Children.Add(zone);
@@ -145,7 +146,7 @@ public sealed partial class MainWindow
                 {
                     ReadSchedule(); AgentSchedule.Compile(settings);
                     if (!double.IsFinite(runs.Value)) throw new ArgumentException("Enter a run allowance.");
-                    settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
+                    settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true; settings.RequiresEngagement = waits.IsChecked == true;
                     settings.HomeAssistantURL = local is null ? initialHAURL : haURL.Text.Trim();
                     settings.HomeAssistantEntities = local is null ? initialHAEntities : haEntities.Text.Trim();
                     settings.HomeAssistantRead = local is null ? initialHARead : haRead.IsChecked == true;
