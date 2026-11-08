@@ -3298,7 +3298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        PerformanceCapture.shared.configure(folder: Store.shared.folder, enabled: ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1")
+        PerformanceDebugState.shared.initialize(folder: Store.shared.folder)
         AppDelegate.shared = self
         Store.shared.chooseImportProvider = { [weak self] in self?.chooseLogin($0) }
         Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }
@@ -3445,7 +3445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentMinSize = NSSize(width: 760, height: 540)
         window.title = (DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") : state.title)) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
-        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
+        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 510, height: 24)
         window.addTitlebarAccessoryViewController(title)
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
         if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }

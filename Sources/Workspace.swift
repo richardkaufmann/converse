@@ -358,12 +358,22 @@ struct SidebarSession: View {
     }
 }
 struct WindowTitle: View {
+    @ObservedObject private var capture = PerformanceDebugState.shared
     @ObservedObject var workspace: Workspace
     let state: WindowState
     var body: some View {
         HStack(spacing: 8) {
             Text(DemoReset.testName ?? state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
             Text(ConverseAbout.versionBuild).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
+            if capture.recording || capture.paused {
+                Text(capture.recording ? "RECORDING" : "PAUSED")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white).padding(.horizontal, 6).frame(height: 16)
+                    .background(capture.recording ? Color.red : Color(red: 0.38, green: 0.38, blue: 0.40), in: Capsule())
+                    .fixedSize()
+                    .accessibilityLabel(capture.recording ? "Performance telemetry recording" : "Performance telemetry paused")
+                    .help(capture.recording ? "Recording performance timings. Pause in Settings → Debug." : "Performance buffer is frozen. Settings → Debug to record or turn off.")
+            }
         }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             .help(state.title + "\nRight-click to rename this window")

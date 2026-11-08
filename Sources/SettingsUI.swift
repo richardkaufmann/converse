@@ -265,6 +265,35 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
         session.title = "Example conversation"
     }
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let diagnostics = PerformanceDebugState.shared
+    func titlePreview(_ name: String) {
+        let state = WindowState(); Workspace.shared.rename(state.id, to: "Converse App Development")
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: appearanceName)!
+            let view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state).background(Color(nsColor: .windowBackgroundColor)))
+            view.frame = NSRect(x: 0, y: 0, width: 510, height: 24)
+            let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.appearance = appearance; view.appearance = appearance; window.contentView = view
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            appearance.performAsCurrentDrawingAppearance {
+                if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("telemetry-title-" + name + "-" + appearanceName.rawValue + ".png"))
+                }
+            }
+        }
+    }
+    titlePreview("off")
+    diagnostics.record(folder: store.folder)
+    titlePreview("recording")
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 125)
+    diagnostics.pause()
+    let deadline = Date().addingTimeInterval(3)
+    while diagnostics.busy && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    guard diagnostics.paused, !diagnostics.recording, diagnostics.file != nil, !diagnostics.busy else {
+        throw NSError(domain: "PerformancePreview", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pause did not freeze a capture"])
+    }
+    titlePreview("paused")
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         let appearance = NSAppearance(named: appearanceName)!
         for (index, category) in SettingsCategory.allCases.enumerated() {
@@ -289,35 +318,68 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
 
 final class PerformanceDebugState: ObservableObject {
     static let shared = PerformanceDebugState()
-    @Published var enabled = false
-    @Published var delay = 5.0
-    @Published var duration = 30.0
+    @Published private(set) var recording = false
+    @Published private(set) var paused = false
     @Published private(set) var busy = false
-    @Published private(set) var status = "Ready to capture."
+    @Published private(set) var status = "Off."
     @Published private(set) var file: URL?
     @Published var exportError: String?
-    private let run = PerformanceCaptureRun()
+    @Published var history = 60.0 {
+        didSet {
+            UserDefaults.standard.set(history, forKey: "performanceHistorySeconds")
+            PerformanceCapture.shared.setHistory(seconds: history)
+        }
+    }
+    @Published var automatic = false {
+        didSet { UserDefaults.standard.set(automatic, forKey: "performanceRecordOnLaunch") }
+    }
     private var request = 0
-    func go(folder: URL) {
-        guard enabled, !busy else { return }
+    private var folder: URL?
+    func initialize(folder: URL) {
+        self.folder = folder
+        let defaults = UserDefaults.standard
+        history = PerformanceCapture.clampedHistory((defaults.object(forKey: "performanceHistorySeconds") as? Double) ?? 60)
+        automatic = (defaults.object(forKey: "performanceRecordOnLaunch") as? Bool) ?? PerformanceCapture.recordingDefault(
+            info: Bundle.main.infoDictionary ?? [:], environment: ProcessInfo.processInfo.environment)
+        let paused = folder.appendingPathComponent("Performance Diagnostics/paused-performance.json")
+        if FileManager.default.fileExists(atPath: paused.path) { file = paused }
+        if automatic { record(folder: folder) }
+    }
+    func record(folder: URL) {
+        guard !recording, !busy else { return }
+        self.folder = folder; request += 1; exportError = nil
+        PerformanceCapture.shared.configure(folder: folder, enabled: true, historySeconds: history)
+        recording = true; paused = false; status = "Recording recent activity. Pause after a stutter."
+    }
+    func pause(turnOff: Bool = false) {
+        guard recording, !busy, let folder else { return }
         request += 1; let token = request
-        busy = true; file = nil; exportError = nil
-        status = "Starting in \(Int(delay)) seconds. Switch back to the pane you want to test."
-        run.start(folder: folder, delay: delay, duration: duration) { [weak self] state in
-            guard let self, self.request == token else { return }
-            switch state {
-            case .waiting: break
-            case .recording: self.status = "Recording for \(Int(self.duration)) seconds. Use Converse normally."
-            case .complete(let file): self.file = file; self.busy = false; self.status = "Capture complete. Ready to export."
-            case .failed(let message): self.busy = false; self.status = message
-            case .cancelled: self.busy = false; self.status = "Capture cancelled."
+        recording = false; paused = !turnOff; busy = true; status = "Saving paused buffer…"
+        PerformanceCapture.shared.finish { result in
+            var result = result
+            if case .success(let current) = result {
+                do {
+                    let paused = folder.appendingPathComponent("Performance Diagnostics/paused-performance.json")
+                    try Data(contentsOf: current).write(to: paused, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paused.path)
+                    result = .success(paused)
+                } catch { result = .failure(error) }
+            }
+            DispatchQueue.main.async {
+                guard self.request == token else { return }
+                self.busy = false
+                switch result {
+                case .success(let file): self.file = file; self.status = turnOff ? "Off. Last buffer saved locally." : "Paused. Buffer saved locally and ready to export."
+                case .failure(let error): self.file = nil; self.status = "Could not save buffer: " + error.localizedDescription
+                }
             }
         }
     }
-    func cancel(folder: URL) {
-        request += 1
-        busy = false; status = "Capture cancelled."
-        run.cancel(folder: folder) { _ in }
+    func turnOff() {
+        guard !busy else { return }
+        automatic = false
+        if recording { pause(turnOff: true) }
+        else { paused = false; status = "Off. Last paused buffer remains available to export." }
     }
     func export() {
         guard let file, !busy else { return }
@@ -332,7 +394,7 @@ final class PerformanceDebugState: ObservableObject {
                 do {
                     let data = try Data(contentsOf: file)
                     try data.write(to: destination, options: .atomic)
-                    DispatchQueue.main.async { if self.request == token { self.status = "Capture exported." } }
+                    DispatchQueue.main.async { if self.request == token { self.status = self.recording ? "Paused buffer exported. Recording continues." : "Paused buffer exported." } }
                 } catch {
                     DispatchQueue.main.async { if self.request == token { self.exportError = "Could not export: " + error.localizedDescription } }
                 }
@@ -345,31 +407,28 @@ struct PerformanceDebugView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Text("Debug").font(.title2.bold())
-            Toggle("Enable performance telemetry", isOn: $capture.enabled)
-                .onChange(of: capture.enabled) { _, enabled in
-                    if !enabled && capture.busy { capture.cancel(folder: Store.shared.folder) }
-                }
-            Text("Capture typing, rendering, saving and main-thread delays locally. Nothing is uploaded. Captures contain timings and app version, not conversations, key characters or credentials.")
+            Toggle("Record automatically on launch", isOn: $capture.automatic)
+            Text("Keep a rolling buffer of typing, rendering, saving and main-thread timings locally. No conversations, key characters or credentials are recorded. Nothing is uploaded.")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 16) {
-                Text("Start in \(Int(capture.delay)) seconds").monospacedDigit()
-                Slider(value: $capture.delay, in: 0...60, step: 1).accessibilityLabel("Start delay in seconds")
-                Text("Run for \(Int(capture.duration)) seconds").monospacedDigit()
-                Slider(value: $capture.duration, in: 5...300, step: 5).accessibilityLabel("Capture duration in seconds")
-            }.disabled(!capture.enabled || capture.busy)
+                Text("Keep the last \(Int(capture.history)) seconds").monospacedDigit()
+                Slider(value: $capture.history, in: 30...600, step: 10)
+                    .accessibilityLabel("History in seconds")
+            }.disabled(capture.busy)
             HStack(spacing: 14) {
-                Button("Go") { capture.go(folder: Store.shared.folder) }
+                Button("Record") { capture.record(folder: Store.shared.folder) }
                     .buttonStyle(.borderedProminent).controlSize(.large)
-                    .disabled(!capture.enabled || capture.busy)
-                Button("Export") { capture.export() }
+                    .disabled(capture.recording || capture.busy)
+                Button("Pause") { capture.pause() }
+                    .disabled(!capture.recording || capture.busy)
+                Button("Off") { capture.turnOff() }
+                    .disabled((!capture.recording && !capture.paused) || capture.busy)
+                Button("Export…") { capture.export() }
                     .disabled(capture.file == nil || capture.busy)
-                if capture.busy {
-                    Button("Cancel") { capture.cancel(folder: Store.shared.folder) }
-                }
             }
             Text(capture.status).foregroundStyle(.secondary).accessibilityIdentifier("performanceCaptureStatus")
             if let error = capture.exportError { Text(error).foregroundStyle(.red) }
-            Text("You can close Settings during the capture. Recording stops automatically. Go starts a fresh capture.")
+            Text("You can close Settings while recording. Pause freezes the recent buffer. Off also disables automatic recording. Record starts a new buffer; Export saves the last paused buffer, which stays saved until you pause again.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
