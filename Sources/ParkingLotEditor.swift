@@ -224,7 +224,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             guard let text, !rendering else { return }
             // Image rows reserve space for their drawn height at the current
             // width, so a resize that changes the width must re-render too.
-            let width = min(ParkingOutlineText.lotImageWidth, (text.textContainer?.containerSize.width ?? 400) - 10)
+            let width = text.imageSlotWidth
             guard caret != nil || displayed != parent.lot.document || displayedCollapsed != parent.collapsed || displayedWidth != width else { return }
             let oldSelection = text.selectedRange()
             let oldAnchor = projection.index(at: oldSelection.location).map { (projection.entries[$0].row.id, oldSelection.location - projection.entries[$0].range.location) }
@@ -562,11 +562,48 @@ final class ParkingOutlineText: NSTextView {
     override func layout() {
         let measurement = PerformanceCapture.shared.begin()
         defer { PerformanceCapture.shared.end(.lotTextLayout, measurement) }
-        super.layout(); updateCommentButtons()
-        // Resizes land here after the container tracks the new width, so
-        // image spacing follows live resizes. render()'s width guard keeps
-        // this a no-op when nothing changed.
+        super.layout()
+        // Resizes land here after the container tracks the new width. Only
+        // image rows depend on it, so re-reserve their spacing rather than
+        // rebuilding the outline; render() is then a no-op unless the lot changed.
+        if let owner, !owner.rendering, owner.displayedWidth != imageSlotWidth { updateImageSpacing() }
+        updateCommentButtons()
         owner?.render()
+    }
+    // The gutter numbers and comment column lie outside the text the layout
+    // manager invalidates, so a new width repaints and re-lays out the whole view.
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { widthSettled() }
+    }
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize(); widthSettled()
+    }
+    /// Called when the container reaches a new width, including when a
+    /// window resize releases frozen wrapping.
+    func widthSettled() { needsLayout = true; needsDisplay = true }
+    /// Lots up to this size reflow live while a window or pane resizes; larger
+    /// ones keep their wrapping until the resize ends, as transcripts do.
+    static let liveReflowLimit = 50_000
+    var reflowsDuringResize: Bool { (textStorage?.length ?? 0) <= Self.liveReflowLimit }
+    var imageSlotWidth: CGFloat { min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 10) }
+    /// Image rows reserve their drawn height at the current width. Updates only
+    /// those paragraphs, leaving the projection and text untouched.
+    func updateImageSpacing() {
+        guard let owner, let storage = textStorage else { return }
+        let width = imageSlotWidth, length = storage.length
+        owner.displayedWidth = width
+        storage.beginEditing()
+        for entry in owner.projection.entries {
+            guard let paths = entry.row.images, !paths.isEmpty, entry.range.location < length,
+                  let old = storage.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle,
+                  let style = old.mutableCopy() as? NSMutableParagraphStyle else { continue }
+            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
+            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 })
+            storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: min(length - entry.range.location, max(1, entry.range.length))))
+        }
+        storage.endEditing()
     }
     @objc private func openComments(_ sender: NSButton) {
         guard let value = sender.identifier?.rawValue, let id = UUID(uuidString: value) else { return }
@@ -799,6 +836,13 @@ final class ParkingOutlineText: NSTextView {
         let glyph = manager.glyphIndexForCharacter(at: entry.range.location)
         return manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
     }
+    /// Area marked for redisplay and gutter marker origins drawn since the
+    /// resize self-test last cleared them, to compare with the layout.
+    var invalidatedArea = NSRect.null
+    var paintedMarkers: [UUID: NSPoint] = [:]
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        invalidatedArea = invalidatedArea.union(invalidRect); super.setNeedsDisplay(invalidRect)
+    }
     override func draw(_ dirtyRect: NSRect) {
         // NSTextView narrows the graphics clip while drawing its text container.
         // Restore it before drawing the outline gutter outside that container.
@@ -834,6 +878,7 @@ final class ParkingOutlineText: NSTextView {
             // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
             let markerX = entry.row.heading ? gutterWidth / 3 + offset : max(2, gutterWidth - 4 + offset - (marker as NSString).size(withAttributes: markerAttributes).width)
             (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
+            paintedMarkers[entry.row.id] = NSPoint(x: markerX, y: rect.minY)
             if (entry.hasChildren || entry.row.heading) && !entry.placeholder {
                 let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
                 (disclosure as NSString).draw(at: NSPoint(x: 3 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: pointSize, weight: .semibold), .foregroundColor: NSColor.labelColor])
@@ -1030,6 +1075,7 @@ private final class ParkingMenuAction: NSObject {
 
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     parkingLotTextScalingSelfTests(check)
+    parkingLotResizeSelfTests(check)
     parkingMultiSelectionSelfTests(check)
     let heading = ParkingLotRow(heading: true, text: "Converse")
     let first = ParkingLotRow(heading: false, text: "Fix scrolling", notes: [.init(author: "Reviewer", text: "Keep this comment")])
@@ -1757,6 +1803,106 @@ func parkingLotTextScalingSelfTests(_ check: (Bool, String) -> Void) {
     print("Lot zoom measurement: 180 wrapped rows, \(String(format: "%.3f", elapsed)) seconds")
 }
 
+/// Dragging a lot window's edge, in an offscreen window with the same live-resize
+/// handling as a Converse window: text, gutter numbers, comment buttons and image
+/// spacing follow every width, and the end of the drag repaints the whole view.
+func parkingLotResizeSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-resize-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let imagePath = folder.appendingPathComponent("wide.png").path
+    let picture = NSImage(size: NSSize(width: 1200, height: 100), flipped: false) { rect in NSColor.orange.setFill(); rect.fill(); return true }
+    if let tiff = picture.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: imagePath))
+    }
+    for large in [false, true] {
+        let kind = large ? "A large lot" : "A lot"
+        let lot = ParkingLotStore(folder: folder.appendingPathComponent(large ? "large" : "small"))
+        let heading = ParkingLotRow(heading: true, text: "Bugs")
+        var rows = [heading]
+        for i in 0..<(large ? 420 : 16) {
+            var row = ParkingLotRow(heading: false, text: "Item \(i): a long line that wraps differently at every window width, so stale layout would leave rows and numbers out of line.", parentID: heading.id)
+            if i % 3 == 0 { row.notes = [.init(author: "Reviewer", text: "Comment \(i)")] }
+            rows.append(row)
+            if i == 4 { rows.append(ParkingLotRow(heading: false, text: "Child with a screenshot", images: [imagePath], parentID: row.id)) }
+        }
+        lot.openStarter(rows)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let panes = WindowPaneLayout(window: window)
+        let scroll = ParkingLotScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        scroll.hasVerticalScroller = true; scroll.autoresizingMask = [.width, .height]
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+        text.isRichText = false; text.isVerticallyResizable = true; text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]; text.textContainerInset = NSSize(width: 36, height: 8)
+        text.textContainer?.widthTracksTextView = true
+        text.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        text.minSize = .zero; text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        // Layer-backed like a Converse window, where AppKit does not repaint a
+        // resized view wholesale.
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500)); content.wantsLayer = true
+        content.addSubview(scroll); window.contentView = content
+        scroll.documentView = text; text.configureTextScaling(); coordinator.render()
+        check(text.reflowsDuringResize != large, "\(kind) \(large ? "keeps its wrapping" : "reflows live") during a window resize (\(text.textStorage!.length) characters)")
+        func settle() { content.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.05)); content.layoutSubtreeIfNeeded() }
+        func consistent(_ moment: String, invalidated: NSRect?) {
+            guard let manager = text.layoutManager, let container = text.textContainer else { return }
+            manager.ensureLayout(for: container)
+            let tracked = text.bounds.width - 2 * text.textContainerInset.width
+            var overflow: CGFloat = 0
+            manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) { _, used, _, _, _ in overflow = max(overflow, used.maxX - container.containerSize.width) }
+            check(abs(container.containerSize.width - tracked) < 0.5 && overflow <= 0.5,
+                  "\(kind) \(moment) wraps at the visible width (container \(container.containerSize.width), view \(tracked), overflow \(overflow))")
+            check(text.frame.height + 0.5 >= manager.usedRect(for: container).maxY + text.textContainerOrigin.y, "\(kind) \(moment) grows to hold its rewrapped rows")
+            let commented = coordinator.projection.entries.filter { !($0.row.notes ?? []).isEmpty }
+            let buttons = text.subviews.compactMap { $0 as? NSButton }
+            check(buttons.count == commented.count && commented.allSatisfy { entry in
+                buttons.first { $0.identifier?.rawValue == entry.row.id.uuidString }.map {
+                    text.bounds.contains($0.frame) && abs($0.frame.minY - (text.rowRect(entry).minY - 1)) < 0.5
+                } ?? false
+            }, "\(kind) \(moment) keeps comment buttons inside the view beside their rows")
+            if let entry = coordinator.projection.entries.first(where: { $0.row.images != nil }) {
+                let style = text.textStorage?.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle
+                let offset = CGFloat(max(0, entry.depth - 1)) * text.indentWidth
+                let expected = ParkingOutlineText.lotImageSpacing(text.lotImageSizes([imagePath], width: max(40, text.imageSlotWidth - offset)).compactMap { $0 })
+                check(abs((style?.paragraphSpacing ?? 0) - expected) < 0.5, "\(kind) \(moment) reserves image space for the current width (\(style?.paragraphSpacing ?? 0) vs \(expected))")
+            }
+            let visible = scroll.contentView.documentVisibleRect
+            if let invalidated {
+                check(invalidated.contains(visible), "\(kind) \(moment) repaints the whole visible view, gutter included (\(invalidated) vs \(visible))")
+            }
+            text.paintedMarkers = [:]
+            if let rep = text.bitmapImageRepForCachingDisplay(in: visible) { text.cacheDisplay(in: visible, to: rep) }
+            let shown = coordinator.projection.entries.filter { !$0.row.heading && text.rowRect($0).intersects(visible) }
+            check(!shown.isEmpty && shown.allSatisfy { entry in text.paintedMarkers[entry.row.id].map { abs($0.y - text.rowRect(entry).minY) < 0.5 } ?? false },
+                  "\(kind) \(moment) draws gutter numbers level with their rows' first lines")
+        }
+        settle(); consistent("at first", invalidated: nil)
+        for width: CGFloat in [340, 900, 520] {
+            // The large lot relies on the window's end-of-resize thaw alone.
+            NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+            if !large { text.viewWillStartLiveResize() }
+            let start = content.frame.width
+            for step in 1...4 {
+                text.invalidatedArea = .null
+                window.setContentSize(NSSize(width: start + (width - start) * CGFloat(step) / 4, height: 500)); settle()
+                if !large { consistent("while dragging toward \(Int(width))pt", invalidated: text.invalidatedArea) }
+            }
+            text.invalidatedArea = .null
+            if !large { text.viewDidEndLiveResize() }
+            NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+            settle(); consistent("after a drag to \(Int(width))pt", invalidated: text.invalidatedArea)
+        }
+        // A pane divider changes the width without a window live resize.
+        text.invalidatedArea = .null
+        scroll.setFrameSize(NSSize(width: 460, height: 500)); settle()
+        consistent("after a pane divider resize", invalidated: text.invalidatedArea)
+        withExtendedLifetime(panes) { window.close() }
+    }
+}
+
 extension ParkingOutlineText: PaneTextScalable {
     func configureTextScaling() {
         pointSize = 13
@@ -1817,18 +1963,10 @@ extension ParkingOutlineText: PaneTextScalable {
             style.headIndent *= factor; style.firstLineHeadIndent *= factor
             storage.addAttribute(.paragraphStyle, value: style, range: range)
         }
-        let width = min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 10)
-        for entry in owner.projection.entries {
-            guard let paths = entry.row.images, !paths.isEmpty, entry.range.location < length,
-                  let old = storage.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle,
-                  let style = old.mutableCopy() as? NSMutableParagraphStyle else { continue }
-            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 })
-            storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: min(length - entry.range.location, max(1, entry.range.length))))
-        }
+        // The projection and text did not change: recording the width here
+        // keeps layout from rebuilding either.
+        updateImageSpacing()
         storage.endEditing()
-        // The projection and text did not change: do not rebuild either during layout.
-        owner.displayedWidth = width
         typingAttributes[.font] = NSFont.systemFont(ofSize: pointSize)
         setSelectedRange(selection)
         if let clip, let manager = layoutManager, let container = textContainer {
