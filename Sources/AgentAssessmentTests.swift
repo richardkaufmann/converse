@@ -234,6 +234,17 @@ import Foundation
     let store = Store(folder: root)
     let agent = store.createAgent(title: "KAOS Steward"); agent.agent?.enabled = false
     agent.agent?.recordAssessment(.revision(first), now: now)
+    do {
+        let revokedLot = UUID()
+        var discord = AgentConfig(); discord.assessment = first
+        discord.assessment?.facts = [AgentAssessments.missingInput("lot." + revokedLot.uuidString, label: "Private orchard", now: now),
+                                     AgentFact(id: "lot." + revokedLot.uuidString + ".open", label: "Private orchard open", value: "7", kind: .measured, source: "lot", observedAt: now)]
+        func sharedFacts() -> String { String(describing: AgentRuntime.discordSessionInformation(agent, config: discord)["assessment"] ?? "") }
+        discord.watchedSessions = [revokedLot]
+        check(sharedFacts().contains("Private orchard"), "Discord session information includes a permitted lot's facts")
+        discord.watchedSessions = []
+        check(!sharedFacts().contains("Private orchard") && !sharedFacts().contains(revokedLot.uuidString), "Discord session information drops a revoked lot's names and counts")
+    }
     let service = PortraitService()
     var calls = 0, prompts: [String] = [], gate: CheckedContinuation<Void, Never>?, holdNext = false, failNext = false
     func png(_ color: NSColor) -> Data {

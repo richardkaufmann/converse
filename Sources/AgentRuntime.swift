@@ -452,7 +452,7 @@ enum AgentPolicy {
         if let last = config.lastRunAt { value["lastRunAt"] = ISO8601DateFormatter().string(from: last) }
         if let assessment = config.assessment {
             value["assessment"] = ["status": assessment.status.rawValue, "summary": assessment.summary, "revision": assessment.revision,
-                                   "facts": assessment.facts.prefix(AgentAssessment.displayedFacts).map { ["label": $0.label, "value": $0.value, "kind": $0.kind.rawValue] }] as [String: Any]
+                                   "facts": config.visibleAssessmentFacts.prefix(AgentAssessment.displayedFacts).map { ["label": $0.label, "value": $0.value, "kind": $0.kind.rawValue] }] as [String: Any]
         }
         return value
     }
