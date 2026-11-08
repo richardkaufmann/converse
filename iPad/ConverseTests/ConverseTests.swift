@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import AVKit
 import Network
 import CryptoKit
 import UniformTypeIdentifiers
@@ -1550,6 +1551,72 @@ final class ConverseTests: XCTestCase {
         XCTAssertNil(playback.player, "Dismissing releases the player")
         XCTAssertEqual(player?.rate, 0, "Dismissing stops playback")
         XCTAssertNil(player?.currentItem)
+    }
+    func testHelpVideoPlaysFullScreenAspectFitAcrossRotation() async throws {
+        let book = try HelpBook.load()
+        let video = try XCTUnwrap(book.videos?.first { $0.id == "first-run" })
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixture = folder.appendingPathComponent("fixture-v1.mp4")
+        try HelpVideoFixture.writeMP4(to: fixture, seconds: 8)
+        let presenter = HelpVideoPresenter(videos: book.videos ?? []) { _ in fixture }
+        XCTAssertTrue(presenter.open(try XCTUnwrap(URL(string: video.mediaURL))))
+        let playback = try XCTUnwrap(presenter.playback)
+        try await eventually("Local fixture plays") { playback.state == .ready && (playback.player?.rate ?? 0) > 0 }
+        let player = try XCTUnwrap(playback.player)
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: PadHelpVideo(playback: playback, close: presenter.close))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { presenter.close(); window.isHidden = true; if phone { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) } }
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in XCTFail("Initial portrait request failed: \(error)") }
+            try await eventually("Video starts in portrait") { window.bounds.height > window.bounds.width }
+        }
+        func controllers(_ root: UIViewController) -> [UIViewController] { [root] + root.children.flatMap(controllers) }
+        try await eventually("AVKit hosts the player") { controllers(host).contains { $0 is AVPlayerViewController } }
+        let avkit = try XCTUnwrap(controllers(host).compactMap { $0 as? AVPlayerViewController }.first)
+        XCTAssertEqual(avkit.videoGravity, .resizeAspect, "The whole frame shows, letterboxed, never cropped")
+        XCTAssertFalse(avkit.allowsPictureInPicturePlayback, "Picture in Picture would outlive Done")
+        XCTAssertTrue(avkit.player === player)
+        func frame() -> CGRect { avkit.view.convert(avkit.view.bounds, to: window) }
+        let safe = { window.safeAreaLayoutGuide.layoutFrame }
+        host.view.layoutIfNeeded()
+        XCTAssertEqual(frame().width, safe().width, accuracy: 1, "Upright, the player spans the full safe width")
+        XCTAssertGreaterThan(frame().height, safe().height * 0.8, "Only the Done bar sits above the player")
+        player.pause()
+        let paused = player.currentTime()
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeLeft)) { error in XCTFail("Rotation request failed: \(error)") }
+            try await eventually("Video reaches landscape") { window.bounds.width > window.bounds.height && host.traitCollection.verticalSizeClass == .compact }
+        } else {
+            host.traitOverrides.verticalSizeClass = .compact
+        }
+        try await eventually("Done moves to a side rail") { host.view.layoutIfNeeded(); return abs(frame().height - safe().height) < 1 }
+        XCTAssertGreaterThan(frame().width, safe().width * 0.8, "Landscape keeps nearly all of the width")
+        XCTAssertTrue(controllers(host).compactMap { $0 as? AVPlayerViewController }.first === avkit, "Rotation keeps the AVKit controller")
+        XCTAssertEqual(avkit.videoGravity, .resizeAspect)
+        XCTAssertTrue(avkit.player === player && playback.player === player, "Rotation keeps the same AVPlayer; no asset reload")
+        XCTAssertEqual(player.rate, 0, "A paused video stays paused across rotation")
+        XCTAssertEqual(player.currentTime(), paused, "Rotation keeps the playback position")
+        player.play()
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            try await eventually("Video returns to portrait") { window.bounds.height > window.bounds.width && host.traitCollection.verticalSizeClass == .regular }
+        } else {
+            host.traitOverrides.verticalSizeClass = .regular
+        }
+        try await eventually("Done returns above the player") { host.view.layoutIfNeeded(); return frame().height < safe().height - 20 }
+        XCTAssertTrue(avkit.player === player)
+        XCTAssertGreaterThan(player.rate, 0, "A playing video keeps playing across rotation")
+        XCTAssertGreaterThanOrEqual(player.currentTime().seconds, paused.seconds)
+        presenter.close()
+        XCTAssertNil(playback.player, "Done releases the player")
+        XCTAssertEqual(player.rate, 0, "Done stops playback")
+        XCTAssertNil(player.currentItem)
+        try await eventually("AVKit lets go of the player") { avkit.player == nil }
     }
     func eventually(_ description: String, timeout: TimeInterval = 10, _ predicate: @escaping () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
