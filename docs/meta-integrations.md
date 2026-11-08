@@ -8,9 +8,9 @@ Meta also powers work inside Converse itself. Muse coding sessions run through *
 | --- | --- | --- |
 | Muse coding sessions | Muse Code’s selected Spark/Wonder model via `muse serve` and MSP `turn/start`; the footer reports the resolved model from the CLI | [Muse connection](../Sources/MuseConnection.swift), [status and model catalog](../Sources/MuseStatus.swift) |
 | Meta API agent reasoning and optional web search | Configurable model, default `muse-spark-1.3`; `POST https://api.meta.ai/v1/responses` | [Mac API client](../Sources/Agents.swift), [Mac agent runtime](../Sources/AgentRuntime.swift), [Windows/Linux agent runtime](windows/src/Converse.Core/AgentRuntime.cs) |
-| Scoreboard art | `muse-image-1.0`; `POST https://api.meta.ai/v1/images/generations` | [Mac API client](../Sources/Agents.swift), [Windows/Linux agent runtime](windows/src/Converse.Core/AgentRuntime.cs) |
+| On-demand agent portraits | `muse-image-1.0` at `1024x1024`; `POST https://api.meta.ai/v1/images/generations` | [Mac API client](../Sources/Agents.swift), [portrait service](../Sources/AgentPortraits.swift) |
 | Mac speech recognition | `muse-voice-transcribe-1.0`; `POST https://api.meta.ai/v1/asr/transcribe` | [Voice input](../Sources/AgentVoice.swift) |
-| Muse mobile / Jolly access | Named-agent routing, request status, and returned art through Converse’s own bridge; the selected agent then uses the reasoning path above | [Jolly routing](../Sources/Jolly.swift), [bridge and connector schema](../scripts/jolly_bridge.py) |
+| Muse mobile / Jolly access | Named-agent routing, request status, and requested portraits through Converse’s own bridge; the selected agent then uses the reasoning path above | [Jolly routing](../Sources/Jolly.swift), [bridge and connector schema](../scripts/jolly_bridge.py) |
 
 For a demo, keep the Muse session’s resolved model visible while it completes a task. Spark’s current API model ID is `muse-spark-1.3`; Wonder’s is `muse-wonder-1.0`. Wonder Full is a Muse Code subscription option, not a Model API model. The installed CLI’s catalog and the model shown for the actual turn are authoritative; do not label one run as both Spark and Wonder. See [Meta’s model catalog](https://dev.meta.ai/docs/models).
 

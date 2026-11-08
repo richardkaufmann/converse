@@ -109,4 +109,4 @@ Agent reports render Markdown headings, bullets and fenced code. Pipe tables bec
 
 The wand beside attached images opens Image tools. Describe drafts editable Spark notes; tap an object and Find region uses SAM 3.1, then Add focused crop retains the original alongside a rectangular crop. Processing uses the updated Mac home's Meta key, independently of the session provider. Windows/Linux homes do not yet advertise image assistance. No result sends a prompt automatically. A changed lease, removed image, draft conflict or pending send prevents applying a stale result. Home operation receipts prevent retrying an uncertain paid request as a second API call.
 
-Agent Setup now includes Scoreboard art direction. Save and run once to try it; changed direction bypasses the normal hour/mood art refresh gate on the next scoreboard refresh. Older homes require an update before accepting this field.
+Agent Setup includes Portrait art direction, applied to on-demand portraits made on the home Mac. Older homes require an update before saving it.
