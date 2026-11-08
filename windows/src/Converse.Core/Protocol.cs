@@ -561,7 +561,7 @@ public sealed class DeviceWireMessage
     [JsonPropertyName("createdAtUnixSeconds")] public double? CreatedAtUnixSeconds { get; set; }
     // Inject all parts (UTF-16 ranges of Text), shared with Swift. Older
     // peers omit and ignore it; viewers then use the conservative text split.
-    [JsonPropertyName("components")] public List<MessageComponent>? Components { get; set; }
+    [JsonPropertyName("components"), JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
     [JsonIgnore] public DateTime? CreatedAt
     {
         get => CreatedAtUnixSeconds is { } seconds && double.IsFinite(seconds)
@@ -583,6 +583,70 @@ public sealed class MessageComponent
     /// "traffic" may collapse to its own summary. "human" (typed in a
     /// composer) and "text" (anything else) always stay visible.
     [JsonPropertyName("kind")] public string Kind { get; set; } = Plain;
+    /// Stands in for recorded parts that could not be read (Swift
+    /// MessageComponent.undecodable): it never tiles, so the message shows
+    /// whole and expanded like any other invalid parts. It is written back
+    /// as-is, so an archive or snapshot re-saves it as the same marker.
+    public static List<MessageComponent> Undecodable() => new() { new MessageComponent { Offset = -1, Length = 0, Kind = Plain } };
+}
+
+/// Lenient `components` decoding for every type that carries Inject all parts
+/// (Swift decodeComponents parity). Parts are presentation only, so unreadable
+/// ones never fail the message, snapshot or archive: absent or null stays
+/// null; any other value that is not a list of {offset, length, kind?} objects
+/// (a wrong type, a null or non-object entry, a missing, fractional or out of
+/// range number, a non-string kind) reads as MessageComponent.Undecodable().
+/// Integral numbers such as 46.0 read as 46, as in Swift. A missing kind is
+/// "text" and a null kind stays null, both ordinary visible parts. Writing
+/// uses the default contract, so valid parts round-trip byte for byte.
+public sealed class LenientComponentsConverter : JsonConverter<List<MessageComponent>?>
+{
+    public override List<MessageComponent>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+        if (root.ValueKind == JsonValueKind.Null) return null;
+        if (root.ValueKind != JsonValueKind.Array) return MessageComponent.Undecodable();
+        var comparison = options.PropertyNameCaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var parts = new List<MessageComponent>(root.GetArrayLength());
+        foreach (var entry in root.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object) return MessageComponent.Undecodable();
+            int? offset = null, length = null;
+            var kind = MessageComponent.Plain;
+            foreach (var property in entry.EnumerateObject())
+            {
+                if (string.Equals(property.Name, "offset", comparison))
+                {
+                    if (Integer(property.Value) is not { } value) return MessageComponent.Undecodable();
+                    offset = value;
+                }
+                else if (string.Equals(property.Name, "length", comparison))
+                {
+                    if (Integer(property.Value) is not { } value) return MessageComponent.Undecodable();
+                    length = value;
+                }
+                else if (string.Equals(property.Name, "kind", comparison))
+                {
+                    if (property.Value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) return MessageComponent.Undecodable();
+                    kind = property.Value.GetString()!;
+                }
+            }
+            if (offset is null || length is null) return MessageComponent.Undecodable();
+            parts.Add(new MessageComponent { Offset = offset.Value, Length = length.Value, Kind = kind });
+        }
+        return parts;
+    }
+
+    private static int? Integer(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Number) return null;
+        if (value.TryGetInt32(out var exact)) return exact;
+        return value.TryGetDouble(out var number) && number == Math.Truncate(number) && number is >= int.MinValue and <= int.MaxValue ? (int)number : null;
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<MessageComponent>? value, JsonSerializerOptions options) =>
+        JsonSerializer.Serialize(writer, value, options);
 }
 
 public sealed class DevicePendingDto
@@ -591,7 +655,7 @@ public sealed class DevicePendingDto
     [JsonPropertyName("text")] public string Text { get; set; } = "";
     // Inject all parts of a merged queue item, as on DeviceWireMessage.
     // Optional: older peers omit and ignore it.
-    [JsonPropertyName("components")] public List<MessageComponent>? Components { get; set; }
+    [JsonPropertyName("components"), JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
 }
 
 public sealed class DeviceChoiceDto

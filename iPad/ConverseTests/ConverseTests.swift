@@ -627,17 +627,18 @@ final class ConverseTests: XCTestCase {
             return try JSONDecoder().decode(DeviceWireMessage.self, from: Data(json.utf8))
         }
         let tellLength = (tell as NSString).length
-        let damaged = try ["[null]", "[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},null]", "{\"offset\":0}"].map(wire)
+        let damaged = try ["[null]", "[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},null]", "{\"offset\":0}", "5",
+                           "[{\"offset\":0,\"length\":\(tellLength),\"kind\":5}]", "[{\"offset\":\"bad\",\"length\":\(tellLength),\"kind\":\"human\"}]"].map(wire)
         let nullKind = try wire("[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},{\"offset\":\(tellLength + 2),\"length\":\((typed as NSString).length),\"kind\":null}]")
-        XCTAssertTrue(damaged.allSatisfy { $0.text == text && $0.components == MessageComponent.undecodable }, "Null entries and mistyped parts decode as invalid parts with the text intact")
+        XCTAssertTrue(damaged.allSatisfy { $0.text == text && $0.components == MessageComponent.undecodable }, "Null entries, a mistyped list and mistyped kind or offset decode as invalid parts with the text intact")
         XCTAssertEqual(nullKind.components?.map(\.kind), ["traffic", "text"], "A null kind is an ordinary visible part")
         let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
         let parent = PadTranscript(messages: damaged + [nullKind], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
         let coordinator = PadTranscript.Coordinator(parent)
         parent.update(view, coordinator: coordinator)
         let lines = view.text.components(separatedBy: "\n")
-        XCTAssertEqual(lines.filter { $0 == typed }.count, 4, "Typed text stays visible in every message")
-        XCTAssertEqual(lines.filter { $0.hasPrefix("[Converse message from Fixture") }.count, 3, "Invalid parts show the whole message expanded")
+        XCTAssertEqual(lines.filter { $0 == typed }.count, damaged.count + 1, "Typed text stays visible in every message")
+        XCTAssertEqual(lines.filter { $0.hasPrefix("[Converse message from Fixture") }.count, damaged.count, "Invalid parts show the whole message expanded")
         XCTAssertEqual(lines.filter { $0.hasPrefix("Received tell from Fixture") }.count, 1, "Valid parts with a null kind still summarize the tell")
     }
     func service() throws -> DeviceSyncService {

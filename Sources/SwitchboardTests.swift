@@ -211,6 +211,58 @@ func transcriptDisclosureSelfTests(_ check: (Bool, String) -> Void) {
           && recordNull?.text == "kept" && recordNull?.components == MessageComponent.undecodable
           && TranscriptStyle.segments(merged, components: MessageComponent.undecodable) == [TranscriptSegment(text: merged, summary: nil)],
           "Device snapshots and .converse records with a null part keep their text and render it whole")
+    // Shared parity vectors (also run by the Core suite): every malformed
+    // shape loads through each real type that carries parts, keeps its text,
+    // renders whole, and re-encodes as the same marker.
+    let componentVectorFile = URL(fileURLWithPath: FileManager.default.currentDirectoryPath + "/Tests/inject-components-vectors.json")
+    if let vectorData = try? Data(contentsOf: componentVectorFile), let vectorFile = (try? JSONSerialization.jsonObject(with: vectorData)) as? [String: Any],
+       let vectorText = vectorFile["text"] as? String, let vectorTyped = vectorFile["typed"] as? String, let vectors = vectorFile["vectors"] as? [[String: Any]] {
+        // Encodes `value` without its components, then splices in the raw JSON.
+        func spliced<T: Encodable>(_ value: T, _ raw: String) -> String {
+            var object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as! [String: Any]
+            object["components"] = nil
+            var json = String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            json.removeLast(); return json + ",\"components\":" + raw + "}"
+        }
+        func loaded(_ parts: [MessageComponent]?, _ expect: String) -> Bool {
+            let segments = TranscriptStyle.segments(vectorText, components: parts)
+            switch expect {
+            case "absent": return parts == nil
+            case "empty": return parts == [] && segments == [TranscriptSegment(text: vectorText, summary: nil)]
+            case "valid": return segments?.count == 2 && segments?[0].summary != nil && segments?[1] == TranscriptSegment(text: vectorTyped, summary: nil)
+            case "undecodable": return parts == MessageComponent.undecodable && segments == [TranscriptSegment(text: vectorText, summary: nil)]
+            default: return false
+            }
+        }
+        var failed: [String] = []
+        for vector in vectors {
+            guard let name = vector["name"] as? String, let raw = vector["components"] as? String, let expect = vector["expect"] as? String else { failed.append("?"); continue }
+            let message = try? JSONDecoder().decode(Message.self, from: Data(spliced(Message(role: "user", text: vectorText), raw).utf8))
+            let wire = try? JSONDecoder().decode(DeviceWireMessage.self, from: Data(spliced(DeviceWireMessage(id: UUID(), role: "user", text: vectorText), raw).utf8))
+            let pending = try? JSONDecoder().decode(DevicePendingDTO.self, from: Data(spliced(DevicePendingDTO(id: UUID(), text: vectorText), raw).utf8))
+            let record = try? JSONDecoder().decode(ConverseExchange.MessageRecord.self, from: Data(spliced(ConverseExchange.MessageRecord(role: "user", text: vectorText, createdAt: nil, images: []), raw).utf8))
+            let reloaded = message.flatMap { try? JSONDecoder().decode(Message.self, from: JSONEncoder().encode($0)) }
+            if !([message?.text, wire?.text, pending?.text, record?.text].allSatisfy { $0 == vectorText }
+                 && [message?.components, wire?.components, pending?.components, record?.components, reloaded?.components].allSatisfy { loaded($0, expect) }) { failed.append(name) }
+        }
+        check(vectors.count >= 20 && failed.isEmpty, "Every shared components vector loads through Message, DeviceWireMessage, DevicePendingDTO and .converse records" + (failed.isEmpty ? "" : ": " + failed.joined(separator: ", ")))
+        // One damaged message among valid ones: the whole archive and the
+        // whole device snapshot still load with every message.
+        let raws = vectors.compactMap { $0["components"] as? String }
+        let expects = vectors.compactMap { $0["expect"] as? String }
+        var savedJSON = String(decoding: try! JSONSerialization.data(withJSONObject: { var o = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(Session(entry: partsSession.entry).saved)) as! [String: Any]; o["messages"] = [Any](); return o }()), as: UTF8.self)
+        savedJSON = savedJSON.replacingOccurrences(of: "\"messages\":[]", with: "\"messages\":[" + raws.map { spliced(Message(role: "user", text: vectorText), $0) }.joined(separator: ",") + "]")
+        let archive = try? JSONDecoder().decode(SavedSession.self, from: Data(savedJSON.utf8))
+        let snapshot = DeviceTranscriptPayload(globalID: "g", homeSeq: 1, messages: [], draft: "", draftVersion: 0, busy: false, status: "Ready")
+        var snapshotJSON = String(decoding: try! JSONEncoder().encode(snapshot), as: UTF8.self)
+        snapshotJSON = snapshotJSON.replacingOccurrences(of: "\"messages\":[]", with: "\"messages\":[" + raws.map { spliced(DeviceWireMessage(id: UUID(), role: "user", text: vectorText), $0) }.joined(separator: ",") + "]")
+            .replacingOccurrences(of: "\"pending\":[]", with: "\"pending\":[" + raws.map { spliced(DevicePendingDTO(id: UUID(), text: vectorText), $0) }.joined(separator: ",") + "]")
+        let page = try? JSONDecoder().decode(DeviceTranscriptPayload.self, from: Data(snapshotJSON.utf8))
+        check(archive?.messages.count == raws.count && zip(archive?.messages ?? [], expects).allSatisfy { $0.text == vectorText && loaded($0.components, $1) }
+              && page?.messages.count == raws.count && page?.pending.count == raws.count
+              && zip(page?.messages ?? [], expects).allSatisfy { $0.text == vectorText && loaded($0.components, $1) } && zip(page?.pending ?? [], expects).allSatisfy { loaded($0.components, $1) },
+              "An archive or device snapshot mixing every malformed shape with valid parts loads every message")
+    } else { check(false, "Shared components vectors are readable") }
 
     if let path = ProcessInfo.processInfo.environment["CONVERSE_DISCLOSURE_PREVIEW"],
        let bitmap = fixture.scroll.bitmapImageRepForCachingDisplay(in: fixture.scroll.bounds) {

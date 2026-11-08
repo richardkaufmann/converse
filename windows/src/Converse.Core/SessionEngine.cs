@@ -55,14 +55,14 @@ public sealed class ChatMessage
     public string? FinalReply { get; set; }
     // Inject all parts, so a typed prompt merged with switchboard traffic
     // stays visible. Presentation only; Text is what was sent.
-    public List<MessageComponent>? Components { get; set; }
+    [System.Text.Json.Serialization.JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
 }
 
 public sealed class PendingPrompt
 {
     public List<Guid>? ComponentIDs { get; set; }
     // Where each prompt combined by Inject all sits in Text, for the transcript.
-    public List<MessageComponent>? Components { get; set; }
+    [System.Text.Json.Serialization.JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
     // Typed in a local or remote composer; stays visible after Inject all.
     public bool Typed { get; set; }
     public bool ClearDisplayBeforeReply { get; set; }

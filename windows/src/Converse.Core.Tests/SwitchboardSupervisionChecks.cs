@@ -293,7 +293,8 @@ static class SwitchboardSupervisionChecks
                 && SwitchboardPresentation.QueueSummary("hello", parsedNullKind) is null && SwitchboardPresentation.Components(parsedNullKind, "hello", "hello", text => text) is [{ Kind: null }],
                 "A deserialized null kind renders plain, never collapses traffic, and keys apart from an empty kind");
             // Null list entries are invalid metadata: the whole message shows
-            // expanded, and nothing that walks the parts throws.
+            // expanded, and nothing that walks the parts throws. The real wire,
+            // queue and archive types read them as MessageComponent.Undecodable().
             var nullEntryLists = new[] { "[null]", "[{\"offset\":0,\"length\":" + plainTell.Length + ",\"kind\":\"traffic\"},null]", "[null,{\"offset\":" + (plainTell.Length + 2) + ",\"length\":" + humanText.Length + ",\"kind\":\"human\"}]" }
                 .Select(json => System.Text.Json.JsonSerializer.Deserialize<List<MessageComponent>>(json)!).ToList();
             var nullEntriesSafe = nullEntryLists.All(parts =>
@@ -307,12 +308,12 @@ static class SwitchboardSupervisionChecks
             var nullEntryWire = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"" + markerless.Replace("\n", "\\n") + "\",\"imageHashes\":[],\"components\":[null]}"));
             var nullEntryHeld = Busy(new PendingPrompt { Text = markerless, Components = nullEntryLists[1] }, new PendingPrompt { Text = "and more", Typed = true });
             store.InjectPending(nullEntryHeld);
-            check(nullEntryWire.Text == markerless && nullEntryWire.Components is [null] && Expanded(nullEntryWire.Components)
+            check(nullEntryWire.Text == markerless && nullEntryWire.Components is [{ Offset: -1, Length: 0, Kind: MessageComponent.Plain }] && Expanded(nullEntryWire.Components)
                 && SwitchboardPresentation.Segments(nullEntryHeld.Pending[0].Text, nullEntryHeld.Pending[0].Components) is [{ Summary: null } nullHeldWhole] && nullHeldWhole.Text == markerless + "\n\nand more",
-                "A wire message with a null part keeps its text, and Inject all over it keeps that part visible");
+                "A wire message with a null part keeps its text as the undecodable marker, and Inject all over a null part keeps it visible");
             var archivedNullEntry = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>("{\"Role\":\"user\",\"Text\":\"kept text\",\"Components\":[null,{\"offset\":0,\"length\":9,\"kind\":null}]}")!;
-            check(archivedNullEntry.Text == "kept text" && archivedNullEntry.Components?.Count == 2 && SwitchboardPresentation.Segments(archivedNullEntry.Text, archivedNullEntry.Components) is [{ Summary: null, Text: "kept text" }],
-                "An archived message with null parts loads with its text and renders it whole");
+            check(archivedNullEntry.Text == "kept text" && archivedNullEntry.Components is [{ Offset: -1, Length: 0 }] && SwitchboardPresentation.Segments(archivedNullEntry.Text, archivedNullEntry.Components) is [{ Summary: null, Text: "kept text" }],
+                "An archived message with null parts loads with its text as the undecodable marker and renders it whole");
             copy[0].Kind = "human";
             check(!SwitchboardPresentation.SameComponents(valid, copy) && valid[0].Kind == "traffic", "Mutating a part in place is seen against the cached snapshot");
             check(SwitchboardPresentation.QueueSummary(markerless, null) is not null && partStates.Skip(1).All(s => SwitchboardPresentation.QueueSummary(markerless, s.Parts) is null),
@@ -360,9 +361,107 @@ static class SwitchboardSupervisionChecks
         finally { try { Directory.Delete(root, true); } catch { } }
     }
 
+    // Shared parity vectors (also run by the Swift suite): every malformed
+    // components shape loads through the real wire, queue and archive types,
+    // keeps its text, renders whole, and re-saves as the same marker.
+    static void ComponentVectors(Action<bool, string> check)
+    {
+        string? vectorFile = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null && vectorFile is null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "Tests", "inject-components-vectors.json"))) vectorFile = Path.Combine(dir.FullName, "Tests", "inject-components-vectors.json");
+        check(vectorFile is not null, "Shared components vectors are readable");
+        if (vectorFile is null) return;
+        var file = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(vectorFile)).RootElement;
+        var text = file.GetProperty("text").GetString()!;
+        var typed = file.GetProperty("typed").GetString()!;
+        var vectors = file.GetProperty("vectors").EnumerateArray()
+            .Select(v => (Name: v.GetProperty("name").GetString()!, Raw: v.GetProperty("components").GetString()!, Expect: v.GetProperty("expect").GetString()!)).ToList();
+        // Serializes `value` without its components, then splices in the raw JSON.
+        string Spliced<T>(T value, string raw, System.Text.Json.JsonSerializerOptions? options = null)
+        {
+            var node = System.Text.Json.JsonSerializer.SerializeToNode(value, options)!.AsObject();
+            node.Remove("components"); node.Remove("Components");
+            var json = node.ToJsonString();
+            return json[..^1] + (typeof(T) == typeof(ChatMessage) || typeof(T) == typeof(PendingPrompt) ? ",\"Components\":" : ",\"components\":") + raw + "}";
+        }
+        var id = Guid.NewGuid();
+        bool Loaded(IReadOnlyList<MessageComponent>? parts, string expect)
+        {
+            var segments = SwitchboardPresentation.Segments(text, parts);
+            var whole = segments is [{ Summary: null } only] && only.Text == text;
+            var stable = SwitchboardPresentation.ComponentsKey(parts) == SwitchboardPresentation.ComponentsKey(SwitchboardPresentation.Snapshot(parts))
+                && SwitchboardPresentation.QueueSignature(id, text, parts) == SwitchboardPresentation.QueueSignature(id, text, SwitchboardPresentation.Snapshot(parts));
+            return stable && expect switch
+            {
+                "absent" => parts is null,
+                "empty" => parts is { Count: 0 } && whole,
+                "valid" => segments is [{ Summary: not null }, { Summary: null } typedPart] && typedPart.Text == typed,
+                "undecodable" => parts is [{ Offset: -1, Length: 0, Kind: MessageComponent.Plain }] && whole && SwitchboardPresentation.QueueSummary(text, parts) is null
+                    && SwitchboardPresentation.Components(parts, text, text, t => t) is [{ Kind: MessageComponent.Plain } visible] && visible.Length == text.Length,
+                _ => false,
+            };
+        }
+        var failed = new List<string>();
+        foreach (var (name, raw, expect) in vectors)
+        {
+            try
+            {
+                var wire = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes(Spliced(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = text }, raw, DeviceJson.Options)));
+                var pending = DeviceJson.Decode<DevicePendingDto>(System.Text.Encoding.UTF8.GetBytes(Spliced(new DevicePendingDto { Id = Guid.NewGuid(), Text = text }, raw, DeviceJson.Options)));
+                var archived = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>(Spliced(new ChatMessage { Role = "user", Text = text }, raw))!;
+                var queued = System.Text.Json.JsonSerializer.Deserialize<PendingPrompt>(Spliced(new PendingPrompt { Text = text }, raw))!;
+                var wireBytes = DeviceJson.Encode(wire);
+                var rewired = DeviceJson.Decode<DeviceWireMessage>(wireBytes);
+                var rearchived = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>(System.Text.Json.JsonSerializer.Serialize(archived))!;
+                var exact = name != "valid" || System.Text.Encoding.UTF8.GetString(wireBytes).Contains("\"components\":" + raw);
+                if (!(new[] { wire.Text, pending.Text, archived.Text, queued.Text, rewired.Text, rearchived.Text }.All(t => t == text) && exact
+                    && new[] { wire.Components, pending.Components, archived.Components, queued.Components, rewired.Components, rearchived.Components }.All(parts => Loaded(parts, expect))))
+                    failed.Add(name);
+            }
+            catch (Exception e) { failed.Add(name + " (" + e.GetType().Name + ")"); }
+        }
+        check(vectors.Count >= 20 && failed.Count == 0, "Every shared components vector loads through DeviceWireMessage, DevicePendingDto, ChatMessage and PendingPrompt, and re-saves without throwing" + (failed.Count == 0 ? "" : ": " + string.Join(", ", failed)));
+        // One damaged message among valid ones: the whole device snapshot and
+        // the whole archive still load with every message.
+        try
+        {
+            var snapshot = System.Text.Json.JsonSerializer.SerializeToNode(new DeviceTranscriptPayload { GlobalID = "g", HomeSeq = 1, Status = "Ready" }, DeviceJson.Options)!.AsObject();
+            snapshot["messages"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = text }, v.Raw, DeviceJson.Options))) + "]");
+            snapshot["pending"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new DevicePendingDto { Id = Guid.NewGuid(), Text = text }, v.Raw, DeviceJson.Options))) + "]");
+            var page = DeviceJson.Decode<DeviceTranscriptPayload>(System.Text.Encoding.UTF8.GetBytes(snapshot.ToJsonString()));
+            check(page.Messages.Count == vectors.Count && page.Pending.Count == vectors.Count
+                && page.Messages.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect)) && page.Pending.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect)),
+                "A device snapshot mixing every malformed shape with valid parts loads every message and queue row");
+        }
+        catch (Exception e) { check(false, "A device snapshot with malformed parts loads: " + e.GetType().Name + " " + e.Message); }
+        var root = Directory.CreateTempSubdirectory("converse-component-vectors-").FullName;
+        try
+        {
+            var seed = new SessionStore(root, new FakeRunner());
+            seed.Create(new AgentEntry { Name = "Vectors", Engine = "codex" });
+            var file2 = Path.Combine(root, "sessions.json");
+            var archive = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file2))!;
+            var session = archive["Sessions"]![0]!;
+            session["Messages"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new ChatMessage { Role = "user", Text = text }, v.Raw))) + "]");
+            session["Pending"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new PendingPrompt { Text = text }, v.Raw))) + "]");
+            File.WriteAllText(file2, archive.ToJsonString());
+            bool Archived(SessionStore store) => store.Sessions is [{ } only] && only.Messages.Count == vectors.Count && only.Pending.Count == vectors.Count
+                && only.Messages.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect))
+                && only.Pending.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect));
+            var loaded = new SessionStore(root, new FakeRunner());
+            var first = Archived(loaded);
+            loaded.Save();
+            check(first && Archived(new SessionStore(root, new FakeRunner())),
+                "An archive mixing every malformed shape with valid parts loads every message and queued prompt, and re-saves the marker");
+        }
+        catch (Exception e) { check(false, "An archive with malformed parts loads: " + e.GetType().Name + " " + e.Message); }
+        finally { Directory.Delete(root, true); }
+    }
+
     public static async Task Run(Action<bool, string> check, Func<DeviceSyncService, DeviceSyncService, Func<bool>, Task<bool>> join)
     {
         InjectAllFlags(check);
+        ComponentVectors(check);
         await ReplyTolerance(check);
         await TrailingFence(check);
         var root = Directory.CreateTempSubdirectory("converse-supervision-").FullName;

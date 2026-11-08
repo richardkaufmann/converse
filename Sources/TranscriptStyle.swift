@@ -195,7 +195,9 @@ extension MessageComponent {
 }
 extension KeyedDecodingContainer {
     /// Inject all parts are presentation only: unreadable ones never fail
-    /// the message, archive or snapshot that carries them.
+    /// the message, archive or snapshot that carries them. Core's
+    /// LenientComponentsConverter mirrors this; both run the shared
+    /// Tests/inject-components-vectors.json.
     func decodeComponents(forKey key: Key) -> [MessageComponent]? {
         guard contains(key), (try? decodeNil(forKey: key)) == false else { return nil }
         guard let parts = try? decode([MessageComponent?].self, forKey: key), !parts.contains(where: { $0 == nil }) else { return MessageComponent.undecodable }
