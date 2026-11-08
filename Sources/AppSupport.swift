@@ -450,11 +450,15 @@ final class FeedbackInvitation: ObservableObject {
     @Published private(set) var visible = false
     private var state = FeedbackInvitationState(release: "")
     let surfaces = NSHashTable<NSView>.weakObjects()
+    var isMonitoring: Bool { timer != nil || eventMonitor != nil }
     private var supportVisible: Bool {
         surfaces.allObjects.contains { view in
-            guard let window = view.window else { return false }
-            return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
-                && !view.isHiddenOrHasHiddenAncestor && !view.visibleRect.isEmpty
+            guard let window = view.window, window.isVisible, !window.isMiniaturized,
+                  window.occlusionState.contains(.visible), !view.isHiddenOrHasHiddenAncestor,
+                  !view.visibleRect.isEmpty, let index = NSApp.orderedWindows.firstIndex(of: window) else { return false }
+            let rect = window.convertToScreen(view.convert(view.visibleRect, to: nil))
+            let covers = NSApp.orderedWindows.prefix(index).filter { $0.isVisible && !$0.isMiniaturized && $0.alphaValue > 0 }.map(\.frame)
+            return FeedbackInvitationVisibility.exposed(rect, beneath: covers)
         }
     }
     private var file: URL?
@@ -466,8 +470,8 @@ final class FeedbackInvitation: ObservableObject {
     private var publishing = false
     private let writes = DispatchQueue(label: "Converse.feedback-invitation.persistence", qos: .utility)
 
-    func start(folder: URL) {
-        guard timer == nil, FeedbackInvitationState.allowed(info: Bundle.main.infoDictionary ?? [:], environment: ProcessInfo.processInfo.environment, arguments: CommandLine.arguments) else { return }
+    func start(folder: URL, info: [String: Any] = Bundle.main.infoDictionary ?? [:], environment: [String: String] = ProcessInfo.processInfo.environment, arguments: [String] = CommandLine.arguments) {
+        guard timer == nil, FeedbackInvitationState.allowed(info: info, environment: environment, arguments: arguments) else { return }
         let target = folder.appendingPathComponent("feedback-invitation.json")
         let release = ConverseAbout.version + "/" + ConverseAbout.build
         if FileManager.default.fileExists(atPath: target.path) {
@@ -592,7 +596,7 @@ final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
     func show() {
         if let window { window.makeKeyAndOrderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Thoughts About Converse?"; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = "Thoughts About Converse"; window.isReleasedWhenClosed = false; window.delegate = self
         let panel = FeedbackInvitationPanel(repository: {
             NSWorkspace.shared.open(URL(string: "https://github.com/richardkaufmann/converse")!)
         }, issue: {
@@ -608,4 +612,43 @@ final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
         self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
     }
     func windowWillClose(_ notification: Notification) { window = nil }
+}
+
+/// Subtract higher app-window frames; window-level visibility alone is insufficient.
+enum FeedbackInvitationVisibility {
+    static func exposed(_ rect: CGRect, beneath covers: [CGRect]) -> Bool {
+        guard !rect.isEmpty else { return false }
+        var pieces = [rect]
+        for cover in covers {
+            pieces = pieces.flatMap { piece -> [CGRect] in
+                let cut = piece.intersection(cover)
+                guard !cut.isNull && !cut.isEmpty else { return [piece] }
+                return [CGRect(x: piece.minX, y: piece.minY, width: piece.width, height: cut.minY - piece.minY),
+                        CGRect(x: piece.minX, y: cut.maxY, width: piece.width, height: piece.maxY - cut.maxY),
+                        CGRect(x: piece.minX, y: cut.minY, width: cut.minX - piece.minX, height: cut.height),
+                        CGRect(x: cut.maxX, y: cut.minY, width: piece.maxX - cut.maxX, height: cut.height)].filter { !$0.isEmpty }
+            }
+            if pieces.isEmpty { return false }
+        }
+        return !pieces.isEmpty
+    }
+}
+
+func feedbackInvitationControllerSelfTests(_ check: (Bool, String) -> Void) {
+    let rect = CGRect(x: 10, y: 10, width: 100, height: 30)
+    check(FeedbackInvitationVisibility.exposed(rect, beneath: []), "Uncovered feedback surface admits the invitation")
+    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 0, y: 0, width: 200, height: 200)]), "A higher app window covering App Support prevents consumption")
+    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30), CGRect(x: 60, y: 10, width: 50, height: 30)]), "Several higher windows can jointly cover the feedback surface")
+    check(FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30)]), "Partly exposed App Support still admits its banner")
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let controller = FeedbackInvitation()
+    controller.start(folder: folder, info: ["ConverseDemo": true], environment: [:], arguments: [])
+    check(!controller.isMonitoring, "Demo controller never installs timers or input monitors")
+    controller.start(folder: folder, info: [:], environment: ["CONVERSE_DATA_DIR": folder.path], arguments: [])
+    check(!controller.isMonitoring, "Data-directory automation never installs invitation monitors")
+    controller.start(folder: folder, info: [:], environment: [:], arguments: [])
+    check(controller.isMonitoring, "Normal controller starts its visibility and activity monitor")
+    controller.dismiss()
+    check(!controller.isMonitoring && !controller.visible, "Dismissing the invitation removes timer and input monitor")
 }

@@ -6,7 +6,7 @@ struct FeedbackInvitationState: Codable {
     static func allowed(info: [String: Any], environment: [String: String], arguments: [String]) -> Bool {
         guard info["ConverseDemo"] as? Bool != true, info["ConverseTestProvider"] == nil,
               info["ConverseNUXPreview"] as? Bool != true else { return false }
-        guard environment["CONVERSE_TEST_COMMAND"] == nil,
+        guard environment["CONVERSE_TEST_COMMAND"] == nil, environment["CONVERSE_DATA_DIR"] == nil,
               !environment.keys.contains(where: { $0.hasPrefix("CONVERSE_QA_") || $0.hasPrefix("CONVERSE_AUTOMATION") }) else { return false }
         return !arguments.contains(where: { $0.hasPrefix("--") && ($0.contains("test") || $0.contains("preview")) })
     }
