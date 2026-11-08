@@ -9,7 +9,7 @@ final class SidebarHoverState: ObservableObject {
     // Published so P and X can turn red while a row shown elsewhere is hovered.
     @Published private(set) var inside = false
     // The P/1/2/3/X buttons carry their own tooltips; never stack the row card on top.
-    // Published so the strip can show every free pane orange while it is hovered.
+    // Published so the strip can colour every free pane while it is hovered.
     @Published private(set) var overButtons = false
     var wantsDetails: Bool { inside && !overButtons }
     func setHovered(_ inside: Bool) {

@@ -169,6 +169,7 @@ struct RemoteSidebarRow: View {
     @State private var closeError: String?
     @State private var renaming = false
     @State private var renameText = ""
+    var placement: PanePlacement { PanePlacement(localPane: localPane, elsewhere: elsewhere, free: freePanes, closing: confirmingClose) }
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
         if location != nil { text = row.title + "\nClicking will bring its window forward.\n" + text.dropFirst(row.title.count + 1) }
@@ -209,14 +210,15 @@ struct RemoteSidebarRow: View {
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             PaneButtonGroup(hover: hover) {
-                PaneButton(label: "P", selected: localPane == nil, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { park() }.accessibilityLabel("Park " + row.title).help(elsewhere.help("Park this session: hide its pane here and release control. Its work continues on its home."))
+                let shown = placement, canClose = !closing && DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? "")
+                PaneButton(label: "P", look: shown.look(.park, stripHovered: hover.overButtons, rowHovered: hover.inside, enabled: online)) { park() }.accessibilityLabel(shown.parkLabel(row.title)).help(shown.parkHelp("Park this session: hide its pane here and release control. Its work continues on its home."))
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane), stripHovered: hover.overButtons) { assign(pane) }
-                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
+                    PaneButton(label: String(pane), look: shown.look(.pane(pane), stripHovered: hover.overButtons, enabled: online)) { assign(pane) }
+                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").accessibilityValue(shown.paneValue(pane)).help(shown.paneHelp(pane, item: "this session"))
                 }
                 if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
-                PaneButton(label: "X", selected: confirmingClose, destructive: true, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { confirmingClose = true }
-                    .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
+                PaneButton(label: "X", look: shown.look(.close, stripHovered: hover.overButtons, rowHovered: hover.inside, enabled: online && canClose)) { confirmingClose = true }
+                    .disabled(!canClose)
                     .help(elsewhere.help("Close this session on its home and remove it from every viewer. The home must support remote closing."))
                 }
             }.disabled(!online)
@@ -308,7 +310,7 @@ struct RemotePane: View {
                             Button("OK", role: .cancel) { agentActionError = nil }
                         } message: { Text(agentActionError ?? "") }
                 }
-                PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
+                PaneButton(label: "P") { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             HStack {
