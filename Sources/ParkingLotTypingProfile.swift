@@ -136,7 +136,7 @@ struct ParkingLotRenderSignature: Equatable {
             let font = attributes[.font] as? NSFont, style = attributes[.paragraphStyle] as? NSParagraphStyle
             // Tag colors are new dynamic objects per render; compare what they resolve to.
             let color = (attributes[.foregroundColor] as? NSColor)?.usingColorSpace(.sRGB).map { "\($0.redComponent) \($0.greenComponent) \($0.blueComponent) \($0.alphaComponent)" } ?? "-"
-            runs.append("\(range.location),\(range.length) \(font?.fontName ?? "-") \(font?.pointSize ?? 0) \(color) \(style.map { "\($0.firstLineHeadIndent)/\($0.headIndent)/\($0.paragraphSpacing)/\($0.paragraphSpacingBefore)" } ?? "-") "
+            runs.append("\(range.location),\(range.length) \(font?.fontName ?? "-") \(font?.pointSize ?? 0) \(color) \(style.map { "\($0.firstLineHeadIndent)/\($0.headIndent)/\($0.tailIndent)/\($0.paragraphSpacing)/\($0.paragraphSpacingBefore)" } ?? "-") "
                 + "\(attributes[.strikethroughStyle] as? Int ?? 0) \((attributes[.link] as? URL)?.absoluteString ?? "-") \(attributes[.toolTip] as? String ?? "-")")
         }
         entries = coordinator.projection.entries.map {
@@ -238,6 +238,11 @@ private func parkingLotIncrementalRenderSelfTests(_ check: (Bool, String) -> Voi
         coordinator.render(); matches("a remote device's commit")
     } catch { check(false, "Incremental render session fixture: " + error.localizedDescription) }
     lot.changeIndent(item, deeper: true); coordinator.render(); matches("indenting renumbers later rows")
+    lot.changeIndent(item, deeper: true); coordinator.render(); matches("a flexible indent beyond the row above")
+    lot.changeIndent(item, deeper: false); coordinator.render(); matches("removing a flexible indent")
+    let topLevel = lot.document.rows.first { !$0.heading && $0.id != item && (try? ParkingLotTree.nodes(lot.document.rows))?[$0.id]?.depth == 1 }!.id
+    lot.changeIndent(topLevel, deeper: false); coordinator.render(); matches("outdenting a top-level item into a heading")
+    text.undo(nil); matches("Undo of an outdent to a heading")
     lot.delete(linked); coordinator.render(); matches("deleting a row renumbers its section")
     collapsed = [heading]; coordinator.render(); matches("collapsing a section")
     collapsed = []; coordinator.render(); matches("expanding a section")

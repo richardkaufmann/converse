@@ -132,17 +132,15 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     var exportMessages: [Message] { Self.exportMessages(document) }
     static func exportMessages(_ document: ParkingLotDocument) -> [Message] {
         let hierarchy = (try? ParkingLotTree.nodes(document.rows)) ?? [:]
-        var counts: [UUID?: Int] = [:]
+        let numbers = ParkingLotTree.numbers(document.rows)
         return document.rows.map { row in
-            let parent = hierarchy[row.id]?.parentID
-            if !row.heading { counts[parent, default: 0] += 1 }
             var copy = row
             // The ordinary Markdown helper numbers a standalone item as one.
             // Preserve the section's actual numbering in the exported message.
             copy.images = nil
             var text = Self.markdown([copy])
             if !row.heading {
-                if text.hasPrefix("1. ") { text = ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". " + text.dropFirst(3) }
+                if text.hasPrefix("1. ") { text = ParkingLotTree.label(numbers[row.id] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". " + text.dropFirst(3) }
                 let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
                 text = indent + text.replacingOccurrences(of: "\n   ", with: "\n" + indent + "   ")
             }
@@ -166,7 +164,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         let capture = PerformanceCapture.shared
         var next = next
         next.rows = try capture.measure(.lotNormalize) { try ParkingLotTree.normalized(next.rows) }
-        next.schemaVersion = next.rows.contains(where: { $0.tag != nil }) ? 3 : 2
+        next.schemaVersion = ParkingLotDocument.schemaVersion(for: next.rows)
         try capture.measure(.lotSnapshotCheck) { try snapshotCheck?(next) }
         try capture.measure(.lotEncodeWrite) {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -300,13 +298,11 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     static func markdown(_ rows: [ParkingLotRow]) -> String {
         let hierarchy = (try? ParkingLotTree.nodes(rows)) ?? [:]
-        var counts: [UUID?: Int] = [:]
+        let numbers = ParkingLotTree.numbers(rows)
         return rows.map { row in
-            let parent = hierarchy[row.id]?.parentID
-            if !row.heading { counts[parent, default: 0] += 1 }
             let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
             let continuation = "\n" + indent + "   "
-            let line = (row.heading ? "# " : indent + ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + (row.tag.map { "[Tag: " + $0.rawValue + "] " } ?? "") + row.text.replacingOccurrences(of: "\n", with: continuation)
+            let line = (row.heading ? "# " : indent + ParkingLotTree.label(numbers[row.id] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + (row.tag.map { "[Tag: " + $0.rawValue + "] " } ?? "") + row.text.replacingOccurrences(of: "\n", with: continuation)
             return line + (row.images ?? []).map { continuation + "[Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { continuation + "> " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: continuation + "> ") }.joined()
         }.joined(separator: "\n")
     }
@@ -393,6 +389,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                     throw AgentFailure.message("A Parking Lot heading cannot be nested inside an item.")
                 }
                 moving[0].parentID = moving[0].heading ? nil : operation.parentID ?? ParkingLotTree.parentForInsertion(at: position, in: rows, heading: false)
+                moving[0].indent = nil
                 rows.insert(contentsOf: moving, at: position)
             default: throw AgentFailure.message("Unknown Parking Lot operation; no edits applied.")
             }
@@ -481,6 +478,7 @@ struct ParkingLotView: View {
     }
     @State private var reordering = false
     @StateObject private var undoFocus = ParkingLotUndoFocus()
+    @StateObject private var finder = ParkingLotFinder()
     @State private var talking = false
     @State private var dragging: UUID?
     @State private var dropBefore: UUID?
@@ -497,16 +495,7 @@ struct ParkingLotView: View {
             return !hidden
         }
     }
-    func number(_ row: ParkingLotRow) -> Int {
-        let hierarchy = (try? ParkingLotTree.nodes(lot.document.rows)) ?? [:]
-        let parent = hierarchy[row.id]?.parentID
-        var number = 0
-        for entry in lot.document.rows {
-            if !entry.heading && hierarchy[entry.id]?.parentID == parent { number += 1 }
-            if entry.id == row.id { return number }
-        }
-        return number
-    }
+    func number(_ row: ParkingLotRow) -> Int { ParkingLotTree.numbers(lot.document.rows)[row.id] ?? 0 }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     private func rowField(_ row: ParkingLotRow) -> some View {
                 TextField(row.heading ? "Heading" : "Write an idea, prompt or bug…", text: Binding(get: { lot.document.rows.first(where: { $0.id == row.id })?.text ?? "" }, set: { lot.update(row.id, text: $0) }), axis: .vertical)
@@ -664,13 +653,10 @@ struct ParkingLotView: View {
                     Button("Export recovery copy…", action: exportRecovery)
                     Button("Show saved file") { lot.showSavedFile() }
                 }.padding(.horizontal)
-                ScrollView {
-                    Text(ParkingLotStore.markdown(lot.document.rows))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled).padding()
-                }
+                ParkingLotReadOnlyText(text: ParkingLotStore.markdown(lot.document.rows))
             } else if !reordering {
-                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
+                if finder.visible { ParkingLotFindBar(finder: finder); Divider() }
+                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true }, finder: finder)
                     .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: lot.substitutionFeedback).padding(12) }
             } else {
             ScrollView {
@@ -694,6 +680,21 @@ struct ParkingLotView: View {
             .onDisappear { lot.endViewing(viewerID) }
             .background(ParkingLotUndoAnchor(lot: lot, focus: undoFocus).frame(width: 0, height: 0))
             .sheet(isPresented: $talking) { ParkingLotTalkView(lot: lot) }
+    }
+}
+/// Read-only recovery view: native selection and Find, with nothing to replace.
+struct ParkingLotReadOnlyText: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        guard let view = scroll.documentView as? NSTextView else { return scroll }
+        view.isEditable = false; view.usesFindBar = true; view.isIncrementalSearchingEnabled = true
+        view.textContainerInset = NSSize(width: 12, height: 8); view.font = .systemFont(ofSize: 13)
+        view.setAccessibilityLabel("Parking Lot text")
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if let view = scroll.documentView as? NSTextView, view.string != text { view.string = text }
     }
 }
 private struct ParkingLotFrames: PreferenceKey {
@@ -934,8 +935,12 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
     check(lot.changeIndent([b.id, c.id], deeper: false) && lot.document.rows == before,
           "Batch outdent preserves sibling order, comments, Done and descendant identities")
     let revision = lot.document.revision
-    check(!lot.changeIndent([a.id, c.id], deeper: true) && lot.document.revision == revision && lot.document.rows == before,
-          "An impossible batch is refused atomically instead of indenting only some items")
+    let deepest = (1...7).reduce(into: [a]) { rows, n in rows.append(ParkingLotRow(heading: false, text: "d\(n)", parentID: rows.last!.id)) }
+    let capLot = ParkingLotStore(folder: folder.appendingPathComponent("cap")); capLot.openStarter([h] + deepest + [c])
+    let capBefore = capLot.document
+    check(!capLot.changeIndent([deepest[7].id, c.id], deeper: true) && capLot.document == capBefore,
+          "A batch with an item already at the depth cap is refused atomically instead of indenting only some items")
+    check(lot.document.revision == revision && lot.document.rows == before, "Refusing a batch elsewhere leaves this lot unchanged")
     check(!lot.changeIndent([h.id, b.id], deeper: true), "A selection containing a heading cannot accidentally nest the heading")
     // Richard's lot: 17 > a > i…vii. Shift-Tab on i keeps every row in place.
     let oh = ParkingLotRow(heading: true, text: "Lot"), o17 = ParkingLotRow(heading: false, text: "17", parentID: oh.id)

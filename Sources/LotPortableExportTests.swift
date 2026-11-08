@@ -8,7 +8,7 @@ func lotPortableExportSelfTests(_ check: (Bool, String) -> Void) {
         let hash = DeviceBlob.sha256Hex(png)
         let heading = ParkingLotRow(heading: true, text: "Roadmap")
         let row = ParkingLotRow(heading: false, text: "Contact me@example.com", notes: [ParkingLotNote(author: "Test Person", text: "Keep this comment")], images: [hash], done: true, parentID: heading.id, tag: .purple)
-        let snapshot = try LotSnapshot(globalID: "fixture", homeBoot: 1, leaseEpoch: 1, name: "Mobile lot", document: ParkingLotDocument(revision: 17, rows: [heading, row]))
+        let snapshot = try LotSnapshot(globalID: "fixture", homeBoot: 1, leaseEpoch: 1, name: "Mobile lot", document: { var document = ParkingLotDocument(revision: 17, rows: [heading, row]); document.schemaVersion = 3; return document }())
         var none: ExportScrubber?
         let data = try LotPortableExport.encode(snapshot, includeImages: true, scrubber: &none, version: "test", build: "0", imageData: { _ in png })
         let imported = try ConverseExchange.decode(data)

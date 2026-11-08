@@ -1,6 +1,92 @@
 import Foundation
 
+/// Flexible nesting and outdent-to-heading, in the shared tree and wire model.
+func lotFlexibleNestingSelfTests(_ check: (Bool, String) -> Void) {
+    func depth(_ id: UUID, _ rows: [ParkingLotRow]) -> Int { ParkingLotTree.depth(of: id, in: rows) }
+    do {
+        let h = ParkingLotRow(heading: true, text: "Section"), first = ParkingLotRow(heading: false, text: "First", parentID: h.id)
+        let second = ParkingLotRow(heading: false, text: "Second", parentID: h.id), child = ParkingLotRow(heading: false, text: "Child", parentID: second.id)
+        let third = ParkingLotRow(heading: false, text: "Third", parentID: h.id), later = ParkingLotRow(heading: true, text: "Later")
+        let rows = [h, first, second, child, third, later]
+        // A first item can go deeper than its heading, one level per Tab.
+        let once = ParkingLotTree.changingIndent(first.id, in: rows, deeper: true)!
+        let twice = ParkingLotTree.changingIndent(first.id, in: once, deeper: true)!
+        check(depth(first.id, once) == 2 && depth(first.id, twice) == 3 && once[1].parentID == h.id && once[1].indent == 1 && twice[1].indent == 2,
+              "A first item can sit deeper than its heading, recording the gap above it")
+        check(ParkingLotTree.canIndent(first.id, in: rows) && ParkingLotTree.canOutdent(first.id, in: once), "Indent and Outdent are offered for a first item")
+        check(ParkingLotTree.changingIndent(first.id, in: twice, deeper: false) == once && ParkingLotTree.changingIndent(first.id, in: once, deeper: false) == rows,
+              "Outdent removes the recorded gap one level at a time")
+        // An item can go several levels deeper than the row before it.
+        let nested = ParkingLotTree.changingIndent(second.id, in: rows, deeper: true)!
+        let deeper = ParkingLotTree.changingIndent(second.id, in: nested, deeper: true)!
+        check(nested[2].parentID == first.id && nested[2].indent == nil && deeper[2].parentID == first.id && deeper[2].indent == 1 && depth(second.id, deeper) == 3 && depth(child.id, deeper) == 4,
+              "An item can nest more than one level deeper than the row before it, carrying its children")
+        // A later row that is merely indented deeper is not swallowed as a descendant.
+        var gapped = rows; gapped[2].indent = 2
+        check(ParkingLotTree.range(first.id, in: gapped) == 1..<2 && ParkingLotTree.range(second.id, in: gapped) == 2..<4, "A row indented deeper than the one before it is not treated as its child")
+        check((try? LotOperation(kind: .deleteSubtree, rowID: first.id).applying(to: ParkingLotDocument(revision: 1, rows: gapped), author: "iPhone"))?.rows.contains { $0.id == second.id } == true,
+              "Deleting the row above keeps an unrelated, deeper row")
+        // Numbering stays per level: a shallower sibling ends a deeper run.
+        var mixed = rows; mixed[1].indent = 2
+        let numbers = ParkingLotTree.numbers(mixed)
+        check(numbers[first.id] == 1 && numbers[second.id] == 1 && numbers[third.id] == 2 && ParkingLotTree.label(numbers[first.id]!, depth: depth(first.id, mixed)) == "i",
+              "A deeper first item numbers on its own level, and normal siblings keep their numbers")
+        // The depth cap still holds.
+        var chain = [h, first]
+        for n in 2...ParkingLotTree.maximumDepth { chain.append(ParkingLotRow(heading: false, text: "d\(n)", parentID: chain.last!.id)) }
+        check(ParkingLotTree.changingIndent(chain.last!.id, in: chain, deeper: true) == nil, "Tab at the depth cap is refused")
+        var overDeep = rows; overDeep[1].indent = ParkingLotTree.maximumDepth
+        check((try? ParkingLotTree.nodes(overDeep)) == nil, "An indent beyond the depth cap is rejected as an invalid document")
+        var badIndent = rows; badIndent[0].indent = 1
+        check((try? ParkingLotTree.nodes(badIndent)) == nil, "A heading can never carry an indent")
+        // Outdent of a top-level item makes it a heading; siblings after it follow into its section.
+        let converted = ParkingLotTree.changingIndent(second.id, in: rows, deeper: false)!
+        let hierarchy = try ParkingLotTree.nodes(converted)
+        check(converted.map(\.id) == rows.map(\.id) && converted[2].heading && converted[2].parentID == nil && hierarchy[child.id]?.parentID == second.id && hierarchy[child.id]?.depth == 1
+              && hierarchy[third.id]?.parentID == second.id && hierarchy[first.id]?.parentID == h.id,
+              "Outdenting a top-level item turns it into a heading, adopting later siblings and shifting its children")
+        check(ParkingLotTree.changingIndent([first.id, second.id], in: rows, deeper: false)?.filter(\.heading).count == 4, "Outdenting several selected top-level items makes each a heading")
+        let root = ParkingLotRow(heading: false, text: "Root"), rootTwo = ParkingLotRow(heading: false, text: "Next root")
+        let rootConverted = ParkingLotTree.changingIndent(root.id, in: [root, rootTwo], deeper: false)!
+        check(rootConverted[0].heading && rootConverted[1].parentID == root.id, "An item before any heading also outdents into a heading")
+        check(ParkingLotTree.changingIndent(h.id, in: rows, deeper: false) == nil, "A heading itself cannot outdent")
+        // Reordering works around recorded gaps.
+        var spaced = rows; spaced[2].indent = 2
+        let dropped = ParkingLotTree.moving(third.id, before: child.id, depth: 3, in: spaced)!
+        check((try? ParkingLotTree.nodes(dropped)) != nil && dropped[3].id == third.id, "Dropping into a row that has an indent gap keeps a valid outline")
+        // Normalized accepts the new shapes through every read path.
+        let wire = ParkingLotDocument(revision: 4, rows: twice)
+        let encoded = try LotEditing.encoded(wire)
+        check(try JSONDecoder().decode(ParkingLotDocument.self, from: encoded).rows == twice && (try ParkingLotTree.normalized(twice)) == twice, "Flexible indents survive encoding and normalization")
+        check((try ParkingLotTree.normalized(rows.map { var row = $0; row.indent = 0; return row })) == rows, "A stored zero indent normalizes away")
+        var plainDoc = ParkingLotDocument(revision: 3, rows: rows); plainDoc.schemaVersion = 3
+        let indentOp = try LotOperation(kind: .indent, rowID: first.id).applying(to: plainDoc, author: "iPad")
+        check(indentOp.rows[1].indent == 1 && indentOp.schemaVersion == 4, "A device indent uses schema 4 only once a row needs it")
+        let outdentOp = try LotOperation(kind: .outdent, rowID: second.id).applying(to: plainDoc, author: "iPad")
+        check(outdentOp.rows[2].heading && outdentOp.schemaVersion == 3, "A device outdent to a heading stays compatible with schema 3")
+        check(try LotOperation(kind: .move, rowID: first.id, parentID: h.id).applying(to: indentOp, author: "iPad").rows[1].indent == nil, "A move clears any recorded gap")
+        let snapshot = try LotSnapshot(globalID: "home/" + UUID().uuidString.lowercased(), homeBoot: 1, leaseEpoch: 1, name: "L", document: indentOp)
+        check(try JSONDecoder().decode(LotSnapshot.self, from: LotEditing.encoded(snapshot)) == snapshot, "A snapshot with flexible indents round-trips")
+        // An older peer does not know `indent`. Dropping it on decode leaves the digest wrong, so it refuses the snapshot.
+        var olderPeer = snapshot
+        olderPeer.document.rows = olderPeer.document.rows.map { var row = $0; row.indent = nil; return row }
+        do { try olderPeer.validate(); check(false, "An older peer that drops indent must fail the digest check") } catch { check(true, "An older peer that drops indent fails the digest check instead of keeping an altered lot") }
+        var plainSnapshot = plainDoc
+        plainSnapshot.rows = rows
+        let plain = try LotSnapshot(globalID: "home/" + UUID().uuidString.lowercased(), homeBoot: 1, leaseEpoch: 1, name: "L", document: plainSnapshot)
+        check(!String(decoding: try LotEditing.encoded(plain), as: UTF8.self).contains("indent") && plain.document.schemaVersion == 3,
+              "Lots without flexible nesting have no new field and stay schema 3 for older peers")
+        // A document saved by an older build keeps loading here.
+        let oldJSON = #"{"schemaVersion":3,"revision":1,"rows":[{"id":"\#(h.id)","heading":true,"text":"Section"},{"id":"\#(first.id)","heading":false,"text":"First","parentID":"\#(h.id)"}]}"#
+        check((try? JSONDecoder().decode(ParkingLotDocument.self, from: Data(oldJSON.utf8)))?.rows[1].indent == nil, "Older lot files decode with no indents")
+        var futureDoc = ParkingLotDocument(revision: 1, rows: rows); futureDoc.schemaVersion = ParkingLotDocument.currentSchemaVersion + 1
+        let futureJSON = String(decoding: try JSONEncoder().encode(futureDoc), as: UTF8.self)
+        check((try? JSONDecoder().decode(ParkingLotDocument.self, from: Data(futureJSON.utf8))) == nil, "A lot from a future schema is still refused")
+    } catch { check(false, "Flexible nesting model: " + error.localizedDescription) }
+}
+
 func lotEditingSelfTests(_ check: (Bool, String) -> Void) {
+    lotFlexibleNestingSelfTests(check)
     func refuses(_ label: String, _ body: () throws -> Void) {
         do { try body(); check(false, label) } catch { check(true, label) }
     }

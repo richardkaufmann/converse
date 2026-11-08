@@ -93,7 +93,116 @@ enum LotLinks {
     }
 }
 
+// Standard Markdown emphasis in plain row text: **bold**, *italic*, ***both***.
+// Found at display time like links; delimiters may never split a link or code span.
+enum LotInline {
+    struct Span: Equatable {
+        var range: NSRange    // whole source span, delimiters included
+        var content: NSRange  // the part shown
+        var bold: Bool
+        var italic: Bool
+        var marker: Int { content.location - range.location }
+    }
+    private static let pattern = try! NSRegularExpression(pattern: #"(?<![\\*\w])(\*{1,3})(?=[^\s*])(.+?)(?<=[^\s*])\1(?![*\w])"#)
+    private static let code = try! NSRegularExpression(pattern: #"`[^`\n]+`"#)
+    static func spans(in text: String) -> [Span] {
+        guard text.contains("*") else { return [] }
+        let all = NSRange(location: 0, length: (text as NSString).length)
+        let blocked = LotLinks.find(in: text).map(\.range) + code.matches(in: text, range: all).map(\.range)
+        return pattern.matches(in: text, range: all).compactMap { match in
+            let marker = match.range(at: 1).length
+            let open = NSRange(location: match.range.location, length: marker)
+            let close = NSRange(location: NSMaxRange(match.range) - marker, length: marker)
+            guard !blocked.contains(where: { NSIntersectionRange($0, open).length > 0 || NSIntersectionRange($0, close).length > 0 }) else { return nil }
+            return Span(range: match.range, content: match.range(at: 2), bold: marker >= 2, italic: marker != 2)
+        }
+    }
+    /// The delimiters themselves, in source offsets.
+    static func delimiters(in text: String) -> [NSRange] {
+        spans(in: text).flatMap { span -> [NSRange] in
+            [NSRange(location: span.range.location, length: span.marker), NSRange(location: NSMaxRange(span.content), length: span.marker)]
+        }
+    }
+    /// End of the word containing a span, so conversion waits for a boundary.
+    static func tokenEnd(_ span: Span, in text: String) -> Int {
+        let source = text as NSString
+        var end = NSMaxRange(span.range)
+        while end < source.length, let scalar = Unicode.Scalar(source.character(at: end)), !CharacterSet.whitespacesAndNewlines.contains(scalar) { end += 1 }
+        return end
+    }
+    /// True when a space typed at `offset` finishes a span.
+    static func completes(in text: String, at offset: Int) -> Bool {
+        spans(in: text).contains { NSMaxRange($0.range) == offset }
+    }
+    enum Style { case bold, italic; var stars: Int { self == .bold ? 2 : 1 } }
+    private static func starsOutside(_ selection: NSRange, in source: NSString) -> Int {
+        var before = 0, after = 0
+        while before < 3, selection.location - before - 1 >= 0, source.character(at: selection.location - before - 1) == 42 { before += 1 }
+        while after < 3, NSMaxRange(selection) + after < source.length, source.character(at: NSMaxRange(selection) + after) == 42 { after += 1 }
+        return min(before, after)
+    }
+    private static func has(_ style: Style, _ stars: Int) -> Bool { style == .bold ? stars >= 2 : stars == 1 || stars == 3 }
+    /// The word, span content or trimmed selection this command applies to.
+    private static func target(in text: String, selection: NSRange) -> NSRange {
+        let source = text as NSString
+        if selection.length > 0 {
+            var start = selection.location, end = NSMaxRange(selection)
+            while start < end, CharacterSet.whitespacesAndNewlines.contains(UnicodeScalar(source.character(at: start)) ?? " ") { start += 1 }
+            while end > start, CharacterSet.whitespacesAndNewlines.contains(UnicodeScalar(source.character(at: end - 1)) ?? " ") { end -= 1 }
+            return NSRange(location: start, length: end - start)
+        }
+        if let span = spans(in: text).first(where: { selection.location >= $0.content.location && selection.location <= NSMaxRange($0.content) }) { return span.content }
+        let word = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-'’_"))
+        var start = selection.location, end = selection.location
+        while start > 0, let scalar = UnicodeScalar(source.character(at: start - 1)), word.contains(scalar) { start -= 1 }
+        while end < source.length, let scalar = UnicodeScalar(source.character(at: end)), word.contains(scalar) { end += 1 }
+        return NSRange(location: start, length: end - start)
+    }
+    static func isActive(_ style: Style, in text: String, selection: NSRange) -> Bool {
+        has(style, starsOutside(target(in: text, selection: selection), in: text as NSString))
+    }
+    /// The new text and selection after toggling `style`. Stars already around
+    /// the target are counted, so bold and italic combine and come apart cleanly.
+    static func toggling(_ style: Style, in text: String, selection: NSRange, on: Bool? = nil) -> (text: String, selection: NSRange) {
+        let source = text as NSString
+        let target = target(in: text, selection: selection)
+        let stars = starsOutside(target, in: source)
+        let active = has(style, stars)
+        let wanted = on ?? !active
+        let count = wanted == active ? stars : stars + (active ? -style.stars : style.stars)
+        let content = source.substring(with: target)
+        let replacement = String(repeating: "*", count: count) + content + String(repeating: "*", count: count)
+        let whole = NSRange(location: target.location - stars, length: target.length + 2 * stars)
+        let result = source.replacingCharacters(in: whole, with: replacement)
+        let delta = count - stars
+        let next = selection.length > 0 ? NSRange(location: whole.location + count, length: target.length)
+            : NSRange(location: selection.location + delta + (target.length == 0 ? count - delta : 0), length: 0)
+        return (result, NSRange(location: min(max(0, next.location), (result as NSString).length), length: next.length))
+    }
+}
+
+func lotInlineSelfTests(_ check: (Bool, String) -> Void) {
+    func shown(_ text: String) -> [String] { LotInline.spans(in: text).map { (text as NSString).substring(with: $0.content) } }
+    check(shown("say **bold** and *italic* and ***both***") == ["bold", "italic", "both"] && LotInline.spans(in: "***x***")[0].bold && LotInline.spans(in: "***x***")[0].italic, "Markdown emphasis finds bold, italic and both")
+    check(shown("2 * 3 * 4") == [] && shown("a*b*c") == [] && shown("** spaced **") == [] && shown("\\*not*") == [] && shown("`*code*`") == [], "Emphasis ignores arithmetic, intraword stars, spaced markers, escapes and code")
+    check(shown("see [a*b](https://x.com/*y*) and https://x.com/*z*") == [] && shown("**[the repo](https://x.com)**") == ["[the repo](https://x.com)"], "Emphasis never splits a link, but can wrap one")
+    check(shown("**across\nlines**") == [], "Emphasis stays on one line")
+    func toggle(_ style: LotInline.Style, _ text: String, _ location: Int, _ length: Int = 0) -> String { LotInline.toggling(style, in: text, selection: NSRange(location: location, length: length)).text }
+    check(toggle(.bold, "say hello now", 4, 5) == "say **hello** now" && toggle(.italic, "say hello now", 4, 5) == "say *hello* now", "Toggling wraps the selection")
+    check(toggle(.bold, "say **hello** now", 6, 5) == "say hello now" && toggle(.italic, "say *hello* now", 5, 5) == "say hello now", "Toggling a selection that is already styled removes it")
+    check(toggle(.bold, "say hello now", 6) == "say **hello** now" && LotInline.toggling(.bold, in: "say hello now", selection: NSRange(location: 6, length: 0)).selection == NSRange(location: 8, length: 0), "Toggling at a caret applies to the word and keeps the caret in it")
+    check(toggle(.bold, "say **hello** now", 8) == "say hello now", "Toggling inside a styled word removes the style")
+    check(toggle(.italic, "say **hello** now", 6, 5) == "say ***hello*** now" && toggle(.italic, "say ***hello*** now", 7, 5) == "say **hello** now" && toggle(.bold, "say ***hello*** now", 7, 5) == "say *hello* now", "Bold and italic combine and come apart")
+    check(toggle(.bold, " x ", 1, 2) == " **x** ", "Selected spaces stay outside the markers")
+    let empty = LotInline.toggling(.bold, in: "a  b", selection: NSRange(location: 2, length: 0))
+    check(empty.text == "a **** b" && empty.selection == NSRange(location: 4, length: 0), "With no word to act on, the markers go in and the caret goes between them")
+    check(LotInline.completes(in: "go **bold**", at: 11) && !LotInline.completes(in: "go **bold", at: 9), "A space after finished markup is recognized")
+    let unicode = LotInline.toggling(.bold, in: "🦊 word", selection: NSRange(location: 3, length: 0))
+    check(unicode.text == "🦊 **word**", "Toggling uses UTF-16 offsets")
+}
+
 func lotLinkSelfTests(_ check: (Bool, String) -> Void) {
+    lotInlineSelfTests(check)
     func urls(_ text: String) -> [String] { LotLinks.find(in: text).map(\.url.absoluteString) }
     check(urls("See https://github.com/x/y today") == ["https://github.com/x/y"], "Lot links: bare https URL")
     check(urls("Read https://x.com/a.") == ["https://x.com/a"] && urls("(https://x.com/a)") == ["https://x.com/a"] && urls("https://x.com/a, then") == ["https://x.com/a"], "Lot links: trailing punctuation and wrapping parentheses are not part of the URL")

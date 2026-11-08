@@ -76,6 +76,18 @@ import SwiftUI
     outline.redo(nil)
     check(lot.document.rows.first { $0.id == row.id }?.text == "Idea 🙂 ", "Parking Lot Redo restores substitution")
     check(outline.undoManager?.undoActionName == TextSubstitutions.undoName, "Parking Lot Redo keeps the substitution Undo action")
+    // ⌘B/⌘I in the draft toggle Markdown markers, with normal Undo.
+    text.setSelectedRange(NSRange(location: (text.string as NSString).length, length: 0))
+    type("marked word"); let start = text.selectedRange().location - 4
+    func nextEvent() { RunLoop.current.run(until: Date()) }  // AppKit closes one Undo group per event.
+    nextEvent(); text.setSelectedRange(NSRange(location: start, length: 4)); text.toggleBold(nil)
+    check(session.draft.hasSuffix("marked **word**") && text.selectedRange().length == 4, "Command-B in a draft wraps the selection in Markdown bold")
+    nextEvent(); text.toggleBold(nil)
+    check(session.draft.hasSuffix("marked word"), "Command-B again removes it")
+    nextEvent(); text.undo(nil)
+    check(session.draft.hasSuffix("marked **word**"), "Undo restores the draft's markup")
+    text.setSelectedRange(NSRange(location: (text.string as NSString).length - 2, length: 0)); text.toggleItalic(nil)
+    check(session.draft.hasSuffix("marked ***word***"), "Command-I at a caret in a draft adds italic to the word")
     session.supportTeachingVersion = AppSupport.version
     let store = Store.shared
     let result = try? store.appSupportResult(AppSupportCommand(action: "set-substitutions", enabled: false), session: session, openUI: false)

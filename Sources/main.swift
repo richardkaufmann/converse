@@ -2162,6 +2162,22 @@ final class ConversationTextView: NSTextView {
         setSelectedRange(NSRange(location: inputStart + min(caret, (replacement as NSString).length), length: 0))
         if manager.isUndoing { substitutionFeedback.rejected() }
     }
+    @objc func toggleBold(_ sender: Any?) { toggleInlineStyle(.bold, name: "Bold") }
+    @objc func toggleItalic(_ sender: Any?) { toggleInlineStyle(.italic, name: "Italic") }
+    /// ⌘B/⌘I in the draft: toggles Markdown markers in the draft text only.
+    private func toggleInlineStyle(_ style: LotInline.Style, name: String) {
+        guard isEditable, selectedRange().location >= inputStart else { return }
+        let draft = (string as NSString).substring(from: inputStart)
+        let selection = NSRange(location: selectedRange().location - inputStart, length: selectedRange().length)
+        guard NSMaxRange(selection) <= (draft as NSString).length else { return }
+        let result = LotInline.toggling(style, in: draft, selection: selection)
+        // Each ⌘B/⌘I is one event, so it is already its own native Undo step.
+        breakUndoCoalescing()
+        suppressSubstitutions = true; defer { suppressSubstitutions = false }
+        super.insertText(result.text, replacementRange: NSRange(location: inputStart, length: (draft as NSString).length))
+        setSelectedRange(NSRange(location: inputStart + result.selection.location, length: result.selection.length))
+        breakUndoCoalescing(); undoManager?.setActionName(name)
+    }
     private var substitutionUndo: (expected: String, replacement: String, caret: Int, inverseCaret: Int)?
     func retainedSubstitutionUndo(for draft: String) -> (() -> Void)? {
         guard let value = substitutionUndo, value.expected == draft, undoManager?.undoActionName == TextSubstitutions.undoName else { return nil }
@@ -3441,6 +3457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         f.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
         for (name, action, key) in [("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
+        e.addItem(.separator())
+        e.addItem(withTitle: "Bold", action: #selector(ParkingOutlineText.toggleBold(_:)), keyEquivalent: "b")
+        e.addItem(withTitle: "Italic", action: #selector(ParkingOutlineText.toggleItalic(_:)), keyEquivalent: "i")
         e.addItem(.separator())
         for (title, key, tag) in [("Find…", "f", NSTextFinder.Action.showFindInterface.rawValue), ("Find Next", "g", NSTextFinder.Action.nextMatch.rawValue), ("Find Previous", "G", NSTextFinder.Action.previousMatch.rawValue)] {
             let item = e.addItem(withTitle: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
