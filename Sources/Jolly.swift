@@ -13,6 +13,9 @@ struct JollyRequest: Codable {
     static let shared = JollyRouter()
     private var timer: Timer?
     private var finished = Set<String>()
+    // Portrait requests held open until their PNG and caption, or an error.
+    private(set) var holding = Set<String>()
+    var portraits: PortraitService = .shared
     private var recovered = false
     var status = "Waiting for Converse"
     static func folder(_ store: Store) -> URL { store.folder.appendingPathComponent("Jolly") }
@@ -101,7 +104,7 @@ struct JollyRequest: Codable {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
-    func answer(_ id: String, text: String, status: String, agent: Session? = nil, suggested: Session? = nil, image: Data? = nil, store: Store) throws {
+    func answer(_ id: String, text: String, status: String, agent: Session? = nil, suggested: Session? = nil, image: Data? = nil, imageKind: String = "portrait", store: Store) throws {
         guard Self.validID(id) else { throw AgentFailure.message("Invalid Jolly request ID.") }
         var body: [String: Any] = ["ok": true, "status": status, "answer": String(text.prefix(24000)), "backend": "converse"]
         if let agent { body["agent"] = ["id": agent.id.uuidString, "name": agent.title] }
@@ -113,7 +116,7 @@ struct JollyRequest: Codable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try data.write(to: directory.appendingPathComponent(hash + ".png"), options: .atomic)
             body["imageID"] = hash
-            body["imageKind"] = "scoreboard"
+            body["imageKind"] = imageKind
         }
         try write(body, file: Self.folder(store).appendingPathComponent("responses/" + id + ".json"))
         finished.insert(id)
@@ -121,7 +124,8 @@ struct JollyRequest: Codable {
     func complete(_ session: Session, text: String, success: Bool, store: Store) {
         guard let id = session.agent?.jollyRequestID else { return }
         do {
-            try answer(id, text: text, status: success ? "completed" : "failed", agent: session, image: success && session.agent?.jollyAllowed != false ? try? AgentScoreboardImage.render(session: session, store: store) : nil, store: store)
+            // Answers are text; assessments and portraits are separate, explicit requests.
+            try answer(id, text: text, status: success ? "completed" : "failed", agent: session, store: store)
             session.agent?.jollyRequestID = nil
             try store.saveChecked()
         } catch { session.agent?.attention = "Jolly reply could not be saved. Check disk access before retrying." }
@@ -149,7 +153,7 @@ struct JollyRequest: Codable {
                 ["id": $0.id.uuidString, "name": $0.title, "busy": $0.busy, "maxTurnsPerLoop": $0.agent?.turnLimit ?? 0, "appSupport": $0.supportAssistant] as [String: Any]
             }], file: folder.appendingPathComponent("directory.json"))
             let files = try FileManager.default.contentsOfDirectory(at: requestFolder, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])
-                .filter { $0.pathExtension == "json" && !finished.contains($0.deletingPathExtension().lastPathComponent) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .filter { $0.pathExtension == "json" && !finished.contains($0.deletingPathExtension().lastPathComponent) && !holding.contains($0.deletingPathExtension().lastPathComponent) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
             for file in files.prefix(32) {
                 let id = file.deletingPathExtension().lastPathComponent
                 guard Self.validID(id) else { continue }
@@ -163,6 +167,9 @@ struct JollyRequest: Codable {
                 }
                 guard now.timeIntervalSince1970 - request.createdAt < 600 else {
                     try answer(id, text: "This request expired before an agent started. Send a new request if it is still needed.", status: "expired", store: store); continue
+                }
+                if PortraitService.isRequest(request.question), let portrayed = Self.portraitTarget(request, sessions: sessions) {
+                    hold(id, portrait: portrayed, store: store); continue
                 }
                 guard let session = Self.resolve(request, sessions: sessions) else {
                     try answer(id, text: "Which agent should answer? Specify its exact name or ID. Available agents: " + sessions.map { $0.title + " [" + $0.id.uuidString + "]" }.joined(separator: ", "), status: "needs_agent", store: store); continue
@@ -189,6 +196,24 @@ struct JollyRequest: Codable {
             }
             status = "\(sessions.count) agents enabled for Jolly on this Mac"
         } catch { status = "Jolly routing paused: could not save or read its request journal." }
+    }
+    /// The one agent a portrait request names, else the addressed agent.
+    static func portraitTarget(_ request: JollyRequest, sessions: [Session]) -> Session? {
+        let named = agentsNamed(request.question, sessions: sessions)
+        if named.count == 1 { return named[0] }
+        return named.isEmpty ? resolve(request, sessions: sessions) : nil
+    }
+    /// Portraits don't need the agent's turn or queue. The response file is
+    /// written only when the PNG and one-line caption, or an error, are ready.
+    func hold(_ id: String, portrait session: Session, store: Store) {
+        holding.insert(id)
+        Task { @MainActor in
+            let outcome = await portraits.request(session, store: store, origin: .jolly)
+            let text = outcome.png == nil ? "Portrait of " + session.title + " unavailable: " + (outcome.error ?? "no image") : outcome.caption + (outcome.note.map { "\n" + $0 } ?? "")
+            do { try answer(id, text: text, status: outcome.png == nil ? "failed" : "completed", agent: session, image: session.agent?.jollyAllowed != false ? outcome.png : nil, imageKind: "portrait", store: store) }
+            catch { status = "Jolly routing paused: could not save a portrait reply." }
+            holding.remove(id)
+        }
     }
     static func send(_ text: String, store: Store) throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.unicodeScalars.count <= 500 else { throw AgentFailure.message("Enter 1–500 characters.") }

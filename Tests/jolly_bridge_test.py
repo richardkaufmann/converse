@@ -51,6 +51,19 @@ class Tests(unittest.TestCase):
         status, result = self.call("/v1/requests/" + key)
         self.assertEqual(status, 200)
         self.assertEqual(result["images"], [{"title": "Agent scoreboard", "url": "https://example.test/v1/images/" + image}])
+    def test_portrait_image_is_labelled_and_caption_kept(self):
+        key, image = "c" * 64, "d" * 64
+        bridge.atomic(self.b.root / "responses" / (key + ".json"),
+                      {"status": "completed", "answer": "Portrait of KAOS Steward · assessment rev 3 · #abcd1234 · current", "imageID": image, "imageKind": "portrait"})
+        status, result = self.call("/v1/requests/" + key)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["images"], [{"title": "Agent portrait", "url": "https://example.test/v1/images/" + image}])
+        self.assertIn("#abcd1234", result["answer"])
+    def test_portrait_request_is_pending_until_published(self):
+        key = "e" * 64
+        bridge.atomic(self.b.root / "requests" / (key + ".json"), {"id": key, "question": "get me a portrait of KAOS Steward"})
+        status, result = self.call("/v1/requests/" + key)
+        self.assertEqual(result["status"], "pending")
     def test_request_idempotency_and_correlation(self):
         self.live()
         body = {"question": "Price?", "agent": "Stock", "request_id": "same"}

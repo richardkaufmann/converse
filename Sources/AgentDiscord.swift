@@ -240,16 +240,10 @@ enum AgentDiscord {
     }
 }
 
-// Channel-specific permission checks stay outside the shared renderer.
-@MainActor enum AgentDiscordImage {
-    static func render(session: Session, store: Store, kind: String) throws -> Data {
-        guard session.agent?.discordShareScoreboard == true else { throw AgentFailure.message("Scoreboard sharing is off in Agent Setup.") }
-        return try AgentScoreboardImage.render(session: session, store: store, kind: kind)
-    }
-}
-
-// Draw numbers as text from measured snapshots; image generation supplies only
-// the background. No drafts, transcripts, working notes or model-selected files.
+// Draw numbers as text from measured snapshots for the explicit README/visual
+// preview mode only. Agents, Jolly and Discord no longer receive this composite:
+// they get assessments (text) and on-demand portraits (art).
+// No drafts, transcripts, working notes or model-selected files.
 @MainActor enum AgentScoreboardImage {
     struct Line {
         var text: String

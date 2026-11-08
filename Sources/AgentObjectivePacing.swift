@@ -192,15 +192,6 @@ extension AgentConfig {
             cadence = "Runs " + line
         }
         var parts = [cadence]
-        if let spec, spec.specifiesArt, generateArt {
-            var triggers: [String] = []
-            if let hours = spec.artMaxAgeHours { triggers.append("at least every " + AgentPacing.durationText(minutes: hours * 60)) }
-            if let percent = spec.artChangePercent { triggers.append("when any metric moves > " + String(format: "%g", percent) + "%") }
-            if spec.artOnSentimentChange == true { triggers.append("when the mood changes") }
-            var art = "art: " + (triggers.isEmpty ? "on meaningful changes" : triggers.joined(separator: ", or "))
-            if let floor = spec.artMinIntervalMinutes { art += " (at most every " + AgentPacing.durationText(minutes: floor) + ")" }
-            parts.append(art)
-        }
         if pacingSpec?.failed == true { parts.append("couldn’t read timing from the objective; save it again to retry") }
         return parts.joined(separator: " · ")
     }

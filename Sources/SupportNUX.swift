@@ -280,7 +280,7 @@ final class FirstRunGuide: ObservableObject {
         change(&next); record = next
         do { try JSONEncoder().encode(next).write(to: file, options: .atomic) } catch { NSLog("Converse could not save first-run progress.") }
     }
-    /// The starter agent: on, hourly, Auto pacing, mood art only with a saved Meta key.
+    /// The starter agent: on, hourly, Auto pacing; the retired art flag follows a saved Meta key.
     func starterDefaults(_ agent: Session, codingTitle: String) {
         agent.agent?.objective = FirstRunText.agentObjective(codingTitle)
         agent.agent?.artDirection = FirstRunText.agentArtDirection

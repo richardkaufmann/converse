@@ -67,7 +67,10 @@ struct AgentConfig: Codable, Equatable {
     // "Paused: <reason> (<time>)" when the host paused the loop. It stays
     // visible through later manual runs until re-enabled or cleared.
     var pauseReason: String? = nil
+    // Owner art direction, applied to on-demand portraits.
     var artDirection: String? = nil
+    // Retired automatic mood art (before 152): still decoded so older archives
+    // and peers round-trip; nothing generates art from these any more.
     var lastArtDirection: String? = nil
     var generateArt = true
     var fileTriggers: Bool? = nil
@@ -96,6 +99,14 @@ struct AgentConfig: Codable, Equatable {
     var workingMemory: String? = nil
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
     var artPath: String? = nil
+    // Every turn's assessment, its recent revisions, and why the latest turn
+    // did not produce one (the record stays, marked stale).
+    var assessment: AgentAssessment? = nil
+    var assessmentHistory: [AgentAssessmentRevision]? = nil
+    var assessmentProblem: AgentAssessmentProblem? = nil
+    // On-demand portrait cache and the per-agent minimum refresh (nil = 10 min).
+    var portrait: AgentPortraitRecord? = nil
+    var portraitMinMinutes: Double? = nil
     var lastRunAt: Date? = nil
     var lastOutcome = "Not run yet"
     var scoreboardCadence: Int { min(1000, max(1, scoreboardEveryLoops ?? 1)) }
@@ -247,7 +258,12 @@ struct AgentReply: Decodable {
     var appControl: AppSupportCommand?
     var parkingLotEdits: ParkingLotEdits?
     var attention: String?
-    var artPrompt: String?
+    // Untrusted JSON, validated by AgentAssessments.evaluate. Any shape decodes,
+    // so a malformed assessment never makes the whole reply unusable.
+    var assessment: AgentJSON?
+    // {agent: "<name or id>"}: show that agent's portrait in this transcript.
+    var portrait: AgentJSON?
+    var portraitTarget: String? { (portrait?["agent"]?.string ?? portrait?.string)?.trimmingCharacters(in: .whitespacesAndNewlines) }
     struct Recovery: Decodable { var target: String; var delivery: UUID }
     var recover: [Recovery]?
     var tell: [Tell]?
@@ -381,8 +397,8 @@ final class AgentAPI {
         let text = (final?["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
         guard !text.isEmpty else { throw AgentFailure.message("Agent returned no answer.") }; return text
     }
-    func art(prompt: String, key: String) async throws -> Data {
-        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/images/generations")!, body: ["model": "muse-image-1.0", "prompt": prompt, "n": 1, "output_format": "png", "response_format": "b64_json", "size": "1536x1024"], key: key)
+    func art(prompt: String, key: String, size: String = "1024x1024") async throws -> Data {
+        let (raw, _) = try await json(URL(string: "https://api.meta.ai/v1/images/generations")!, body: ["model": "muse-image-1.0", "prompt": prompt, "n": 1, "output_format": "png", "response_format": "b64_json", "size": size], key: key)
         guard let root = raw as? [String: Any], let item = (root["data"] as? [[String: Any]])?.first, let b64 = item["b64_json"] as? String, let bytes = Data(base64Encoded: b64), bytes.count <= 8_000_000, let image = NSBitmapImageRep(data: bytes), image.pixelsWide <= 4096, image.pixelsHigh <= 4096,
               let png = image.representation(using: .png, properties: [:]) else { throw AgentFailure.message("Image service returned an unsupported or oversized image.") }
         return png
@@ -514,12 +530,5 @@ extension AgentConfig {
         if !keepDeadline { next.nextRunAt = next.enabled ? schedule.next(after: Date()) : nil }
         self = next
         return notice
-    }
-}
-
-// Art direction is separate from operational instructions and forwarded directly.
-enum AgentArt {
-    static func prompt(direction: String, scene: String?, mood: String) -> String {
-        "Create a beautifully composed scoreboard background illustration. No numerical data, example counts, labels or captions; the app draws a readable sports scoreboard with measured data over the center and lower area. Keep distinctive scenery and characters near the top and edges. Mood: " + mood + ". For a parking-lot scene, peaceful means pastoral and healthy; urgent or watchful means unresolved problems and dark stormy scenery; unknown means unverified, never falsely healthy. Owner art direction (takes precedence over suggested scene): " + direction + ". Suggested scene: " + String((scene ?? "An imaginative scene expressing current progress.").prefix(1800))
     }
 }

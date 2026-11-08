@@ -45,10 +45,12 @@ import Foundation
         check(restored.artDirection == art.artDirection && restored.lastArtDirection == art.lastArtDirection, "Art direction and rendered direction survive archive reload")
         var wire = art.wire(home: String(repeating: "a", count: 64)); wire.artDirection = "Playful moonbase, purple palette"
         try art.apply(wire)
-        check(art.artDirection == wire.artDirection && art.lastArtDirection != art.artDirection, "Remote art direction edit leaves a pending refresh even when mood stays unchanged")
+        let before = PortraitService.cacheKey(agent: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, config: restored)
+        check(art.artDirection == wire.artDirection && PortraitService.cacheKey(agent: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, config: art) != before, "A remote art direction edit changes the portrait cache key")
         var old = art.wire(home: String(repeating: "a", count: 64)); old.artDirection = nil; try art.apply(old)
         check(art.artDirection == wire.artDirection, "Older editors preserve an existing art direction")
-        check(AgentArt.prompt(direction: art.artDirection!, scene: String(repeating: "x", count: 5000), mood: "peaceful").contains(art.artDirection!), "Owner art direction reaches image prompt even with a long generated scene")
+        art.objective = String(repeating: "x", count: 5000)
+        check(PortraitPrompt.build(name: "Explorer", config: art).contains(art.artDirection!), "Owner art direction reaches the portrait prompt even with a long objective")
         var oversized = art.wire(home: String(repeating: "a", count: 64)); oversized.artDirection = String(repeating: "x", count: 4001)
         do { try art.apply(oversized); check(false, "Art direction size limit") } catch { check(true, "Art direction size limit rejects before settings mutation") }
     } catch { check(false, "Art direction regression: " + error.localizedDescription) }
@@ -60,6 +62,8 @@ import Foundation
     agentObjectivePacingSelfTests(check)
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
+    agentAssessmentSelfTests(check)
+    agentAssessmentRuntimeSelfTests(check)
     agentDiscordRouterSelfTests(check)
     agentHomeAssistantSelfTests(check)
     let voice = AgentDictation()

@@ -76,14 +76,14 @@ struct AgentSetupView: View {
                             }.disabled(session.busy || testingServices.contains("meta"))
                             Button(loadingModels ? "Loading…" : "Refresh models") { loadModels() }.disabled(loadingModels)
                         }
-                        Text("CLI models use the selected login. Meta API models, mood art and voice use the Meta key. Catalog visibility does not guarantee access. CLI agents use supplied evidence; hosted web research currently requires a Meta API model.").font(.caption).foregroundStyle(.secondary)
+                        Text("CLI models use the selected login. Meta API models, portraits and voice use the Meta key. Catalog visibility does not guarantee access. CLI agents use supplied evidence; hosted web research currently requires a Meta API model.").font(.caption).foregroundStyle(.secondary)
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
-                        Text(settings.objective != session.agent?.objective ? "Timing is read from the objective when you save. Say how often to run and refresh art, e.g. “run every five minutes, new art at least every twelve hours or when any price moves more than 0.5%”."
+                        Text(settings.objective != session.agent?.objective ? "Timing is read from the objective when you save. Say how often to run, e.g. “run every five minutes while the US market is open”."
                              : settings.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)))
                             .font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                            .help("Describe how often to run and when to refresh art in the objective. Converse reads it once per edit with this agent’s model; Stop, budgets, a 1 minute floor and a 72 hour ceiling always apply.")
+                            .help("Describe how often to run in the objective. Converse reads it once per edit with this agent’s model; Stop, budgets, a 1 minute floor and a 72 hour ceiling always apply.")
                         Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                         Toggle("Enable automatic loop", isOn: $settings.enabled)
                         Toggle("Auto pacing · the agent picks each next check", isOn: Binding(get: { settings.autoPaceOn }, set: { settings.autoPace = $0 }))
@@ -95,18 +95,10 @@ struct AgentSetupView: View {
                             }.font(.caption)
                         }
                         Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
-                        Toggle("Generate mood art with Muse Image" + (metaKeyAvailable ? "" : " · needs a Meta API key"), isOn: $settings.generateArt)
-                            .disabled(!metaKeyAvailable && !settings.generateArt)
-                        if !metaKeyAvailable { Text("Add a Meta API key above to turn on mood art. Scoreboards work without it.").font(.caption).foregroundStyle(.secondary) }
-                        if settings.generateArt {
-                            HStack(spacing: 16) {
-                                Stepper("New art at most every \(AgentPacing.minutesText(settings.artMinMinutes)) min", value: Binding(get: { settings.artMinMinutes }, set: { settings.artMinIntervalMinutes = $0; if settings.artStaleHours * 60 < $0 { settings.artMaxStaleHours = ($0 / 60).rounded(.up) } }), in: 5...1440, step: 5)
-                                Stepper("refresh unchanged art every \(AgentPacing.minutesText(settings.artStaleHours)) hr", value: Binding(get: { settings.artStaleHours }, set: { settings.artMaxStaleHours = max($0, (settings.artMinMinutes / 60).rounded(.up)) }), in: 1...168, step: 1)
-                            }.font(.caption)
-                        }
-                        Text("Scoreboard art direction").font(.headline)
+                        Text("Portrait art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
-                        Text("Describe the subject, style, colors or humor. Applied directly to artwork; separate from success criteria. A changed prompt updates the art on the next scoreboard refresh. Otherwise art changes with the mood or scoreboard, no more often than the minimum above, and refreshes at least once per the maximum. Art timing stated in the objective takes precedence.").font(.caption).foregroundStyle(.secondary)
+                        Text("Portraits are made on demand with Muse Image" + (metaKeyAvailable ? "" : " (needs a Meta API key)") + ", from this agent's assessment, objective and this direction: View → Portraits, Get Portrait, a session, Jolly or Discord. Nothing is generated automatically. Factual numbers and scoreboards stay out of the art; ask here for stylistic lettering if you want it.").font(.caption).foregroundStyle(.secondary)
+                        Stepper("New portrait at most every " + AgentPacing.minutesText(settings.portraitMinutes) + " min · Refresh always works", value: Binding(get: { settings.portraitMinutes }, set: { settings.portraitMinMinutes = $0 }), in: 1...1440, step: settings.portraitMinutes >= 30 ? 10 : 1).font(.caption)
                         Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
                         Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
                         Text("Speech starts only with Start talking in the session. Scheduled runs stay silent.").font(.caption).foregroundStyle(.secondary)
@@ -118,7 +110,7 @@ struct AgentSetupView: View {
                         if settings.discordMentions == true {
                             Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 }))
                                 .help("Allows this agent’s recent conversation, working notes and scoreboard in Discord replies, only in a verified private channel.")
-                            Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
+                            Toggle("Share assessments and portraits on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                             Toggle("Default agent for this channel", isOn: Binding(get: { settings.discordDefault == true }, set: { settings.discordDefault = $0 }))
                             Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request gets a fresh activation limit and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
                         }
@@ -247,7 +239,7 @@ struct AgentSetupView: View {
             current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
             let notice = migrationNotice
             try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())
-            try current.setArtThrottle(minMinutes: settings.artMinMinutes, maxStaleHours: settings.artStaleHours)
+            try current.setPortraitInterval(minutes: settings.portraitMinutes)
             session.agent = current; session.toolStatus.model = AgentModels.label(current.model)
             session.probeError = ""; session.needsSignIn = false
             if !session.busy { session.status = "Ready" }
@@ -467,7 +459,7 @@ struct AgentWidgetView: View {
                 // Background art must never contribute its intrinsic size to the document.
                 ZStack(alignment: .bottomLeading) {
                     GeometryReader { geometry in
-                        if let path = session.agent?.artPath, let image = NSImage(contentsOfFile: path) {
+                        if let path = session.agent?.portrait?.latest?.path ?? session.agent?.artPath, let image = NSImage(contentsOfFile: path) {
                             Image(nsImage: image).resizable().scaledToFill()
                                 .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                         } else {
@@ -589,7 +581,7 @@ enum AgentWidgetExport {
     static func html(_ session: Session) -> String {
         let config = session.agent ?? AgentConfig()
         var art = ""
-        if let path = config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
+        if let path = config.portrait?.latest?.path ?? config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
         let cells = (config.repositorySnapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
         let lots = config.visibleLotScoreboards.map { lot in
             AgentScoreboardCards.html(AgentScoreboard(title: lot.name + " · unfinished items", summary: "Revision \(lot.revision). Counts exclude headings and Done items; colors are explicit, not inherited.", metrics: lot.sections.map { .init(label: $0.title, value: $0.value) }, observedAt: lot.observedAt))
@@ -683,12 +675,11 @@ struct RemoteAgentSetupView: View {
                 Text("Homes that read timing from the objective use it instead; describe how often to run there.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
-                Toggle("Generate status art", isOn: $settings.generateArt)
-                TextField("Scoreboard art direction", text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
+                TextField("Portrait art direction", text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
                 Text("Speech requires Start talking on the viewing Mac.").font(.caption).foregroundStyle(.secondary)
                 Toggle("Allow configured Discord alerts", isOn: $settings.discord)
                 Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 })).help("Only in verified private Discord channels.")
-                Toggle("Share scoreboard and mood image on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
+                Toggle("Share assessments and portraits on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                 Toggle("Accept home Inbox file events", isOn: $settings.fileTriggers)
                 Text("Allowed sessions").bold()
                 #if os(macOS)

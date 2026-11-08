@@ -3439,6 +3439,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // ⌘= (unshifted) also makes text bigger, as in other Mac apps.
         let equals = v.addItem(withTitle: "Bigger", action: #selector(biggerText(_:)), keyEquivalent: "=")
         equals.target = self; equals.isHidden = true; equals.allowsKeyEquivalentWhenHidden = true
+        v.addItem(.separator())
+        v.addItem(withTitle: "Assessments", action: #selector(showAssessments), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Portraits", action: #selector(showPortraits), keyEquivalent: "").target = self
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
@@ -3480,6 +3483,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
+    @objc func showAssessments() { MainActor.assumeIsolated { AgentBoardWindows.shared.showAssessments() } }
+    @objc func showPortraits() { MainActor.assumeIsolated { AgentBoardWindows.shared.showPortraits() } }
     @objc func showJolly() { showSettings(); (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settingsCategory = .jolly }
     @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }

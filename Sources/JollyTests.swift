@@ -84,27 +84,21 @@ import Foundation
         first.agent?.repository = "fixture/project"
         first.agent?.snapshot = AgentRepoSnapshot(repository: "fixture/project", observedAt: now, stars: 0, openPRs: 0, openIssues: 4, openBugs: 1, releaseDownloads: 106, uniqueClonersTodayUTC: 2, uniqueCloners14d: 9)
         first.agent?.scoreboard = AgentScoreboard(summary: "Fixture measurements", metrics: [.init(label: "External metric", value: "Unavailable")], observedAt: now)
+        // The measured-text renderer remains only for the explicit preview mode.
+        let labels = AgentScoreboardImage.lines(session: first).map(\.text).joined(separator: "\n")
+        check(labels.contains("Bugs: 2 (1 red, 1 green)") && labels.contains("Stars: 0") && labels.contains("cumulative: 106") && labels.contains("Unique cloners · today UTC: 2") && labels.contains("14d: 9") && labels.contains("Revision 42"), "Preview scoreboard includes local counts AND repository data, timestamps and measured zeros")
+        first.agent?.snapshot?.uniqueClonersTodayUTC = nil
+        check(AgentScoreboardImage.lines(session: first).contains { $0.text == "Unique cloners · today UTC: Unavailable" }, "A missing current-day traffic bucket is explicitly unavailable")
+        let png = try AgentScoreboardImage.render(session: first, store: store)
+        let preview = FileManager.default.temporaryDirectory.appendingPathComponent("converse-jolly-scoreboard-fixture.png")
+        try png.write(to: preview)
+        print("Measured scoreboard preview fixture: " + preview.path)
         first.agent?.jollyRequestID = String(repeating: "9", count: 64)
         router.complete(first, text: "Measured status", success: true, store: store)
         let response = result(String(repeating: "9", count: 64))
-        let imageID = response["imageID"] as? String ?? "missing"
-        let imagePath = JollyRouter.folder(store).appendingPathComponent("images/" + imageID + ".png")
-        let png = try Data(contentsOf: imagePath)
-        check(response["imageKind"] as? String == "scoreboard" && NSBitmapImageRep(data: png) != nil && first.agent?.discordShareScoreboard != true, "Jolly publishes a rendered scoreboard even without art or Discord opt-in")
-        let labels = AgentScoreboardImage.lines(session: first).map(\.text).joined(separator: "\n")
-        check(labels.contains("Bugs: 2 (1 red, 1 green)") && labels.contains("Stars: 0") && labels.contains("cumulative: 106") && labels.contains("Unique cloners · today UTC: 2") && labels.contains("14d: 9") && labels.contains("Revision 42"), "Rendered scoreboard includes local counts AND repository data, timestamps and measured zeros")
-        first.agent?.snapshot?.uniqueClonersTodayUTC = nil
-        check(AgentScoreboardImage.lines(session: first).contains { $0.text == "Unique cloners · today UTC: Unavailable" }, "A missing current-day traffic bucket is explicitly unavailable")
-        let preview = FileManager.default.temporaryDirectory.appendingPathComponent("converse-jolly-scoreboard-fixture.png")
-        try png.write(to: preview)
-        print("Jolly measured scoreboard fixture: " + preview.path)
-        check(first.agent?.measuredArtMood(fallback: "peaceful") == "urgent", "Unresolved red lot items prevent falsely peaceful art")
+        check(response["answer"] as? String == "Measured status" && response["imageID"] == nil, "Jolly answers are text; scoreboard composites are no longer attached")
         first.agent?.watchedSessions = []
         check(!AgentScoreboardImage.lines(session: first).map(\.text).joined().contains("Fixture lot") && !AgentWidgetExport.html(first).contains("Fixture lot"), "Revoked lot access excludes stored counts from images and HTML")
-        first.agent?.jollyAllowed = false; first.agent?.jollyRequestID = String(repeating: "8", count: 64)
-        router.complete(first, text: "No image", success: true, store: store)
-        check(result(String(repeating: "8", count: 64))["imageID"] == nil, "Revoked Jolly access never shares a scoreboard image")
-        first.agent?.jollyAllowed = nil
     } catch { check(false, "Jolly measured scoreboard fixture: " + error.localizedDescription) }
     first.queuePaused = true
     let held = request("b"); enqueue(held); router.tick(store: store, now: now)

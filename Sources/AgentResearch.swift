@@ -128,22 +128,4 @@ extension AgentConfig {
     var visibleLotScoreboards: [AgentLotScoreboard] {
         (lotScoreboards ?? []).filter { allows(local: $0.id, home: $0.home) }
     }
-    // Strip timestamps and explanatory prose out of the art-change comparison.
-    // Include host measurements even when the model omits a scoreboard object.
-    var artMeasurementBoard: AgentScoreboard {
-        var board = scoreboard ?? AgentScoreboard(summary: "", metrics: [])
-        for lot in visibleLotScoreboards {
-            board.metrics += lot.sections.map { .init(label: lot.id.uuidString + "/" + $0.title, value: $0.value) }
-        }
-        if let repo = repositorySnapshot { board.metrics += repo.metrics.map { .init(label: "GitHub/" + $0.0, value: $0.1) } }
-        return board
-    }
-    func measuredArtMood(fallback: String) -> String {
-        let sections = visibleLotScoreboards.flatMap(\.sections)
-        if sections.contains(where: { ($0.colors["red"] ?? 0) > 0 }) { return "urgent" }
-        let bugs = sections.filter { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "bugs" }
-        if bugs.contains(where: { $0.unfinished > 0 }) || (repositorySnapshot?.openBugs ?? 0) > 0 { return "watchful" }
-        if !bugs.isEmpty || repositorySnapshot?.openBugs == 0 { return "peaceful" }
-        return fallback
-    }
 }

@@ -339,6 +339,8 @@ struct SidebarSession: View {
                 if session.isAgentSession {
                     Button("Agent Setup…") { AgentWindows.shared.setup(session) }
                     Button("Show scoreboard") { AgentWindows.shared.widget(session) }
+                    Button("Get Portrait") { Task { await PortraitService.shared.request(session, store: .shared, origin: .menu, reply: .transcript) } }
+                        .help("Shows this agent's portrait in its conversation. Reuses the current portrait when its assessment has not changed.")
                     Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.needsAgentSetup)
                     Button("Clear attention banner") { Store.shared.clearAgentAttention(session) }
                     Button("Change Assistant or Login…") { AppDelegate.shared.configureSession(session, focusPickers: true) }
