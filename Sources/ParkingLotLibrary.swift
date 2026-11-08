@@ -330,9 +330,10 @@ func parkingLibrarySelfTests(_ check: (Bool, String) -> Void) {
         try lot.apply(.init(revision: revision, operations: [.init(action: "comment", id: before[1].id, text: "Assistant thought")]), author: "Assistant")
         let commented = lot.document.rows
         lot.undoManager.undo()
-        check(lot.document.rows == moved && lot.document.revision > revision, "Undo reverses assistant edits and advances the revision to invalidate stale proposals")
+        check(lot.document.rows.map(\.id) == before.map(\.id) && lot.document.rows.first { $0.id == before[1].id }?.notes?.last?.text == "Assistant thought"
+              && lot.document.revision == revision + 2, "Undo reverses the user's move, keeps the assistant comment and advances the revision to invalidate stale proposals")
         lot.undoManager.redo()
-        check(lot.document.rows == commented, "Redo restores assistant comments with their author and identity")
+        check(lot.document.rows == commented, "Redo repeats the user's move and keeps the assistant comment with its author and identity")
         let firstLot = ParkingLotStore(folder: folder.appendingPathComponent("second")); firstLot.open()
         firstLot.update(firstLot.document.rows[1].id, text: "Separate lot")
         lot.undoManager.undo()
