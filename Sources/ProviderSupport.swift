@@ -28,6 +28,12 @@ struct PendingPrompt: Codable, Identifiable {
     var components: [PendingPrompt]? = nil
     /// Typed in a local or remote composer; stays visible after Inject all.
     var typed: Bool? = nil
+    /// Every part was typed by a human. Survives held() and Inject all, so
+    /// a requeued human prompt still counts toward the feedback invitation.
+    var humanTyped: Bool {
+        guard let components, !components.isEmpty else { return typed == true }
+        return components.allSatisfy(\.humanTyped)
+    }
     var originParticipants: [GroupMessageOrigin]? = nil
     var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
     var agentRunReserved: Bool? = nil

@@ -25,11 +25,14 @@ struct FeedbackInvitationState: Codable {
         release = value; completedTurns = 0
     }
     mutating func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
-        guard !suppressed, success, !interrupted, humanDirected, !askedReleases.contains(release) else { return }
+        guard !suppressed, success, !interrupted, humanDirected, !feedbackAsk else { return }
         completedTurns = min(Self.qualifyingTurns, completedTurns + 1)
     }
+    /// Richard's feedback_ask: false on each install of a release, true once
+    /// this release's banner has been seen.
+    var feedbackAsk: Bool { askedReleases.contains(release) }
     var eligible: Bool {
-        !suppressed && !askedReleases.contains(release) && completedTurns >= Self.qualifyingTurns
+        !suppressed && !feedbackAsk && completedTurns >= Self.qualifyingTurns
     }
     @discardableResult mutating func markShown() -> Bool {
         guard eligible else { return false }
@@ -39,16 +42,16 @@ struct FeedbackInvitationState: Codable {
 
 func feedbackInvitationSelfTests(_ check: (Bool, String) -> Void) {
     var state = FeedbackInvitationState(release: "0.7.16/151")
-    check(!state.eligible && state.askedReleases.isEmpty, "Feedback invitation starts off on a new profile")
+    check(!state.eligible && !state.feedbackAsk && state.askedReleases.isEmpty, "Feedback invitation starts off on a new profile with feedback_ask false")
     for _ in 0..<19 { state.completedTurn(success: true, interrupted: false, humanDirected: true) }
     check(!state.eligible && state.completedTurns == 19, "Feedback invitation waits through nineteen human turns")
     state.completedTurn(success: true, interrupted: false, humanDirected: true)
     check(state.eligible && state.markShown(), "Twentieth completed human turn qualifies without an elapsed-time threshold")
-    check(!state.eligible && !state.markShown(), "Showing consumes this release without tracking a button or star")
+    check(state.feedbackAsk && !state.eligible && !state.markShown(), "Showing sets feedback_ask for this release without tracking a button or star")
     let copy = try! JSONDecoder().decode(FeedbackInvitationState.self, from: JSONEncoder().encode(state))
     check(!copy.eligible && copy.askedReleases.contains("0.7.16/151"), "Relaunch preserves the consumed release")
     state.useRelease("0.7.17/152")
-    check(state.completedTurns == 0 && !state.eligible, "A new installed release starts a new twenty-turn count")
+    check(state.completedTurns == 0 && !state.eligible && !state.feedbackAsk, "A new installed release resets feedback_ask and starts a new twenty-turn count")
     for _ in 0..<25 {
         state.completedTurn(success: false, interrupted: false, humanDirected: true)
         state.completedTurn(success: true, interrupted: true, humanDirected: true)
@@ -78,5 +81,16 @@ func feedbackInvitationSelfTests(_ check: (Bool, String) -> Void) {
     }
     check(!FeedbackInvitationState.allowed(info: [:], environment: ["CONVERSE_TEST_COMMAND": "/usr/bin/false"], arguments: []), "Test automation excludes feedback invitation")
     check(!FeedbackInvitationState.allowed(info: [:], environment: [:], arguments: ["--settings-preview"]), "Preview command excludes feedback invitation")
+
+    let typed = PendingPrompt(typed: true, text: "typed", images: [])
+    check(typed.humanTyped && typed.held(text: "typed", images: [], switchboardHop: 0).humanTyped,
+          "A human prompt held after Muse reports the session in use still counts as human")
+    let relayed = PendingPrompt(text: "[Requested by the human through Converse App Support]\nhello", images: [])
+    let continuation = PendingPrompt(supportContinuation: true, text: "[Converse app-control result]", images: [])
+    check(!relayed.humanTyped && !continuation.humanTyped && !PendingPrompt(switchboardHop: 0, text: "teach", images: []).humanTyped,
+          "App Support relays, app-control continuations and app teaching never count; the typed App Support turn already did")
+    check(PendingPrompt(components: [typed, typed], text: "typed\n\ntyped", images: []).humanTyped
+          && !PendingPrompt(components: [typed, PendingPrompt(switchboardHop: 1, text: "relay", images: [])], text: "x", images: []).humanTyped,
+          "Inject all counts only when every combined part was typed")
 
 }

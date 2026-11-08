@@ -721,7 +721,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next, feedbackHumanInitiated: next.switchboardHop == nil)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -783,7 +783,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil, feedbackHumanInitiated: Bool = true) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -812,7 +812,8 @@ final class Store: ObservableObject {
         s.supportContinuation = supportContinuation; s.supportAutonomous = supportAutonomous || agentLoopTick || preservingAgentDraft != nil
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
-        s.feedbackHumanTurn = feedbackHumanInitiated
+        // Only composer text counts. App-generated, relayed and handoff prompts never do.
+        s.feedbackHumanTurn = input?.humanTyped == true
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         // Inject all parts render separately; text that differs from the queued input shows whole.
         let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
