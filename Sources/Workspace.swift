@@ -249,17 +249,20 @@ struct SidebarRevealName<Content: View>: View {
     let location: PaneLocation?
     var windowName: String? = nil
     var deviceName: String? = nil
+    var parkedHelp: String? = nil
+    var onParked: (() -> Void)? = nil
     @ViewBuilder let content: Content
     @State private var showingLocation = false
     private var help: String {
         if location != nil { return "Show in " + (windowName ?? "its existing window") + "\nClicking will bring its window forward." }
         if let deviceName { return "Displayed on " + deviceName }
-        return "Parked. Use 1, 2 or 3 to show it in a pane."
+        return parkedHelp ?? "Parked. Use 1, 2 or 3 to show it in a pane."
     }
     var body: some View {
         Button {
             if let location { AppDelegate.shared?.frontWindow(location.windowID) }
             else if deviceName != nil { showingLocation = true }
+            else { onParked?() }
         } label: { content.contentShape(Rectangle()) }
             .buttonStyle(.plain).help(help).accessibilityHint(help)
             .popover(isPresented: $showingLocation) {

@@ -426,7 +426,9 @@ struct ParkingLotSidebar: View {
             }.frame(width: 12, height: 12)
             SidebarRevealName(location: workspace.placements[lot.id],
                               windowName: workspace.placements[lot.id].flatMap { workspace.names[$0.windowID] },
-                              deviceName: ShownElsewhere.device(DeviceSyncService.shared.remoteDisplayHolder(lot.id), me: DeviceSyncService.shared.identity?.deviceID) { DeviceSyncService.shared.displayName(for: $0) }) {
+                              deviceName: ShownElsewhere.device(DeviceSyncService.shared.remoteDisplayHolder(lot.id), me: DeviceSyncService.shared.identity?.deviceID) { DeviceSyncService.shared.displayName(for: $0) },
+                              parkedHelp: "Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.",
+                              onParked: { show() }) {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.layoutPriority(-1)
