@@ -39,7 +39,9 @@ static class TranscriptSelfReadChecks
 
             home.TeachSwitchboard(a);
             check(a.Pending[^1].Text.Contains("transcript-search") && a.Pending[^1].Text.Contains("only this session's own retained transcript")
-                && SwitchboardInstructions.ConversationPolicy.Contains("transcript-read"), "Windows/Linux teaching and per-turn policy name the self-read commands");
+                && !SwitchboardInstructions.ConversationPolicy.Contains("transcript"), "Windows/Linux teaching names the self-read commands");
+            var perTurn = SwitchboardInstructions.WithPolicy(a, "prompt");
+            check(perTurn.Contains("[Switchboard: ") && !perTurn.Contains("transcript-") && !perTurn.Contains("Own history"), "Windows/Linux per-turn context does not repeat the self-read lesson");
             a.Pending.Clear();
 
             var page = await Result(a, new { command = "transcript-read", fromMessage = 5, count = 3 }, "Checking.\n");
@@ -54,6 +56,12 @@ static class TranscriptSelfReadChecks
             check(refused.StartsWith(TranscriptSelfRead.RefusedHeader) && !refused.Contains("neighbor"), "Windows/Linux refuses another session's transcript");
             check(TranscriptSelfRead.OwnsTarget(new DeviceGlobalID(home.DeviceId, a.Id).ToString(), a, home.DeviceId) && !TranscriptSelfRead.OwnsTarget(new DeviceGlobalID("other", a.Id).ToString(), a, home.DeviceId),
                 "Windows/Linux accepts only this session's own home-qualified ID");
+            check(TranscriptSelfRead.OwnsTarget(a.Id.ToString(), a, null) && TranscriptSelfRead.OwnsTarget(null, a, null) && !TranscriptSelfRead.OwnsTarget(new DeviceGlobalID("h", a.Id).ToString(), a, null),
+                "Windows/Linux with no known home accepts only the bare own ID or no target");
+            check((await Result(a, new { command = "transcript-search", query = "needle", session = "elsewhere/" + a.Id })).StartsWith(TranscriptSelfRead.RefusedHeader), "Windows/Linux refuses this session's ID on another home");
+            foreach (var malformed in new object[] { new { command = "transcript-read", session = 5 }, new { command = "transcript-read", to = new[] { "x" } }, new { command = "transcript-read", session = new { id = a.Id } }, new { command = "transcript-read", to = true } })
+                check((await Result(a, malformed)).StartsWith(TranscriptSelfRead.RefusedHeader), "Windows/Linux refuses a transcript command whose target is not a string: " + JsonSerializer.Serialize(malformed));
+            check((await Result(a, JsonNode.Parse("{\"command\":\"transcript-read\",\"session\":null}")!)).StartsWith(TranscriptSelfRead.Header), "Windows/Linux treats a null target as omitted");
             var longSession = new ChatSession(); longSession.Messages.Add(new ChatMessage { Role = "assistant", Text = new string('x', 30_000) });
             var cut = Json(TranscriptSelfRead.Read(longSession, 1, 1, null));
             check(cut["messages"]![0]!["text"]!.GetValue<string>().Length == TranscriptSelfRead.MessageCharacters && cut["next"]!["fromCharacter"]!.GetValue<int>() == TranscriptSelfRead.MessageCharacters,

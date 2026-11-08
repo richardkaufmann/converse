@@ -8,7 +8,7 @@ struct SwitchboardCommand: Decodable {
     [Converse switchboard instructions]
     Continue using the agent response JSON object required by your runtime, with a tell array for messages. Do not use converse command fences or list-sessions; use exact watched-session IDs from the supplied evidence and stay within your configured scope. Tell is one-way: omit replyExpected or set it false. Ask uses replyExpected:true and expects an answer, blocker, or explicit decline. To answer a request, include a tell to the sender with inReplyTo set to the request UUID. A transport acknowledgement is not an answer. Do not send receipt-only tells. Recovery notices do not create new reply obligations. Refreshing these instructions does not resolve outstanding requests; answer those with the matching inReplyTo. If the target is outside your scope, explain the blocker to the human. Supervision may request recover with a target and delivery UUID from host switchboardDeliveries evidence only when canRecover is true. The host enforces selected-session scope, one recovery per delivery, cooldowns, and human pauses. No arbitrary urgent text injection is granted.
     """
-    static let conversationPolicy = "Switchboard: interpret “tell <session> <message>” as a one-way tell; no reply or receipt turn is requested. Interpret “ask <session> <question>” as ask: a correlated answer, blocker, or decline is expected. A transport acknowledgement is not an answer. Use exact IDs from list-sessions. Commands execute only when a converse JSON fence is the last thing in your reply (one per reply): {\"command\":\"ask\",\"to\":\"ID\",\"text\":\"question\"} (use command tell for one-way messages). Reply to a request with tell and inReplyTo set to its request UUID; do not ask merely to acknowledge receipt. Legacy tell with replyExpected:true also requests an answer. Parking Lot discovery: {\"command\":\"parking-lot-list\",\"linkedOnly\":true} lists lots linked to this session. Links guide selection, not permissions; ask if several fit. Remote lots list their home and read-only limitations. " + TranscriptSelfRead.policy
+    static let conversationPolicy = "Switchboard: interpret “tell <session> <message>” as a one-way tell; no reply or receipt turn is requested. Interpret “ask <session> <question>” as ask: a correlated answer, blocker, or decline is expected. A transport acknowledgement is not an answer. Use exact IDs from list-sessions. Commands execute only when a converse JSON fence is the last thing in your reply (one per reply): {\"command\":\"ask\",\"to\":\"ID\",\"text\":\"question\"} (use command tell for one-way messages). Reply to a request with tell and inReplyTo set to its request UUID; do not ask merely to acknowledge receipt. Legacy tell with replyExpected:true also requests an answer. Parking Lot discovery: {\"command\":\"parking-lot-list\",\"linkedOnly\":true} lists lots linked to this session. Links guide selection, not permissions; ask if several fit. Remote lots list their home and read-only limitations."
     let command: String
     var to: String?
     var text: String?
@@ -25,6 +25,31 @@ struct SwitchboardCommand: Decodable {
     var count: Int?
     var fromCharacter: Int?
     var session: String?
+    private enum CodingKeys: String, CodingKey { case command, to, text, replyExpected, inReplyTo, parkingLotEdits, lotID, linkedOnly, query, limit, beforeMessage, fromMessage, count, fromCharacter, session }
+    init(command: String) { self.command = command }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        command = try c.decode(String.self, forKey: .command)
+        // A transcript command whose target is not a string is kept so it is
+        // refused (as on Windows/Linux), never run as if it named no one.
+        func target(_ key: CodingKeys) throws -> String? {
+            guard TranscriptSelfRead.commands.contains(command), c.contains(key), try !c.decodeNil(forKey: key) else { return try c.decodeIfPresent(String.self, forKey: key) }
+            return (try? c.decode(String.self, forKey: key)) ?? TranscriptSelfRead.invalidTarget
+        }
+        to = try target(.to); session = try target(.session)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        replyExpected = try c.decodeIfPresent(Bool.self, forKey: .replyExpected)
+        inReplyTo = try c.decodeIfPresent(String.self, forKey: .inReplyTo)
+        parkingLotEdits = try c.decodeIfPresent(ParkingLotEdits.self, forKey: .parkingLotEdits)
+        lotID = try c.decodeIfPresent(UUID.self, forKey: .lotID)
+        linkedOnly = try c.decodeIfPresent(Bool.self, forKey: .linkedOnly)
+        query = try c.decodeIfPresent(String.self, forKey: .query)
+        limit = try c.decodeIfPresent(Int.self, forKey: .limit)
+        beforeMessage = try c.decodeIfPresent(Int.self, forKey: .beforeMessage)
+        fromMessage = try c.decodeIfPresent(Int.self, forKey: .fromMessage)
+        count = try c.decodeIfPresent(Int.self, forKey: .count)
+        fromCharacter = try c.decodeIfPresent(Int.self, forKey: .fromCharacter)
+    }
     static func parse(_ text: String) -> SwitchboardCommand? {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = "```converse\n", suffix = "\n```"
