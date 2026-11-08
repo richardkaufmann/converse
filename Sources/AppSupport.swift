@@ -445,31 +445,39 @@ extension Store {
 }
 
 /// A local invitation, deliberately outside agent prompts and transcripts.
-final class StarInvitation: ObservableObject {
-    static let shared = StarInvitation()
+final class FeedbackInvitation: ObservableObject {
+    static let shared = FeedbackInvitation()
     @Published private(set) var visible = false
-    private var state = StarInvitationState(release: "")
+    private var state = FeedbackInvitationState(release: "")
+    let surfaces = NSHashTable<NSView>.weakObjects()
+    private var supportVisible: Bool {
+        surfaces.allObjects.contains { view in
+            guard let window = view.window else { return false }
+            return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+                && !view.isHiddenOrHasHiddenAncestor && !view.visibleRect.isEmpty
+        }
+    }
     private var file: URL?
     private var timer: Timer?
     private var eventMonitor: Any?
     private var lastInput: TimeInterval = -.infinity
     private var lastTick: TimeInterval = 0
-    private var lastSave: TimeInterval = 0
-    private var remaining = StarInvitationState.bannerSeconds
+    private var remaining = FeedbackInvitationState.bannerSeconds
     private var publishing = false
-    private let writes = DispatchQueue(label: "Converse.star-invitation.persistence", qos: .utility)
+    private let writes = DispatchQueue(label: "Converse.feedback-invitation.persistence", qos: .utility)
 
     func start(folder: URL) {
-        guard timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
-        let target = folder.appendingPathComponent("star-invitation.json")
+        guard timer == nil, FeedbackInvitationState.allowed(info: Bundle.main.infoDictionary ?? [:], environment: ProcessInfo.processInfo.environment, arguments: CommandLine.arguments) else { return }
+        let target = folder.appendingPathComponent("feedback-invitation.json")
         let release = ConverseAbout.version + "/" + ConverseAbout.build
         if FileManager.default.fileExists(atPath: target.path) {
             // Do not overwrite a damaged record and accidentally ask again.
-            guard let data = try? Data(contentsOf: target), let saved = try? JSONDecoder().decode(StarInvitationState.self, from: data) else { return }
+            guard let data = try? Data(contentsOf: target), let saved = try? JSONDecoder().decode(FeedbackInvitationState.self, from: data) else { return }
             state = saved; state.useRelease(release)
-        } else { state = StarInvitationState(release: release) }
+        } else { state = FeedbackInvitationState(release: release) }
         file = target
-        lastTick = ProcessInfo.processInfo.systemUptime; lastSave = lastTick
+        guard !state.suppressed, !state.askedReleases.contains(state.release) else { return }
+        lastTick = ProcessInfo.processInfo.systemUptime
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
             self?.lastInput = ProcessInfo.processInfo.systemUptime
             return event
@@ -482,28 +490,25 @@ final class StarInvitation: ObservableObject {
         // Foreground with recent human input; sleeping or a stalled run loop adds no time.
         let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
         if active {
-            state.addActiveSeconds(elapsed)
             if visible { remaining -= elapsed; if remaining <= 0 { dismiss() } }
         }
-        if active && state.eligible && !publishing && Store.shared.sessions.contains(where: { $0.supportAssistant }) {
+        if active && supportVisible && state.eligible && !publishing {
             publishing = true
             var consumed = state; consumed.markShown()
             persist(consumed) { [weak self] ok in
                 guard let self else { return }
                 self.publishing = false
-                guard ok else { return }
-                self.state = consumed; self.remaining = StarInvitationState.bannerSeconds; self.visible = true
+                guard ok, !self.state.suppressed else { return }
+                self.state = consumed; self.remaining = FeedbackInvitationState.bannerSeconds; self.visible = true
             }
-        } else if !publishing && now - lastSave >= 30 {
-            lastSave = now; persist(state)
         }
     }
     func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
-        guard file != nil, !publishing else { return }
+        guard file != nil, !state.suppressed, !publishing, !state.askedReleases.contains(state.release) else { return }
         state.completedTurn(success: success, interrupted: interrupted, humanDirected: humanDirected)
         if success && !interrupted && humanDirected { persist(state) }
     }
-    private func persist(_ value: StarInvitationState, completion: ((Bool) -> Void)? = nil) {
+    private func persist(_ value: FeedbackInvitationState, completion: ((Bool) -> Void)? = nil) {
         guard let file, let data = try? JSONEncoder().encode(value) else { completion?(false); return }
         writes.async {
             let ok: Bool
@@ -511,19 +516,37 @@ final class StarInvitation: ObservableObject {
             if let completion { DispatchQueue.main.async { completion(ok) } }
         }
     }
-    func dismiss() { visible = false }
+    func dismiss() {
+        visible = false; timer?.invalidate(); timer = nil
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
+    }
+    func feedbackWasGiven() {
+        guard file != nil else { return }
+        state.markFeedbackGiven()
+        dismiss()
+        persist(state)
+    }
     func openInvitation() {
         dismiss()
-        StarInvitationWindow.shared.show()
+        FeedbackInvitationWindow.shared.show()
     }
 }
 
-struct StarInvitationBanner: View {
-    @ObservedObject private var invitation = StarInvitation.shared
+/// A non-interactive view measures actual clipping/window visibility, including a scrolled-away sidebar row.
+struct FeedbackInvitationSurface: NSViewRepresentable {
+    final class Probe: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    func makeNSView(context: Context) -> NSView {
+        let view = Probe(); FeedbackInvitation.shared.surfaces.add(view); return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
+struct FeedbackInvitationBanner: View {
+    @ObservedObject private var invitation = FeedbackInvitation.shared
     var body: some View {
         if invitation.visible {
             HStack(spacing: 8) {
-                Button("Happy With Converse?") { invitation.openInvitation() }
+                Button("Thoughts About Converse?") { invitation.openInvitation() }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
                 Spacer(minLength: 0)
                 Button { invitation.dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
@@ -534,21 +557,28 @@ struct StarInvitationBanner: View {
     }
 }
 
-struct StarInvitationPanel: View {
-    var star: () -> Void
+struct FeedbackInvitationPanel: View {
+    var repository: () -> Void
+    var issue: () -> Void
     var report: () -> Void
     var close: () -> Void
+    var feedbackGiven: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
                 ParkingLotShoe().frame(width: 52, height: 52).accessibilityHidden(true)
-                Text("Happy With Converse?").font(.title2.bold())
+                Text("Thoughts About Converse").font(.title2.bold())
             }
-            Text("Hi, if you like this app, please consider pressing the Star button below. It lets the developer know the app is appreciated. Converse doesn’t track whether you star it.")
-            Text("If you have issues, please use File a Bug below so we can help.")
+            Text("Hi, we appreciate feedback on GitHub. Converse doesn’t check your GitHub activity. The Open GitHub button below brings up the repository in your browser. If you like what you see, please consider pressing the star icon at the top of that page.")
+            Text("You can also use the other buttons to file an issue or bug. THANK YOU!")
             HStack {
-                Button("Star on GitHub", action: star)
+                Button("Open GitHub", action: repository)
+                Button("File an Issue…", action: issue)
                 Button("File a Bug…", action: report)
+            }
+            Text("Already given feedback? Tell us below and this app will remember locally, even after upgrades.").font(.callout)
+            HStack {
+                Button("I’ve given feedback", action: feedbackGiven)
                 Spacer()
                 Button("Not Now", action: close).keyboardShortcut(.cancelAction)
             }
@@ -556,19 +586,23 @@ struct StarInvitationPanel: View {
     }
 }
 
-final class StarInvitationWindow: NSObject, NSWindowDelegate {
-    static let shared = StarInvitationWindow()
+final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
+    static let shared = FeedbackInvitationWindow()
     private var window: NSWindow?
     func show() {
         if let window { window.makeKeyAndOrderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Happy With Converse?"; window.isReleasedWhenClosed = false; window.delegate = self
-        let panel = StarInvitationPanel(star: { [weak self] in
+        window.title = "Thoughts About Converse?"; window.isReleasedWhenClosed = false; window.delegate = self
+        let panel = FeedbackInvitationPanel(repository: {
             NSWorkspace.shared.open(URL(string: "https://github.com/richardkaufmann/converse")!)
+        }, issue: {
+            NSWorkspace.shared.open(ConverseAbout.bugReports)
+        }, report: {
+            AppDelegate.shared.reportConverseBug()
+        }, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
+            FeedbackInvitation.shared.feedbackWasGiven()
             self?.window?.close()
-        }, report: { [weak self] in
-            self?.window?.close(); AppDelegate.shared.reportConverseBug()
-        }, close: { [weak self] in self?.window?.close() })
+        })
         let host = NSHostingView(rootView: panel)
         window.contentView = host; window.setContentSize(host.fittingSize)
         self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
