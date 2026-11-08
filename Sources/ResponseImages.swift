@@ -357,6 +357,27 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             check(Date().timeIntervalSince(started) < 0.5 && TranscriptStyle.localImageReferences(neutral).isEmpty && local.count <= 1 && web.count <= 1, "10,000 nested image openers are scanned in bounded time: " + tail)
         }
         check(TranscriptStyle.imageReferences("![" + String(repeating: "a", count: 600) + "](https://example.com/w.png)").isEmpty && TranscriptStyle.imageReferences("![Chart](https://example.com/w.png)").count == 1, "Image captions longer than 512 characters are not treated as images")
+        let balancedShot = "![x](/tmp/shot(1).png)"
+        let balancedRefs = TranscriptStyle.localImageReferences(balancedShot)
+        check(balancedRefs.count == 1 && balancedRefs.first?.url.path == "/tmp/shot(1).png" && balancedRefs.first?.range == NSRange(location: 0, length: (balancedShot as NSString).length), "Image paths keep balanced parentheses")
+        check(TranscriptStyle.localImageReferences("![x](/tmp/a(b(c))(d).png) ![y](/tmp/y.png)").map(\.url.path) == ["/tmp/a(b(c))(d).png", "/tmp/y.png"], "Nested parentheses end at the image's own closer and the next image still parses")
+        check(TranscriptStyle.localImageReferences("![x](file:///tmp/my%20shot(1).png)").first?.url.path == "/tmp/my shot(1).png" && TranscriptStyle.localImageReferences("![x](file:///tmp/my shot(1).png)").first?.url.path == "/tmp/my shot(1).png", "File URLs keep balanced parentheses, encoded or with raw spaces")
+        check(TranscriptStyle.imageReferences("![w](https://example.com/w_(1).png)").first?.url.absoluteString == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses")
+        check(TranscriptStyle.imageLinks("![w](https://example.com/w_(1).png) tail") == "w: [https://example.com/w\\_(1).png](https://example.com/w_(1).png) tail", "Image fallbacks replace the whole parenthesized reference")
+        let unbalancedLine = "![x](/tmp/a(b.png) and more)"
+        check(TranscriptStyle.localImageReferences(unbalancedLine).first?.url.path == "/tmp/a(b.png" && TranscriptStyle.localImageReferences(unbalancedLine).first?.range.length == ("![x](/tmp/a(b.png)" as NSString).length, "An unbalanced parenthesis keeps the original first-closer match")
+        let pastBound = "![x](/tmp/a(" + String(repeating: "b", count: 4080) + ")" + String(repeating: "c", count: 20) + ".png)"
+        check(TranscriptStyle.localImageReferences(pastBound).first?.url.path.hasSuffix("b") == true, "Balanced scanning never reads past the target bound")
+        let balancedFallback = MarkdownText.inline(balancedShot), balancedURL = URL(fileURLWithPath: "/tmp/shot(1).png")
+        var balancedAttribute: URL?
+        balancedFallback.enumerateAttribute(LocalImageFallback.attribute, in: NSRange(location: 0, length: balancedFallback.length)) { value, _, _ in if let url = value as? URL { balancedAttribute = url } }
+        check(balancedAttribute == balancedURL && !balancedFallback.string.hasSuffix(".png)"), "A parenthesized local image renders one complete fallback link")
+        check(ConverseExchange.neutralizeLocalImages(balancedShot) == "[x](/tmp/shot(1).png)" && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages(balancedShot)).isEmpty, "Import neutralization covers parenthesized paths")
+        do {
+            let hostile = String(repeating: "![x](/tmp/a()", count: 20_000), started = Date()
+            let found = TranscriptStyle.localImageReferences(hostile)
+            check(found.count == 20_000 && found.allSatisfy { $0.url.path == "/tmp/a(" } && Date().timeIntervalSince(started) < 1, "Repeated open parentheses stay linear and keep their first-closer matches")
+        }
         check(TranscriptStyle.localImageReferences("![![x](/tmp/a.png)").count == 1 && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages("![![x](/tmp/a.png)")).isEmpty, "A nested local embed is still found and neutralized")
         // Nested opening markers once needed one round per level; any depth now goes in one pass.
         for depth in [2, 6, 10, 100, 5_000] {

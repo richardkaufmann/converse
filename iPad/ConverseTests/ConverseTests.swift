@@ -1155,6 +1155,8 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(rendered.string, "Grasshopper: " + url.absoluteString)
         XCTAssertEqual(rendered.attribute(.link, at: ("Grasshopper: " as NSString).length, effectiveRange: nil) as? URL, url)
         XCTAssertEqual(TranscriptStyle.imageLinks("`![example](https://example.com/a.png)`"), "`![example](https://example.com/a.png)`")
+        XCTAssertEqual(TranscriptStyle.imageReferences("![w](https://example.com/w_(1).png)").first?.url.absoluteString, "https://example.com/w_(1).png", "Balanced parentheses stay in the image URL")
+        XCTAssertEqual(TranscriptStyle.localImageReferences("![x](/tmp/shot(1).png)").first?.url.path, "/tmp/shot(1).png")
     }
     func testUnalignedCoalescedFrames() throws {
         var first = DeviceEnvelope(kind: "odd")
