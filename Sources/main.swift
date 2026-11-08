@@ -843,7 +843,7 @@ final class Store: ObservableObject {
             prompt += "\n\n" + localContext(s, directory: directory)
             let imageFolder = responseImageFolder(s)
             try? FileManager.default.createDirectory(at: imageFolder, withIntermediateDirectories: true)
-            prompt += "\n[Converse image output: save images you create or download in " + imageFolder.path + "; include each as ![caption](file:///absolute/path.png) in your reply. Converse displays these in the conversation, including on remote devices. Do not open Preview or another desktop viewer.]"
+            prompt += "\n" + ResponseImages.deliveryReminder(output: imageFolder)
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && usesInteractiveMuse {

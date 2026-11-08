@@ -104,6 +104,7 @@ extension Store {
         return """
         [Converse switchboard instructions]
         This session can now send messages to other Converse sessions. Your session ID is \(s.id.uuidString).
+        \(responseImageTeaching(s))
         The user may type natural language such as 'tell <name> <message>', 'ask <name> <question>', or 'tell <name> urgently <message>'. Interpret that request and use this protocol.
         CRITICAL: A switchboard command executes only when one converse fenced JSON block is the LAST thing in your final reply. This applies to list-sessions, tell, ask, tell-urgently and every Parking Lot command. A short line of prose before the block is fine. Put NOTHING after it, and use only one command block per reply. A block followed by text, or several blocks in one reply, runs nothing; Converse shows a notice that nothing was sent. Do not claim delivery merely because you included a block.
         Discover CURRENT session IDs and human-readable names by ending your reply with exactly this fenced block:

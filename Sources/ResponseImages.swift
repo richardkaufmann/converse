@@ -5,6 +5,10 @@ import ImageIO
 // Explicit image references become managed attachments. File imports stay
 // inside permitted roots; HTTPS downloads use a bounded, credential-free client.
 enum ResponseImages {
+    /// Keep recurring prompt overhead small; the complete explanation lives in Teach.
+    static func deliveryReminder(output: URL) -> String {
+        "[Converse image output: save images in \(output.path); embed each as ![caption](\(output.appendingPathComponent("name.png").absoluteString)) using its real filename, on its own line in the SAME final reply, outside code and before any converse fence. Saving alone does not display it. Do not open a desktop viewer.]"
+    }
     // Local screenshots may be much larger than the attachment sent to peers.
     // Keep network downloads and normalized output at their existing 8 MB limit.
     static let localInputLimit = 32_000_000
@@ -56,6 +60,19 @@ enum ResponseImages {
 
 extension Store {
     func responseImageFolder(_ session: Session) -> URL { folder.appendingPathComponent("Attachments").appendingPathComponent(session.id.uuidString).appendingPathComponent("Outputs") }
+    func responseImageTeaching(_ session: Session) -> String {
+        let output = responseImageFolder(session)
+        let example = output.appendingPathComponent("example.png").absoluteString
+        return """
+        [Converse inline images]
+        To SHOW an image in the conversation, do BOTH steps in the same turn:
+        1. Save the image you create or download as a PNG in this session's Outputs folder: \(output.path)
+        2. Include a Markdown IMAGE in your final reply, using the actual saved file's absolute file URL. Example (replace example.png with your real filename):
+        ![A short description](\(example))
+        The leading ! is required. Put the image Markdown on its own line, outside code fences, inline code and blockquotes. Encode spaces in file URLs as %20. Saving a file alone, mentioning its path, or writing an ordinary [link](file:///...) does NOT display it inline. Do not claim an image is displayed without including its image Markdown in that same reply.
+        Converse imports the referenced image and displays it in the conversation, including on remote devices. Do not open Preview, a browser or another desktop viewer to show it. If the reply also sends a switchboard command, put the image Markdown BEFORE the final converse command fence; that command fence must still be last.
+        """
+    }
     // Local captures only. Web images wait for the reader's click
     // (loadResponseImage): fetching one unasked would let a prompt-injected
     // link leak conversation details through its hostname or path.
@@ -161,6 +178,10 @@ enum ImageLinkSuspicion {
 }
 
 func responseImageSelfTests(_ check: (Bool, String) -> Void) {
+    let reminderOutput = URL(fileURLWithPath: "/Users/example/Library/Application Support/Converse/Attachments/00000000-0000-0000-0000-000000000000/Outputs")
+    let reminder = ResponseImages.deliveryReminder(output: reminderOutput)
+    check(reminder.count < 650 && !reminder.contains("\n"), "Per-turn image reminder stays one line under 650 characters for a normal session path")
+    check(TranscriptStyle.localImageReferences(reminder).first?.url == reminderOutput.appendingPathComponent("name.png"), "Compact image reminder example resolves through the real image parser, including spaces")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-response-images-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     do {
