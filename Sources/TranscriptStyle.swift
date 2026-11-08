@@ -392,7 +392,9 @@ extension TranscriptStyle {
             let unit = source.character(at: index)
             if unit == 33, index + 1 < source.length, source.character(at: index + 1) == 91 { break }
             if unit == 13 { break }
-            if !spaced, isSpace(unit) {
+            // A raw-space file target has only a `(` left to close; past that, a
+            // space ends the target so its first closer is kept, not later prose.
+            if !spaced || depth == 0, isSpace(unit) {
                 var next = index
                 while next < limit, isSpace(source.character(at: next)) { next += 1 }
                 if depth == 0, next < limit, source.character(at: next) == 41 { return closed(index, next) }

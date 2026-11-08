@@ -366,6 +366,8 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         check(TranscriptStyle.imageLinks("![w](https://example.com/w_(1).png) tail") == "w: [https://example.com/w\\_(1).png](https://example.com/w_(1).png) tail", "Image fallbacks replace the whole parenthesized reference")
         let unbalancedLine = "![x](/tmp/a(b.png) and more)"
         check(TranscriptStyle.localImageReferences(unbalancedLine).first?.url.path == "/tmp/a(b.png" && TranscriptStyle.localImageReferences(unbalancedLine).first?.range.length == ("![x](/tmp/a(b.png)" as NSString).length, "An unbalanced parenthesis keeps the original first-closer match")
+        let prose = TranscriptStyle.localImageReferences("![x](file:///tmp/a(b.png) and more)")
+        check(prose.first?.url.path == "/tmp/a(b.png" && prose.first?.range.length == ("![x](file:///tmp/a(b.png)" as NSString).length, "A raw-space file target keeps its first closer instead of absorbing later prose")
         let pastBound = "![x](/tmp/a(" + String(repeating: "b", count: 4080) + ")" + String(repeating: "c", count: 20) + ".png)"
         check(TranscriptStyle.localImageReferences(pastBound).first?.url.path.hasSuffix("b") == true, "Balanced scanning never reads past the target bound")
         let balancedFallback = MarkdownText.inline(balancedShot), balancedURL = URL(fileURLWithPath: "/tmp/shot(1).png")

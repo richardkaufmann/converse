@@ -24,7 +24,8 @@ public static class TranscriptSelfRead
         var result = new List<(int, ChatMessage)>(); var number = 0;
         foreach (var message in session.Messages)
         {
-            if (message.Role == "activity" || (message.Text.Trim().Length == 0 && message.Images.Count == 0)) continue;
+            if (message.Role == "activity" || (message.Role == "notice" && SwitchboardPresentation.IsQueueReceipt(message.Text))
+                || (message.Text.Trim().Length == 0 && message.Images.Count == 0)) continue;
             result.Add((++number, message));
         }
         return result;

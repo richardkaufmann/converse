@@ -27,6 +27,9 @@ static class TranscriptSelfReadChecks
             a.MessagingEnabled = true;
             for (var i = 1; i <= 30; i++) a.Messages.Add(new ChatMessage { Role = i % 2 == 1 ? "user" : "assistant", Text = $"message {i}" + (i is 7 or 21 ? " has the Needle" : ""), CreatedAt = DateTime.UtcNow });
             a.Messages.Insert(3, new ChatMessage { Role = "activity", Text = "tool output" });
+            a.Messages.Insert(4, new ChatMessage { Role = "notice", Text = "Switchboard: message queued from Planner" });
+            check(TranscriptSelfRead.Numbered(a).Select(e => e.Number).SequenceEqual(Enumerable.Range(1, 30))
+                && TranscriptSelfRead.Numbered(a).All(e => !SwitchboardPresentation.IsQueueReceipt(e.Message.Text)), "Hidden queue receipts take no transcript number, as on the Mac");
             b.Messages.Add(new ChatMessage { Role = "user", Text = "neighbor secret needle" });
             string Fence(object command) => "```converse\n" + JsonSerializer.Serialize(command) + "\n```";
             void Reply(ChatSession s, string text) { s.Messages.Add(new ChatMessage { Role = "assistant", Text = text }); store.FinalParticipantReply!(s, text, TurnAuthority.Foreground()); }
