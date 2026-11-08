@@ -364,7 +364,7 @@ public sealed partial class ConversationPane : UserControl
             finally { _agentActionBusy = false; }
         };
         menu.Items.Add(run);
-        var board = new MenuFlyoutItem { Text = "Scoreboard", IsEnabled = local?.Agent is not null || BannerStack.Children.OfType<Expander>().Any() };
+        var board = new MenuFlyoutItem { Text = "Assessment", IsEnabled = local?.Agent is not null || BannerStack.Children.OfType<Expander>().Any() };
         board.Click += (_, _) =>
         {
             if (local is not null) _host.ShowAgentScoreboard(local);

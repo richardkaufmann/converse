@@ -13,7 +13,7 @@ public static class AppSupportTeaching
     {
         ["readme"] = "overview", ["security"] = "security-and-privacy", ["first-session"] = "set-up-your-first-coding-session",
         ["first-agent"] = "set-up-your-first-agent", ["first-group"] = "connect-your-devices-into-a-group",
-        ["agents"] = "agents-and-project-scoreboards", ["discord"] = "agents-and-project-scoreboards",
+        ["agents"] = "agents-assessments-and-portraits", ["discord"] = "agents-assessments-and-portraits",
         ["muse-iphone"] = "jolly-mac", ["devices"] = "connect-your-devices-into-a-group"
     };
     public const string Links = "[README](converse-help://readme) · [Security and privacy](converse-help://security) · [Discord](converse-help://discord) · [Connect the Meta Muse iPhone app](converse-help://muse-iphone)\n[First coding session](converse-help://first-session) · [First agent](converse-help://first-agent) · [Create a Group](converse-help://first-group)";

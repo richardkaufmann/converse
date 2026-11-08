@@ -98,10 +98,10 @@ enum AppSupport {
         case "readme": app.helpController.show(topic: "overview", query: "")
         case "discord":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
-            else { app.helpController.show(topic: "agents-and-project-scoreboards", query: "Discord") }
+            else { app.helpController.show(topic: "agents-assessments-and-portraits", query: "Discord") }
         case "home-assistant":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
-            else { app.helpController.show(topic: "agents-and-project-scoreboards", query: "Home Assistant") }
+            else { app.helpController.show(topic: "agents-assessments-and-portraits", query: "Home Assistant") }
         case "agents":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
             else { app.newAgent() }
