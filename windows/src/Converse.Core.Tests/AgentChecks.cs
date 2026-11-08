@@ -26,13 +26,20 @@ static class AgentChecks
         haAgent.Apply(oldEditor);
         check(haAgent.Settings.HomeAssistantRead == true && haAgent.Settings.HomeAssistantEntities == "sensor.office_temperature", "Older Windows editors preserve Home Assistant scope");
         var artNow = D("2026-11-04T15:00:00Z");
-        var artBoard = AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } });
-        check(AgentArtPolicy.ShouldRegenerate(artNow, null, false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-1), true, false, false), "Windows art: first art and edited direction regenerate immediately");
-        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-10), false, true, true) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, true, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddMinutes(-30), false, false, true), "Windows art: mood or scoreboard changes wait for the 30 minute minimum");
-        check(!AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-5.9), false, false, false) && AgentArtPolicy.ShouldRegenerate(artNow, artNow.AddHours(-6), false, false, false), "Windows art: unchanged art refreshes at 6 hours");
-        check(!AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Bugs", Value = "3" }, new DeviceWidgetMetric { Label = "Price", Value = "$10" } }))
-            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$11" }, new DeviceWidgetMetric { Label = "Bugs", Value = "3" } }))
-            && AgentArtPolicy.ScoreboardChanged(artBoard, AgentArtPolicy.Signature(new[] { new DeviceWidgetMetric { Label = "Price", Value = "$10" } })) && AgentArtPolicy.ScoreboardChanged(null, artBoard), "Windows art: value, added or removed metrics are meaningful changes; order is not");
+        // Assessments: host-owned measured values, revision vs heartbeat, malformed never fatal.
+        var measured = AgentAssessments.Measured(new JsonObject { ["observedAt"] = "2026-11-04T14:00:00Z", ["openIssues"] = 4 }, "kaos/converse", artNow);
+        var raw = JsonNode.Parse("{\"summary\":\"Two bugs remain.\",\"status\":\"at-risk\",\"facts\":[{\"id\":\"github.openIssues\",\"kind\":\"measured\",\"value\":\"999\"},{\"id\":\"users\",\"label\":\"Users\",\"kind\":\"measured\",\"value\":\"5000\"},{\"label\":\"Ship tonight\",\"value\":\"Likely\",\"kind\":\"judgment\",\"detail\":{\"why\":[\"tests\",{\"docs\":true}]}}],\"detail\":{\"risks\":{\"top\":\"renderer\"}}}");
+        var first = AgentAssessments.Evaluate(raw, measured, null, artNow);
+        check(first.Kind == AgentAssessmentOutcome.Revision && first.Record!.Revision == 1 && first.Record.Facts[0].Value == "4" && first.Record.Facts[1].Value == AgentAssessments.Unavailable && first.Record.Facts[2].Detail?["why"] is JsonArray,
+            "Windows assessment: measured values come from the host, unknown measurements read Unavailable, nested detail is kept");
+        var again = AgentAssessments.Evaluate(JsonNode.Parse(raw!.ToJsonString().Replace("Two bugs remain.", "  two bugs   remain. ")), measured, first.Record, artNow.AddMinutes(5));
+        check(again.Kind == AgentAssessmentOutcome.Heartbeat && again.Record!.Revision == 1 && again.Record.Heartbeats == 1, "Windows assessment: unchanged content is a heartbeat");
+        var moved = AgentAssessments.Measured(new JsonObject { ["openIssues"] = 5 }, "kaos/converse", artNow);
+        check(AgentAssessments.Evaluate(raw, moved, again.Record, artNow.AddMinutes(10)) is { Kind: AgentAssessmentOutcome.Revision, Record.Revision: 2 }, "Windows assessment: a changed measurement is a new revision");
+        foreach (var bad in new JsonNode?[] { null, JsonValue.Create("fine"), JsonNode.Parse("{\"status\":\"done\"}"), JsonNode.Parse("{\"summary\":\"x\",\"status\":\"great\"}") })
+            check(AgentAssessments.Evaluate(bad, measured, first.Record, artNow).Kind == AgentAssessmentOutcome.Rejected, "Windows assessment: malformed input is rejected, not fatal");
+        var persisted = DeviceJson.Decode<AgentConfig>(DeviceJson.Encode(new AgentConfig { Assessment = first.Record }));
+        check(persisted.Assessment?.ContentHash == first.Record.ContentHash && persisted.Assessment.Facts.Count == 3, "Windows assessment persists with the agent");
         var transientErrors = new Exception[] { new AgentHttpStatusException(503, false), new AgentHttpStatusException(429, false), new AgentHttpStatusException(400, false), new HttpRequestException("lost"),
             new TaskCanceledException("timeout", new TimeoutException()), new IOException("reset"), new InvalidOperationException("Something nobody anticipated."), new FormatException("odd"),
             new InvalidOperationException("Home Assistant scope changed during the run. Retry with the new settings.") };
@@ -145,7 +152,7 @@ static class AgentChecks
             home.Agents.Request = async (request, token) =>
             {
                 calls++; input = request.Content is null ? "" : await request.Content.ReadAsStringAsync(token);
-                return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Synthetic verified reply\\\",\\\"attention\\\":\\\"\\\",\\\"scoreboard\\\":{\\\"summary\\\":\\\"No live market data in this test\\\",\\\"metrics\\\":[{\\\"label\\\":\\\"Price\\\",\\\"value\\\":\\\"999\\\",\\\"sourceURL\\\":\\\"https://invented.invalid\\\"}]}}\"}]}]}");
+                return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Synthetic verified reply\\\",\\\"attention\\\":\\\"\\\",\\\"scoreboard\\\":{\\\"summary\\\":\\\"Old field\\\",\\\"metrics\\\":[]},\\\"assessment\\\":{\\\"summary\\\":\\\"Synthetic progress.\\\",\\\"status\\\":\\\"at-risk\\\",\\\"facts\\\":[{\\\"id\\\":\\\"github.openIssues\\\",\\\"kind\\\":\\\"measured\\\"}]}}\"}]}]}");
             };
             foreach (var service in new[] { home, viewer }) { service.PairingConfirmation = _ => Task.FromResult(true); await service.StartAsync(0, enableDiscovery: false, loopbackOnly: true); }
             check(await join(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Online == true), "Agent control peers join one group");
@@ -162,13 +169,17 @@ static class AgentChecks
             check(calls == 1 && agent.Messages.Any(m => m.Text == "Synthetic verified reply"), "Agent human turn runs through injected API and writes a reply");
             var sentBody = JsonNode.Parse(input) as JsonObject;
             check(sentBody?["prompt_cache_key"]?.GetValue<string>() == AgentRuntime.PromptCacheKey(agent.Id) && sentBody?["prompt_cache_retention"]?.GetValue<string>() == "24h", "Windows agent sends a per-agent prompt cache key and 24h retention");
-            check(agent.Agent.Widget?.Metrics.Single().Value == "Unavailable", "Agent scoreboard rejects metrics without an exact real search source");
+            var invented = AgentAssessments.Evaluate(JsonNode.Parse("{\"summary\":\"Quotes\",\"status\":\"on-track\",\"facts\":[{\"id\":\"price\",\"label\":\"Price\",\"value\":\"999\",\"kind\":\"evidence\",\"source\":\"https://invented.invalid/q\"},{\"id\":\"real\",\"label\":\"Real\",\"value\":\"$1\",\"kind\":\"evidence\",\"source\":\"https://example.com/q\"}]}"), [], null, DateTime.UtcNow, url => url == "https://example.com/q");
+            check(invented.Record!.Facts.Single(f => f.Id == "price").Value == AgentAssessments.Unavailable && invented.Record.Facts.Single(f => f.Id == "real").Value == "$1", "Assessment facts citing a web URL this run did not retrieve read Unavailable");
+            var widget = home.AgentWidgetFor(agent);
+            check(agent.Agent.Widget is null && widget?.Summary == "Synthetic progress." && widget.Status == "At risk" && widget.Freshness == "Fresh" && widget.Revision == 1 && widget.Metrics.Single().Value == AgentAssessments.Unavailable,
+                "The remote widget derives from the assessment (summary, status, freshness, facts); a scoreboard field from the model is ignored");
             var before = agent.Agent.Settings.RemainingRuns;
             agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.IntervalSeconds = 60; agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1);
             home.Agents.Tick(DateTime.UtcNow); home.Agents.Tick(DateTime.UtcNow);
             deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
             check(calls == 2 && agent.Agent.Settings.RemainingRuns == before, "Agent scheduler persists one activation without depleting the schedule and coalesces ticks");
-            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and scoreboard survive archive reload");
+            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and assessment survive archive reload");
             var created = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Created remotely");
             check(created.Outcome == "completed" && store.Sessions.Any(s => s.Title == "Created remotely" && s.Agent is not null), "Viewer creates a paused agent on the selected home");
             home.SetAcceptingWork(false);

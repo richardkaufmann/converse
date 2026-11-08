@@ -15,16 +15,14 @@ struct AgentPacingSpec: Codable, Equatable {
     }
     var runEveryMinutes: Double? = nil
     var activeWindow: Window? = nil
-    var artMinIntervalMinutes: Double? = nil
-    var artMaxAgeHours: Double? = nil
-    var artChangePercent: Double? = nil
-    var artOnSentimentChange: Bool? = nil
+    // Art timing (artMinIntervalMinutes, artMaxAgeHours, artChangePercent,
+    // artOnSentimentChange) is no longer read: portraits are on demand only.
+    // Specs saved by older builds still decode; those keys are ignored.
     // Extraction failed; defaults apply until the objective is saved again.
     var failed: Bool? = nil
     static let failure = AgentPacingSpec(failed: true)
     static let maxRunMinutes = 4320.0
     var usable: AgentPacingSpec? { failed == true ? nil : self }
-    var specifiesArt: Bool { artMinIntervalMinutes != nil || artMaxAgeHours != nil || artChangePercent != nil || artOnSentimentChange != nil }
 
     static func hash(_ objective: String) -> String {
         SHA256.hash(data: Data(objective.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -32,11 +30,7 @@ struct AgentPacingSpec: Codable, Equatable {
     static let instructions = """
     You read an AI agent's objective and extract only the timing the owner stated. Return exactly one JSON object and nothing else, matching this schema. Omit every field the objective does not state explicitly; never guess.
     {"runEveryMinutes": number (how often the agent should run, in minutes),
-     "activeWindow": {"days": "everyday" | "weekdays" | "weekends" | "usMarket", "start": "HH:MM" (24-hour), "end": "HH:MM" (24-hour), "timeZone": IANA name such as "America/New_York"},
-     "artMinIntervalMinutes": number (never regenerate scoreboard art more often than this),
-     "artMaxAgeHours": number (regenerate scoreboard art at least this often),
-     "artChangePercent": number (regenerate art when any scoreboard number changes by more than this percent since the last art),
-     "artOnSentimentChange": boolean (regenerate art when the overall mood changes)}
+     "activeWindow": {"days": "everyday" | "weekdays" | "weekends" | "usMarket", "start": "HH:MM" (24-hour), "end": "HH:MM" (24-hour), "timeZone": IANA name such as "America/New_York"}}
     Use "usMarket" when the agent should run only while the US stock market is open. For a once-a-day time give start without end. Omit timeZone unless the objective names one; defaultTimeZone in the input is the owner's zone. If the objective says nothing about timing, return {}.
     """
     static func input(objective: String, timeZone: String?) -> String {
@@ -58,10 +52,6 @@ struct AgentPacingSpec: Codable, Equatable {
         }
         var spec = AgentPacingSpec()
         spec.runEveryMinutes = number("runEveryMinutes", 1...maxRunMinutes)
-        spec.artMinIntervalMinutes = number("artMinIntervalMinutes", 5...1440)
-        spec.artMaxAgeHours = number("artMaxAgeHours", 1...168)
-        spec.artChangePercent = number("artChangePercent", 0.01...1000)
-        spec.artOnSentimentChange = object["artOnSentimentChange"] as? Bool
         if let window = object["activeWindow"] as? [String: Any] {
             func clock(_ key: String) -> String? {
                 guard let text = window[key] as? String, let parts = AgentSchedule.captures("^([0-9]{1,2}):([0-9]{2})$", text.trimmingCharacters(in: .whitespaces)),
@@ -88,31 +78,6 @@ struct AgentPacingSpec: Codable, Equatable {
             text = (window.days == "weekdays" ? "weekdays" : window.days == "weekends" ? "weekends" : "daily") + " at " + start
         } else { return nil }
         return try? AgentSchedule.compile(interval: interval, text: text, zone: window.timeZone ?? zone)
-    }
-}
-
-// Scoreboard values are free text such as "$1,234.56", "12.3%", "-0.5" or
-// "−$12 (+1.2%)". Only a leading number counts; "Q3 2026" or "Open" do not.
-enum AgentMetricNumber {
-    static func parse(_ text: String) -> Double? {
-        let value = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "\u{2212}", with: "-")
-        guard let parts = AgentSchedule.captures(#"^([+-]?)\s*[$€£¥]?\s*([+-]?)\s*([0-9][0-9,]*(?:\.[0-9]+)?|\.[0-9]+)"#, value) else { return nil }
-        let digits = parts[2].replacingOccurrences(of: ",", with: "")
-        guard let number = Double(digits), number.isFinite else { return nil }
-        return (parts[0] == "-") != (parts[1] == "-") ? -number : number
-    }
-    static func values(_ board: AgentScoreboard?) -> [String: Double] {
-        var result: [String: Double] = [:]
-        for metric in board?.metrics ?? [] where result[metric.label] == nil { if let number = parse(metric.value) { result[metric.label] = number } }
-        return result
-    }
-    // True when any metric present both times moved by more than percent.
-    static func moved(from old: [String: Double], to new: [String: Double], percent: Double) -> Bool {
-        new.contains { label, value in
-            guard let before = old[label] else { return false }
-            if before == 0 { return value != 0 }
-            return abs(value - before) / abs(before) * 100 > percent
-        }
     }
 }
 
@@ -192,15 +157,6 @@ extension AgentConfig {
             cadence = "Runs " + line
         }
         var parts = [cadence]
-        if let spec, spec.specifiesArt, generateArt {
-            var triggers: [String] = []
-            if let hours = spec.artMaxAgeHours { triggers.append("at least every " + AgentPacing.durationText(minutes: hours * 60)) }
-            if let percent = spec.artChangePercent { triggers.append("when any metric moves > " + String(format: "%g", percent) + "%") }
-            if spec.artOnSentimentChange == true { triggers.append("when the mood changes") }
-            var art = "art: " + (triggers.isEmpty ? "on meaningful changes" : triggers.joined(separator: ", or "))
-            if let floor = spec.artMinIntervalMinutes { art += " (at most every " + AgentPacing.durationText(minutes: floor) + ")" }
-            parts.append(art)
-        }
         if pacingSpec?.failed == true { parts.append("couldn’t read timing from the objective; save it again to retry") }
         return parts.joined(separator: " · ")
     }

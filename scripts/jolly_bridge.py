@@ -16,6 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+# Converse labels each attached image; old releases sent scoreboard composites.
+IMAGE_TITLES = {"portrait": "Agent portrait", "scoreboard": "Agent scoreboard"}
+
 MAX_BODY = 16384
 LOCK = threading.RLock()
 
@@ -92,7 +95,7 @@ class Bridge:
             result["requestId"] = key
             image = result.pop("imageID", None)
             if image and re.fullmatch("[0-9a-f]{64}", image):
-                result["images"] = [{"title": "Agent scoreboard" if result.get("imageKind") == "scoreboard" else "Agent scoreboard art", "url": self.public_base + "/v1/images/" + image}]
+                result["images"] = [{"title": IMAGE_TITLES.get(result.get("imageKind"), "Agent image"), "url": self.public_base + "/v1/images/" + image}]
             return 200, result
         if not (self.root / "requests" / (key + ".json")).exists():
             return 404, {"ok": False, "error": "Unknown request."}
@@ -145,7 +148,7 @@ def schema():
         operation["responses"].pop("202", None)
 
     return {"openapi": "3.0.3", "info": {"title": "Ask Converse", "version": "3.1.0",
-        "description": "Jolly addresses Converse agents. List agents, then ask with an agent ID or exact name. General Converse health questions (is the app up, its version or Group, which hosts are in its Group) go to Converse App Support: choose the agent marked appSupport, or use agent=converse. Never route an explicitly named other agent to App Support. If the question names an agent or a project that matches an agent name (for example 'KAOS' -> KAOS Steward), address that agent. Converse Steward is not a default. If Converse answers needs_agent or misrouted, resend to the agent it names (suggestedAgent). If Converse is offline, report appAvailable=false from /health rather than claiming an agent answered. If ambiguous, ask Richard which agent; never guess or broadcast. Reuse request_id when retrying. A pending response has requestId: poll /v1/requests/{requestId}. Agent execution can take minutes. No fallback backend. Inbox is non-consuming; acknowledge received IDs explicitly."},
+        "description": "Jolly addresses Converse agents. List agents, then ask with an agent ID or exact name. General Converse health questions (is the app up, its version or Group, which hosts are in its Group) go to Converse App Support: choose the agent marked appSupport, or use agent=converse. Never route an explicitly named other agent to App Support. If the question names an agent or a project that matches an agent name (for example 'KAOS' -> KAOS Steward), address that agent. Converse Steward is not a default. If Converse answers needs_agent or misrouted, resend to the agent it names (suggestedAgent). If Converse is offline, report appAvailable=false from /health rather than claiming an agent answered. If ambiguous, ask Richard which agent; never guess or broadcast. To show an agent's portrait, ask that agent (or name it) with a question like 'get me a portrait of KAOS Steward': keep polling until the result has the PNG in images plus a one-line caption (agent, assessment time, short hash, stale flag), or an error. Reuse request_id when retrying. A pending response has requestId: poll /v1/requests/{requestId}. Agent execution can take minutes. No fallback backend. Inbox is non-consuming; acknowledge received IDs explicitly."},
         "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}, "paths": paths}
 
 def handler(bridge, wait_seconds=0):

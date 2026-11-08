@@ -240,55 +240,27 @@ enum AgentDiscord {
     }
 }
 
-// Channel-specific permission checks stay outside the shared renderer.
-@MainActor enum AgentDiscordImage {
-    static func render(session: Session, store: Store, kind: String) throws -> Data {
-        guard session.agent?.discordShareScoreboard == true else { throw AgentFailure.message("Scoreboard sharing is off in Agent Setup.") }
-        return try AgentScoreboardImage.render(session: session, store: store, kind: kind)
-    }
-}
-
-// Draw numbers as text from measured snapshots; image generation supplies only
-// the background. No drafts, transcripts, working notes or model-selected files.
+// Draws the agent's latest assessment as text for the explicit README/visual
+// preview mode only. Agents, Jolly and Discord no longer receive this composite:
+// they get assessments (text) and on-demand portraits (art).
+// No drafts, transcripts, working notes or model-selected files.
 @MainActor enum AgentScoreboardImage {
     struct Line {
         var text: String
         var size: CGFloat = 24
     }
-    static func lines(session: Session) -> [Line] {
+    static func lines(session: Session, now: Date = Date()) -> [Line] {
         guard let config = session.agent else { return [] }
-        func stamp(_ date: Date?) -> String { date.map { ISO8601DateFormatter().string(from: $0) } ?? "Unknown" }
-        var rows = [Line(text: session.title, size: 36)]
-        for lot in config.visibleLotScoreboards {
-            rows.append(Line(text: lot.name + " · unfinished items", size: 28))
-            for section in lot.sections where section.unfinished > 0 || section.title.lowercased() == "bugs" || section.title.lowercased().contains("implement now") { rows.append(Line(text: section.title + ": " + section.value)) }
-            rows.append(Line(text: "Revision \(lot.revision) · measured " + stamp(lot.observedAt), size: 17))
-        }
-        if let repo = config.repositorySnapshot, repo.hasMeasurements {
-            rows.append(Line(text: "GitHub · " + repo.repository, size: 28))
-            rows += repo.metrics.filter { !["Users", "Visitors · 14d", "Conversation comments"].contains($0.0) }.map { Line(text: $0.0 + ": " + $0.1) }
-            rows.append(Line(text: "Measured " + stamp(repo.observedAt) + " · github.com/" + repo.repository, size: 17))
-            rows.append(Line(text: "Cloners: rolling 14 days; lifetime uniques are not provided. Today is UTC and may be delayed. Downloads are cumulative across all accessible releases.", size: 17))
-        } else if config.hasRepository {
-            rows.append(Line(text: "GitHub · " + config.repository + ": Unavailable"))
-        }
-        if let board = config.scoreboard, board.metrics.contains(where: { $0.value != "Unavailable" }) {
-            // Unverified model metrics stay unavailable. Host measurements above
-            // are authoritative, independent of the external-search validator.
-            rows.append(Line(text: "Agent report", size: 28))
-            rows.append(Line(text: String(board.summary.prefix(1000)), size: 21))
-            rows += board.metrics.prefix(12).map { metric in
-                Line(text: metric.label + ": " + metric.value + (metric.asOf.map { " · " + $0 } ?? ""))
-            }
-            rows.append(Line(text: "Report measured " + stamp(board.observedAt), size: 17))
-        }
-        if config.visibleLotScoreboards.isEmpty && config.scoreboard == nil && config.repositorySnapshot?.hasMeasurements != true {
-            rows.append(Line(text: "No measured scoreboard data yet."))
+        let content = config.widgetContent(now: now)
+        var rows = [Line(text: session.title, size: 36), Line(text: content.line(now: now), size: 19), Line(text: String(content.summary.prefix(1000)), size: 26)]
+        if let problem = content.problem { rows.append(Line(text: problem, size: 19)) }
+        rows += content.facts.map { fact in
+            Line(text: fact.label + ": " + fact.value + " · " + fact.kind.label + (fact.observedAt.map { " · " + ISO8601DateFormatter().string(from: $0) } ?? ""))
         }
         return rows
     }
     static func render(session: Session, store: Store, kind: String = "scoreboard") throws -> Data {
-        guard let config = session.agent, ["art", "scoreboard"].contains(kind) else { throw AgentFailure.message("No agent scoreboard is available.") }
+        guard let config = session.agent, ["art", "scoreboard"].contains(kind) else { throw AgentFailure.message("No agent assessment is available.") }
         let root = store.folder.appendingPathComponent("Agents/" + session.id.uuidString).resolvingSymlinksInPath()
         var art: NSImage?
         if let path = config.artPath {
@@ -311,7 +283,7 @@ enum AgentDiscord {
         let height = kind == "art" ? 900 : max(900, Int(ceil(contentHeight)) + 300)
         guard height <= 12000,
               let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
-              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { throw AgentFailure.message("Could not render scoreboard image.") }
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { throw AgentFailure.message("Could not render assessment image.") }
         NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = context
         defer { NSGraphicsContext.restoreGraphicsState() }
         NSColor(calibratedRed: 0.05, green: 0.09, blue: 0.14, alpha: 1).setFill()
@@ -331,7 +303,7 @@ enum AgentDiscord {
                 y -= lineHeight + 14
             }
         }
-        guard let data = bitmap.representation(using: .png, properties: [:]), data.count <= 8_000_000 else { throw AgentFailure.message("Scoreboard image exceeds 8 MB.") }
+        guard let data = bitmap.representation(using: .png, properties: [:]), data.count <= 8_000_000 else { throw AgentFailure.message("Assessment image exceeds 8 MB.") }
         return data
     }
 }

@@ -51,11 +51,11 @@ import Foundation
           && body?["tools"] == nil && (body?["input"] as? String)?.contains("every five minutes") == true,
           "Extraction asks the agent's own model once at low effort with the strict schema and the objective")
     let spec = stock.agent?.pacingSpec
-    check(spec?.runEveryMinutes == 5 && spec?.artMaxAgeHours == 12 && spec?.artChangePercent == 0.5 && spec?.failed == nil
-          && stock.agent?.pacingObjectiveHash == AgentPacingSpec.hash(stock.agent?.objective ?? ""), "The extracted spec is stored with the objective's hash")
+    check(spec?.runEveryMinutes == 5 && spec?.failed == nil && !AgentPacingSpec.instructions.contains("artMaxAgeHours")
+          && stock.agent?.pacingObjectiveHash == AgentPacingSpec.hash(stock.agent?.objective ?? ""), "The extracted spec is stored with the objective's hash; art-timing phrases are no longer extracted")
     check(stock.agent?.effectiveIntervalSeconds == 300 && (try? stock.agent?.scheduleRule())?.kind == .interval && (try? stock.agent?.scheduleRule())?.seconds == 300
           && abs((stock.agent?.nextRunAt ?? .distantFuture).timeIntervalSince(saved) - 300) < 5, "Runs every 5 minutes, rescheduled from the 15 minute default")
-    check(stock.agent?.pacingSummary() == "Runs every 5 min · art: at least every 12 h, or when any metric moves > 0.5%", "Summary reads as one plain line")
+    check(stock.agent?.pacingSummary() == "Runs every 5 min", "Summary reads as one plain line; art timing no longer applies because portraits are on demand")
     check(stock.agent?.loopStatus(at: Date(), busy: false, queuePaused: false, pendingCount: 0).hasPrefix("Loop on · every 5 min") == true, "Footer status shows the objective's cadence")
     // Explicit cadence beats the agent's suggestion even with Auto on.
     if var config = stock.agent {
@@ -63,21 +63,6 @@ import Foundation
         config.applyPace(suggestedMinutes: 60, reason: "quiet", at: now)
         check(config.autoPaceOn && config.autoPaceInstruction == nil && config.nextRunAt == now.addingTimeInterval(300) && config.autoPaceReason == nil,
               "An owner-stated cadence wins over the agent's next-run suggestion")
-        // Art: market-open jump, small moves and non-numeric metrics.
-        func board(_ meta: String, _ market: String = "Open") -> AgentScoreboard {
-            AgentScoreboard(summary: "", metrics: [.init(label: "META", value: meta), .init(label: "Market", value: market)], sentiment: "steady")
-        }
-        config.generateArt = true; config.lastArtAt = date("2026-11-03T20:55:00Z"); config.lastArtMood = "steady"
-        config.lastArtMetricValues = AgentMetricNumber.values(board("$600.00", "Closed")); config.lastArtScoreboard = AgentArtPolicy.signature(board("$600.00", "Closed"))
-        check(config.shouldRegenerateArt(mood: "steady", board: board("$604.00"), now: date("2026-11-04T14:35:00Z")), "At market open a > 0.5% move from the prior close regenerates art")
-        config.lastArtAt = date("2026-11-04T14:35:00Z"); config.lastArtMetricValues = AgentMetricNumber.values(board("$604.00"))
-        check(!config.shouldRegenerateArt(mood: "steady", board: board("$605.00"), now: date("2026-11-04T15:20:00Z")), "A 0.17% move does not regenerate art")
-        check(!config.shouldRegenerateArt(mood: "steady", board: board("$604.00", "Halted"), now: date("2026-11-04T15:20:00Z")), "Non-numeric metric changes are ignored by the percent trigger")
-        check(!config.shouldRegenerateArt(mood: "elated", board: board("$604.00"), now: date("2026-11-04T15:20:00Z")), "A mood change alone does not regenerate art when the objective names other triggers")
-        check(!config.shouldRegenerateArt(mood: "steady", board: board("$610.00"), now: date("2026-11-04T14:50:00Z")) && config.shouldRegenerateArt(mood: "steady", board: board("$610.00"), now: date("2026-11-04T15:05:00Z")),
-              "A big move still waits for the 30 minute default minimum")
-        check(!config.shouldRegenerateArt(mood: "steady", board: board("$604.10"), now: date("2026-11-05T02:30:00Z")) && config.shouldRegenerateArt(mood: "steady", board: board("$604.10"), now: date("2026-11-05T02:35:00Z")),
-              "Unchanged art refreshes at least every 12 hours")
     }
 
     // Re-extraction only when the objective text changes.
@@ -132,7 +117,7 @@ import Foundation
 
     // Untrusted output is clamped or dropped.
     let clamped = AgentPacingSpec.parse("```json\n{\"runEveryMinutes\": 0.2, \"artMaxAgeHours\": 9999, \"artChangePercent\": true, \"artMinIntervalMinutes\": \"1\", \"activeWindow\": {\"days\": \"sometimes\", \"start\": \"25:00\"}}\n```")
-    check(clamped?.runEveryMinutes == 1 && clamped?.artMaxAgeHours == 168 && clamped?.artChangePercent == nil && clamped?.artMinIntervalMinutes == 5 && clamped?.activeWindow == nil,
+    check(clamped?.runEveryMinutes == 1 && clamped?.activeWindow == nil,
           "Extraction output is clamped to the 1 minute floor and host limits; malformed fields are dropped")
     check(AgentPacingSpec.parse("{\"runEveryMinutes\": 100000}")?.runEveryMinutes == 4320 && AgentPacingSpec.parse("{\"runEveryMinutes\": -5}")?.runEveryMinutes == nil && AgentPacingSpec.parse("not json") == nil,
           "Cadence is capped at 72 hours; negative values and non-JSON are rejected")
@@ -145,12 +130,9 @@ import Foundation
     var fixed = AgentConfig(); fixed.autoPace = false
     check(fixed.pacingSummary() == "Runs every 15 min", "With Auto off and no stated cadence the saved interval applies")
 
-    // Numbers on scoreboards.
-    let numbers: [(String, Double?)] = [("$1,234.56", 1234.56), ("12.3%", 12.3), ("-0.5", -0.5), ("\u{2212}$12.50", -12.5), ("$-3", -3), ("+2.1%", 2.1), (".5", 0.5),
-        ("$612.40 (+1.2%)", 612.4), ("Open", nil), ("Q3 2026", nil), ("—", nil), ("", nil)]
-    check(numbers.allSatisfy { AgentMetricNumber.parse($0.0) == $0.1 }, "Scoreboard numbers parse robustly; non-numeric values are skipped")
-    check(AgentMetricNumber.moved(from: ["A": 0], to: ["A": 1], percent: 0.5) && !AgentMetricNumber.moved(from: [:], to: ["A": 1], percent: 0.5) && AgentMetricNumber.moved(from: ["A": -10], to: ["A": -10.1], percent: 0.5),
-          "Percent moves handle zero, new metrics and negative values")
+    // A spec saved by an older build with art timing still decodes.
+    let olderSpec = try? JSONDecoder().decode(AgentPacingSpec.self, from: Data("{\"runEveryMinutes\":5,\"artMaxAgeHours\":12,\"artChangePercent\":0.5,\"artOnSentimentChange\":true}".utf8))
+    check(olderSpec?.runEveryMinutes == 5, "A pacing spec saved with retired art-timing fields still decodes")
 
     // Text schedules move into the objective: archive and wire.
     let legacyStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-schedule-migration-" + UUID().uuidString))
@@ -180,7 +162,7 @@ import Foundation
     let loopStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-loop-migration-" + UUID().uuidString))
     let loopAgent = loopStore.createAgent(title: "Loop controls agent")
     do {
-        try loopStore.configureAgentLoop(loopAgent, enabled: true, interval: 900, turns: 2, scoreboardEvery: 1, scheduleText: "every 30 minutes", scheduleTimeZone: "UTC")
+        try loopStore.configureAgentLoop(loopAgent, enabled: true, interval: 900, turns: 2, scheduleText: "every 30 minutes", scheduleTimeZone: "UTC")
         check(loopAgent.agent?.scheduleText == nil && loopAgent.agent?.objective.hasSuffix("\nSchedule: every 30 minutes") == true && (try? loopAgent.agent?.scheduleRule())?.seconds == 1800
               && loopAgent.messages.last?.text.contains("moved into this agent’s objective") == true, "Older loop-control callers' schedules migrate too")
     } catch { check(false, "Older loop-control callers' schedules migrate too: " + error.localizedDescription) }

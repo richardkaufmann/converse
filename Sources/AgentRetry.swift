@@ -114,7 +114,7 @@ extension Store {
     func pauseAgentLoop(_ session: Session) {
         guard let config = session.agent, config.enabled else { return }
         do {
-            try configureAgentLoop(session, enabled: false, interval: config.intervalSeconds, turns: config.turnLimit, scoreboardEvery: config.scoreboardCadence)
+            try configureAgentLoop(session, enabled: false, interval: config.intervalSeconds, turns: config.turnLimit)
             session.agent?.lastOutcome = "Loop paused. Choose Resume loop to continue."
             save()
         } catch { session.agent?.attention = error.localizedDescription; save() }
@@ -123,7 +123,7 @@ extension Store {
         guard let config = session.agent, !config.enabled else { return }
         let reason = config.pauseReason
         do {
-            try configureAgentLoop(session, enabled: true, interval: config.intervalSeconds, turns: config.turnLimit, scoreboardEvery: config.scoreboardCadence, now: now)
+            try configureAgentLoop(session, enabled: true, interval: config.intervalSeconds, turns: config.turnLimit, now: now)
             if let attention = session.agent?.attention, (reason.map { attention.hasPrefix($0) } == true || attention.hasPrefix("Loop paused") || attention.hasPrefix("Turn cancelled")) {
                 session.agent?.attention = ""
             }

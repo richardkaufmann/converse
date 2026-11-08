@@ -74,10 +74,12 @@ class HelpContentTests(unittest.TestCase):
         self.assertIn('Actual help.', book['topics'][0]['markdown'])
 
     def test_source_commit_without_git_is_unknown(self):
-        with mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
-            self.assertEqual(generator.source_commit(root), 'unknown')
-        with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
-            self.assertEqual(generator.source_commit(root), 'unknown')
+        # A temporary folder has no stamp; a source archive's root would.
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
+                self.assertEqual(generator.source_commit(folder), 'unknown')
+            with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
+                self.assertEqual(generator.source_commit(folder), 'unknown')
 
     def test_source_archive_without_git_uses_stamped_commit(self):
         stamped = 'a' * 40

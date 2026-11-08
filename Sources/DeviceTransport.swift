@@ -954,7 +954,7 @@ extension DeviceSyncService {
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
-                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: config.scoreboard?.metrics.map { DeviceWidgetMetric(label: $0.label, value: $0.value) } ?? (config.repositorySnapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.scoreboard?.observedAt ?? config.repositorySnapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
+                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in config.deviceWidget(artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
         payload.compaction = session.compactionState
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
@@ -2113,7 +2113,7 @@ extension DeviceSyncService {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the Mac home to use multi-object segmentation.")
         }
         if !(settings?.artDirection ?? "").isEmpty && peer.hello?.capabilities.contains("agent-art-direction-v1") != true {
-            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving scoreboard art direction.")
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving portrait art direction.")
         }
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
@@ -2311,13 +2311,13 @@ extension DeviceSyncService {
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent created paused. Configure API credentials on its home.", target: DeviceGlobalID(home: identity!.deviceID, session: agent.id).string)
             case "agent.run":
                 guard let session, let config = session.agent, config.turnLimit > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
-                session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and refresh the scoreboard.", images: []))
+                session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and update your assessment.", images: []))
                 runAfterCommit = true
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: session.queuePaused ? "Run saved in paused queue. Resume the queue to run it." : "Agent run queued on home.", target: request.target)
             case "agent.widget":
                 guard session?.agent != nil else { reject("Target is not an agent."); return true }
                 widgetAfterCommit = true
-                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Scoreboard opened on home.", target: request.target)
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Assessment opened on home.", target: request.target)
             case "agent.configure":
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
                 guard (settings.homeAssistantURL == nil || settings.homeAssistantURL == session.agent?.homeAssistantURL),

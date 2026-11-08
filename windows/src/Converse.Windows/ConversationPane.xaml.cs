@@ -1710,7 +1710,7 @@ public sealed partial class ConversationPane : UserControl
         var outbox = gid is null ? null : _host.Devices.Unresolved(gid).FirstOrDefault();
         if (outbox is not null) signature.Append($"|out:{outbox.CommandID}:{outbox.Outcome}:{outbox.Detail}");
         signature.Append("|lease:").Append(gid is null || _host.Devices.RemoteLeases.ContainsKey(gid));
-        var widget = local?.Agent?.Widget ?? (gid is null ? null : _host.Devices.RemoteTranscripts.GetValueOrDefault(gid)?.AgentWidget);
+        var widget = local?.Agent is { } localAgent ? AgentAssessments.WidgetFor(localAgent, DateTime.UtcNow) : gid is null ? null : _host.Devices.RemoteTranscripts.GetValueOrDefault(gid)?.AgentWidget;
         var isAgent = local?.Agent is not null || widget is not null;
         signature.Append("|support:").Append(local?.SupportAssistant).Append(local?.SupportSetupCompleted);
         signature.Append("|agent:").Append(isAgent).Append(System.Text.Json.JsonSerializer.Serialize(widget)).Append(local?.Agent?.Attention);
@@ -1728,9 +1728,11 @@ public sealed partial class ConversationPane : UserControl
             if (widget is not null)
             {
                 var board = new StackPanel { Spacing = 6 };
-                board.Children.Add(new TextBlock { Text = string.Join(" · ", widget.Metrics.Select(m => m.Label + ": " + m.Value)), TextWrapping = TextWrapping.Wrap });
+                var line = string.Join(" · ", new[] { widget.Status, widget.Freshness, widget.Revision is { } revision ? "rev " + revision : null }.Where(part => part is not null));
+                if (line.Length > 0) board.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
                 board.Children.Add(new TextBlock { Text = widget.Summary, TextWrapping = TextWrapping.Wrap });
-                BannerStack.Children.Add(new Expander { Header = "Agent scoreboard", Content = board, HorizontalAlignment = HorizontalAlignment.Stretch });
+                board.Children.Add(new TextBlock { Text = string.Join(" · ", widget.Metrics.Select(m => m.Label + ": " + m.Value)), TextWrapping = TextWrapping.Wrap });
+                BannerStack.Children.Add(new Expander { Header = "Agent assessment", Content = board, HorizontalAlignment = HorizontalAlignment.Stretch });
             }
         }
         foreach (var request in requests)

@@ -480,11 +480,12 @@ struct PadPane: View {
                 }.padding(8).background(Color.yellow.opacity(0.3))
             }
             if let widget = snapshot?.agentWidget {
-                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
+                DisclosureGroup("Agent assessment", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = UIImage(contentsOfFile: file.path) { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
-                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        if let line = widget.assessmentLine { Text(line).font(.caption.bold()) }
                         Text(widget.summary).font(.caption).textSelection(.enabled)
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
                     }
                 }.padding(8)
                 if !widget.attention.isEmpty { Label(widget.attention, systemImage: "exclamationmark.triangle.fill").padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.yellow).foregroundStyle(.black) }
@@ -697,7 +698,7 @@ struct PadSessionActions: View {
                     if isAgent {
                         Button("Agent Setup / Loop…") { agentSetupShown = true }.disabled(!service.canHostAgent(home))
                         Button("Run once") { runAgent() }.disabled(running || service.remoteRow(globalID: row.globalID)?.busy == true || !service.canHostAgent(home))
-                        Button("Scoreboard") { showScoreboard?(); dismiss() }.disabled(showScoreboard == nil)
+                        Button("Assessment") { showScoreboard?(); dismiss() }.disabled(showScoreboard == nil)
                     }
                     Button("Park") { park(); dismiss() }
                 }

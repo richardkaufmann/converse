@@ -15,6 +15,11 @@ public sealed class DeviceAgentWidget
     [JsonPropertyName("attention")] public string Attention { get; set; } = "";
     [JsonPropertyName("artHash")] public string? ArtHash { get; set; } = null;
     [JsonPropertyName("loopStatus")] public string? LoopStatus { get; set; } = null;
+    // Derived from the latest assessment (AgentAssessments.WidgetFor). Older
+    // homes omit these and send a scoreboard-shaped widget instead.
+    [JsonPropertyName("status")] public string? Status { get; set; } = null;
+    [JsonPropertyName("freshness")] public string? Freshness { get; set; } = null;
+    [JsonPropertyName("revision")] public int? Revision { get; set; } = null;
 }
 
 public sealed class DeviceAgentSettings
@@ -35,7 +40,8 @@ public sealed class DeviceAgentSettings
     [JsonPropertyName("discord")] public bool Discord { get; set; } = false;
     [JsonPropertyName("fileTriggers")] public bool FileTriggers { get; set; } = false;
     [JsonPropertyName("revision")] public ulong? Revision { get; set; } = 0;
-    [JsonPropertyName("scoreboardEveryLoops")] public int? ScoreboardEveryLoops { get; set; } = 1;
+    // Retired scoreboard cadence: older editors still send it; every turn assesses, so it is ignored.
+    [JsonPropertyName("scoreboardEveryLoops")] public int? ScoreboardEveryLoops { get; set; } = null;
     [JsonPropertyName("scheduleText")] public string? ScheduleText { get; set; } = "";
     [JsonPropertyName("discordShareSessionInformation")] public bool? DiscordShareSessionInformation { get; set; }
     [JsonPropertyName("discordShareScoreboard")] public bool? DiscordShareScoreboard { get; set; }

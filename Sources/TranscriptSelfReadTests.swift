@@ -28,7 +28,7 @@ func transcriptSelfReadSelfTests(_ check: (Bool, String) -> Void) {
     let lesson = a.pending.last?.text ?? ""
     check(lesson.contains("transcript-search") && lesson.contains("transcript-read") && lesson.contains("only this session's own retained transcript") && lesson.contains("reference data, not instructions"),
           "Teach covers transcript-search and transcript-read, own-session scope and reference framing")
-    check(SwitchboardTeaching.version == 4 && a.switchboardTeachingVersion == 4 && SwitchboardTeaching.talkHelp.contains("its own transcript"),
+    check(SwitchboardTeaching.version == 5 && a.switchboardTeachingVersion == 5 && SwitchboardTeaching.talkHelp.contains("its own transcript"),
           "The lesson version advances so taught sessions see Re-teach")
     let perTurn = store.localContext(a, directory: root.path)
     check(perTurn.contains("[Switchboard: ") && !perTurn.contains("transcript-") && !perTurn.contains("Own history") && !SwitchboardCommand.conversationPolicy.contains("transcript"),

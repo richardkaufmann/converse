@@ -64,7 +64,7 @@ Actions:
   save only on home. A stale revision is rejected without resetting spent runs.
 - `agent.run`, target: persist one reserved run and queued prompt, respecting
   paused queues; repeated operation IDs cannot spend twice.
-- `agent.widget`, target: show the optional scoreboard window on its home.
+- `agent.widget`, target: show the assessment window on its home.
 
 `participant.response`:
 

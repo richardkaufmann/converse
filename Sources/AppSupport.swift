@@ -60,8 +60,8 @@ enum AppSupport {
     }
     static func credentialStatus(metaKeySaved: Bool) -> String {
         metaKeySaved
-            ? "Credential status (checked by Converse now): a Meta API key is already saved on this Mac. Never ask the human to add, paste or re-enter a Meta key, and never tell them to add one in Agent Setup. Muse Spark agents, scoreboard art, voice and image tools can use it."
-            : "Credential status (checked by Converse now): no Meta API key is saved. Only Meta API features (Muse Spark agents, scoreboard art, voice, image tools) need one; Claude, Codex and Muse CLI sessions, the switchboard, Parking Lots and Groups do not. If the human wants those features, open agents so they can paste it into Agent Setup's secure field, never into chat."
+            ? "Credential status (checked by Converse now): a Meta API key is already saved on this Mac. Never ask the human to add, paste or re-enter a Meta key, and never tell them to add one in Agent Setup. Muse Spark agents, on-demand portraits, voice and image tools can use it."
+            : "Credential status (checked by Converse now): no Meta API key is saved. Only Meta API features (Muse Spark agents, portraits, voice, image tools) need one; Claude, Codex and Muse CLI sessions, the switchboard, Parking Lots and Groups do not. If the human wants those features, open agents so they can paste it into Agent Setup's secure field, never into chat."
     }
     static func instructions(agent: Bool) -> String {
         """
@@ -139,7 +139,7 @@ extension Store {
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
         // A daily check by default; Auto pacing may move it within its bounds.
         config.autoPace = true
-        config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
+        config.jollyAllowed = true; config.supportDefaultsVersion = 1
         config.nextRunAt = config.nextScheduledRun(after: Date())
         session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"
         session.supportTeachingVersion = AppSupport.version; session.switchboardEnabled = true

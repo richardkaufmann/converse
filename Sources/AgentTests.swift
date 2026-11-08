@@ -17,24 +17,24 @@ import Foundation
     check(app.keyWindow === workspace && workspace.firstResponder === composer, "Focus fixture has an active composer")
     let windows = AgentWindows()
     defer {
-        app.windows.filter { $0.title == session.title + " · Scoreboard" }.forEach { $0.close() }
+        app.windows.filter { $0.title == session.title + " · Assessment" }.forEach { $0.close() }
         workspace.close()
         try? FileManager.default.removeItem(at: root)
     }
     for action in ["create", "re-show", "reopen after close"] {
         if action == "reopen after close" {
-            app.windows.first { $0.title == session.title + " · Scoreboard" }?.close()
+            app.windows.first { $0.title == session.title + " · Assessment" }?.close()
         }
         // Both the local menu and remote agent.widget use this entry point.
         windows.widget(session)
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        check(app.keyWindow === workspace && workspace.firstResponder === composer, "Scoreboard \(action) preserves workspace key window and composer responder")
-        check(app.windows.contains { $0.title == session.title + " · Scoreboard" && $0.isVisible }, "Scoreboard \(action) remains visible")
+        check(app.keyWindow === workspace && workspace.firstResponder === composer, "Assessment widget \(action) preserves workspace key window and composer responder")
+        check(app.windows.contains { $0.title == session.title + " · Assessment" && $0.isVisible }, "Assessment widget \(action) remains visible")
         let before = composer.string
         if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: workspace.windowNumber, context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7) {
             app.keyWindow?.sendEvent(event)
         }
-        check(composer.string == before + "x", "Typing reaches composer with scoreboard open after \(action)")
+        check(composer.string == before + "x", "Typing reaches composer with the assessment widget open after \(action)")
     }
 }
 
@@ -45,10 +45,12 @@ import Foundation
         check(restored.artDirection == art.artDirection && restored.lastArtDirection == art.lastArtDirection, "Art direction and rendered direction survive archive reload")
         var wire = art.wire(home: String(repeating: "a", count: 64)); wire.artDirection = "Playful moonbase, purple palette"
         try art.apply(wire)
-        check(art.artDirection == wire.artDirection && art.lastArtDirection != art.artDirection, "Remote art direction edit leaves a pending refresh even when mood stays unchanged")
+        let before = PortraitService.cacheKey(agent: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, config: restored)
+        check(art.artDirection == wire.artDirection && PortraitService.cacheKey(agent: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, config: art) != before, "A remote art direction edit changes the portrait cache key")
         var old = art.wire(home: String(repeating: "a", count: 64)); old.artDirection = nil; try art.apply(old)
         check(art.artDirection == wire.artDirection, "Older editors preserve an existing art direction")
-        check(AgentArt.prompt(direction: art.artDirection!, scene: String(repeating: "x", count: 5000), mood: "peaceful").contains(art.artDirection!), "Owner art direction reaches image prompt even with a long generated scene")
+        art.objective = String(repeating: "x", count: 5000)
+        check(PortraitPrompt.build(name: "Explorer", config: art).contains(art.artDirection!), "Owner art direction reaches the portrait prompt even with a long objective")
         var oversized = art.wire(home: String(repeating: "a", count: 64)); oversized.artDirection = String(repeating: "x", count: 4001)
         do { try art.apply(oversized); check(false, "Art direction size limit") } catch { check(true, "Art direction size limit rejects before settings mutation") }
     } catch { check(false, "Art direction regression: " + error.localizedDescription) }
@@ -60,6 +62,8 @@ import Foundation
     agentObjectivePacingSelfTests(check)
     configurationAuditSelfTests(check)
     agentDiscordSelfTests(check)
+    agentAssessmentSelfTests(check)
+    agentAssessmentRuntimeSelfTests(check)
     agentDiscordRouterSelfTests(check)
     agentHomeAssistantSelfTests(check)
     let voice = AgentDictation()
@@ -168,16 +172,20 @@ import Foundation
     AgentRuntime().finishCancelledTurn(ownStop, store: strayStore)
     check(ownStop.agent?.enabled == false && ownStop.agent?.attention.contains("Agent Setup") == true && ownStop.agent?.lastOutcome == "Paused by Stop.", "A Stop on the agent's own session keeps its paused explanation after the turn settles")
     let boardStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-board-" + UUID().uuidString))
-    let boardAgent = boardStore.createAgent(title: "Scoreboard fixture agent")
+    let boardAgent = boardStore.createAgent(title: "Assessment fixture agent")
     boardAgent.agent?.turnLimit = 1
-    check(boardStore.requestScoreboardRefresh(boardAgent) && boardAgent.pending.last?.text.contains("scoreboard") == true, "Scoreboard refresh queues a scoreboard-only prompt")
+    check(boardStore.requestAssessmentRefresh(boardAgent) && boardAgent.pending.last?.text == Store.assessmentRefreshPrompt && boardAgent.pending.last?.autonomous == true, "Refresh assessment now queues an assessment-only turn")
+    check(!boardStore.requestAssessmentRefresh(boardAgent) && boardAgent.pending.count == 1, "A second Refresh assessment while one is queued does not stack another turn")
+    boardAgent.pending = []; boardAgent.busy = true
+    check(boardStore.requestAssessmentRefresh(boardAgent) && boardAgent.pending.count == 1, "Refresh assessment while the agent is busy queues it as the next turn")
+    boardAgent.pending = []; boardAgent.busy = false
     boardAgent.agent?.turnLimit = 0
-    check(!boardStore.requestScoreboardRefresh(boardAgent) && boardAgent.agent?.attention.contains("turn limit") == true, "Scoreboard refresh without a turn limit asks for setup instead")
+    check(!boardStore.requestAssessmentRefresh(boardAgent) && boardAgent.agent?.attention.contains("turn limit") == true, "Refresh assessment without a turn limit asks for setup instead")
     let setupSwitch = strayStore.createAgent(title: "Setup switch fixture agent")
     setupSwitch.agent?.enabled = true
     setupSwitch.agent?.attention = "Stale alarm."
     do {
-        try strayStore.configureAgentLoop(setupSwitch, enabled: false, interval: 900, turns: 20, scoreboardEvery: 1)
+        try strayStore.configureAgentLoop(setupSwitch, enabled: false, interval: 900, turns: 20)
     } catch { check(false, "Setup switch fixture: " + error.localizedDescription) }
     check(setupSwitch.agent?.enabled == false && setupSwitch.agent?.attention == "" && setupSwitch.agent?.lastOutcome == "Loop turned off in Agent Setup.", "Switching a loop off in Setup clears the alarm and records the choice")
     check(AgentRepoSnapshot.validRepository("owner/repo-name") && !AgentRepoSnapshot.validRepository("../repo") && !AgentRepoSnapshot.validRepository("owner/repo?token=x"), "Agent repository paths cannot inject queries or escape their namespace")
@@ -191,12 +199,6 @@ import Foundation
     check(!research.markdown.contains("Source 1") && research.markdown.contains("[Quote](<https://example.com/quote>)"), "Research citations read as short labels instead of numbered sources")
     check(AgentWebSource.shortLabel(title: "Apple Reports Record Quarter Results Today", url: "https://example.com/x") == "Apple Reports" && AgentWebSource.shortLabel(title: "", url: "https://www.example.com/x") == "example.com" && AgentWebSource.shortLabel(title: "[Bracketed] (mess)", url: "https://example.com/x") == "Bracketed mess" && AgentWebSource.shortLabel(title: String(repeating: "Supercalifragilistic", count: 4), url: "https://example.com/x") == "example.com" && AgentWebSource.domainLabel("https://www.example.com/x") == "example.com", "Short source labels trim to two words with a domain fallback")
     check((MarkdownText.inline("[x](https://example.com/y)").attribute(.toolTip, at: 0, effectiveRange: nil) as? String) == "https://example.com/y", "Rendered links carry their URL as the hover tooltip")
-    let board = AgentScoreboard(title: "Stock", summary: "Today’s verified snapshot", metrics: [
-        .init(label: "Price", value: "$123", sourceURL: "https://example.com/quote", asOf: "2026-10-29 16:00 ET · close"),
-        .init(label: "Invented", value: "999", sourceURL: "https://unseen.example/quote", asOf: "now")], sentiment: "up").validated(research: research, at: now)
-    check(board.metrics[0].value == "$123" && board.metrics[1].value == "Unavailable" && board.metrics[1].sourceURL == nil && board.observedAt == now, "Scoreboard keeps source time distinct from retrieval and refuses metrics whose source was not retrieved")
-    check(AgentScoreboardCards.html(board).contains("https://example.com/quote") && !AgentScoreboardCards.html(board).contains("999"), "Exported flexible scoreboard has clickable sources and omits unsupported values")
-    check(AgentScoreboardCards.html(board).contains(">example.com</a>"), "Exported scoreboard links read as domains")
     do {
         var many = AgentResearch(); many.searched = true
         many.sources = (1...30).map { AgentWebSource(title: "Story \($0)", url: "https://news.example/\($0)") }
@@ -209,7 +211,7 @@ import Foundation
         check(AgentInstructions.staticRules.contains("never report the absence of watched sessions") && AgentInstructions.staticRules.contains("use it for any date or time-of-day wording") && AgentInstructions.staticRules.contains("If you have nothing new or relevant to say, say nothing") && AgentInstructions.staticRules.contains("answer in one short line"), "Agents use the supplied local time, skip unconfigured sources, and stay silent when there is nothing to say")
         check(AgentReply.decode("{\"reply\":\"\",\"attention\":\"\"}")?.reply == "", "A silent agent reply is a valid reply, not an error that could pause the loop")
     }
-    check(!AgentResearch.parse(["output": []]).searched && board.validated(research: AgentResearch()).metrics.allSatisfy { $0.value == "Unavailable" }, "Enabling search is not treated as evidence that a search ran")
+    check(!AgentResearch.parse(["output": []]).searched, "Enabling search is not treated as evidence that a search ran")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-agents-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let store = Store(folder: root)
@@ -422,7 +424,7 @@ import Foundation
     looping.queuePaused = true; looping.draft = "Unfinished human thought"
     func changeLoop(_ enabled: Bool) {
         let config = looping.agent!
-        try! loopStore.configureAgentLoop(looping, enabled: enabled, interval: config.intervalSeconds, turns: config.turnLimit, scoreboardEvery: config.scoreboardCadence, now: now)
+        try! loopStore.configureAgentLoop(looping, enabled: enabled, interval: config.intervalSeconds, turns: config.turnLimit, now: now)
     }
     check(looping.agent?.loopStatus(at: now, busy: false, queuePaused: true, pendingCount: 0) == "Loop paused · automatic checks off", "Paused agent loop status explicitly says automatic checks are off")
     changeLoop(true)
@@ -449,20 +451,19 @@ import Foundation
 
     var loopRevision = looping.agent?.settingsRevision ?? 0
     do {
-        try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision, now: now)
-        check(looping.agent?.intervalSeconds == 120 && looping.agent?.turnLimit == 4 && looping.agent?.scoreboardCadence == 3, "Loop popover saves interval, finite turn budget and scoreboard cadence together")
+        try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, expectedRevision: loopRevision, now: now)
+        check(looping.agent?.intervalSeconds == 120 && looping.agent?.turnLimit == 4, "Loop popover saves interval and finite turn budget together")
         loopRevision = looping.agent?.settingsRevision ?? 0
         looping.agent?.settingsChanged(); looping.agent?.turnLimit = 3
-        do { try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, scoreboardEvery: 3, expectedRevision: loopRevision); check(false, "Stale loop editor rejected") }
+        do { try loopStore.configureAgentLoop(looping, enabled: true, interval: 120, turns: 4, expectedRevision: loopRevision); check(false, "Stale loop editor rejected") }
         catch { check(looping.agent?.turnLimit == 3, "A stale loop popover cannot restore a turn spent while it was open") }
     } catch { check(false, "Loop options: " + error.localizedDescription) }
+    // Every turn measures and assesses: no scoreboard cadence remains.
     let cadenceStore = Store(folder: root.appendingPathComponent("cadence-fixture"))
-    let cadenceAgent = cadenceStore.createAgent(title: "Cadence fixture")
+    let cadenceAgent = cadenceStore.createAgent(title: "Every-turn fixture")
     cadenceAgent.queuePaused = true; cadenceAgent.agent?.generateArt = false
     cadenceAgent.agent?.repository = "owner/repo"
-    cadenceAgent.agent?.scoreboardEveryLoops = 2
     cadenceAgent.agent?.snapshot = AgentRepoSnapshot(repository: "owner/repo", observedAt: now, stars: 7)
-    cadenceAgent.agent?.widgetSummary = "Existing scoreboard"
     let cadenceRuntime = AgentRuntime(); cadenceRuntime.keyReader = { _ in "isolated-cadence-key" }
     var measuredRequests = 0, cadenceResponses = 0
     cadenceRuntime.api.request = { request in
@@ -470,7 +471,7 @@ import Foundation
         let object: Any
         if path == "/v1/responses" {
             cadenceResponses += 1
-            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Cadence report \(cadenceResponses)\",\"attention\":\"\"}"]]]]]
+            object = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": "{\"reply\":\"Turn report \(cadenceResponses)\",\"attention\":\"\",\"scoreboard\":{\"summary\":\"Old field\",\"metrics\":[]},\"assessment\":{\"summary\":\"Turn \(cadenceResponses) assessed.\",\"status\":\"on-track\",\"facts\":[{\"id\":\"github.stars\",\"kind\":\"measured\"}]}}"]]]]]
         } else {
             measuredRequests += 1
             object = path.contains("search/issues") ? ["total_count": 0] : (path.hasSuffix("/comments") || path.hasSuffix("/releases")) ? [] : ["stargazers_count": 12, "uniques": 0]
@@ -484,19 +485,30 @@ import Foundation
         while cadenceAgent.busy && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     }
     cadenceRun(loop: true)
-    check(!cadenceAgent.busy && cadenceResponses == 1 && measuredRequests == 0 && cadenceAgent.agent?.snapshot?.observedAt == now && cadenceAgent.agent?.widgetSummary == "Existing scoreboard" && cadenceAgent.agent?.loopsSinceScoreboard == 1, "An intervening scheduled loop still reports in the conversation without re-fetching or replacing the scoreboard")
+    let measuredAfterFirst = measuredRequests
+    check(!cadenceAgent.busy && cadenceResponses == 1 && measuredAfterFirst > 0 && cadenceAgent.agent?.snapshot?.observedAt != now && cadenceAgent.agent?.assessment?.summary == "Turn 1 assessed.",
+          "A scheduled loop turn re-measures the repository and records an assessment")
     cadenceRun(loop: true)
-    check(cadenceResponses == 2 && measuredRequests > 0 && cadenceAgent.agent?.widgetSummary == "Cadence report 2" && cadenceAgent.agent?.loopsSinceScoreboard == 0, "Scoreboard refresh happens on the configured loop cadence and resets its persisted counter")
-    cadenceRun(loop: true)
+    check(cadenceResponses == 2 && measuredRequests > measuredAfterFirst && cadenceAgent.agent?.assessment?.summary == "Turn 2 assessed." && cadenceAgent.agent?.assessment?.revision == 2,
+          "The very next scheduled turn measures and assesses again; there is no every-N-loops cadence")
+    check(cadenceAgent.agent?.scoreboard == nil && cadenceAgent.agent?.widgetContent().summary == "Turn 2 assessed.",
+          "A scoreboard field a model still returns is ignored; widgets read the assessment")
     let measuredBeforeManual = measuredRequests
     cadenceRun(loop: false)
-    check(cadenceResponses == 4 && measuredRequests > measuredBeforeManual && cadenceAgent.agent?.widgetSummary == "Cadence report 4" && cadenceAgent.agent?.loopsSinceScoreboard == 0, "A manual check forces a fresh scoreboard and resets the loop cadence without enabling the loop")
+    check(cadenceResponses == 3 && measuredRequests > measuredBeforeManual && cadenceAgent.agent?.assessment?.summary == "Turn 3 assessed.", "A manual check measures and assesses without enabling the loop")
     cadenceAgent.agent?.repository = "owner/other"
     let measuredBeforeRepositoryChange = measuredRequests
     cadenceRun(loop: true)
-    check(measuredRequests > measuredBeforeRepositoryChange && cadenceAgent.agent?.snapshot?.repository == "owner/other", "Changing repository forces fresh metrics instead of reusing another project's cached scoreboard")
-    let legacyCadence = try! JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(AgentConfig()))
-    check(legacyCadence.scoreboardCadence == 1 && cadenceAgent.agent?.wire(home: String(repeating: "a", count: 64)).scoreboardEveryLoops == 2, "Existing agents default to refreshing every loop and custom cadence travels in secret-free settings")
+    check(measuredRequests > measuredBeforeRepositoryChange && cadenceAgent.agent?.snapshot?.repository == "owner/other", "Changing repository measures the new project instead of reusing another project's snapshot")
+    if var legacy = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentConfig())) as? [String: Any] {
+        legacy["scoreboardEveryLoops"] = 5; legacy["loopsSinceScoreboard"] = 3
+        let old = try? JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
+        check(old != nil && old?.wire(home: String(repeating: "a", count: 64)).scoreboardEveryLoops == nil, "Archives with a saved scoreboard cadence still load; the cadence is no longer sent")
+    } else { check(false, "Archives with a saved scoreboard cadence still load") }
+    var olderEditor = cadenceAgent.agent!.wire(home: String(repeating: "a", count: 64)); olderEditor.scoreboardEveryLoops = 7
+    var applied = cadenceAgent.agent!
+    do { try applied.apply(olderEditor); check(true, "Settings from an older editor that still sends a scoreboard cadence are accepted and the cadence ignored") }
+    catch { check(false, "Older editor settings: " + error.localizedDescription) }
     let taggedLoop = PendingPrompt(agentLoopTick: true, text: "host tick", images: [])
     check((try? JSONDecoder().decode(PendingPrompt.self, from: JSONEncoder().encode(taggedLoop)))?.agentLoopTick == true, "Scheduled loop provenance survives queue persistence without inferring it from prompt text")
 
@@ -507,13 +519,15 @@ import Foundation
     agent.messages.append(Message(role: "assistant", text: "```converse\n{\"command\":\"tell\",\"to\":\"" + blocked.id.uuidString + "\",\"text\":\"Forbidden through alternate protocol\"}\n```"))
     store.processSwitchboard(agent)
     check(blocked.pending.isEmpty && !store.switchboardDirectory(for: agent).contains(blocked.id.uuidString), "Agent scope also fences normal switchboard commands and directory lookup")
-    agent.agent?.widgetSummary = "<script>alert('x')</script>"
-    check(AgentWidgetExport.html(agent).contains("&lt;script&gt;") && !AgentWidgetExport.html(agent).contains("<script>"), "Exported agent widget escapes model text and disables scripts")
+    agent.agent?.recordAssessment(AgentAssessments.evaluate(.object(["summary": .string("<script>alert('x')</script>"), "status": .string("at-risk"),
+        "facts": .array([.object(["label": .string("Open bugs"), "value": .string("0"), "kind": .string("evidence"), "source": .string("https://example.com/bugs")])])]), measured: [], previous: nil, now: now), now: now)
+    let exported = AgentWidgetExport.html(agent, now: now)
+    check(exported.contains("&lt;script&gt;") && !exported.contains("<script>"), "Exported agent widget escapes model text and disables scripts")
+    check(exported.contains("AGENT ASSESSMENT") && exported.contains("At risk · Fresh · rev 1") && exported.contains("<strong>0</strong>") && exported.contains("Open bugs") && !exported.contains("SCOREBOARD"),
+          "The HTML export shows the assessment's status, freshness, revision and facts, including a zero")
     agent.agent?.repository = "owner/repo"
     agent.agent?.snapshot = AgentRepoSnapshot(repository: "owner/repo")
-    check(AgentWidgetExport.html(agent).contains("Repository data unavailable") && !AgentWidgetExport.html(agent).contains("<div class=metric>"), "Scoreboard without GitHub data gives one setup explanation instead of empty metric tiles")
     agent.agent?.snapshot?.stars = 0
-    check(agent.agent?.snapshot?.hasMeasurements == true && AgentWidgetExport.html(agent).contains("<strong>0</strong>"), "Scoreboard distinguishes measured zero from missing GitHub data")
     agent.agent?.enabled = true; agent.agent?.turnLimit = 2; agent.agent?.nextRunAt = now
     agent.draft = "User's unfinished thought"
     runtime.tick(store: store, now: now)
@@ -615,7 +629,7 @@ import Foundation
     let answerRange = (responseView.string as NSString).range(of: "Measured progress")
     check(answerRange.location != NSNotFound && responseView.textStorage?.attribute(.toolTip, at: answerRange.location, effectiveRange: nil) as? String != nil && responseView.string.contains(Store.delayLabel(response.delays?.first?.seconds ?? 0)),
           "Agent response body provides a timestamp hover and rendered delay hint")
-    check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its scoreboard after the model response")
+    check(FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/widget.html").path) && requests.contains { $0.url?.path == "/v1/responses" }, "Agent exports its assessment widget after the model response")
     ArchiveWriter.shared.flushAll()
     let archive = (try? String(contentsOf: root.appendingPathComponent("sessions.json"), encoding: .utf8)) ?? ""
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.workingMemory == "Keep release acceptance criteria", "Agent's learned human criteria survive archive reload beyond the recent conversation window")
@@ -650,7 +664,7 @@ import Foundation
     let evidenceInput = evidenceText(requestBody).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let activeEvidence = (evidenceInput?["watchedSessions"] as? [[String: Any]])?.first { $0["title"] as? String == "Currently working fixture" }
     check(activeEvidence?["busy"] as? Bool == true && activeEvidence?["activity"] as? String == "running now" && activeEvidence?["activityObservedAt"] as? String != nil && (requestBody?["instructions"] as? String)?.contains("do not recommend re-prompting or resuming") == true, "Agent receives timestamped current host activity and must not infer a stalled session from an unfinished reply")
-    check((requestBody?["instructions"] as? String)?.contains(AgentPolicy.scoreboardScope) == true, "Agent scoreboard instructions limit metrics to that agent's own objective and scope")
+    check((requestBody?["instructions"] as? String)?.contains(AgentPolicy.assessmentScope) == true && (requestBody?["instructions"] as? String)?.contains("scoreboard") == false, "Agent assessment instructions limit facts to that agent's own objective and scope, and no longer ask for a scoreboard")
     check((requestBody?["tools"] as? [[String: String]])?.first?["type"] == "web_search" && requestBody?["max_tool_calls"] as? Int == 4, "Agent enables bounded built-in web research without changing credential test calls")
     check(requestBody?["max_output_tokens"] as? Int == 8192 && (requestBody?["reasoning"] as? [String: Any])?["effort"] as? String == "low", "Agent requests reserve room for reasoning and visible output with explicit low effort")
     check(requestBody?["prompt_cache_key"] as? String == AgentInstructions.cacheKey(agent.id) && requestBody?["prompt_cache_retention"] as? String == "24h" && (requestBody?["instructions"] as? String)?.hasPrefix(AgentInstructions.staticRules) == true,
@@ -692,7 +706,7 @@ import Foundation
     let noRepoInstructions = noRepoBody?["instructions"] as? String ?? ""
     check(noRepoInstructions.contains("Objective: Report weather news only. Never mention GitHub or Discord.") && !noRepoInstructions.contains("Objective: " + AgentConfig().objective) && noRepoInstructions.contains(AgentPolicy.objectiveGoverns), "An objective edited in Agent Setup reaches the next run and governs supplied evidence and older notes")
     let noRepoHTML = AgentWidgetExport.html(agent)
-    check(noRepoHTML.contains("AGENT SCOREBOARD") && !noRepoHTML.contains("Repository data unavailable") && !noRepoHTML.contains("<div class=grid>"), "General scoreboard retains its report without GitHub warnings or metric tiles")
+    check(noRepoHTML.contains("AGENT ASSESSMENT") && noRepoHTML.contains(AgentWidgetExport.escape(agent.agent?.assessment?.summary ?? "missing")) && !noRepoHTML.contains("Repository data unavailable"), "A general agent's export shows its assessment without GitHub warnings")
     check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/metrics.json").path), "Clearing GitHub removes stale exported repository measurements")
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.repository == "", "No-repository agent survives a full session archive reload")
     runtime.keyReader = { _ in "isolated-test-key" }

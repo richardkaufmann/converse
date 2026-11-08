@@ -2,8 +2,8 @@
 
 Status: approved design, with a Mac-only implementation. The Mac
 harness now contains home-run bounded loops, selected local/group session evidence
-and messaging, remote agent creation/configuration, file events, attention and
-scoreboard art. Validation and release status belong to the release notes. Windows
+and messaging, remote agent creation/configuration, file events, attention,
+per-turn assessments and on-demand portraits. Validation and release status belong to the release notes. Windows
 and iPad work is explicitly deferred. Remote creation of ordinary CLI sessions
 remains future work; this change adds agent creation only. The original broader
 cross-platform design follows below.
@@ -113,20 +113,20 @@ app users, which are not currently measured.
 - An inline progress image renders through the ordinary transcript pipeline on
   local and remote panes, with the same attachment behavior as any session.
 
-## Web research and general scoreboards (Mac)
+## Web research and assessment facts (Mac)
 
 Agents may use enabled Muse, Claude or Codex CLI logins, or Meta Model API credentials. CLI-backed agent runs receive Converse-supplied evidence with native web/shell tools disabled. Only the Meta Model API route enables hosted `web_search`, with at most four built-in calls. Saving a Meta key does not add search to a CLI-backed agent. No extra search credential is required. Users can disable research in
 Agent Setup. Tool output remains untrusted evidence; selected session scope and
 host-enforced messaging limits still apply. Progress messages emitted during
 search are not treated as the actionable final JSON.
 
-Scoreboards can contain user-requested metric labels, values, source URLs,
-source-reported observation times, a short summary, and sentiment. The host
-accepts metric URLs only when returned by that run's search results/citations;
-unavailable or unsupported values stay Unavailable. This is source-grounded
-model extraction, not an independently verified exchange feed. Observation
-times and retrieval time are distinct. Summaries/art are model interpretations.
-Requested logos and humor are allowed; data stays in legible overlay cards.
+Assessment evidence facts can carry user-requested labels, values, source URLs
+and source-reported observation times. A fact citing a web URL shows its value
+only when that run's search results or supplied evidence contain the URL (or
+the same value was already checked on an earlier turn); otherwise it reads
+Unavailable. This is source-grounded model extraction, not an independently
+verified exchange feed. Observation times and retrieval time are distinct.
+Summaries and portraits are model interpretations.
 
 ## Jolly routing (Mac)
 
@@ -176,7 +176,7 @@ App Support sets agents up for the human on a direct request; its own objective 
 
 ## Cross-platform release boundary (0.5.22)
 
-Mac and Windows host agents; iPad controls them on a desktop home. All three display attention, loop status, transcript images and scoreboards. Windows uses Windows Credential Manager for its Meta key and the same bounded direct Responses/Image APIs, with synthetic API and live loopback coverage. Voice, Discord and file triggers remain Mac-home features for this release; Windows explicitly rejects enabling unsupported options. Jolly continues to use the existing Mac bridge. No iPad background execution is promised.
+Mac and Windows host agents; iPad controls them on a desktop home. All three display attention, loop status, transcript images and assessments. Windows uses Windows Credential Manager for its Meta key and the same bounded direct Responses/Image APIs, with synthetic API and live loopback coverage. Voice, Discord and file triggers remain Mac-home features for this release; Windows explicitly rejects enabling unsupported options. Jolly continues to use the existing Mac bridge. No iPad background execution is promised.
 
 
 ## Home Assistant state connector
@@ -243,7 +243,7 @@ for a day and cursors provide the permanent duplicate barrier.
 Public mention turns receive only their question and up to 20 recent channel
 messages, plus optional public web research. They receive no private objective,
 notes, transcript/session evidence, GitHub credentials or agent action permissions.
-Their accepted output is a public reply and, only with the per-agent sharing opt-in, a host-rendered scoreboard or existing mood image. Arbitrary model-selected files cannot be uploaded. Thus they can discuss publicly posted
+Their accepted output is a public reply and, only with the per-agent sharing opt-in, the agent's on-demand portrait with its caption. Arbitrary model-selected files cannot be uploaded. Thus they can discuss publicly posted
 progress but cannot reveal unpublished agent context or trigger switchboard tells.
 The reply references its source message and disables all pings. The host persists
 the send attempt first and uses Discord's enforced nonce as an additional duplicate
@@ -261,31 +261,87 @@ iPad Agent Setup uses explicit Save/Cancel. Save and run once persists the edite
 
 ### Sharing session information in a private channel
 
-**Share session information** is a separate per-agent opt-in, available in Mac and iPad Agent Setup. It allows a mention response to use that agent's objective, working notes, scoreboard and recent submitted conversation. It excludes unsent drafts, credentials and other sessions' transcripts. The host checks Discord's channel and guild-role permissions before supplying the context, then rechecks privacy and the option before posting a generated reply. Missing permissions, API errors, public channels and unsupported channel types do not grant sharing. Turning the option off also blocks already-generated private replies awaiting delivery.
+**Share session information** is a separate per-agent opt-in, available in Mac and iPad Agent Setup. It allows a mention response to use that agent's objective, working notes, assessment and recent submitted conversation. It excludes unsent drafts, credentials and other sessions' transcripts. The host checks Discord's channel and guild-role permissions before supplying the context, then rechecks privacy and the option before posting a generated reply. Missing permissions, API errors, public channels and unsupported channel types do not grant sharing. Turning the option off also blocks already-generated private replies awaiting delivery.
 
-For this feature, a private channel is a guild text or announcement channel where the `@everyone` role lacks effective `VIEW_CHANNEL`, following Discord's [permission rules](https://docs.discord.com/developers/topics/permissions). The bot does not change channel permissions. The existing **Share scoreboard and mood image** option remains separate and explicitly allows those artifacts to be requested without sharing conversation context.
+For this feature, a private channel is a guild text or announcement channel where the `@everyone` role lacks effective `VIEW_CHANNEL`, following Discord's [permission rules](https://docs.discord.com/developers/topics/permissions). The bot does not change channel permissions. The **Share assessments and portraits** option remains separate and explicitly allows a portrait to be requested without sharing conversation context.
 
 Natural requests such as `@Converse ask converse agent for current status` use the channel's configured default. Explicit agent names take precedence; unknown names are not guessed. Editing an already-processed Discord message does not trigger it again: send a new mention.
 
 
-### Measured scoreboard images
+### Assessments and portraits (152)
 
-Jolly and the agent transcript carry a host-rendered scoreboard PNG, not just
-Muse's decorative background. The Mac scoreboard and HTML export also show
-host-counted local Parking Lot sections: every unfinished non-heading row counts
-once, including nested rows. Done rows are excluded; color counts use explicit
-tags without inheritance. Measurements retain the lot revision and observation
-time and disappear from exports when the agent loses access to the lot.
+Every agent turn returns an `assessment` object in its JSON reply:
+`{summary, status: on-track|at-risk|blocked|done, mood?, facts: [{id, label, value, kind: measured|evidence|judgment, source, observedAt, detail}], detail}`.
+`detail` (per fact and per assessment) is arbitrary nested JSON, bounded by depth,
+item count, string length and node budget before it is stored. The host supplies
+`measuredFacts` evidence each turn (Parking Lot unfinished and red counts per
+allowed lot, GitHub stars, downloads, cloners, visitors, issues, bugs and PRs,
+new Discord messages, fleet versions). A model may only reference those by `id`:
+the host always substitutes its own label, value, source and observation time.
+A `measured` fact the host does not have is stored as **Unavailable** with source
+“Not measured by Converse”. Evidence keeps its stated source time; a repeated,
+unchanged fact keeps the time it was first seen.
 
-GitHub clone metrics use the authenticated traffic API: today's UTC bucket and
-rolling 14-day unique cloners. A missing bucket or denied traffic access is
-Unavailable, never zero. GitHub does not provide lifetime unique cloners; daily
-uniques must not be summed into that claim. Release downloads are cumulative
-counts for currently listed release assets, not a reconstructed daily history.
+The store (`AgentConfig.assessment`) creates a new revision only when the content
+hash changes: status, whitespace- and case-normalized summary, facts by id/label/
+value/kind/source (measured rows by value only) and detail; observation times are
+excluded. Otherwise it records a heartbeat (`checkedAt`, `heartbeats`). The last ten
+revisions are kept. A missing or malformed assessment never fails the turn: the
+raw value is written to `Agents/<id>/assessment-rejected.json`, the last record is
+kept and `assessmentProblem` marks it stale. Agents from earlier releases are
+seeded once from their last scoreboard, labelled stale.
 
-An explicit instruction such as “Only generate this if there has been significant
-activity” or “Only generate new artwork when backlog counts, severity or repository
-metrics meaningfully change” suppresses age-only art refreshes. Measured counts
-and severity determine change; observation timestamps do not. Existing minimum
-intervals still limit paid generation. Scoreboard numbers refresh without buying
-new artwork. Red unfinished items or known open bugs prevent a peaceful scene.
+Portraits (`PortraitService`) are generated only on request: View → Portraits,
+Get Portrait, the switchboard `portrait` command, an agent's `portrait` field,
+Jolly or Discord. The prompt is a shared fleet style, the agent's name, the first
+sentence of its objective, the assessment summary and status, 3–5 mood words and
+the owner's art direction. Fact values are never included; the default forbids
+factual numbers, scoreboards and overlays, and an art direction that asks for
+lettering may opt into stylistic text. Requests are square (`1024x1024`) through
+the existing `muse-image-1.0` path.
+
+The cache key is (agent ID, assessment content hash, art-direction version), never
+the revision. One generation runs per key and matching requests join it. If the
+assessment changes during a generation, that result keeps its source revision and
+is flagged stale; the latest demanded content is generated after it. A changed
+portrait is regenerated at most once per agent's minimum interval (default 10
+minutes) unless the request is a forced Refresh. Failures keep the last image with
+the reason and back off exponentially (1, 2, 4… minutes, capped at 6 hours). An open
+View → Portraits window subscribes to agent turns (debounced); closing it cancels
+pending and deferred window demand. Agent loops never wait for a portrait.
+
+Delivered portraits carry a one-line caption: agent, assessment revision and
+time, short content hash, and current or stale. Inline delivery copies the PNG
+into the requester's managed Outputs folder. Jolly holds the request open (no
+response file) until the PNG and caption or an error are ready; Discord posts the
+same PNG and caption. Jolly and Discord keep their existing access rules for 152;
+audience-specific variants and client RBAC are planned.
+
+Measured counts follow these rules. Parking Lot sections count every
+unfinished non-heading row once, including nested rows. Done rows are excluded;
+color counts use explicit tags without inheritance. Measurements retain the lot
+revision and observation time and disappear from widgets and exports when the
+agent loses access to the lot. GitHub clone metrics use the authenticated traffic
+API: today's UTC bucket and rolling 14-day unique cloners. A missing bucket or
+denied traffic access is Unavailable, never zero. GitHub does not provide lifetime
+unique cloners; daily uniques must not be summed into that claim. Release
+downloads are cumulative counts for currently listed release assets, not a
+reconstructed daily history.
+
+The assessment text renderer (`AgentScoreboardImage`) remains only for the
+explicit README preview mode. Agents no longer attach scoreboard composites to
+transcripts, Jolly answers or Discord replies; existing transcript images stay.
+Windows Core stores the same assessment contract and derives its widgets from it.
+
+Every widget reads one source of truth, the latest assessment: the Mac widget
+window and HTML export, remote iPad/Mac viewers (`DeviceAgentWidget` carries
+summary, facts, status, freshness and revision) and Windows. There is no
+scoreboard field in the agent's output and no every-N-turns cadence; every turn
+measures and assesses. Older data still loads: a saved scoreboard becomes a
+seeded, stale-labelled assessment, a saved cadence is ignored, and widgets from
+older homes display whatever fields they send.
+
+The objective and the portrait art direction are separate owner texts, each
+with its own editor in Agent Setup. The objective guides assessments; the art
+direction only reaches portrait prompts. Generated summaries never overwrite
+either.

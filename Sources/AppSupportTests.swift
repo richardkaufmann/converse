@@ -352,7 +352,7 @@ import SwiftUI
             let model = a.agent?.model ?? ""
             if engine == "muse" && key { check(model == "muse-spark-1.3", "Muse with a saved Meta key runs the agent on Muse Spark") }
             else { check(AgentModels.parse(model)?.engine == engine && AgentModels.parse(model)?.account == profile.id, "Agent runs on the chosen provider's CLI login: " + engine + (key ? " with key" : "")) }
-            check(a.title == name + " Agent" && a.messages.count == 1 && a.messages[0].text.contains("Right-click \(name) Agent in the left panel for Agent Setup, Run once, Show scoreboard"), "Agent welcome explains right-clicking its name: " + engine)
+            check(a.title == name + " Agent" && a.messages.count == 1 && a.messages[0].text.contains("Right-click \(name) Agent in the left panel for Agent Setup, Run once, Show assessment"), "Agent welcome explains right-clicking its name: " + engine)
             check(sup.entry.engine == engine && sup.entry.accountID == profile.id, "App Support uses the same login: " + engine)
             if sup.agent != nil {
                 let supportModel = sup.agent?.model ?? ""

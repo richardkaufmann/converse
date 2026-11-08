@@ -60,7 +60,7 @@ You can build Linux apps and services on a Mac or PC without multiple windows, o
 The cross-system session support also greatly eases development. Ask a session to generate an image, paste it into another session running on a different system.
 
 <!-- readme-only:start -->
-Converse's agent setup includes the ability to generate images reflecting the project. The first image here is Converse's build agent's opinion of progress based on GitHub and the internal parking lot.
+Converse agents can paint their own portraits on request, based on how their project is going. The first image here is an earlier painting by Converse's build agent of its progress, based on GitHub and the internal parking lot.
 
 [![Converse development status artwork based on GitHub and the internal Parking Lot](docs/converse-status.jpg)](docs/converse-status.jpg)
 
@@ -107,15 +107,15 @@ On a brand-new Mac installation, Converse opens with four things in the left pan
 1. **Click a provider.** Converse sets everything up to use it and renames the sessions to match, for example **Claude Coding** and **Claude Agent**. The Parking Lot is already linked to both.
 2. **Press Return.** App Support has typed `/login` for you. Return opens that provider's normal login (`claude auth login`, `codex login` or `muse login`) in Terminal and your browser. Finish there and come back. Already signed in? Click **I’m already signed in** instead.
 3. **Wait for one short answer.** Converse asks the model for a single reply to prove the login works (this may use a little quota), then App Support opens your coding session beside it in a second pane and explains what it can help with, including the **1 2 3** icons that put any session in the first, second or third pane.
-4. **Start in your coding session.** It asks: *What shall we build today? You can also ask me to read the Parking Lot and react to it and update it.* The Parking Lot starts with **What Are We Building** and one idea to react to. Your agent has a greeting too; right-click its name for **Agent Setup**, **Run once**, **Show scoreboard** and more. It starts on, watching your coding session (*Monitor the health of the Claude Coding session.*), checks hourly with **Auto pacing** on, and makes its first check an hour after you sign in. With a saved Meta key it also draws mood art that matches how the project is going.
+4. **Start in your coding session.** It asks: *What shall we build today? You can also ask me to read the Parking Lot and react to it and update it.* The Parking Lot starts with **What Are We Building** and one idea to react to. Your agent has a greeting too; right-click its name for **Agent Setup**, **Run once**, **Show assessment** and more. It starts on, watching your coding session (*Monitor the health of the Claude Coding session.*), checks hourly with **Auto pacing** on, and makes its first check an hour after you sign in. With a saved Meta key it also draws mood art that matches how the project is going.
 
 Not ready to choose? Click **Decide later**. Everything else keeps working, and **Choose a provider…** brings the question back. If a provider's button is greyed out, its command-line tool isn't installed yet: use **How to install** ([Install a provider CLI](#install-a-provider-cli)), then **Check again**. Do not put passwords, API keys or login codes into a conversation.
 
-**Picking Meta Muse?** Your Muse subscription sign-in is enough for coding sessions, App Support and agents. A **Meta Model API key** is optional: it is needed only for Muse Spark API agents, Muse Image scoreboard art, voice transcription and the image tools. To add one, [get it on Meta's developer site](https://dev.meta.ai/docs/models) and paste it into the masked field App Support shows (or later into Agent Setup). If a key is already saved, Converse doesn't ask again.
+**Picking Meta Muse?** Your Muse subscription sign-in is enough for coding sessions, App Support and agents. A **Meta Model API key** is optional: it is needed only for Muse Spark API agents, Muse Image portraits, voice transcription and the image tools. To add one, [get it on Meta's developer site](https://dev.meta.ai/docs/models) and paste it into the masked field App Support shows (or later into Agent Setup). If a key is already saved, Converse doesn't ask again.
 
 **Keys stay in your Keychain.** Converse saves API keys and tokens in the macOS Keychain and logins stay with each provider's own tool. Nothing secret goes into a conversation, a settings file or this repository, so there is nothing to commit and no `.env` file to fill in.
 
-**What works without a Meta key:** coding sessions and App Support with any of the three providers (including a Muse sign-in), agents running on those logins, messages between sessions through the [switchboard](#messaging-between-sessions), [Parking Lots](#parking-lots) and [Groups](#connect-your-devices-into-a-group). The key adds Muse Spark API agents, scoreboard art, voice and the image tools.
+**What works without a Meta key:** coding sessions and App Support with any of the three providers (including a Muse sign-in), agents running on those logins, messages between sessions through the [switchboard](#messaging-between-sessions), [Parking Lots](#parking-lots) and [Groups](#connect-your-devices-into-a-group). The key adds Muse Spark API agents, portraits, voice and the image tools.
 
 For a problem involving another Group system, App Support can find its support agent and ask for a scoped, read-only health report. It uses live session IDs, reports unavailable peers, and does not turn a peer message into permission to change settings.
 
@@ -240,7 +240,7 @@ Don't like a substitution? **⌘Z** restores exactly what you typed; **Backspace
 
 Create another session with **+** when you want an independent task or a second opinion. **1 / 2 / 3** place a session in a pane. **P** parks it: the pane closes but work continues. **X** closes the session after confirmation and stops its work; Mac **File → Restore Closed Conversation** can restore a saved recovery copy.
 
-Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show scoreboard**, **Run once**).
+Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show assessment**, **Run once**).
 
 To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart. To sort sessions instead, open the **˯** menu beside **+** on this device's heading and choose **Alphabetical** or **Recently changed** (newest activity first); **Manual order** brings back your dragged order, and clicking **Reorder** switches to it. The choice is remembered.
 
@@ -298,7 +298,7 @@ Look at its settings before making your own:
 | Repository | `richardkaufmann/converse`, so checks can use GitHub releases and open issues. |
 | Automatic loop | Enabled, every **1,440 minutes** (24 hours), with **Auto pacing** on. |
 | Sessions it may read/message | None selected by default. |
-| Mood art and speech | Off. |
+| Speech | Off. Portraits are made only when someone asks. |
 
 Type “What should I know about the current Converse release?” to ask it directly. Choose **Run once** to have it assess its configured objective now. Read the report and its evidence. App Support reports available updates and serious bugs; it does not silently install an update. It uses installed Help and this exact repository first. Any necessary web searches must identify Richard Kaufmann’s Converse AI coding app, not the bare word “Converse”; unrelated namesakes are not evidence. If it cannot access the repository, it should report that limitation rather than claim there are no bugs.
 
@@ -338,11 +338,11 @@ A saved Meta key does **not** automatically add web search to a Claude/Codex/Mus
 
 ### Set a useful rhythm
 
-Say how often to run in the objective, in your own words. A stock tracker might say: “Run every five minutes, and generate new scoreboard art at least every twelve hours or when any stock changes value by more than 0.5%.” When you save, Converse asks the agent's own model once to read the timing, then shows what it understood under the objective, in the footer and when you hover the agent's name: *Runs every 5 min · art: at least every 12 h, or when any metric moves > 0.5%*. It reads the objective again only when you change it. Days and hours work too: “only while the US stock market is open”, “weekdays between 9am and 5pm New York time” or “once a day at 09:00”.
+Say how often to run in the objective, in your own words. A stock tracker might say: “Run every five minutes while the US stock market is open.” When you save, Converse asks the agent's own model once to read the timing, then shows what it understood under the objective, in the footer and when you hover the agent's name: *Runs every 5 min while the US market is open*. It reads the objective again only when you change it. Days and hours work too: “only while the US stock market is open”, “weekdays between 9am and 5pm New York time” or “once a day at 09:00”.
 
 If the objective says nothing about timing, **Auto pacing** decides. It is on for new agents: each run suggests its next check with a short reason, sooner while a release is going out, hours later when nothing is moving, and the footer shows it, for example *Auto · next in 20 min (release in progress)*. It stays between 5 minutes and 72 hours by default, so a quiet agent can sleep through a three-day weekend; change both bounds in Agent Setup. A cadence you state in the objective always wins over the agent's suggestions. If Converse can't read the objective (for example, a Meta model without a Meta key), the summary says so and Auto pacing's defaults apply; save again to retry.
 
-Agents stay quiet when there is nothing to say: a scheduled check with nothing new or relevant adds no reply, though the scoreboard may still update. Ask it for a status and it answers in one short line even when nothing has changed.
+Agents stay quiet when there is nothing to say: a scheduled check with nothing new or relevant adds no reply, though its assessment still updates. Ask it for a status and it answers in one short line even when nothing has changed.
 
 Use **Enable automatic loop** and **Maximum turns per loop**. That limit applies to each activation; it is not a lifetime allowance. A newly enabled loop waits one interval before its first check. **Run once** performs a check without enabling a paused loop or moving an already scheduled deadline.
 
@@ -356,17 +356,47 @@ A green loop indicator means scheduled checks are enabled and waiting; a rainbow
 
 For Meta API agents the footer also shows the last turn's tokens, including how much of the input was served from the provider's prompt cache (for example *cached 80% of input*). Cached input costs much less, so repeat checks get cheaper. The account column shows **API Key**, since an API key has no account details to report.
 
-### Read the scoreboard and optionally add art
+### See how every agent is doing: Assessments
 
-**Show scoreboard** presents the agent's status and available measurements in **cards** (small labeled panels). With a repository, these can include issues, bugs, pull requests, stars and release downloads. Repository visitors and clone traffic require authorized GitHub access. Unique cloners cover today (UTC) when available and the last 14 days; GitHub does not provide a lifetime unique-cloner total. Release downloads are cumulative across accessible releases. Missing data is **Unavailable**, not zero. None of these counts measures actual app users.
+Every agent turn now ends with an **assessment**: a sentence or two on how it's going, a status (**on track**, **at risk**, **blocked** or **done**) and five to seven facts. Open **View → Assessments** to see all your agents side by side, one card each. The grid rearranges itself as you resize the window.
 
-Selected Parking Lots contribute unfinished-item counts by section and explicit color tag, excluding headings and Done items. Each lot shows its revision and measurement time. The shared scoreboard image combines these scoped lot counts with the configured repository’s measured statistics.
+Hover over a fact to see the detail behind it: the sections behind a Parking Lot count, the steps behind “fix verified in Writer”, the agent's deeper notes. Click it, or press Space or Return, to keep it open while you read another. The card's **Details** row works the same way. VoiceOver reads each fact's label, value, kind and age.
 
-For search-backed cards, source links and **observation times** (when the source measured the value) matter: a delayed quote or prior close is not a live price. Unsupported values remain unavailable. **Export widget** saves a portable HTML snapshot with embedded art; it is a snapshot, not a live dashboard.
+Facts come in three kinds, marked **M**, **E** and **J**:
 
-Optional **mood art** uses Meta's image service independently of the agent's reasoning provider. Supply a Meta key, enable art, and write the desired subject and style in **Scoreboard art direction**. Save and **Run once** to try it. You do not need art for useful reports; App Support leaves it off. For a measured scoreboard, ask the image service for scenery without numbers or labels: Converse draws the measured values over the artwork. Generated artwork can still contain incorrect details, so use the measured cards and their source times when checking facts.
+- **Measured** values are Converse's own: Parking Lot counts (including reds), GitHub stars, downloads and cloners, new Discord messages, and which Converse version each of your devices runs. The agent can only point at them; it can't type a number in. If Converse doesn't have a value, the fact says **Unavailable** and names its source.
+- **Evidence** is something the agent can trace to a session, lot or link it names.
+- **Judgment** is the agent's own opinion, labelled as such.
 
-Art changes when the mood or the scoreboard numbers change, but no more often than every 30 minutes, and unchanged art refreshes about every 6 hours. Adjust both next to the art toggle, or say it in the objective, which takes precedence. “New art when any price moves more than 0.5%” compares each number on the scoreboard with its value when the current picture was made, so the jump at the market open redraws it and small wiggles don't; words such as “Open” or “Halted” don't count. Editing the art direction normally updates the picture on the next scoreboard refresh. An explicit instruction such as “Only generate new artwork when there has been significant activity” suppresses age-based redraws while measured values and mood stay unchanged. In the current implementation, that condition can also delay an art-direction edit until activity changes.
+Each fact shows its own age, so a fresh summary doesn't make an old measurement look new. When nothing has changed, the card says so instead of repeating itself: *Rev 4 · no change in 12 checks, last 3m ago*. Earlier revisions are one click away. If a turn returns a broken assessment, or none at all, the last good one stays up with a **Stale** badge and the reason, and the agent keeps running.
+
+### Ask for a portrait
+
+**Portraits** are art, and they're made only when someone asks. Open **View → Portraits** for a grid of every agent's current portrait. Each card has **Refresh** and shows when it was painted and whether the assessment has moved on since (**stale**). Right-click a portrait to **Copy**, **Save…** or **Save to Photos**. While the window is open, a portrait refreshes when its agent's assessment changes; close the window and nothing more is generated.
+
+You can ask from anywhere:
+
+- Right-click an agent in the sidebar and choose **Get Portrait**: it appears in that agent's conversation.
+- In any session you've taught to talk to other sessions: “show me KAOS Steward's portrait”. It appears inline, with a one-line caption: the agent, when it was assessed, a short content hash and whether it is current or stale.
+- An agent can ask for its own portrait, or one of an agent it watches.
+- From your phone, ask Jolly: “get me a portrait of KAOS Steward.” Jolly waits for the picture and caption, or tells you why there isn't one.
+- In Discord: `@Converse KAOS Steward: get me a portrait`. The bot posts the picture with the same caption. This needs **Share assessments and portraits** in that agent's setup, and the bot needs **Attach Files** permission.
+
+Portraits use Muse Image and need a Meta key. They're painted from the agent's name, its objective, its assessment summary and mood, a shared fleet style so the grid looks like one family, and your **Portrait art direction** in Agent Setup. Numbers and scoreboards stay out of the art (the facts live in the Assessments table). If you want stylistic lettering, such as a movie-poster title, say so in the art direction.
+
+Portraits don't run up a bill. An unchanged assessment reuses the cached portrait, however often you ask. A changed one is repainted at most every 10 minutes per agent (change it in Agent Setup), and **Refresh** always tries right away. If several people ask at once, they share one painting. If the image service refuses or fails, the last portrait stays with a “couldn't refresh” note, Converse waits longer before trying again, and the agent's own work is never held up.
+
+Scoreboard pictures already in your conversations stay where they are; agents simply stop adding new ones. Your art direction carries over to portraits. Agents from earlier releases start with an assessment seeded from their last scoreboard, marked stale until their next turn.
+
+### Show the assessment
+
+**Show assessment** opens one agent's latest assessment: its status, how fresh it is, the summary and its facts. Remote iPads and Macs show the same assessment, and **Refresh assessment now** asks for a new one straight away, or as the agent's next turn if it's busy.
+
+Repository facts can include issues, bugs, pull requests, stars and release downloads. Repository visitors and clone traffic require authorized GitHub access. Unique cloners cover today (UTC) when available and the last 14 days; GitHub does not provide a lifetime unique-cloner total. Release downloads are cumulative across accessible releases. Missing data is **Unavailable**, not zero. None of these counts measures actual app users.
+
+Selected Parking Lots contribute unfinished-item and red counts, excluding headings and Done items. Revoke the agent's access to a lot and its counts disappear from the widget and exports right away.
+
+For web facts, source links and **observation times** (when the source measured the value) matter: a delayed quote or prior close is not a live price. A fact citing a page that run didn't actually retrieve reads Unavailable. **Export…** saves a portable HTML snapshot with the agent's latest portrait; it is a snapshot, not a live dashboard.
 
 ### Voice on Mac
 
@@ -384,7 +414,7 @@ Discord is optional. It lets an agent read a chosen channel during checks, post 
 4. Choose reading and/or alerts. **Test Discord** posts a labeled test message and reads it back; it does not send session content. Save the settings after testing.
 5. If you want direct questions, enable **Anyone in this channel may @mention this agent**. Use a real bot mention: `@Converse Project Steward: what needs attention?` A **Default agent for this channel** also accepts `@Converse question`.
 
-Anyone able to post in the configured channel can use enabled mentions. By default, replies use the question and public channel context, not private session history. **Share session information** is a separate opt-in requiring a verified private channel; **Share scoreboard and mood image** is another opt-in and needs **Attach Files** permission. Leave both off unless you intend to share that material.
+Anyone able to post in the configured channel can use enabled mentions. By default, replies use the question and public channel context, not private session history. **Share session information** is a separate opt-in requiring a verified private channel; **Share assessments and portraits** is another opt-in and needs **Attach Files** permission. Leave both off unless you intend to share that material.
 
 The Mac app must be open. Mention checks run independently of the agent's loop; pausing a daily loop does not disable enabled mentions. Windows/Linux do not host Discord integration yet. [Detailed Discord behavior](docs/agents.md#discord-bot-integration).
 
@@ -438,7 +468,7 @@ Ask App Support to walk through this with the person administering your Mac. Fir
 
    Keep the process running for the first test, then have the operator arrange a persistent service. **Always set `--public-base` to your address**: the script’s current default is the developer’s endpoint, used for returned image links. The existing `install-jolly-bridge.py` is a migration helper and does not pass a custom public address; it is not a complete new-user installer. Do not run it unchanged for someone else’s endpoint.
 4. In Muse’s connector configuration, load `https://your-bridge.example/openapi.json` and set its server/base URL to your HTTPS address. The schema does not supply a server URL. Configure bearer authentication using your private token in the connector’s secure credential field. The schema names the integration **Ask Converse**.
-5. Open Converse, allow the intended agents in **Converse → Settings → Jolly**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but images (the measured scoreboard or art) do not, check the public base address and tunnel image route.
+5. Open Converse, allow the intended agents in **Converse → Settings → Jolly**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but portraits do not, check the public base address and tunnel image route.
 
 Treat the bearer token as access to the enabled agents. Limit their scope before sharing the connector. Returned images use opaque URLs that can be retrieved without the bearer token; anyone with such a URL can view that image. To stop new agent requests, disable its Jolly access. To revoke the connector itself, stop the bridge or rotate the token and update the connector’s credential; disabling an agent does not erase saved replies or images.
 
@@ -698,7 +728,7 @@ Desktop Converse runs sessions and agents on their **home system** while the app
 
 **Choose what an agent can see.** An agent receives its conversation, objective and working notes. If you select other sessions in Agent Setup, relevant excerpts from those sessions are also sent to the agent's selected provider—even when those sessions use a different provider or live on another Group member. Agents you create start with no watched sessions; the first-run starter agent watches only the starter coding session and Parking Lot. Repository checks send the repository name to GitHub and supply returned issue/release information to the selected model. Treat private repository content as private data. App Support's daily check uses the Converse repository while the app is open, with Auto pacing on (so it may check sooner or later within its bounds), and starts without watched sessions or mood art. You can pause its loop in Agent Setup. App Support does not hold up Quit: if it is the only active session or scheduled agent, Converse saves its state and quits without a warning.
 
-**Images in agent chat (Mac).** Paste or attach a screenshot to an agent's chat and ask about it. The image goes to that agent's selected provider along with your message. Up to eight recent user-attached images are included from the last 24 conversation messages, resized to at most 2048 pixels per side. Agent-generated artwork and images in watched sessions or Discord are not automatically included. Missing or oversized attachments in your latest message produce an error; attach them again in a new message to retry. Unavailable older attachments are explicitly labeled as omitted. Use the image tools' Describe command when you want to turn an image into reusable text context.
+**Images in agent chat (Mac).** Paste or attach a screenshot to an agent's chat and ask about it. The image goes to that agent's selected provider along with your message. Up to eight recent user-attached images are included from the last 24 conversation messages, resized to at most 2048 pixels per side. Portraits and other agent-generated artwork, and images in watched sessions or Discord, are not automatically included. Missing or oversized attachments in your latest message produce an error; attach them again in a new message to retry. Unavailable older attachments are explicitly labeled as omitted. Use the image tools' Describe command when you want to turn an image into reusable text context.
 
 **Integrations have their own sharing boundaries.** Enabling Discord reading supplies the configured channel's messages to the agent. Alerts and mention replies can send content back to that channel; public mention handling excludes private session history by default. Sharing session information requires an explicit setting and a verified private channel. Enabling Jolly lets the authenticated Meta Muse phone connector submit requests to permitted agents and retrieve replies/images. General Converse health questions route to App Support and may include the Group name and host display names/status. Disable an agent's Jolly access to remove it from this routing. Voice and image tools—including SAM—use Meta services independently of the conversation's selected model; the relevant audio/image is sent when you invoke those features. Pasting a key into a credential field does **not** send it to a model.
 
