@@ -210,6 +210,7 @@ struct ParkingLotEditor: NSViewRepresentable {
     let lot: ParkingLotStore
     @Binding var collapsed: Set<UUID>
     var reorder: () -> Void
+    var finder = ParkingLotFinder()
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = ParkingLotScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
@@ -230,6 +231,7 @@ struct ParkingLotEditor: NSViewRepresentable {
     func updateNSView(_ view: NSScrollView, context: Context) {
         let changedLot = context.coordinator.parent.lot.id != lot.id
         context.coordinator.parent = self
+        finder.editor = context.coordinator
         if changedLot { context.coordinator.text?.configureTextScaling(); context.coordinator.observeLot() }
         context.coordinator.render()
     }
@@ -241,7 +243,7 @@ struct ParkingLotEditor: NSViewRepresentable {
         var displayed: ParkingLotDocument?
         var displayedCollapsed: Set<UUID> = []
         var rendering = false
-        init(_ parent: ParkingLotEditor) { self.parent = parent }
+        init(_ parent: ParkingLotEditor) { self.parent = parent; super.init(); parent.finder.editor = self }
         private var lotObserver: AnyCancellable?
         private var renderQueued = false
         /// The pane refreshes from the lot here rather than through SwiftUI, which
@@ -308,6 +310,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             text.updateCommentButtons()
             text.needsDisplay = true
             if caret != nil { capture.measure(.lotScrollVisible) { text.scrollRangeToVisible(text.selectedRange()) } }
+            parent.finder.editorRendered()
         }
         /// The styled text of `entries`, whose rows and separators fill `range` of the display.
         private func styled(_ entries: ArraySlice<ParkingOutline.Entry>, in range: NSRange, width: CGFloat, standard: NSParagraphStyle) -> NSMutableAttributedString {
@@ -476,11 +479,58 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
             save(edit.rows, expected: displayed, caret: (edit.caretID, edit.caretOffset)); return false
         }
-        func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil) {
+        func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil, undoName: String? = nil) {
             do {
-                try PerformanceCapture.shared.measure(.lotRowsCommit) { try parent.lot.replaceUserRows(rows, revision: expected.revision) }
+                try PerformanceCapture.shared.measure(.lotRowsCommit) { try parent.lot.replaceUserRows(rows, revision: expected.revision, undoName: undoName) }
                 render(caret: caret)
             } catch { parent.lot.error = error.localizedDescription; render() }
+        }
+        // Find bar. Replacements are ordinary saved row edits, so read-only lots
+        // and writers holding the lot elsewhere refuse them in the usual way.
+        var canEditText: Bool { !parent.lot.isReadOnly && text?.isEditable != false }
+        var selectedFindText: String? {
+            guard let text, text.selectedRange().length > 0 else { return nil }
+            let value = (text.string as NSString).substring(with: text.selectedRange())
+            return value.rangeOfCharacter(from: CharacterSet(charactersIn: "\n\u{2028}")) == nil ? value : nil
+        }
+        var findCaret: (UUID, Int)? {
+            guard let text, let index = projection.index(at: text.selectedRange().location) else { return nil }
+            let entry = projection.entries[index]
+            return (entry.row.id, max(0, text.selectedRange().location - entry.range.location))
+        }
+        @discardableResult func saveFindResult(_ rows: [ParkingLotRow], undoName: String, caret: (UUID, Int)?) -> Bool {
+            let document = parent.lot.document
+            guard canEditText, rows != document.rows else { return false }
+            let revision = document.revision
+            save(rows, expected: document, caret: caret, undoName: undoName)
+            return parent.lot.document.revision == revision + 1
+        }
+        /// Opens every collapsed ancestor, then selects the match in the text.
+        func showFindMatch(_ match: ParkingLotFind.Match) {
+            let hierarchy = (try? ParkingLotTree.nodes(parent.lot.document.rows)) ?? [:]
+            var ancestor = hierarchy[match.row]?.parentID, opened = false
+            while let id = ancestor {
+                if parent.collapsed.contains(id) { parent.collapsed.remove(id); opened = true }
+                ancestor = hierarchy[id]?.parentID
+            }
+            if opened { render() }
+            guard let text, let entry = projection.entries.first(where: { $0.row.id == match.row }) else { return }
+            let range = NSRange(location: entry.range.location + match.range.location, length: match.range.length)
+            text.setSelectedRange(range); text.scrollRangeToVisible(range); text.showFindIndicator(for: range)
+        }
+        func applyFindHighlights() {
+            guard parent.finder.visible, let text, let manager = text.layoutManager, let storage = text.textStorage else { return }
+            clearFindHighlights()
+            let color = NSColor.systemYellow.withAlphaComponent(0.35)
+            let locations = Dictionary(uniqueKeysWithValues: projection.entries.map { ($0.row.id, $0.range.location) })
+            for match in parent.finder.matches {
+                guard let start = locations[match.row], NSMaxRange(match.range) + start <= storage.length else { continue }
+                manager.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: NSRange(location: start + match.range.location, length: match.range.length))
+            }
+        }
+        func clearFindHighlights() {
+            guard let text, let manager = text.layoutManager else { return }
+            manager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: (text.string as NSString).length))
         }
         func restore(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
             guard parent.lot.document.rows == expected else { parent.lot.error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
@@ -807,9 +857,21 @@ final class ParkingOutlineText: NSTextView {
         }
         super.deleteBackward(sender)
     }
+    override func performTextFinderAction(_ sender: Any?) {
+        let tag = (sender as? NSMenuItem)?.tag ?? (sender as? NSControl)?.tag ?? 0
+        guard let finder = owner?.parent.finder, let action = NSTextFinder.Action(rawValue: tag) else { return }
+        switch action {
+        case .showFindInterface: finder.open()
+        case .nextMatch: if finder.visible { finder.next() } else { finder.open() }
+        case .previousMatch: if finder.visible { finder.previous() } else { finder.open() }
+        case .hideFindInterface: finder.close()
+        default: break
+        }
+    }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        if item.action == #selector(performTextFinderAction(_:)) { return owner != nil }
         // Plain NSTextView validation rejects image-only clipboards before the
         // Edit menu can dispatch Command-V to our custom paste implementation.
         if item.action == #selector(paste(_:)),
@@ -1374,6 +1436,7 @@ private func parkingFlexibleNestingEditorSelfTests(_ check: (Bool, String) -> Vo
 
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     parkingFlexibleNestingEditorSelfTests(check)
+    parkingFindSelfTests(check)
     parkingHeadingLayoutSelfTests(check)
     parkingLotTextScalingSelfTests(check)
     parkingLotResizeSelfTests(check)

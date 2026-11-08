@@ -475,6 +475,7 @@ struct ParkingLotView: View {
     }
     @State private var reordering = false
     @StateObject private var undoFocus = ParkingLotUndoFocus()
+    @StateObject private var finder = ParkingLotFinder()
     @State private var talking = false
     @State private var dragging: UUID?
     @State private var dropBefore: UUID?
@@ -649,13 +650,10 @@ struct ParkingLotView: View {
                     Button("Export recovery copy…", action: exportRecovery)
                     Button("Show saved file") { lot.showSavedFile() }
                 }.padding(.horizontal)
-                ScrollView {
-                    Text(ParkingLotStore.markdown(lot.document.rows))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled).padding()
-                }
+                ParkingLotReadOnlyText(text: ParkingLotStore.markdown(lot.document.rows))
             } else if !reordering {
-                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
+                if finder.visible { ParkingLotFindBar(finder: finder); Divider() }
+                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true }, finder: finder)
                     .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: lot.substitutionFeedback).padding(12) }
             } else {
             ScrollView {
@@ -679,6 +677,21 @@ struct ParkingLotView: View {
             .onDisappear { lot.endViewing(viewerID) }
             .background(ParkingLotUndoAnchor(lot: lot, focus: undoFocus).frame(width: 0, height: 0))
             .sheet(isPresented: $talking) { ParkingLotTalkView(lot: lot) }
+    }
+}
+/// Read-only recovery view: native selection and Find, with nothing to replace.
+struct ParkingLotReadOnlyText: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        guard let view = scroll.documentView as? NSTextView else { return scroll }
+        view.isEditable = false; view.usesFindBar = true; view.isIncrementalSearchingEnabled = true
+        view.textContainerInset = NSSize(width: 12, height: 8); view.font = .systemFont(ofSize: 13)
+        view.setAccessibilityLabel("Parking Lot text")
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if let view = scroll.documentView as? NSTextView, view.string != text { view.string = text }
     }
 }
 private struct ParkingLotFrames: PreferenceKey {
