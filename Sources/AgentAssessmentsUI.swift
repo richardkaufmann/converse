@@ -4,38 +4,10 @@ import UniformTypeIdentifiers
 
 // View → Assessments and View → Portraits. Local windows need no extra access
 // gate. Portraits subscribe to demand only while their window is open.
-@MainActor final class AgentBoardWindows: NSObject, NSWindowDelegate {
+@MainActor final class AgentBoardWindows {
     static let shared = AgentBoardWindows()
-    private var assessments: NSWindow?
-    private var portraits: NSWindow?
-    private var portraitToken: UUID?
-    func showAssessments() {
-        if let assessments { assessments.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Assessments"; window.isReleasedWhenClosed = false; window.setFrameAutosaveName("ConverseAssessments")
-        window.contentView = NSHostingView(rootView: AgentAssessmentsView())
-        window.delegate = self; assessments = window
-        window.center(); window.makeKeyAndOrderFront(nil)
-    }
-    func showPortraits() {
-        if let portraits { portraits.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Portraits"; window.isReleasedWhenClosed = false; window.setFrameAutosaveName("ConversePortraits")
-        window.contentView = NSHostingView(rootView: AgentPortraitsView())
-        window.delegate = self; portraits = window
-        let token = UUID(); portraitToken = token
-        PortraitService.shared.subscribe(token, store: .shared)
-        window.center(); window.makeKeyAndOrderFront(nil)
-    }
-    func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        if window === portraits {
-            // Closing ends automatic demand; requests already running finish.
-            if let token = portraitToken { PortraitService.shared.unsubscribe(token) }
-            portraitToken = nil; portraits = nil
-        }
-        if window === assessments { assessments = nil }
-    }
+    func showAssessments() { GalleryWindows.shared.showAll(portraits: false) }
+    func showPortraits() { GalleryWindows.shared.showAll(portraits: true) }
 }
 
 struct AgentAssessmentsView: View {
@@ -62,15 +34,15 @@ struct AgentAssessmentCard: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let now = context.date, config = session.agent ?? AgentConfig(), assessment = config.assessment
-            let freshness = AgentAssessmentFreshness.of(assessment, problem: config.assessmentProblem, now: now)
+            let ageColor: Color = config.assessmentProblem != nil ? .orange : assessment.map { now.timeIntervalSince($0.checkedAt) < 300 ? .green : .secondary } ?? .secondary
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(session.title).font(.headline).lineLimit(2)
                     Spacer()
                     if let assessment { AssessmentStatusPill(status: assessment.status) }
-                    Text(freshness.label).font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(freshnessColor(freshness).opacity(0.18), in: Capsule()).foregroundStyle(freshnessColor(freshness))
-                        .accessibilityLabel("Freshness: " + freshness.label)
+                    Text(AgentAge.assessment(assessment?.checkedAt, now: now)).font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(ageColor.opacity(0.18), in: Capsule()).foregroundStyle(ageColor)
+                        .accessibilityLabel("Assessment age: " + AgentAge.assessment(assessment?.checkedAt, now: now))
                 }
                 if let assessment {
                     Text(assessment.summary).font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
@@ -100,10 +72,10 @@ struct AgentAssessmentCard: View {
                     expandable(id: "card", label: "Details", accessibility: "Assessment details", row: { EmptyView() }) { AgentJSONDetailView(json: detail) }
                 }
                 if let history = config.assessmentHistory, !history.isEmpty {
-                    DisclosureGroup("Earlier revisions", isExpanded: $showHistory) {
+                    DisclosureGroup("Earlier assessments", isExpanded: $showHistory) {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(history, id: \.revision) { item in
-                                Text("Rev \(item.revision) · " + item.status.label + " · " + AgentAge.short(item.updatedAt, now: now) + " ago" + (item.heartbeats > 0 ? " · unchanged for \(item.heartbeats) more checks" : "") + "\n" + item.summary)
+                                Text(item.status.label + " · " + AgentAge.short(item.updatedAt, now: now) + " ago" + (item.heartbeats > 0 ? " · unchanged for \(item.heartbeats) more checks" : "") + "\n" + item.summary)
                                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -116,7 +88,7 @@ struct AgentAssessmentCard: View {
         }
     }
     private func revisionLine(_ assessment: AgentAssessment, now: Date) -> String {
-        var line = "Rev \(assessment.revision) · #" + assessment.shortHash + " · updated " + AgentAge.short(assessment.updatedAt, now: now) + " ago"
+        var line = "Updated " + AgentAge.short(assessment.updatedAt, now: now) + " ago"
         // Unchanged turns collapse into one line instead of repeating the card.
         if let beats = assessment.heartbeats, beats > 0 { line += " · no change in \(beats) check" + (beats == 1 ? "" : "s") + ", last " + AgentAge.short(assessment.checkedAt, now: now) + " ago" }
         if assessment.seeded == true { line += " · seeded from the last scoreboard" }
@@ -218,6 +190,7 @@ struct AgentPortraitCard: View {
     @ObservedObject var session: Session
     @ObservedObject var portraits: PortraitService
     @Binding var notice: String
+    var imageHeight: CGFloat? = nil
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let config = session.agent ?? AgentConfig(), latest = config.portrait?.latest
@@ -242,14 +215,16 @@ struct AgentPortraitCard: View {
                     }
                     if generating { ProgressView().controlSize(.small).padding(6).background(.regularMaterial, in: Circle()).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(6) }
                 }
+                .frame(height: imageHeight)
                 HStack {
                     Text(session.title).font(.headline).lineLimit(1)
                     Spacer()
-                    Button("Refresh") { Task { await portraits.request(session, store: .shared, origin: .window, force: true) } }
+                    Button { Task { await portraits.request(session, store: .shared, origin: .menu, force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Refresh portrait")
                         .disabled(generating).help("Request a new portrait now, even if one was made recently.")
                 }
                 if let latest {
-                    Text("Updated " + AgentAge.short(latest.generatedAt, now: context.date) + " ago · " + (latest.sourceRevision > 0 ? "rev \(latest.sourceRevision)" : "no assessment") + (stale ? " · stale" : ""))
+                    Text("Updated " + AgentAge.short(latest.generatedAt, now: context.date) + " ago" + (stale ? " · newer information available" : ""))
                         .font(.caption).foregroundStyle(stale ? .orange : .secondary)
                 }
                 if let failure = config.portrait?.failure {

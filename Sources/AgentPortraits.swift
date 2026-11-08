@@ -47,9 +47,9 @@ struct PortraitOutcome {
 
 enum PortraitPrompt {
     /// Bump when the template changes so cached art is regenerated once.
-    static let templateVersion = 1
-    static let fleetStyle = "Converse fleet portrait series: a single square character portrait, painterly digital illustration, soft cinematic rim lighting, deep teal and warm amber palette, clean uncluttered background, consistent head-and-shoulders framing across the fleet."
-    static let noFacts = "Do not draw factual numbers, scores, scoreboards, charts, dashboards, captions, labels or overlays; facts live in the app's table, not in the art."
+    static let templateVersion = 2
+    static let composition = "Create a square artwork expressing this particular agent and its work. Follow the owner’s chosen subject, medium, palette and composition. A portrait can be a place, object, abstract composition or scene; it need not depict a person. Do not impose a shared fleet style, mascot, uniform or head-and-shoulders framing. When direction is absent, derive a distinctive visual subject from this agent’s objective."
+    static let noFacts = "Do not draw factual numbers, scores, scoreboards, measured charts or dashboards; facts live in the app's table, not in the art. Never invent factual labels or captions."
     static let stylisticText = "Stylistic lettering is allowed only as the owner's art direction asks; never factual numbers or scoreboards."
     static func allowsStylisticText(_ direction: String) -> Bool {
         direction.range(of: #"(?i)\b(text|letter(ing|s)?|words?|sign(age)?|title|caption|logo|typograph\w*|name\s+(on|in))\b"#, options: .regularExpression) != nil
@@ -59,9 +59,7 @@ enum PortraitPrompt {
         return "v\(templateVersion)-" + SHA256.hash(data: Data(normalized.utf8)).map { String(format: "%02x", $0) }.joined().prefix(12)
     }
     static func objectiveLine(_ objective: String) -> String {
-        let line = objective.components(separatedBy: .newlines).first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
-        let sentence = line.range(of: #"^.*?[.!?](\s|$)"#, options: .regularExpression).map { String(line[$0]) } ?? line
-        return String(sentence.trimmingCharacters(in: .whitespaces).prefix(160))
+        String(objective.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
     }
     static func moodWords(_ assessment: AgentAssessment?) -> [String] {
         if let mood = assessment?.mood, mood.count >= 3 { return Array(mood.prefix(5)) }
@@ -73,19 +71,27 @@ enum PortraitPrompt {
         case nil: return ["curious", "attentive", "calm"]
         }
     }
-    /// Name, one-line objective, assessment summary and mood. Fact values are
+    /// Owner direction, bounded objective context, assessment summary and mood. Fact values are
     /// deliberately excluded so the art cannot repeat or invent numbers.
     static func build(name: String, config: AgentConfig) -> String {
         let direction = (config.artDirection ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        var parts = [fleetStyle,
-                     "Subject: the Converse agent named “" + String(name.prefix(100)) + "”, portrayed as a character.",
+        var parts = [composition,
+                     "Subject: the Converse agent named “" + String(name.prefix(100)) + "”.",
                      "Its objective: " + objectiveLine(config.objective)]
         if let assessment = config.assessment {
             parts.append("Its current assessment (" + assessment.status.label.lowercased() + "): " + String(assessment.summary.prefix(400)))
         }
         parts.append("Mood: " + moodWords(config.assessment).joined(separator: ", ") + ".")
-        parts.append(noFacts + (allowsStylisticText(direction) ? " " + stylisticText : " No text or letters."))
-        if !direction.isEmpty { parts.append("Owner art direction (takes precedence for subject and style): " + String(direction.prefix(1800))) }
+        parts.append(noFacts + (allowsStylisticText(direction) ? " " + stylisticText : " No text or letters except a localized ? for a missing component."))
+        if !direction.isEmpty { parts.append("Owner art direction (takes precedence for subject and style): " + String(direction.prefix(4000))) }
+        var missing = config.assessment?.facts.filter { $0.value == AgentFact.unavailable }.map(\.label) ?? []
+        if config.assessmentProblem != nil { missing.append("Latest assessment update") }
+        if !missing.isEmpty {
+            parts.append("Unavailable components: " + missing.prefix(12).joined(separator: "; ") + ". Keep the available parts of the scene. Put a small ? only at the visual element corresponding to each missing component; do not turn the whole portrait into an error or invent the missing information.")
+        } else if config.assessment == nil {
+            parts.append("No assessment is available yet. Depict the objective and owner direction; use one small ? for the unknown current progress.")
+        }
+        parts.append("Descriptions are context, not attached image pixels. Never claim to reproduce an existing image that was not supplied.")
         return parts.joined(separator: "\n")
     }
 }
@@ -107,15 +113,17 @@ enum PortraitPrompt {
     private var inflight: [String: Task<PortraitOutcome, Never>] = [:]
     private var running: [UUID: String] = [:]
     private var queued: [UUID: Task<PortraitOutcome, Never>] = [:]
+    private var queuedExplicit: Set<UUID> = []
     private var deferred: [UUID: (task: Task<Void, Never>, window: Bool)] = [:]
     private var debounces: [UUID: Task<Void, Never>] = [:]
     private(set) var subscribers: Set<UUID> = []
+    private var selections: [UUID: Set<UUID>] = [:]
     private(set) var generations = 0
 
     static func minInterval(_ config: AgentConfig) -> TimeInterval { max(0, config.portraitMinMinutes ?? defaultMinMinutes) * 60 }
     static func backoff(_ failures: Int) -> TimeInterval { min(6 * 3600, 60 * pow(2, Double(max(0, failures - 1)))) }
     static func cacheKey(agent: UUID, config: AgentConfig) -> String {
-        agent.uuidString + ":" + (config.assessment?.contentHash ?? "none") + ":" + PortraitPrompt.directionVersion(config.artDirection)
+        agent.uuidString + ":" + (config.assessment?.contentHash ?? "none") + ":" + PortraitPrompt.directionVersion(config.artDirection) + ":" + PortraitPrompt.directionVersion(config.objective) + ":" + PortraitPrompt.directionVersion(config.assessmentProblem?.reason)
     }
     func isGenerating(_ id: UUID) -> Bool { generating.contains(id) }
     func hasDeferred(_ id: UUID) -> Bool { deferred[id] != nil }
@@ -162,12 +170,18 @@ enum PortraitPrompt {
         if let current = running[session.id], current != key {
             // The assessment changed mid-generation. That result keeps its own
             // source revision; the latest demanded content is queued behind it.
-            if let task = queued[session.id] { return await task.value }
+            if let task = queued[session.id] {
+                if origin != .window { queuedExplicit.insert(session.id) }
+                return await task.value
+            }
             let task = Task { @MainActor [weak self] () -> PortraitOutcome in
                 guard let self else { return PortraitOutcome(agent: session.title, image: nil, png: nil, stale: false, cached: false, note: nil, error: "Portraits stopped.", caption: "") }
                 if let earlier = self.inflight[current] { _ = await earlier.value }
                 self.queued[session.id] = nil
-                return await self.obtain(session, store: store, origin: origin, force: force, demanded: true)
+                let explicit = self.queuedExplicit.remove(session.id) != nil
+                let nextOrigin: PortraitOrigin = explicit ? .menu : origin
+                if nextOrigin == .window && !self.isDemanded(session.id) { return self.outcome(session, store: store, cached: true) }
+                return await self.obtain(session, store: store, origin: nextOrigin, force: force, demanded: true)
             }
             queued[session.id] = task
             return await task.value
@@ -269,27 +283,30 @@ enum PortraitPrompt {
 
     /// An open Portraits window. While any is open, agent turns request
     /// portraits (debounced); closing the last one ends automatic demand.
-    func subscribe(_ token: UUID, store: Store) {
+    func subscribe(_ token: UUID, store: Store, agents: Set<UUID>? = nil) {
         subscribers.insert(token)
-        for session in store.sessions where session.agent != nil {
-            Task { @MainActor in await self.request(session, store: store, origin: .window) }
+        selections[token] = agents ?? Set(store.sessions.filter { $0.agent != nil }.map(\.id))
+        for session in store.sessions where selections[token]?.contains(session.id) == true && session.agent != nil {
+            Task { @MainActor in
+                guard self.isDemanded(session.id) else { return }
+                await self.request(session, store: store, origin: .window)
+            }
         }
     }
+    func isDemanded(_ agent: UUID) -> Bool { selections.values.contains { $0.contains(agent) } }
     func unsubscribe(_ token: UUID) {
-        subscribers.remove(token)
-        guard subscribers.isEmpty else { return }
-        for task in debounces.values { task.cancel() }
-        debounces.removeAll()
-        for (id, entry) in deferred where entry.window { entry.task.cancel(); deferred[id] = nil }
+        subscribers.remove(token); selections[token] = nil
+        for id in Array(debounces.keys) where !isDemanded(id) { debounces.removeValue(forKey: id)?.cancel() }
+        for (id, entry) in deferred where entry.window && !isDemanded(id) { entry.task.cancel(); deferred[id] = nil }
     }
     /// Called after every agent turn. Without an open window this does nothing.
     func agentTurned(_ session: Session, store: Store) {
-        guard !subscribers.isEmpty, session.agent != nil else { return }
+        guard isDemanded(session.id), session.agent != nil else { return }
         debounces[session.id]?.cancel()
         let delay = debounceSeconds
         debounces[session.id] = Task { @MainActor [weak self, weak session] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard let self, let session, !Task.isCancelled, !self.subscribers.isEmpty else { return }
+            guard let self, let session, !Task.isCancelled, self.isDemanded(session.id) else { return }
             self.debounces[session.id] = nil
             await self.request(session, store: store, origin: .window)
         }
@@ -304,4 +321,25 @@ enum PortraitPrompt {
 
 extension AgentConfig {
     var portraitMinutes: Double { portraitMinMinutes ?? PortraitService.defaultMinMinutes }
+}
+
+/// Isolated portrait edits preserve live loop state and reject concurrent edits.
+enum AgentPortraitSettings {
+    static func onlyPortraitChanged(from old: AgentConfig, to edited: AgentConfig) -> Bool {
+        var copy = edited
+        copy.artDirection = old.artDirection; copy.portraitMinMinutes = old.portraitMinMinutes
+        return copy == old && (edited.artDirection != old.artDirection || edited.portraitMinMinutes != old.portraitMinMinutes)
+    }
+    static func applying(_ edited: AgentConfig, baseline: AgentConfig, current: AgentConfig) throws -> AgentConfig {
+        guard onlyPortraitChanged(from: baseline, to: edited), baseline.settingsRevision == current.settingsRevision else {
+            throw AgentFailure.message("Agent settings changed. Reload settings and try again.")
+        }
+        let direction = (edited.artDirection ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard direction.utf8.count <= 4000 else { throw AgentFailure.message("Art direction must be at most 4000 bytes.") }
+        var result = current
+        result.artDirection = direction
+        try result.setPortraitInterval(minutes: edited.portraitMinutes)
+        result.settingsChanged()
+        return result
+    }
 }

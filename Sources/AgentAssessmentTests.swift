@@ -165,14 +165,39 @@ import Foundation
     // 5. Portrait prompt: no factual numbers, stylistic opt-in, square.
     var portraitConfig = AgentConfig(); portraitConfig.objective = "Ship Converse 152 with assessments. Then rest."; portraitConfig.assessment = first
     let prompt = PortraitPrompt.build(name: "KAOS Steward", config: portraitConfig)
-    check(prompt.contains("KAOS Steward") && prompt.contains("Ship Converse 152 with assessments.") && !prompt.contains("Then rest") && prompt.contains("Two bugs remain")
-          && prompt.contains("watchful, busy, hopeful") && prompt.contains(PortraitPrompt.noFacts) && prompt.contains("No text or letters") && prompt.contains(PortraitPrompt.fleetStyle),
-          "Portrait prompt: name, one-line objective, assessment summary, mood words, fleet style and the no-facts rule")
+    check(prompt.contains("KAOS Steward") && prompt.contains("Ship Converse 152 with assessments.") && prompt.contains("Then rest") && prompt.contains("Two bugs remain")
+          && prompt.contains("watchful, busy, hopeful") && prompt.contains(PortraitPrompt.noFacts) && prompt.contains("No text or letters") && prompt.contains(PortraitPrompt.composition) && !prompt.contains("deep teal and warm amber"),
+          "Portrait prompt retains objective context and follows distinct owner composition without forcing a shared palette")
     check(!prompt.contains("41") && !prompt.contains("Verified in Writer") && !prompt.contains("Likely"), "Portrait prompt never includes fact values")
     portraitConfig.artDirection = "Retro movie poster with the agent's name in bold lettering"
     let lettered = PortraitPrompt.build(name: "KAOS Steward", config: portraitConfig)
     check(lettered.contains(PortraitPrompt.stylisticText) && lettered.contains(PortraitPrompt.noFacts) && lettered.contains("Retro movie poster"), "Art direction may opt into stylistic text but never factual numbers")
     check(PortraitPrompt.directionVersion("Retro  Poster") == PortraitPrompt.directionVersion("retro poster") && PortraitPrompt.directionVersion("a") != PortraitPrompt.directionVersion("b"), "Art-direction version normalizes whitespace and case")
+    let missing = AgentAssessments.missingInput("discord", label: "Discord input", now: now)
+    if case .revision(let partial) = AgentAssessments.evaluate(json("{\"summary\":\"Available evidence is useful.\",\"status\":\"on-track\",\"facts\":[]}"), measured: [missing], previous: nil, now: now) {
+        check(partial.facts.contains(missing), "Missing optional inputs remain visible even when the model omits them")
+        var incomplete = portraitConfig; incomplete.assessment = partial
+        let prompt = PortraitPrompt.build(name: "Partial", config: incomplete)
+        check(prompt.contains("Discord input") && prompt.contains("small ? only") && prompt.contains("Keep the available parts"), "Portraits use localized question marks for missing components")
+    } else { check(false, "Partial evidence still produces an assessment") }
+    check(AgentAge.assessment(now.addingTimeInterval(-299), now: now) == "Current" && AgentAge.assessment(now.addingTimeInterval(-300), now: now) == "5m"
+          && AgentAge.assessment(now.addingTimeInterval(-7200), now: now) == "2h" && AgentAge.assessment(now.addingTimeInterval(-345600), now: now) == "4d", "Assessment age uses the strict five-minute boundary and compact elapsed time")
+    var baseline = AgentConfig(); baseline.discordRead = true; baseline.discordChannelID = ""; baseline.settingsRevision = 9
+    var edited = baseline; edited.artDirection = "A silver observatory beneath violet skies."
+    var live = baseline; live.lastRunAt = later
+    do {
+        let saved = try AgentPortraitSettings.applying(edited, baseline: baseline, current: live)
+        check(saved.artDirection == edited.artDirection && saved.discordRead == true && saved.discordChannelID == "" && saved.lastRunAt == later && saved.settingsRevision == 10,
+              "Portrait-only saves work with an unavailable connector and preserve live runtime state")
+        live.settingsChanged()
+        do { _ = try AgentPortraitSettings.applying(edited, baseline: baseline, current: live); check(false, "Concurrent portrait settings rejected") }
+        catch { check(true, "Concurrent portrait settings rejected") }
+    } catch { check(false, "Portrait settings: " + error.localizedDescription) }
+    edited.discordRead = false
+    check(!AgentPortraitSettings.onlyPortraitChanged(from: baseline, to: edited), "Connector changes cannot bypass full settings validation")
+    var changedObjective = portraitConfig; changedObjective.objective += " Different work."
+    let keyID = UUID()
+    check(PortraitService.cacheKey(agent: keyID, config: portraitConfig) != PortraitService.cacheKey(agent: keyID, config: changedObjective), "Objective changes invalidate cached portrait art")
     let apiProbe = AgentAPI(); var imageBody: [String: Any]?
     let tiny = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!.representation(using: .png, properties: [:])!
     apiProbe.request = { request in
@@ -290,6 +315,15 @@ import Foundation
     service.agentTurned(agent, store: store)
     spin(0.3) { false }
     check(calls == 8 && service.pendingDebounces == 0, "After closing, turns generate nothing")
+    let other = store.createAgent(title: "Not selected"); other.queuePaused = true
+    let firstWindow = UUID(), secondWindow = UUID()
+    service.subscribe(firstWindow, store: store, agents: [agent.id])
+    service.subscribe(secondWindow, store: store, agents: [agent.id])
+    check(service.isDemanded(agent.id) && !service.isDemanded(other.id), "Gallery subscriptions select only the requested agents")
+    service.unsubscribe(firstWindow)
+    check(service.isDemanded(agent.id), "Closing one gallery preserves another gallery's overlapping demand")
+    service.unsubscribe(secondWindow)
+    check(!service.isDemanded(agent.id), "Closing the final selected gallery removes that agent's demand")
     // Delivery: inline to a requester and caption format.
     let requester = store.create(Entry(name: "Writer", command: "unused", directory: NSTemporaryDirectory(), engine: "codex")); requester.queuePaused = true
     var delivered: PortraitOutcome?
@@ -418,9 +452,13 @@ import Foundation
     check(agent.agent?.assessment?.summary == "Objective met; new art: neon." && agent.agent?.objective == ownerObjective && agent.agent?.artDirection == ownerDirection,
           "Generated summaries, notes and stray reply fields never overwrite the objective or the art direction")
     let portraitPrompt = PortraitPrompt.build(name: agent.title, config: agent.agent!)
-    check(portraitPrompt.contains("Owner art direction (takes precedence for subject and style): " + ownerDirection) && portraitPrompt.contains("Its objective: Track the 152 release.") && !portraitPrompt.contains("Success: no red bugs"),
-          "The art direction reaches the portrait prompt; only the objective's first line does")
+    check(portraitPrompt.contains("Owner art direction (takes precedence for subject and style): " + ownerDirection) && portraitPrompt.contains("Its objective: Track the 152 release.") && portraitPrompt.contains("Success: no red bugs"),
+          "The art direction reaches the portrait prompt; the objective criteria are retained")
+    agent.agent?.discordRead = true; agent.agent?.discordChannelID = ""
+    turn("{\"reply\":\"Working with available inputs\",\"assessment\":{\"summary\":\"Progress from available evidence.\",\"status\":\"on-track\",\"facts\":[]}}", loopTick: false)
+    check(agent.agent?.assessment?.facts.contains { $0.id == "input.discord" && $0.value == AgentFact.unavailable } == true && agent.agent?.lastOutcome == "Completed",
+          "An unavailable Discord connector does not reject the assessment turn")
     ArchiveWriter.shared.flushAll()
     let reloaded = Store(folder: root).sessions.first { $0.id == agent.id }?.agent
-    check(reloaded?.assessment?.revision == 2 && reloaded?.objective == ownerObjective && reloaded?.artDirection == ownerDirection, "Assessments persist with the agent, beside both owner texts")
+    check(reloaded?.assessment?.revision == 3 && reloaded?.objective == ownerObjective && reloaded?.artDirection == ownerDirection, "Assessments persist with the agent, beside both owner texts")
 }
