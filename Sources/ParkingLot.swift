@@ -424,10 +424,12 @@ struct ParkingLotSidebar: View {
                         .accessibilityLabel("Unseen Parking Lot changes")
                 } else { Color.clear.accessibilityHidden(true) }
             }.frame(width: 12, height: 12)
-            Button { show() } label: {
+            SidebarRevealName(location: workspace.placements[lot.id],
+                              windowName: workspace.placements[lot.id].flatMap { workspace.names[$0.windowID] },
+                              deviceName: ShownElsewhere.device(DeviceSyncService.shared.remoteDisplayHolder(lot.id), me: DeviceSyncService.shared.identity?.deviceID) { DeviceSyncService.shared.displayName(for: $0) }) {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
+            }.layoutPriority(-1)
             ProviderLogo(engine: "parking").frame(width: 24)
             PaneButtonGroup(hover: paneHover) {
                 PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
