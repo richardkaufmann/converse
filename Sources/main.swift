@@ -2580,19 +2580,37 @@ struct ScrollingConversation: NSViewRepresentable {
         }
         // Per-pane and pruned to displayed history; retained bodies are immutable.
         private var preparedMessages: [UUID: PreparedMessage] = [:]
+        // Retain assembled runs as well as parsed bodies. Streaming replaces only
+        // the changed suffix; it must not assemble or compare the entire archive.
+        private let assembledDocument = NSMutableAttributedString(string: "")
+        private var assembledFontSize: CGFloat?
+        private var assembledImageSignatures: [String: String] = [:]
+        private var renderNames: [String: String] = [:]
+        private var missingRenderNames: Set<String> = []
+        private func nameForRender(_ id: String) -> String? {
+            if let name = renderNames[id] { return name }
+            if missingRenderNames.contains(id) { return nil }
+            if let name = resolveSessionName(id) { renderNames[id] = name; return name }
+            missingRenderNames.insert(id); return nil
+        }
+        private func imageSignature(_ path: String) -> String? {
+            guard let info = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+            return "\(path)|\(info[.size] ?? 0)|\((info[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        }
         private var formattingObserver: NSObjectProtocol?
         private static let renderProfilingEnabled = {
             let environment = ProcessInfo.processInfo.environment
             return environment["CONVERSE_RENDER_PROFILE"] == "1"
                 && environment["CONVERSE_TEST_COMMAND"] != nil && environment["CONVERSE_DATA_DIR"] != nil
         }()
+        private(set) var messageAssemblyCount = 0
         private(set) var messagePreparationCount = 0
         var cachedPreparedMessageCount: Int { preparedMessages.count }
         private let imageCache = NSCache<NSString, NSTextAttachment>()
         private(set) var imagePreparationCount = 0
         func preparedImage(_ path: String) -> NSTextAttachment? {
-            guard let info = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
-            let key = "\(path)|\(info[.size] ?? 0)|\((info[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)" as NSString
+            guard let signature = imageSignature(path) else { return nil }
+            let key = signature as NSString
             if let cached = imageCache.object(forKey: key) { return cached }
             guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), let img = NSImage(data: bytes) else { return nil }
             let png: Data?
@@ -2730,7 +2748,7 @@ struct ScrollingConversation: NSViewRepresentable {
             if var cached = preparedMessages[message.id], cached.message == message,
                cached.collapse == collapse,
                cached.expanded == expanded, cached.dateEnvironment == dateEnvironment,
-               cached.resolvedNames.allSatisfy({ resolveSessionName($0.0) == $0.1 }) {
+               cached.resolvedNames.allSatisfy({ nameForRender($0.0) == $0.1 }) {
                 // Bigger/Smaller already scaled the visible storage. On the next
                 // content update, scale the retained bodies instead of parsing
                 // the entire history again. Copies remain immutable and private
@@ -2750,7 +2768,7 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             var resolvedNames: [(String, String?)] = []
             let resolveName: (String) -> String? = { [self] id in
-                let name = resolveSessionName(id)
+                let name = nameForRender(id)
                 resolvedNames.append((id, name))
                 return name
             }
@@ -2873,6 +2891,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 historyChanged = historyChanged || previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }
+            let previousMessageNumbers = renderedMessageNumbers, previousNumberOffset = renderedMessageNumberOffset
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
             historyChanged = historyChanged || numberingChanged
             let contentChanged = historyChanged
@@ -2912,7 +2931,31 @@ struct ScrollingConversation: NSViewRepresentable {
             if let previous {
                 while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
             }
-            let unchangedPrefix = firstRender || restyle || disclosureChanged ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
+            let dateEnvironment = Locale.current.identifier + "|" + TimeZone.current.identifier
+            renderNames.removeAll(keepingCapacity: true); missingRenderNames.removeAll(keepingCapacity: true)
+            var reusable = 0
+            if !firstRender && !restyle && !disclosureChanged && previousNumberOffset == session.messageNumberOffset && assembledFontSize == text.fontSize {
+                for message in messages.prefix(common) {
+                    guard previousMessageNumbers[message.id] == session.messageNumbers[message.id] else { break }
+                    // Mutable names, locale and image files can invalidate an
+                    // otherwise unchanged message. Check them before retaining runs.
+                    let visible = Store.visibleText(message.text)
+                    if !visible.isEmpty || !message.images.isEmpty {
+                        guard let cached = preparedMessages[message.id], cached.message == message,
+                              cached.fontSize == text.fontSize, cached.collapse == collapse,
+                              cached.expanded == expandedDisclosures.contains(message.id),
+                              cached.dateEnvironment == dateEnvironment,
+                              cached.resolvedNames.allSatisfy({ nameForRender($0.0) == $0.1 }),
+                              message.images.allSatisfy({ imageSignature($0) == assembledImageSignatures[$0] }) else { break }
+                    }
+                    reusable += 1
+                }
+            }
+            var unchangedPrefix = reusable == previous?.count ? historyEnd
+                : previous.flatMap { reusable < $0.count ? messageStarts[$0[reusable].id] : nil } ?? 0
+            if reusable == 0 || unchangedPrefix > min(assembledDocument.length, current.length) {
+                reusable = 0; unchangedPrefix = 0
+            }
             renderedAttachments = session.attachments
             historyBuildCount += 1
             let selection = text.selectedRange()
@@ -2927,13 +2970,21 @@ struct ScrollingConversation: NSViewRepresentable {
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
             stage("prepare")
-            let document = NSMutableAttributedString(string: "")
+            let document = assembledDocument
+            document.deleteCharacters(in: NSRange(location: unchangedPrefix, length: document.length - unchangedPrefix))
+            assembledFontSize = text.fontSize
+            let imagePaths = Set(messages.flatMap(\.images) + session.attachments)
+            assembledImageSignatures = assembledImageSignatures.filter { imagePaths.contains($0.key) }
+            var profileImageMilliseconds = 0.0, profileBodyMilliseconds = 0.0
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
             }
             @discardableResult func image(_ path: String) -> Bool {
+                let imageBegan = profile ? ProcessInfo.processInfo.systemUptime : 0
+                defer { if profile { profileImageMilliseconds += (ProcessInfo.processInfo.systemUptime - imageBegan) * 1000 } }
+                assembledImageSignatures[path] = imageSignature(path)
                 guard let attachment = preparedImage(path) else { return false }
-                if document.length > 0 && !document.string.hasSuffix("\n") {
+                if document.length > 0 && document.mutableString.character(at: document.length - 1) != 10 {
                     let precedingStyle = document.attribute(.paragraphStyle, at: document.length - 1, effectiveRange: nil) as? NSParagraphStyle ?? paragraph
                     append("\n", [.paragraphStyle: precedingStyle])
                 }
@@ -2944,20 +2995,23 @@ struct ScrollingConversation: NSViewRepresentable {
                 preview.addAttributes(base.merging([.paragraphStyle: imageStyle]) { _, new in new }, range: NSRange(location: 0, length: preview.length))
                 document.append(preview); return true
             }
-            text.messageLabels = []
-            var messageNumber = max(0, session.messageNumberOffset)
-            text.userBlocks = []
-            text.trafficBlocks = []
-            text.copyBlocks = []
-            messageStarts = [:]
-            let dateEnvironment = Locale.current.identifier + "|" + TimeZone.current.identifier
-            for message in messages {
+            text.messageLabels.removeAll { $0.location >= unchangedPrefix }
+            var messageNumber = text.messageLabels.last?.number ?? max(0, session.messageNumberOffset)
+            text.userBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
+            text.trafficBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
+            text.copyBlocks.removeAll { $0.range.location >= unchangedPrefix || NSMaxRange($0.range) > unchangedPrefix }
+            let reusedIDs = Set(messages.prefix(reusable).map(\.id))
+            messageStarts = messageStarts.filter { reusedIDs.contains($0.key) }
+            for message in messages.dropFirst(reusable) {
+                messageAssemblyCount += 1
                 messageStarts[message.id] = document.length
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
+                let bodyBegan = profile ? ProcessInfo.processInfo.systemUptime : 0
                 let prepared = prepareMessage(message, visible: visible, fontSize: text.fontSize,
                                               bodyFont: text.bodyFont, collapse: collapse,
                                               dateEnvironment: dateEnvironment, base: base)
+                if profile { profileBodyMilliseconds += (ProcessInfo.processInfo.systemUptime - bodyBegan) * 1000 }
                 let body = prepared.body, traffic = prepared.traffic
                 if body.length == 0 && message.images.isEmpty { continue }
                 let start = document.length
@@ -2970,7 +3024,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 messageNumber = session.messageNumbers[message.id].flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber + 1)
                 text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user", timestamp: message.createdAt))
                 let last = document.length - 1
-                let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
+                let paragraphRange = document.mutableString.paragraphRange(for: NSRange(location: last, length: 0))
                 let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle
                 style.paragraphSpacing = TranscriptStyle.blockSpacing
                 append("\n", [.paragraphStyle: style])
@@ -2980,6 +3034,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
             stage("assemble-history")
+            if profile { print(String(format: "PROFILE-SUBTOTAL bodies %.3f ms images %.3f ms", profileBodyMilliseconds, profileImageMilliseconds)) }
             historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
@@ -2995,13 +3050,9 @@ struct ScrollingConversation: NSViewRepresentable {
             // Layout preceding unchanged messages remains valid while an
             // assistant streams. Replacing the entire storage invalidates
             // every paragraph, even when only the final block changed.
-            var prefix = min(unchangedPrefix, document.length, current.length)
-            // A directory refresh can change an earlier traffic label without
-            // changing its stored message. Never reuse offsets unless the
-            // actual rendered prefix still matches the new document.
-            if prefix > 0 && current.substring(to: prefix) != (document.string as NSString).substring(to: prefix) {
-                prefix = 0
-            }
+            // The retained prefix was validated above, including mutable names,
+            // images and formatting. Avoid copying/comparing its entire string.
+            let prefix = unchangedPrefix
             lastReplacementStart = prefix
             text.readOnlyFinder.noteClientStringWillChange()
             if prefix > 0 {
@@ -3694,7 +3745,19 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
         fresh.resolveSessionName = coordinator.resolveSessionName
         fresh.expandedDisclosures = coordinator.expandedDisclosures
         fresh.render(cold)
-        check(text.textStorage!.isEqual(to: cold.textStorage!) && text.inputStart == cold.inputStart,
+        func comparable(_ source: NSAttributedString) -> NSAttributedString {
+            let result = NSMutableAttributedString(attributedString: source)
+            source.enumerateAttribute(.attachment, in: NSRange(location: 0, length: source.length)) { value, range, _ in
+                guard let attachment = value as? NSTextAttachment else { return }
+                // Fresh renderers own different attachment instances. Compare
+                // their actual exported bytes and preview dimensions instead.
+                result.removeAttribute(.attachment, range: range)
+                result.addAttribute(NSAttributedString.Key("qaImageBytes"), value: attachment.fileWrapper?.regularFileContents ?? Data(), range: range)
+                result.addAttribute(NSAttributedString.Key("qaImageSize"), value: NSValue(size: attachment.attachmentCell?.cellSize() ?? .zero), range: range)
+            }
+            return result
+        }
+        check(comparable(text.textStorage!).isEqual(to: comparable(cold.textStorage!)) && text.inputStart == cold.inputStart,
               "Prepared history matches fresh text and attributes: " + label)
         let copiesMatch = text.copyBlocks.count == cold.copyBlocks.count && zip(text.copyBlocks, cold.copyBlocks).allSatisfy {
             $0.range == $1.range && $0.source == $1.source && $0.formatted.isEqual(to: $1.formatted)
@@ -3703,8 +3766,11 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
         check(text.trafficBlocks == cold.trafficBlocks && text.userBlocks == cold.userBlocks && text.messageLabels == cold.messageLabels,
               "Prepared history matches fresh traffic shading, prompt blocks and message labels: " + label)
     }
+    let assembliesBeforeAppend = coordinator.messageAssemblyCount
     session.messages.append(Message(role: "assistant", text: "New **output**"))
     coordinator.render(text)
+    check(coordinator.messageAssemblyCount == assembliesBeforeAppend + 1 && coordinator.lastReplacementStart > 0,
+          "Appending output retains assembled history and replaces only the new suffix")
     check(coordinator.messagePreparationCount == 4, "Appending output prepares only the new message")
     compareCold("append")
     session.messages[1].delays = [DelayMark(offset: 15, seconds: 12)]
@@ -3782,6 +3848,42 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
     let mixedIndex = session.messages.count - 4
     session.messages[mixedIndex].components = TranscriptStyle.components(joining: [(plainTell, "traffic"), (typed, "human")], into: plainMerged)
     coordinator.render(text); compareCold("legacy merge gained parts")
+    session.messages.swapAt(1, 2)
+    coordinator.render(text); compareCold("messages reordered")
+    session.messages.remove(at: 1)
+    coordinator.render(text); compareCold("middle message deleted")
+    session.draft = "A native draft with é😀"
+    coordinator.render(text)
+    let draftOffset = 4
+    text.setSelectedRange(NSRange(location: text.inputStart + draftOffset, length: 0))
+    session.messages.append(Message(role: "assistant", text: "Output while editing the draft"))
+    coordinator.render(text); compareCold("draft preserved across append")
+    check(text.selectedRange().location == text.inputStart + draftOffset && session.draft == "A native draft with é😀",
+          "Suffix assembly preserves draft-relative caret and draft text")
+    let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("converse-assembly-" + UUID().uuidString + ".png")
+    defer { try? FileManager.default.removeItem(at: imageURL) }
+    func writeImage(_ color: NSColor, modified: TimeInterval) {
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(color, atX: x, y: y) } }
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: imageURL)
+        try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: modified)], ofItemAtPath: imageURL.path)
+    }
+    writeImage(.red, modified: 1)
+    session.messages.append(Message(role: "assistant", text: "Image with caption", images: [imageURL.path]))
+    coordinator.render(text); compareCold("image appended")
+    let preparedImages = coordinator.imagePreparationCount
+    session.messages.append(Message(role: "assistant", text: "After the image"))
+    coordinator.render(text); compareCold("history image retained")
+    check(coordinator.imagePreparationCount == preparedImages, "Unchanged historical image reuses prepared pixels")
+    writeImage(.blue, modified: 2)
+    session.messages.append(Message(role: "assistant", text: "After replacing image bytes"))
+    coordinator.render(text); compareCold("same path image replaced")
+    check(coordinator.imagePreparationCount == preparedImages + 1, "Changed image file invalidates retained attachment")
+    try! FileManager.default.removeItem(at: imageURL)
+    session.messages.append(Message(role: "assistant", text: "After deleting image file"))
+    coordinator.render(text); compareCold("historical image file disappeared")
 }
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     conversationPreparedCacheSelfTests(check)
@@ -4662,11 +4764,16 @@ if CommandLine.arguments.contains("--transcript-render-profile") {
           ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     _ = NSApplication.shared
     let longHistory = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_LONG"] == "1"
+    let trafficHistory = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_TRAFFIC"] == "1"
+    let imagePath = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_IMAGE"]
+    if let imagePath, !FileManager.default.fileExists(atPath: imagePath) { fputs("Profile image does not exist\n", stderr); exit(2) }
     for count in (longHistory ? [1200] : [100, 600, 1200]) {
         let session = Session(entry: Entry(name: "Synthetic render profile", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
         session.messages = (0..<count).map { index in
             let role = index % 2 == 0 ? "user" : "assistant"
-            let source = "Message \(index): " + String(repeating: "Retained history with **formatting** and https://example.com/a. ", count: longHistory ? 32 : 8)
+            let body = "Message \(index): " + String(repeating: "Retained history with **formatting** and https://example.com/a. ", count: longHistory ? 32 : 8)
+            let source = trafficHistory && role == "user"
+                ? "[Converse message from Fixture · session 00000000-0000-0000-0000-000000000001 · delivery \(UUID().uuidString) · hop 1/100]\n" + body : body
             let delays: [DelayMark]? = longHistory && role == "assistant" && index % 3 != 0
                 ? [DelayMark(offset: (source as NSString).length / 2, seconds: 3)] : nil
             return Message(role: role, text: source, delays: delays)
@@ -4681,6 +4788,20 @@ if CommandLine.arguments.contains("--transcript-render-profile") {
             print("CASE \(count) suffix \(update)")
             coordinator.render(text)
         }
+        if let imagePath {
+            session.messages.append(Message(role: "assistant", text: "New scoreboard image", images: [imagePath]))
+            print("CASE \(count) image-append-cold")
+            coordinator.render(text)
+            session.messages[session.messages.count - 1].text += " Caption update."
+            print("CASE \(count) image-caption-warm")
+            coordinator.render(text)
+        }
+        for update in 1...3 {
+            session.messages.append(Message(role: "user", text: "[Converse message from Fixture · session 00000000-0000-0000-0000-000000000001 · delivery \(UUID().uuidString) · hop 1/100]\nTraffic append \(update)"))
+            print("CASE \(count) traffic-append \(update)")
+            coordinator.render(text)
+        }
+        print("COUNTS preparedMessages=\(coordinator.messagePreparationCount) preparedImages=\(coordinator.imagePreparationCount) assembledMessages=\(coordinator.messageAssemblyCount)")
     }
     exit(0)
 }
