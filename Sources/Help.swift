@@ -146,7 +146,7 @@ struct HelpText: NSViewRepresentable {
         context.coordinator.videos = videos
         guard let text = scroll.documentView as? NSTextView, context.coordinator.markdown != markdown || context.coordinator.query != query else { return }
         context.coordinator.markdown = markdown; context.coordinator.query = query
-        let content = MarkdownText.render(markdown), string = content.string as NSString
+        let content = Self.content(markdown), string = content.string as NSString
         var firstMatch: NSRange?
         for word in [query.trimmingCharacters(in: .whitespacesAndNewlines)] where !word.isEmpty {
             var location = 0
@@ -161,13 +161,17 @@ struct HelpText: NSViewRepresentable {
         text.textStorage?.setAttributedString(content)
         text.scrollRangeToVisible(firstMatch ?? NSRange(location: 0, length: 0))
     }
+    // Help has no session home to reveal a file on, so a local image shows as plain text.
+    static func content(_ markdown: String) -> NSMutableAttributedString { LocalImageFallback.withoutFileLinks(MarkdownText.render(markdown)) }
     func makeCoordinator() -> Coordinator { Coordinator(videos: videos) }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var markdown: String?; var query: String?; var videos: HelpVideoPresenter
         init(videos: HelpVideoPresenter) { self.videos = videos }
-        // Manifest video links play in Help; every other link opens as usual.
+        // Manifest video links play in Help; local files never open from it;
+        // every other link opens as usual.
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             guard let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else { return false }
+            if url.isFileURL { return true }
             return videos.open(url)
         }
     }
@@ -197,6 +201,12 @@ struct HelpText: NSViewRepresentable {
     let presenter = HelpVideoPresenter(videos: [video]) { _ in fixture }
     let coordinator = HelpText.Coordinator(videos: presenter), text = NSTextView()
     check(!coordinator.textView(text, clickedOnLink: URL(string: others[0])!, at: 0) && presenter.playback == nil, "Help hands non-video links to normal link handling")
+    let localImage = HelpText.content("Before ![Shot](/tmp/help-example.app) after")
+    var localLinks = 0
+    localImage.enumerateAttribute(.link, in: NSRange(location: 0, length: localImage.length)) { value, _, _ in if value != nil { localLinks += 1 } }
+    check(localLinks == 0 && localImage.string.contains("/tmp/help-example.app"), "Help shows a local image reference as plain text with no link")
+    check(coordinator.textView(text, clickedOnLink: URL(fileURLWithPath: "/tmp/help-example.app"), at: 0) && coordinator.textView(text, clickedOnLink: "file:///tmp/help-example.app", at: 0) && presenter.playback == nil,
+          "Help consumes a file link click without opening or playing it")
     func wait(_ done: () -> Bool) { let end = Date().addingTimeInterval(10); while !done() && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) } }
     var playback: HelpVideoPlayback?
     weak var released: AVPlayer?, item: AVPlayerItem?
