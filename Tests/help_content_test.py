@@ -79,6 +79,28 @@ class HelpContentTests(unittest.TestCase):
         with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
             self.assertEqual(generator.source_commit(root), 'unknown')
 
+    def test_source_archive_without_git_uses_stamped_commit(self):
+        stamped = 'a' * 40
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
+            Path(folder, 'SOURCE_COMMIT').write_text(stamped + '\n')
+            self.assertEqual(generator.source_commit(folder), stamped)
+            Path(folder, 'SOURCE_COMMIT').write_text('$Format:%H$\n')
+            self.assertEqual(generator.source_commit(folder), 'unknown', 'An unexpanded placeholder is not a commit')
+            Path(folder, 'SOURCE_COMMIT').write_text('not-a-commit\n')
+            self.assertEqual(generator.source_commit(folder), 'unknown')
+
+    def test_git_archive_stamps_source_commit(self):
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, capture_output=True)
+        if head.returncode != 0:
+            self.skipTest('not a git checkout')
+        archived = subprocess.run(['git', 'archive', 'HEAD', 'SOURCE_COMMIT'], cwd=root, capture_output=True)
+        self.assertEqual(archived.returncode, 0)
+        import io, tarfile
+        with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as tar:
+            content = tar.extractfile('SOURCE_COMMIT').read().decode().strip()
+        self.assertEqual(content, head.stdout.strip(), 'Source archives carry the commit they were made from')
+
     def test_readme_scoreboard_and_caption_are_excluded_from_help(self):
         source = (root / 'README.md').read_text()
         self.assertIn('docs/converse-status.jpg', source)

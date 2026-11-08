@@ -177,7 +177,13 @@ def source_commit(directory):
             return None
     commit = git("rev-parse", "HEAD")
     if commit is None or commit.returncode != 0:
-        return "unknown"
+        # Source archives (git archive) carry the commit in SOURCE_COMMIT via
+        # export-subst; a plain checkout still holds the unexpanded placeholder.
+        try:
+            stamped = (Path(directory) / "SOURCE_COMMIT").read_text().strip()
+        except OSError:
+            stamped = ""
+        return stamped if re.fullmatch(r"[0-9a-f]{40}", stamped) else "unknown"
     dirty = git("status", "--porcelain")
     if dirty is not None and dirty.returncode == 0 and dirty.stdout.strip():
         return commit.stdout.strip() + "-dirty"
