@@ -116,15 +116,6 @@ class HelpContentTests(unittest.TestCase):
             self.assertIn('It talks to the outside world.', rendered)
             self.assertIn('It has polish.', rendered)
 
-    def test_removed_change_assistant_menu_name_stays_removed(self):
-        for relative in ('Sources/Workspace.swift', 'Sources/DeviceUI.swift',
-                         'README.md', 'docs/converse-export.md', 'docs/desktop-reference.md'):
-            with self.subTest(file=relative):
-                self.assertNotIn('Change Assistant or Login', (root / relative).read_text())
-        workspace = (root / 'Sources/Workspace.swift').read_text()
-        self.assertGreaterEqual(workspace.count('Button("Configure…")'), 2,
-                                'Agent and non-agent sidebar menus both keep a Configure route')
-
     def test_current_docs_and_menus_use_assessments_and_portraits(self):
         readme = (root / 'README.md').read_text()
         self.assertNotIn('## Agents and project scoreboards', readme)
@@ -139,6 +130,17 @@ class HelpContentTests(unittest.TestCase):
                          (root / 'windows/src/Converse.Windows/ConversationPane.xaml').read_text())
         self.assertNotIn('filename="scoreboard.png"', (root / 'Sources/AgentDiscord.swift').read_text())
         self.assertNotIn('filename=\\"scoreboard.png\\"', (root / 'Sources/AgentDiscord.swift').read_text())
+        self.assertNotIn('optional scoreboard stay on the chosen home',
+                         (root / 'Sources/AgentUI.swift').read_text())
+
+    def test_removed_change_assistant_menu_name_stays_removed(self):
+        for relative in ('Sources/Workspace.swift', 'Sources/DeviceUI.swift',
+                         'README.md', 'docs/converse-export.md', 'docs/desktop-reference.md'):
+            with self.subTest(file=relative):
+                self.assertNotIn('Change Assistant or Login', (root / relative).read_text())
+        workspace = (root / 'Sources/Workspace.swift').read_text()
+        self.assertGreaterEqual(workspace.count('Button("Configure…")'), 2,
+                                'Agent and non-agent sidebar menus both keep a Configure route')
 
     def test_readme_only_blocks_preserve_surrounding_prose_and_code_examples(self):
         source = '# App\nBefore\n<!-- readme-only:start -->\n![Art](docs/art.jpg)\n\n*Caption*\n<!-- readme-only:end -->\nAfter\n```html\n<!-- readme-only:start -->\nExample\n<!-- readme-only:end -->\n```\n'

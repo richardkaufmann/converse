@@ -621,7 +621,7 @@ struct AgentCreationView: View {
                 #endif
                 ForEach(service.participantHomes.filter { service.canHostAgent($0.deviceID) }, id: \.deviceID) { device in Text(device.deviceName).tag(device.deviceID) }
             }
-            Text("The agent starts paused. Its API credentials, loop and optional scoreboard stay on the chosen home. Select the sessions it may read in Agent Setup.").font(.callout).foregroundStyle(.secondary)
+            Text("The agent starts paused. Its API credentials, loop and assessments stay on the chosen home. Select the sessions it may read in Agent Setup.").font(.callout).foregroundStyle(.secondary)
             if !outcome.isEmpty { Text(outcome).font(.callout) }
             HStack { Button("Cancel", action: onClose); Spacer(); Button(working ? "Creating…" : "Create agent") { create() }.disabled(working || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).keyboardShortcut(.defaultAction) }
         }.padding(20).frame(width: 440)
