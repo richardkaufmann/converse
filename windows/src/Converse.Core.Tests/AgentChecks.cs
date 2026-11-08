@@ -172,7 +172,7 @@ static class AgentChecks
             var invented = AgentAssessments.Evaluate(JsonNode.Parse("{\"summary\":\"Quotes\",\"status\":\"on-track\",\"facts\":[{\"id\":\"price\",\"label\":\"Price\",\"value\":\"999\",\"kind\":\"evidence\",\"source\":\"https://invented.invalid/q\"},{\"id\":\"real\",\"label\":\"Real\",\"value\":\"$1\",\"kind\":\"evidence\",\"source\":\"https://example.com/q\"}]}"), [], null, DateTime.UtcNow, url => url == "https://example.com/q");
             check(invented.Record!.Facts.Single(f => f.Id == "price").Value == AgentAssessments.Unavailable && invented.Record.Facts.Single(f => f.Id == "real").Value == "$1", "Assessment facts citing a web URL this run did not retrieve read Unavailable");
             var widget = home.AgentWidgetFor(agent);
-            check(agent.Agent.Widget is null && widget?.Summary == "Synthetic progress." && widget.Status == "At risk" && widget.Freshness == "Fresh" && widget.Revision == 1 && widget.Metrics.Single().Label == "Open issues",
+            check(agent.Agent.Widget is null && widget?.Summary == "Synthetic progress." && widget.Status == "At risk" && widget.Freshness == "Fresh" && widget.Revision == 1 && widget.Metrics.Single().Value == AgentAssessments.Unavailable,
                 "The remote widget derives from the assessment (summary, status, freshness, facts); a scoreboard field from the model is ignored");
             var before = agent.Agent.Settings.RemainingRuns;
             agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.IntervalSeconds = 60; agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1);

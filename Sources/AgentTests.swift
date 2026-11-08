@@ -507,7 +507,8 @@ import Foundation
     } else { check(false, "Archives with a saved scoreboard cadence still load") }
     var olderEditor = cadenceAgent.agent!.wire(home: String(repeating: "a", count: 64)); olderEditor.scoreboardEveryLoops = 7
     var applied = cadenceAgent.agent!
-    check((try? applied.apply(olderEditor)) != nil, "Settings from an older editor that still sends a scoreboard cadence are accepted and the cadence ignored")
+    do { try applied.apply(olderEditor); check(true, "Settings from an older editor that still sends a scoreboard cadence are accepted and the cadence ignored") }
+    catch { check(false, "Older editor settings: " + error.localizedDescription) }
     let taggedLoop = PendingPrompt(agentLoopTick: true, text: "host tick", images: [])
     check((try? JSONDecoder().decode(PendingPrompt.self, from: JSONEncoder().encode(taggedLoop)))?.agentLoopTick == true, "Scheduled loop provenance survives queue persistence without inferring it from prompt text")
 
@@ -705,7 +706,7 @@ import Foundation
     let noRepoInstructions = noRepoBody?["instructions"] as? String ?? ""
     check(noRepoInstructions.contains("Objective: Report weather news only. Never mention GitHub or Discord.") && !noRepoInstructions.contains("Objective: " + AgentConfig().objective) && noRepoInstructions.contains(AgentPolicy.objectiveGoverns), "An objective edited in Agent Setup reaches the next run and governs supplied evidence and older notes")
     let noRepoHTML = AgentWidgetExport.html(agent)
-    check(noRepoHTML.contains("AGENT ASSESSMENT") && noRepoHTML.contains(agent.agent?.assessment?.summary ?? "missing") && !noRepoHTML.contains("Repository data unavailable"), "A general agent's export shows its assessment without GitHub warnings")
+    check(noRepoHTML.contains("AGENT ASSESSMENT") && noRepoHTML.contains(AgentWidgetExport.escape(agent.agent?.assessment?.summary ?? "missing")) && !noRepoHTML.contains("Repository data unavailable"), "A general agent's export shows its assessment without GitHub warnings")
     check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Agents/" + agent.id.uuidString + "/metrics.json").path), "Clearing GitHub removes stale exported repository measurements")
     check(Store(folder: root).sessions.first(where: { $0.id == agent.id })?.agent?.repository == "", "No-repository agent survives a full session archive reload")
     runtime.keyReader = { _ in "isolated-test-key" }
