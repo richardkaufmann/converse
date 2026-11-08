@@ -283,6 +283,17 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
             }
         }
     }
+    let suite = "Converse.PerformancePreview." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let preferenceProbe = PerformanceDebugState()
+    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: [:], environment: [:])
+    guard !preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") == nil else { throw NSError(domain: "PerformancePreview", code: 2) }
+    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    guard preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") == nil else { throw NSError(domain: "PerformancePreview", code: 3) }
+    preferenceProbe.turnOff()
+    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    guard !preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") as? Bool == false else { throw NSError(domain: "PerformancePreview", code: 4) }
     titlePreview("off")
     diagnostics.record(folder: store.folder)
     titlePreview("recording")
@@ -294,6 +305,15 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
         throw NSError(domain: "PerformancePreview", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pause did not freeze a capture"])
     }
     titlePreview("paused")
+    let savedFile = diagnostics.file!
+    let savedBytes = try Data(contentsOf: savedFile)
+    diagnostics.record(folder: store.folder)
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 500)
+    diagnostics.turnOff()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    guard !diagnostics.recording, !diagnostics.paused, diagnostics.file == savedFile,
+          try Data(contentsOf: savedFile) == savedBytes else { throw NSError(domain: "PerformancePreview", code: 5) }
+    print("PASS: computed recording defaults remain unset; explicit Off persists; Record then Off preserves paused export bytes")
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         let appearance = NSAppearance(named: appearanceName)!
         for (index, category) in SettingsCategory.allCases.enumerated() {
@@ -331,16 +351,19 @@ final class PerformanceDebugState: ObservableObject {
         }
     }
     @Published var automatic = false {
-        didSet { UserDefaults.standard.set(automatic, forKey: "performanceRecordOnLaunch") }
+        didSet { if !loadingPreferences { preferences.set(automatic, forKey: "performanceRecordOnLaunch") } }
     }
+    private var loadingPreferences = false
+    private var preferences = UserDefaults.standard
     private var request = 0
     private var folder: URL?
-    func initialize(folder: URL) {
-        self.folder = folder
-        let defaults = UserDefaults.standard
+    func initialize(folder: URL, defaults: UserDefaults = .standard, info: [String: Any] = Bundle.main.infoDictionary ?? [:], environment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.folder = folder; preferences = defaults
+        loadingPreferences = true
+        defer { loadingPreferences = false }
         history = PerformanceCapture.clampedHistory((defaults.object(forKey: "performanceHistorySeconds") as? Double) ?? 60)
         automatic = (defaults.object(forKey: "performanceRecordOnLaunch") as? Bool) ?? PerformanceCapture.recordingDefault(
-            info: Bundle.main.infoDictionary ?? [:], environment: ProcessInfo.processInfo.environment)
+            info: info, environment: environment)
         let paused = folder.appendingPathComponent("Performance Diagnostics/paused-performance.json")
         if FileManager.default.fileExists(atPath: paused.path) { file = paused }
         if automatic { record(folder: folder) }
@@ -351,10 +374,10 @@ final class PerformanceDebugState: ObservableObject {
         PerformanceCapture.shared.configure(folder: folder, enabled: true, historySeconds: history)
         recording = true; paused = false; status = "Recording recent activity. Pause after a stutter."
     }
-    func pause(turnOff: Bool = false) {
+    func pause() {
         guard recording, !busy, let folder else { return }
         request += 1; let token = request
-        recording = false; paused = !turnOff; busy = true; status = "Saving paused buffer…"
+        recording = false; paused = true; busy = true; status = "Saving paused buffer…"
         PerformanceCapture.shared.finish { result in
             var result = result
             if case .success(let current) = result {
@@ -369,7 +392,7 @@ final class PerformanceDebugState: ObservableObject {
                 guard self.request == token else { return }
                 self.busy = false
                 switch result {
-                case .success(let file): self.file = file; self.status = turnOff ? "Off. Last buffer saved locally." : "Paused. Buffer saved locally and ready to export."
+                case .success(let file): self.file = file; self.status = "Paused. Buffer saved locally and ready to export."
                 case .failure(let error): self.file = nil; self.status = "Could not save buffer: " + error.localizedDescription
                 }
             }
@@ -378,8 +401,10 @@ final class PerformanceDebugState: ObservableObject {
     func turnOff() {
         guard !busy else { return }
         automatic = false
-        if recording { pause(turnOff: true) }
-        else { paused = false; status = "Off. Last paused buffer remains available to export." }
+        request += 1
+        if let folder, recording { PerformanceCapture.shared.configure(folder: folder, enabled: false) }
+        recording = false; paused = false
+        status = "Off. Last paused buffer remains available to export."
     }
     func export() {
         guard let file, !busy else { return }
