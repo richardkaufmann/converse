@@ -66,6 +66,7 @@ struct PadRoot: View {
     @State private var phoneSessionsShown = false
     @State private var phoneDestination: String?
     @State private var keyboardShown = false
+    @AppStorage("sidebarSort") private var sidebarSort = SidebarSort.alphabetical.rawValue
     @GestureState private var resizingText = false
     @ObservedObject private var phoneKeyboard: PhoneKeyboardController
     private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
@@ -257,7 +258,7 @@ struct PadRoot: View {
     }
     var sidebar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Converse Groups") }.padding(6)
+            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); PadSortMenu(sort: $sidebarSort); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Converse Groups") }.padding(6)
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
@@ -278,12 +279,12 @@ struct PadRoot: View {
                                         }
                                     }
                                     if service.canHostAgent(home.deviceID) { Button("New agent…") { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } }
-                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.caption2) } }
+                                } label: { Image(systemName: "plus") }
                                 .accessibilityLabel("Create session on " + home.deviceName)
                             }
                         }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
-                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                        ForEach(SidebarSort.rows(home.rows, by: SidebarSort(rawValue: sidebarSort) ?? .alphabetical)) { row in
                             let pane = model.state.placements.firstIndex(of: row.globalID)
                             let attention = !(row.attention ?? "").isEmpty || (row.status.hasPrefix("Waiting") && pane == nil)
                             let markers = service.remoteMarkers(row)
@@ -327,6 +328,7 @@ struct PhoneSessionPicker: View {
     @ObservedObject var model: PadModel
     @ObservedObject private var service: DeviceSyncService
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("sidebarSort") private var sidebarSort = SidebarSort.alphabetical.rawValue
     var open: (String) -> Void
     init(model: PadModel, open: @escaping (String) -> Void) { self.model = model; self.service = model.service; self.open = open }
     var body: some View {
@@ -337,7 +339,7 @@ struct PhoneSessionPicker: View {
                 }
                 ForEach(Array(service.homes.values).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                     Section {
-                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                        ForEach(SidebarSort.rows(home.rows, by: SidebarSort(rawValue: sidebarSort) ?? .alphabetical)) { row in
                             let selected = model.state.placements.contains(row.globalID)
                             let markers = service.remoteMarkers(row)
                             Button { model.togglePhoneSession(row.globalID) } label: {
@@ -391,6 +393,19 @@ struct PhoneSessionPicker: View {
 }
 
 // Turn state comes from the home, including turns producing no text yet.
+/// The ˯ beside the sidebar title: session order, shared with the iPhone picker.
+struct PadSortMenu: View {
+    @Binding var sort: String
+    var body: some View {
+        Menu {
+            Picker("Sort sessions", selection: $sort) {
+                ForEach([SidebarSort.alphabetical, .recent], id: \.self) { Text($0.title).tag($0.rawValue) }
+            }
+        } label: { Image(systemName: "chevron.down").frame(width: 30, height: 30) }
+            .accessibilityLabel("Sort sessions")
+    }
+}
+
 struct PadSessionActivity: View {
     let id: String
     @ObservedObject var service: DeviceSyncService

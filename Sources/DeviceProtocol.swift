@@ -147,6 +147,34 @@ struct DeviceSidebarRow: Codable, Equatable, Identifiable {
     var pausedHelp: String { pausedReason.flatMap { $0.isEmpty ? nil : $0 } ?? "Loop paused. Re-enable it in Agent Setup / Loop." }
 }
 
+// Sidebar session order, chosen from the ˯ menu beside +. Manual keeps the
+// saved drag order (Mac Reorder); recent puts the latest change first. Ties
+// and undated rows fall back to the title. Remote rows date by their home's
+// last response, which is only ever compared within that home.
+enum SidebarSort: String, CaseIterable {
+    case manual, alphabetical, recent
+    var title: String {
+        switch self {
+        case .manual: return "Manual order"
+        case .alphabetical: return "Alphabetical"
+        case .recent: return "Recently changed"
+        }
+    }
+    static func arranged<Row>(_ rows: [Row], by sort: SidebarSort, title: (Row) -> String, changedAt: (Row) -> Date?) -> [Row] {
+        rows.sorted { a, b in
+            if sort == .recent {
+                let left = changedAt(a) ?? .distantPast, right = changedAt(b) ?? .distantPast
+                if left != right { return left > right }
+            }
+            return title(a).localizedStandardCompare(title(b)) == .orderedAscending
+        }
+    }
+    // iPad has no drag order, so manual reads as alphabetical there.
+    static func rows(_ rows: [DeviceSidebarRow], by sort: SidebarSort) -> [DeviceSidebarRow] {
+        arranged(rows, by: sort, title: \.title, changedAt: \.lastResponseAt)
+    }
+}
+
 struct RemoteRowMarkers: Equatable {
     var paused = false
     var pausedReason: String? = nil

@@ -101,8 +101,8 @@ struct DeviceSidebarSection: View {
                                         }
                                     }
                                     if service.canHostAgent(home.deviceID) { Button("New agent") { create(home.deviceID, provider: nil) } }
-                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.system(size: 8)) } }
-                                    .menuStyle(.borderlessButton).fixedSize().disabled(creating.contains(home.deviceID))
+                                } label: { Image(systemName: "plus") }
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(creating.contains(home.deviceID))
                                     .help("Create a session on " + home.deviceName + " using its local login")
                             }
                         }.padding(.horizontal, 4).frame(height: 28)
@@ -110,8 +110,9 @@ struct DeviceSidebarSection: View {
                             .contextMenu { Button("Rename device…") { renameDeviceDisplay(service, id: home.deviceID) }.disabled(!service.canRenameDevice(home.deviceID)) }
                         }
                         if home.online {
-                            let rowIDs = home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.map(\.globalID)
-                            ForEach(order.ordered(rowIDs, scope: home.deviceID), id: \.self) { id in
+                            let rows = home.rows.map { (id: $0.globalID, title: $0.title, changedAt: $0.lastResponseAt) }
+                            let rowIDs = SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id)
+                            ForEach(order.arranged(rows, scope: home.deviceID), id: \.self) { id in
                               if let row = home.rows.first(where: { $0.globalID == id }) {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),

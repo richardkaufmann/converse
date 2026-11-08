@@ -210,6 +210,8 @@ final class Session: ObservableObject, Identifiable {
     // Remote viewers' unseen marker: the newest assistant response this home
     // holds. A running turn's partial reply never counts until it finishes.
     var lastResponseAt: Date? { Session.lastResponseAt(messages, busy: busy) }
+    // Recently changed sidebar sort: the newest message either way, else creation.
+    var lastChangedAt: Date { messages.last { $0.createdAt != nil }?.createdAt ?? createdAt }
     static func lastResponseAt(_ messages: [Message], busy: Bool) -> Date? {
         var candidates = messages[...]
         if busy, let turn = messages.lastIndex(where: { $0.role == "user" }) { candidates = messages[..<turn] }
@@ -3172,7 +3174,7 @@ struct RootView: View {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(width: 24, height: 12).accessibilityHidden(true)
-                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.reordering.toggle() }.frame(width: 98, alignment: .leading)
+                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.toggleReordering() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -4523,6 +4525,7 @@ func selfTest() {
     performanceDebugSelfTests(check)
     feedbackInvitationSelfTests(check)
     feedbackInvitationControllerSelfTests(check)
+    sidebarSortSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)

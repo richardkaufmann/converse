@@ -26,6 +26,12 @@ final class ParkingLotLibrary: ObservableObject {
         if let value = cache[id] { return value }
         let value = ParkingLotStore(folder: folder, id: id, name: record.name); cache[id] = value; return value
     }
+    /// When the lot's file last changed, for the Recently changed sidebar
+    /// sort. Same path rule as ParkingLotStore.
+    func modifiedAt(_ id: UUID) -> Date? {
+        let file = id == ParkingLotStore.id ? folder.appendingPathComponent("parking-lot.json") : folder.appendingPathComponent("ParkingLots/" + id.uuidString + ".json")
+        return (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
     private func save(_ records: [Record]) throws {
         guard error.isEmpty else { throw AgentFailure.message(error) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -101,9 +107,12 @@ final class ParkingLotLibrary: ObservableObject {
 
 final class SidebarOrder: ObservableObject {
     static let shared = SidebarOrder(folder: Store.shared.folder)
-    struct Saved: Codable { var sections: [String: [String]] = [:] }
+    // sort is a raw name so an unknown future choice falls back to manual
+    // instead of discarding the saved drag order.
+    struct Saved: Codable { var sections: [String: [String]] = [:]; var sort: String? = nil }
     @Published var reordering = false
     @Published private(set) var saved = Saved()
+    var sort: SidebarSort { saved.sort.flatMap(SidebarSort.init(rawValue:)) ?? .manual }
     @Published var dragging: (scope: String, id: String)?
     @Published var dropTarget: String?
     var frames: [String: CGRect] = [:]
@@ -123,15 +132,48 @@ final class SidebarOrder: ObservableObject {
         let known = (saved.sections[scope] ?? []).filter { ids.contains($0) }
         return known + ids.filter { !known.contains($0) }
     }
+    /// The rows of one device list in the chosen sort. Manual starts from
+    /// the titles and applies the saved drag order on top.
+    func arranged(_ rows: [(id: String, title: String, changedAt: Date?)], scope: String) -> [String] {
+        let alphabetical = SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id)
+        switch sort {
+        case .manual: return ordered(alphabetical, scope: scope)
+        case .alphabetical: return alphabetical
+        case .recent: return SidebarSort.arranged(rows, by: .recent, title: \.title, changedAt: \.changedAt).map(\.id)
+        }
+    }
+    func setSort(_ value: SidebarSort) {
+        if value != .manual { reordering = false }
+        var state = saved; state.sort = value.rawValue; persist(state)
+    }
+    /// Reorder drags the manual order, so starting it shows that order again.
+    func toggleReordering() {
+        if !reordering && sort != .manual { setSort(.manual) }
+        reordering.toggle()
+    }
     func move(_ id: String, before target: String?, scope: String, available: [String]) {
         guard available.contains(id), target != id, target == nil || available.contains(target!) else { return }
         var next = ordered(available, scope: scope).filter { $0 != id }
         next.insert(id, at: target.flatMap { next.firstIndex(of: $0) } ?? next.count)
-        var state = saved; state.sections[scope] = next
+        var state = saved; state.sections[scope] = next; persist(state)
+    }
+    private func persist(_ state: Saved) {
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(state).write(to: file, options: .atomic); saved = state
         } catch { NSLog("Could not save sidebar order") }
+    }
+}
+struct SidebarSortMenu: View {
+    @ObservedObject var order = SidebarOrder.shared
+    var body: some View {
+        Menu {
+            Picker("Sort sessions", selection: Binding(get: { order.sort }, set: { order.setSort($0) })) {
+                ForEach(SidebarSort.allCases, id: \.self) { Text($0.title).tag($0) }
+            }.pickerStyle(.inline)
+        } label: { Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Sort sessions: " + order.sort.title).accessibilityLabel("Sort sessions")
     }
 }
 private struct SidebarWindowKey: EnvironmentKey { static let defaultValue = "" }
@@ -183,10 +225,11 @@ struct OrderedDeviceSidebar: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     var deviceIDs: [String] { ["local"] + (devices.currentGroup == nil ? [] : devices.homes.keys.sorted()) }
-    var localIDs: [String] {
-        let rows = store.sessions.filter { !$0.isIdleTalkSession }.map { ($0.id.uuidString, $0.title) } + library.records.map { ($0.id.uuidString, $0.name) }
-        return rows.sorted { $0.1.localizedStandardCompare($1.1) == .orderedAscending }.map(\.0)
+    var localRows: [(id: String, title: String, changedAt: Date?)] {
+        store.sessions.filter { !$0.isIdleTalkSession }.map { ($0.id.uuidString, $0.title, $0.lastChangedAt) }
+            + library.records.map { ($0.id.uuidString, $0.name, order.sort == .recent ? library.modifiedAt($0.id) : nil) }
     }
+    var localIDs: [String] { SidebarSort.arranged(localRows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id) }
     var body: some View {
         VStack(spacing: 0) {
         ForEach(order.ordered(deviceIDs, scope: "devices"), id: \.self) { device in
@@ -203,10 +246,12 @@ struct OrderedDeviceSidebar: View {
                                 Button("New Parking Lot…") { library.promptNew() }
                                 Divider()
                                 Button("Import Conversations…") { AppDelegate.shared.chooseConversationsToImport() }
-                            } label: { Image(systemName: "plus") }.menuStyle(.borderlessButton).fixedSize()
+                            } label: { Image(systemName: "plus") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                                .help("Create a session, agent or Parking Lot")
+                            SidebarSortMenu()
                         }.padding(.horizontal, 4).frame(height: 28)
                     }
-                    ForEach(order.ordered(localIDs, scope: "local"), id: \.self) { id in
+                    ForEach(order.arranged(localRows, scope: "local"), id: \.self) { id in
                         SidebarReorderRow(scope: "local", id: id, available: localIDs) {
                             if let uuid = UUID(uuidString: id), let lot = library.lot(uuid) { ParkingLotSidebar(lot: lot, workspace: workspace, state: state) }
                             else if let session = store.sessions.first(where: { $0.id.uuidString == id }) { SidebarSession(session: session, workspace: workspace, state: state) }
@@ -551,4 +596,35 @@ struct ParkingLotLinksView: View {
     private func binding(_ id: String) -> Binding<Bool> {
         Binding(get: { selected.contains(id) }, set: { if $0 { selected.insert(id) } else { selected.remove(id) } })
     }
+}
+
+func sidebarSortSelfTests(_ check: (Bool, String) -> Void) {
+    let old = Date(timeIntervalSince1970: 100), new = Date(timeIntervalSince1970: 200)
+    let rows: [(id: String, title: String, changedAt: Date?)] = [("b", "Beta", old), ("a", "alpha", nil), ("c", "Gamma", new), ("d", "Delta 10", old), ("e", "Delta 9", nil)]
+    check(SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id) == ["a", "b", "e", "d", "c"],
+          "Alphabetical sidebar sort ignores case and orders numbers naturally")
+    check(SidebarSort.arranged(rows, by: .recent, title: \.title, changedAt: \.changedAt).map(\.id) == ["c", "b", "d", "a", "e"],
+          "Recently changed puts the latest change first, then titles for ties and undated rows")
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sidebar-sort-" + UUID().uuidString)
+    let order = SidebarOrder(folder: folder)
+    check(order.sort == .manual, "A new profile keeps the manual sidebar order")
+    order.move("c", before: "a", scope: "local", available: ["a", "b", "c", "d", "e"])
+    check(order.arranged(rows, scope: "local") == ["c", "a", "b", "d", "e"], "Manual sort applies the saved drag order over titles")
+    order.setSort(.recent)
+    check(order.arranged(rows, scope: "local") == ["c", "b", "d", "a", "e"] && SidebarOrder(folder: folder).sort == .recent, "The chosen sidebar sort persists across launches")
+    order.setSort(.alphabetical)
+    check(order.arranged(rows, scope: "local") == ["a", "b", "e", "d", "c"], "Alphabetical sort overrides the drag order without discarding it")
+    order.toggleReordering()
+    check(order.reordering && order.sort == .manual && order.arranged(rows, scope: "local").first == "c", "Reorder returns to the saved manual order")
+    order.toggleReordering(); order.setSort(.recent); order.reordering = true; order.setSort(.alphabetical)
+    check(!order.reordering, "Choosing a sort ends a manual reorder")
+    try? JSONSerialization.data(withJSONObject: ["sections": ["local": ["b"]], "sort": "future"]).write(to: folder.appendingPathComponent("sidebar-order.json"))
+    let future = SidebarOrder(folder: folder)
+    check(future.sort == .manual && future.ordered(["a", "b"], scope: "local") == ["b", "a"], "An unknown sort falls back to manual and keeps the drag order")
+    try? JSONSerialization.data(withJSONObject: ["sections": ["local": ["b"]]]).write(to: folder.appendingPathComponent("sidebar-order.json"))
+    check(SidebarOrder(folder: folder).ordered(["a", "b"], scope: "local") == ["b", "a"], "Older sidebar order files without a sort still load")
+    let session = Session(entry: Entry(name: "Sort", command: "", directory: "", engine: "muse"))
+    session.messages = [Message(id: UUID(), role: "user", text: "hi", createdAt: old), Message(id: UUID(), role: "assistant", text: "", createdAt: nil)]
+    check(session.lastChangedAt == old, "A session's last change is its newest dated message")
+    try? FileManager.default.removeItem(at: folder)
 }
