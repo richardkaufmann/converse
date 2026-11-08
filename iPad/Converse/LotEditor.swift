@@ -228,7 +228,7 @@ struct EditableLotPane: View {
         HStack(alignment: .top, spacing: 5) {
             if expandable {
                 Button { model.toggleLotHeading(id, heading: row.id) } label: {
-                    Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").frame(width: 30, height: 44)
+                    Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 44)
                 }.accessibilityLabel("Collapse or expand entry")
             } else { Color.clear.frame(width: 30, height: 1).accessibilityHidden(true) }
             VStack(alignment: .leading, spacing: 8) {

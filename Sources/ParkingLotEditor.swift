@@ -316,11 +316,12 @@ struct ParkingLotEditor: NSViewRepresentable {
             for var entry in entries {
                 entry.range.location -= range.location
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle
-                let offset = CGFloat(max(0, entry.depth - 1)) * (text?.indentWidth ?? 20)
+                let offset = text?.textOffset(entry) ?? 0
                 style.firstLineHeadIndent = offset; style.headIndent = offset
+                style.tailIndent = -(text?.itemMargin ?? 0)
                 if entry.row.heading { style.paragraphSpacingBefore = 7 }
                 if let paths = entry.row.images, !paths.isEmpty, let text {
-                    let sizes = text.lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 }
+                    let sizes = text.lotImageSizes(paths, width: max(40, width - text.nestOffset(entry.depth))).compactMap { $0 }
                     style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
                 }
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
@@ -594,6 +595,35 @@ final class ParkingOutlineText: NSTextView {
     var pointSize: CGFloat = 13
     var indentWidth: CGFloat { 20 * pointSize / 13 }
     var gutterWidth: CGFloat { 48 * pointSize / 13 }
+    /// Headings sit at the left margin, just right of their disclosure triangle;
+    /// items start after the number gutter. The text container is inset only by
+    /// the heading margin, and items indent by the rest of the gutter, reserving
+    /// the same width on the right for the comment buttons.
+    var headingMargin: CGFloat { 16 * pointSize / 13 }
+    var itemMargin: CGFloat { gutterWidth - headingMargin }
+    func nestOffset(_ depth: Int) -> CGFloat { CGFloat(max(0, depth - 1)) * indentWidth }
+    func textOffset(_ entry: ParkingOutline.Entry) -> CGFloat { entry.row.heading ? 0 : itemMargin + nestOffset(entry.depth) }
+    /// The disclosure triangle, centered on the entry's first line of text.
+    func disclosureRect(_ entry: ParkingOutline.Entry) -> NSRect {
+        let scale = pointSize / 13, size = 11 * scale
+        return NSRect(x: 3 * scale + nestOffset(entry.depth), y: firstLineMidY(entry) - size / 2, width: size, height: size)
+    }
+    /// A hit target wider and taller than the drawn triangle, reaching toward the numbers.
+    func disclosureHitRect(_ entry: ParkingOutline.Entry) -> NSRect {
+        let scale = pointSize / 13, height = max(22 * scale, rowRect(entry).height)
+        return NSRect(x: nestOffset(entry.depth), y: firstLineMidY(entry) - height / 2, width: 24 * scale, height: height)
+    }
+    func disclosureEntry(at point: NSPoint) -> ParkingOutline.Entry? {
+        owner?.projection.entries.lazy.filter { ($0.row.heading || $0.hasChildren) && !$0.placeholder }
+            .filter { self.disclosureHitRect($0).contains(point) }
+            .min { abs(self.firstLineMidY($0) - point.y) < abs(self.firstLineMidY($1) - point.y) }
+    }
+    func firstLineMidY(_ entry: ParkingOutline.Entry) -> CGFloat {
+        guard let manager = layoutManager, let container = textContainer, entry.range.location < (string as NSString).length else { return rowRect(entry).midY }
+        manager.ensureLayout(for: container)
+        let glyph = manager.glyphIndexForCharacter(at: entry.range.location)
+        return manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil).midY + textContainerOrigin.y
+    }
     static let headingColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 0.48, green: 0.75, blue: 1, alpha: 1)
@@ -661,7 +691,7 @@ final class ParkingOutlineText: NSTextView {
     /// ones keep their wrapping until the resize ends, as transcripts do.
     static let liveReflowLimit = 50_000
     var reflowsDuringResize: Bool { (textStorage?.length ?? 0) <= Self.liveReflowLimit }
-    var imageSlotWidth: CGFloat { min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 10) }
+    var imageSlotWidth: CGFloat { min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 2 * itemMargin - 10) }
     /// Image rows reserve their drawn height at the current width. Updates only
     /// those paragraphs, leaving the projection and text untouched.
     func updateImageSpacing() {
@@ -675,8 +705,7 @@ final class ParkingOutlineText: NSTextView {
             guard let paths = entry.row.images, !paths.isEmpty, entry.range.location < length,
                   let old = storage.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle,
                   let style = old.mutableCopy() as? NSMutableParagraphStyle else { continue }
-            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 })
+            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - nestOffset(entry.depth))).compactMap { $0 })
             storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: min(length - entry.range.location, max(1, entry.range.length))))
         }
         storage.endEditing()
@@ -956,12 +985,12 @@ final class ParkingOutlineText: NSTextView {
                 let end = max(entry.range.location, NSMaxRange(entry.range) - 1)
                 let glyph = manager.glyphIndexForCharacter(at: min(end, max(0, (string as NSString).length - 1)))
                 let line = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
-                let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-                let width = max(40, min(Self.lotImageWidth, container.containerSize.width - 10 - offset))
+                let nest = nestOffset(entry.depth)
+                let width = max(40, imageSlotWidth - nest)
                 var y = textContainerOrigin.y + line.maxY + Self.lotImageGap
                 for (path, size) in zip(paths, lotImageSizes(paths, width: width)) {
                     guard let size, let image = imageCache[path] else { continue }
-                    let dest = NSRect(x: textContainerOrigin.x + 5 + offset, y: y, width: size.width, height: size.height)
+                    let dest = NSRect(x: textContainerOrigin.x + 5 + textOffset(entry), y: y, width: size.width, height: size.height)
                     if dest.intersects(dirtyRect) {
                         image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     }
@@ -973,7 +1002,7 @@ final class ParkingOutlineText: NSTextView {
         for entry in owner.projection.entries where entry.range.location <= NSMaxRange(shown) && NSMaxRange(entry.range) >= shown.location {
             let rect = rowRect(entry)
             guard rect.intersects(dirtyRect) else { continue }
-            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
+            let offset = nestOffset(entry.depth)
             let marker = entry.row.heading ? "" : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
             let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: entry.row.tag?.color ?? NSColor.secondaryLabelColor]
             // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
@@ -981,11 +1010,17 @@ final class ParkingOutlineText: NSTextView {
             (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
             paintedMarkers[entry.row.id] = NSPoint(x: markerX, y: rect.minY)
             if (entry.hasChildren || entry.row.heading) && !entry.placeholder {
-                let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
-                (disclosure as NSString).draw(at: NSPoint(x: 3 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: pointSize, weight: .semibold), .foregroundColor: NSColor.labelColor])
+                let triangle = NSBezierPath(), box = disclosureRect(entry)
+                if owner.parent.collapsed.contains(entry.row.id) {
+                    triangle.move(to: NSPoint(x: box.minX + 1, y: box.minY)); triangle.line(to: NSPoint(x: box.maxX, y: box.midY)); triangle.line(to: NSPoint(x: box.minX + 1, y: box.maxY))
+                } else {
+                    triangle.move(to: NSPoint(x: box.minX, y: box.minY + 1)); triangle.line(to: NSPoint(x: box.maxX, y: box.minY + 1)); triangle.line(to: NSPoint(x: box.midX, y: box.maxY))
+                }
+                triangle.close(); triangle.lineJoinStyle = .round; triangle.lineWidth = 1
+                NSColor.secondaryLabelColor.setFill(); NSColor.secondaryLabelColor.setStroke(); triangle.fill(); triangle.stroke()
             }
             if entry.placeholder {
-                ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
+                ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5 + textOffset(entry), y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
             }
         }
     }
@@ -1003,11 +1038,7 @@ final class ParkingOutlineText: NSTextView {
     }
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if let entry = owner?.projection.entries.first(where: { ($0.row.heading || $0.hasChildren) && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }),
-           !entry.placeholder, point.x >= CGFloat(max(0, entry.depth - 1)) * indentWidth,
-           point.x < 22 * pointSize / 13 + CGFloat(max(0, entry.depth - 1)) * indentWidth {
-            owner?.toggle(entry.row.id); return
-        }
+        if let entry = disclosureEntry(at: point) { owner?.toggle(entry.row.id); return }
         // Clicking a link follows it instead of placing the caret for editing;
         // Option-click places the caret in a Markdown link's label instead.
         let modifiers = event.modifierFlags.intersection([.shift, .command, .option, .control])
@@ -1188,7 +1219,53 @@ private final class ParkingMenuAction: NSObject {
     @objc func run() { action() }
 }
 
+/// Headings start at the left margin, items after the numbers; triangles keep a real target.
+private func parkingHeadingLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-heading-layout-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder, id: UUID())
+    let heading = ParkingLotRow(heading: true, text: "Videos to Make"), item = ParkingLotRow(heading: false, text: "First", parentID: heading.id)
+    let parent = ParkingLotRow(heading: false, text: "Parent", notes: [.init(author: "A", text: "n")], parentID: heading.id), child = ParkingLotRow(heading: false, text: "Child", parentID: parent.id)
+    lot.openStarter([heading, item, parent, child])
+    var collapsed: Set<UUID> = []
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: Binding(get: { collapsed }, set: { collapsed = $0 }), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+    text.isRichText = false; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    text.isVerticallyResizable = true; text.textContainerInset = NSSize(width: 36, height: 8); text.textContainer?.widthTracksTextView = true
+    window.contentView = text; text.configureTextScaling(); coordinator.render()
+    func entry(_ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func x(_ id: UUID) -> CGFloat {
+        text.layoutManager!.ensureLayout(for: text.textContainer!)
+        let glyph = text.layoutManager!.glyphIndexForCharacter(at: entry(id).range.location)
+        return text.layoutManager!.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minX + text.layoutManager!.location(forGlyphAt: glyph).x + text.textContainerOrigin.x
+    }
+    let padding = text.textContainer!.lineFragmentPadding
+    check(abs(x(heading.id) - padding - text.headingMargin) < 0.5 && abs(x(item.id) - padding - text.gutterWidth) < 0.5 && x(heading.id) < x(item.id) - 20,
+          "A heading starts at the left margin, outdented from its items (heading \(x(heading.id)), item \(x(item.id)))")
+    check(abs(x(child.id) - x(item.id) - text.indentWidth) < 0.5, "Nested items keep one indent per level after the gutter")
+    let label = NSAttributedString(string: ParkingLotTree.label(1, depth: 1) + ".", attributes: [.font: NSFont.systemFont(ofSize: text.pointSize)]).size().width
+    check(text.gutterWidth - 4 - label > text.headingMargin + padding - 0.5, "An item's number stays between the heading edge and the item text")
+    let parentButton = text.subviews.compactMap { $0 as? NSButton }.first
+    check(parentButton != nil && parentButton!.frame.minX >= text.bounds.width - 38, "Comment buttons stay in the right margin beyond the wrapped text")
+    let box = text.disclosureRect(entry(heading.id)), hit = text.disclosureHitRect(entry(heading.id))
+    check(box.width == 11 && box.height == 11 && hit.width >= 24 && hit.height >= 22 && hit.contains(NSPoint(x: box.midX, y: box.midY)),
+          "Disclosure triangles are larger and sit inside a hit target at least 24 by 22 points")
+    func click(_ point: NSPoint) {
+        text.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: text.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+    }
+    let center = text.disclosureRect(entry(parent.id))
+    click(NSPoint(x: center.maxX + 8, y: center.midY)); coordinator.render()
+    check(collapsed == [parent.id] && !coordinator.projection.entries.contains { $0.row.id == child.id }, "Clicking beside the triangle, within its target, collapses the row")
+    click(NSPoint(x: center.midX, y: center.midY)); coordinator.render()
+    check(collapsed.isEmpty && coordinator.projection.entries.contains { $0.row.id == child.id }, "Clicking the triangle again expands it")
+    let beyond = text.disclosureHitRect(entry(parent.id))
+    check(text.disclosureEntry(at: NSPoint(x: beyond.maxX + 1, y: beyond.midY)) == nil, "A click just past the target edits text instead of toggling")
+    window.close()
+}
+
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
+    parkingHeadingLayoutSelfTests(check)
     parkingLotTextScalingSelfTests(check)
     parkingLotResizeSelfTests(check)
     parkingMultiSelectionSelfTests(check)
@@ -1421,7 +1498,7 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     wideBoard.releaseGlobally()
     let bothImages = imageLot.document.rows.first { $0.id == imageRow.id }!.images ?? []
     check(bothImages.count == 2, "A second pasted image attaches to the same item")
-    let slotWidth = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    let slotWidth = imageText.imageSlotWidth
     // 100x50 scales to the full 106pt height; 400x40 aspect-fits to 32pt.
     let tallHeight = 50 * min(slotWidth / 100, 106 / 50)
     let wideHeight = 40 * min(slotWidth / 400, 106 / 40)
@@ -1441,7 +1518,7 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
         layout.ensureLayout(for: container)
     }
     imageText.layout()
-    let liveWidth: CGFloat = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    let liveWidth: CGFloat = imageText.imageSlotWidth
     let liveScaleA: CGFloat = min(liveWidth / 100, 106 / 50)
     let liveScaleB: CGFloat = min(liveWidth / 400, 106 / 40)
     let liveExpected: CGFloat = 5 + 6 + (50 * liveScaleA + 6) + (40 * liveScaleB + 6)
@@ -1996,8 +2073,7 @@ func parkingLotResizeSelfTests(_ check: (Bool, String) -> Void) {
             }, "\(kind) \(moment) keeps comment buttons inside the view beside their rows")
             if let entry = coordinator.projection.entries.first(where: { $0.row.images != nil }) {
                 let style = text.textStorage?.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle
-                let offset = CGFloat(max(0, entry.depth - 1)) * text.indentWidth
-                let expected = ParkingOutlineText.lotImageSpacing(text.lotImageSizes([imagePath], width: max(40, text.imageSlotWidth - offset)).compactMap { $0 })
+                let expected = ParkingOutlineText.lotImageSpacing(text.lotImageSizes([imagePath], width: max(40, text.imageSlotWidth - text.nestOffset(entry.depth))).compactMap { $0 })
                 check(abs((style?.paragraphSpacing ?? 0) - expected) < 0.5, "\(kind) \(moment) reserves image space for the current width (\(style?.paragraphSpacing ?? 0) vs \(expected))")
             }
             let visible = scroll.contentView.documentVisibleRect
@@ -2041,7 +2117,7 @@ extension ParkingOutlineText: PaneTextScalable {
            let stored = UserDefaults.standard.object(forKey: ParkingLotTextScaling.key(id)) as? Double {
             pointSize = CGFloat(PaneTextSize.clamp(stored))
         }
-        textContainerInset.width = gutterWidth
+        textContainerInset.width = headingMargin
         ParkingLotTextScaling.register(self)
     }
 
@@ -2082,7 +2158,7 @@ extension ParkingOutlineText: PaneTextScalable {
         owner.rendering = true
         defer { owner.rendering = false }
         pointSize = next
-        textContainerInset.width = gutterWidth
+        textContainerInset.width = headingMargin
         storage.beginEditing()
         storage.enumerateAttribute(.font, in: NSRange(location: 0, length: length)) { value, range, _ in
             // Markdown delimiters use a tiny hidden font; never enlarge them.
@@ -2091,7 +2167,7 @@ extension ParkingOutlineText: PaneTextScalable {
         }
         storage.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: length)) { value, range, _ in
             guard let old = value as? NSParagraphStyle, let style = old.mutableCopy() as? NSMutableParagraphStyle else { return }
-            style.headIndent *= factor; style.firstLineHeadIndent *= factor
+            style.headIndent *= factor; style.firstLineHeadIndent *= factor; style.tailIndent *= factor
             storage.addAttribute(.paragraphStyle, value: style, range: range)
         }
         // The projection and text did not change: recording the width here
@@ -2130,8 +2206,8 @@ func renderLotDisclosurePreview(to output: URL) throws {
     let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([child.id, other.id]), reorder: {}))
     let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 620, height: 280))
     text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
-    text.isRichText = false; text.textContainerInset = NSSize(width: text.gutterWidth, height: 10)
-    text.textContainer?.containerSize = NSSize(width: 620 - 2 * text.gutterWidth, height: 280)
+    text.isRichText = false; text.textContainerInset = NSSize(width: text.headingMargin, height: 10)
+    text.textContainer?.containerSize = NSSize(width: 620 - 2 * text.headingMargin, height: 280)
     coordinator.render()
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     for name in [NSAppearance.Name.aqua, .darkAqua] {

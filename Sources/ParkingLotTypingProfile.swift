@@ -136,7 +136,7 @@ struct ParkingLotRenderSignature: Equatable {
             let font = attributes[.font] as? NSFont, style = attributes[.paragraphStyle] as? NSParagraphStyle
             // Tag colors are new dynamic objects per render; compare what they resolve to.
             let color = (attributes[.foregroundColor] as? NSColor)?.usingColorSpace(.sRGB).map { "\($0.redComponent) \($0.greenComponent) \($0.blueComponent) \($0.alphaComponent)" } ?? "-"
-            runs.append("\(range.location),\(range.length) \(font?.fontName ?? "-") \(font?.pointSize ?? 0) \(color) \(style.map { "\($0.firstLineHeadIndent)/\($0.headIndent)/\($0.paragraphSpacing)/\($0.paragraphSpacingBefore)" } ?? "-") "
+            runs.append("\(range.location),\(range.length) \(font?.fontName ?? "-") \(font?.pointSize ?? 0) \(color) \(style.map { "\($0.firstLineHeadIndent)/\($0.headIndent)/\($0.tailIndent)/\($0.paragraphSpacing)/\($0.paragraphSpacingBefore)" } ?? "-") "
                 + "\(attributes[.strikethroughStyle] as? Int ?? 0) \((attributes[.link] as? URL)?.absoluteString ?? "-") \(attributes[.toolTip] as? String ?? "-")")
         }
         entries = coordinator.projection.entries.map {
