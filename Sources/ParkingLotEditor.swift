@@ -277,6 +277,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             defer { capture.end(.lotRender, measurement) }
             rendering = true; defer { rendering = false }
             guard let storage = text.textStorage else { return }
+            highlightedMatches = nil
             let previous = projection, previousLink = linkEditing, previousSettled = settled
             // Attributes depend on the point size and image width, and marked text
             // can leave the storage out of step; each of those needs a full build.
@@ -570,9 +571,14 @@ struct ParkingLotEditor: NSViewRepresentable {
             let range = NSRange(location: entry.range.location + match.range.location, length: match.range.length)
             text.setSelectedRange(range); text.scrollRangeToVisible(range); text.showFindIndicator(for: range)
         }
+        private(set) var findHighlightPasses = 0
+        /// The matches drawn now. A render rewrites the text under them, so it forgets these.
+        private var highlightedMatches: [ParkingLotFind.Match]?
         func applyFindHighlights() {
-            guard parent.finder.visible, let text, let manager = text.layoutManager, let storage = text.textStorage else { return }
+            guard parent.finder.visible, highlightedMatches != parent.finder.matches, let text, let manager = text.layoutManager, let storage = text.textStorage else { return }
+            findHighlightPasses += 1
             clearFindHighlights()
+            highlightedMatches = parent.finder.matches
             let color = NSColor.systemYellow.withAlphaComponent(0.35)
             let locations = Dictionary(uniqueKeysWithValues: projection.entries.map { ($0.row.id, $0.range.location) })
             for match in parent.finder.matches {
@@ -581,6 +587,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             }
         }
         func clearFindHighlights() {
+            highlightedMatches = nil
             guard let text, let manager = text.layoutManager else { return }
             manager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: (text.string as NSString).length))
         }
