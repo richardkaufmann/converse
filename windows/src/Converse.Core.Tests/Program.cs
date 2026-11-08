@@ -1418,6 +1418,34 @@ MdnsChecks.RunGroupDevices(Check);
         viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");
+        // A connection arriving while the heartbeat is sending must not end the sweep.
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => home.DisplayHolder(homeSession.Id)?.Device == viewer.DeviceId), "Heartbeat fixture holds a display lease");
+        var homePeers = (Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(home)!;
+        var arriving = new Peer { Id = Guid.NewGuid(), Client = new System.Net.Sockets.TcpClient(), IsInitiator = false };
+        var arrivedMidSweep = false;
+        void ArriveMidSweep(DeviceEnvelope envelope)
+        {
+            if (arrivedMidSweep || envelope.Kind is not (DeviceKind.LeaseExpired or DeviceKind.LeaseStolen)) return;
+            arrivedMidSweep = true; homePeers[arriving.Id] = arriving;
+        }
+        home.EnvelopeSentForTest += ArriveMidSweep;
+        home.LeasesForTest.ExpireForTest(homeSession.Id);
+        Exception? sweepFailure = null;
+        try { await home.HeartbeatPassAsync(1); }
+        catch (Exception e) { sweepFailure = e; }
+        home.EnvelopeSentForTest -= ArriveMidSweep;
+        homePeers.Remove(arriving.Id);
+        Check(arrivedMidSweep && sweepFailure is null, "A connection added during the lease sweep cannot end the heartbeat pass" + (sweepFailure is null ? "" : ": " + sweepFailure.Message));
+        // One failed pass must not stop the loop for the life of the process.
+        var beatRoot = Path.Combine(homeRoot, "heartbeat");
+        Directory.CreateDirectory(beatRoot);
+        using var beat = new DeviceSyncService(beatRoot, new SessionStore(beatRoot, new FakeRunner()), "BeatPC");
+        var beatPasses = 0;
+        beat.HeartbeatInterval = TimeSpan.FromMilliseconds(10);
+        beat.HeartbeatPassStartingForTest = () => Interlocked.Increment(ref beatPasses) == 1 ? throw new InvalidOperationException("injected heartbeat failure") : Task.CompletedTask;
+        await beat.StartAsync(0);
+        Check(await Until(() => Volatile.Read(ref beatPasses) >= 3), "The heartbeat loop survives an exception in one pass");
     }
     finally
     {

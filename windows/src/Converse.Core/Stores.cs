@@ -75,6 +75,11 @@ public sealed class DeviceLeaseManager
         return (lease.Device, lease.Epoch);
     }
 
+    internal void ExpireForTest(Guid session)
+    {
+        if (_leases.TryGetValue(session, out var lease)) _leases[session] = (lease.Device, lease.Epoch, _now().AddSeconds(-1));
+    }
+
     public List<(Guid Session, string Device, ulong Epoch)> SweepExpired()
     {
         var expired = _leases.Where(pair => pair.Value.ExpiresAt <= _now())
