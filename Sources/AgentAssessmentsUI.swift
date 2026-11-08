@@ -34,15 +34,15 @@ struct AgentAssessmentCard: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let now = context.date, config = session.agent ?? AgentConfig(), assessment = config.assessment
-            let ageColor: Color = config.assessmentProblem != nil ? .orange : assessment.map { now.timeIntervalSince($0.checkedAt) < 300 ? .green : .secondary } ?? .secondary
+            let ageColor: Color = config.assessmentNeedsConfirmation ? .orange : assessment.map { now.timeIntervalSince($0.checkedAt) < 300 ? .green : .secondary } ?? .secondary
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(session.title).font(.headline).lineLimit(2)
                     Spacer()
                     if let assessment { AssessmentStatusPill(status: assessment.status) }
-                    Text(AgentAge.assessment(assessment?.checkedAt, now: now)).font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                    Text(config.assessmentAge(now: now)).font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
                         .background(ageColor.opacity(0.18), in: Capsule()).foregroundStyle(ageColor)
-                        .accessibilityLabel("Assessment age: " + AgentAge.assessment(assessment?.checkedAt, now: now))
+                        .accessibilityLabel("Assessment age: " + config.assessmentAge(now: now))
                 }
                 if let assessment {
                     Text(assessment.summary).font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
@@ -58,14 +58,14 @@ struct AgentAssessmentCard: View {
                     Label("Portrait couldn't refresh: " + failure + " · " + AgentAge.short(config.portrait?.failedAt, now: now) + " ago", systemImage: "photo")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let assessment, !assessment.facts.isEmpty {
+                if !config.visibleAssessmentFacts.isEmpty {
                     Divider()
-                    let facts = showAllFacts ? assessment.facts : Array(assessment.facts.prefix(AgentAssessment.displayedFacts))
+                    let facts = showAllFacts ? config.visibleAssessmentFacts : Array(config.visibleAssessmentFacts.prefix(AgentAssessment.displayedFacts))
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(facts) { fact in factRow(fact, now: now) }
                     }
-                    if assessment.facts.count > AgentAssessment.displayedFacts {
-                        Button(showAllFacts ? "Show fewer" : "Show \(assessment.facts.count - AgentAssessment.displayedFacts) more") { showAllFacts.toggle() }.buttonStyle(.link).font(.caption)
+                    if config.visibleAssessmentFacts.count > AgentAssessment.displayedFacts {
+                        Button(showAllFacts ? "Show fewer" : "Show \(config.visibleAssessmentFacts.count - AgentAssessment.displayedFacts) more") { showAllFacts.toggle() }.buttonStyle(.link).font(.caption)
                     }
                 }
                 if let detail = assessment?.detail, !detail.isEmpty {

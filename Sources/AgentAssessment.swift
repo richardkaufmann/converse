@@ -269,10 +269,10 @@ enum AgentAssessments {
                 if let fact = fact(item, measured: measured, previous: previous, now: now, sourceRetrieved: sourceRetrieved), !facts.contains(where: { $0.id == fact.id }) { facts.append(fact) }
             }
         }
-        // Required missing-input notices remain visible even if the model omits them.
-        for missing in measured where missing.id.hasPrefix("input.") && !facts.contains(where: { $0.id == missing.id }) {
-            facts.append(missing)
-        }
+        // Host input notices take priority over the bounded model fact list.
+        let missing = measured.filter { $0.id.hasPrefix("input.") }
+        let missingIDs = Set(missing.map(\.id))
+        facts = missing + facts.filter { !missingIDs.contains($0.id) }
         let mood = raw["mood"].flatMap { value -> [String]? in
             guard case .array(let items) = value else { return nil }
             let words = items.compactMap { $0.string.map { clip($0, 24) } }.filter { !$0.isEmpty }.prefix(5)
@@ -425,6 +425,21 @@ struct AgentWidgetContent: Equatable {
 }
 
 extension AgentConfig {
+    /// Apply current lot access to both normal counts and missing-input notices.
+    /// Used by native cards, remote widgets and the image prompt.
+    var visibleAssessmentFacts: [AgentFact] {
+        let facts = (assessment?.facts ?? []).filter { fact in
+            var parts = fact.id.split(separator: ".").map(String.init)
+            if parts.first == "input" { parts.removeFirst() }
+            guard fact.kind == .measured, parts.count >= 2, parts[0] == "lot", let lot = UUID(uuidString: parts[1]) else { return true }
+            return watchedSessions.contains(lot) || (watchedParticipants ?? []).contains { DeviceGlobalID($0)?.session == lot }
+        }
+        return facts.filter { $0.id.hasPrefix("input.") } + facts.filter { !$0.id.hasPrefix("input.") }
+    }
+    var assessmentNeedsConfirmation: Bool { assessmentProblem != nil || assessment?.seeded == true }
+    func assessmentAge(now: Date = Date()) -> String {
+        AgentAge.assessment(assessment?.checkedAt, now: now, confirmed: !assessmentNeedsConfirmation)
+    }
     func widgetContent(now: Date = Date()) -> AgentWidgetContent {
         var config = self
         config.seedAssessmentFromScoreboard(now: now)
@@ -434,12 +449,7 @@ extension AgentConfig {
         guard let assessment = config.assessment else {
             return AgentWidgetContent(summary: AgentWidgetContent.empty, status: nil, freshness: freshness, facts: [], revision: nil, shortHash: nil, updatedAt: nil, checkedAt: nil, problem: problem)
         }
-        // Revoking a Parking Lot hides its stored counts at once, before the next turn re-measures.
-        let facts = assessment.facts.filter { fact in
-            let parts = fact.id.split(separator: ".")
-            guard fact.kind == .measured, parts.count == 3, parts[0] == "lot", let lot = UUID(uuidString: String(parts[1])) else { return true }
-            return watchedSessions.contains(lot) || (watchedParticipants ?? []).contains { DeviceGlobalID($0)?.session == lot }
-        }
+        let facts = config.visibleAssessmentFacts
         return AgentWidgetContent(summary: assessment.summary, status: assessment.status, freshness: freshness,
                                   facts: Array(facts.prefix(AgentAssessment.displayedFacts)), revision: assessment.revision,
                                   shortHash: assessment.shortHash, updatedAt: assessment.updatedAt, checkedAt: assessment.checkedAt, problem: problem)
@@ -454,9 +464,9 @@ extension AgentConfig {
 }
 
 enum AgentAge {
-    static func assessment(_ date: Date?, now: Date = Date()) -> String {
+    static func assessment(_ date: Date?, now: Date = Date(), confirmed: Bool = true) -> String {
         guard let date else { return "No assessment" }
-        return now.timeIntervalSince(date) < 300 ? "Current" : short(date, now: now)
+        return confirmed && now.timeIntervalSince(date) < 300 ? "Current" : (now.timeIntervalSince(date) < 60 ? "<1m" : short(date, now: now))
     }
 
     /// "now", "4m", "3h", "2d".

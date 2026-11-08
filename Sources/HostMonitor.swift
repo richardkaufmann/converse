@@ -24,6 +24,7 @@ struct HostSample {
     private let queue = DispatchQueue(label: "Converse.host-monitor", qos: .utility)
     private var generation = UUID()
     private var refreshPending = false
+    var isSampling: Bool { timer != nil }
     func subscribe(_ token: UUID) {
         let first = tokens.isEmpty
         tokens.insert(token)

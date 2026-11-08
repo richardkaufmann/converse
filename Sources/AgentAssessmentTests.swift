@@ -182,6 +182,25 @@ import Foundation
     } else { check(false, "Partial evidence still produces an assessment") }
     check(AgentAge.assessment(now.addingTimeInterval(-299), now: now) == "Current" && AgentAge.assessment(now.addingTimeInterval(-300), now: now) == "5m"
           && AgentAge.assessment(now.addingTimeInterval(-7200), now: now) == "2h" && AgentAge.assessment(now.addingTimeInterval(-345600), now: now) == "4d", "Assessment age uses the strict five-minute boundary and compact elapsed time")
+    var recent = portraitConfig; recent.assessment = first; recent.assessment?.checkedAt = now
+    recent.assessmentProblem = AgentAssessmentProblem(reason: "Update unavailable", at: now)
+    check(recent.assessmentAge(now: now) == "<1m", "A rejected recent assessment shows elapsed age, never Current")
+    recent.assessmentProblem = nil; recent.assessment?.seeded = true
+    check(recent.assessmentAge(now: now) == "<1m", "A seeded assessment is not labelled Current")
+    let crowded = AgentJSON.object(["summary": .string("Seven useful facts"), "status": .string("on-track"),
+        "facts": .array((0..<7).map { .object(["id": .string("f\($0)"), "label": .string("Fact \($0)"), "value": .string("Ready"), "kind": .string("judgment")]) })])
+    if case .revision(let assessment) = AgentAssessments.evaluate(crowded, measured: [missing], previous: nil, now: now) {
+        var config = AgentConfig(); config.assessment = assessment
+        check(config.visibleAssessmentFacts.first == missing && config.widgetContent(now: now).facts.first == missing,
+              "A missing input precedes seven model facts on both native cards and remote widgets")
+        let privateLot = UUID()
+        let hidden = AgentAssessments.missingInput("lot." + privateLot.uuidString, label: "Private orchard", now: now)
+        config.assessment?.facts.append(hidden); config.watchedSessions = [privateLot]
+        check(config.widgetContent(now: now).facts.contains(hidden) && PortraitPrompt.build(name: "Test", config: config).contains("Private orchard"), "Permitted lot input failures are visible")
+        config.watchedSessions = []
+        check(!config.visibleAssessmentFacts.contains(hidden) && !config.widgetContent(now: now).facts.contains(hidden)
+              && !PortraitPrompt.build(name: "Test", config: config).contains("Private orchard"), "Revoked input.lot names are removed immediately from cards, widgets and image prompts")
+    } else { check(false, "Crowded partial assessment accepted") }
     var baseline = AgentConfig(); baseline.discordRead = true; baseline.discordChannelID = ""; baseline.settingsRevision = 9
     var edited = baseline; edited.artDirection = "A silver observatory beneath violet skies."
     var live = baseline; live.lastRunAt = later
@@ -297,8 +316,10 @@ import Foundation
     service.agentTurned(agent, store: store)
     check(service.pendingDebounces == 0, "Without an open Portraits window, agent turns request nothing")
     let token = UUID()
+    let loadsBeforeWindow = service.imageLoads
     service.subscribe(token, store: store)
     spin(0.3) { false }
+    check(service.imageLoads == loadsBeforeWindow, "Opening a cached portrait window performs no file read or bitmap decode")
     check(calls == 7, "Opening the window requests each agent's portrait; unchanged content is a cache hit")
     agent.agent?.recordAssessment(.revision(AgentAssessment(summary: "Recovered.", status: .onTrack, facts: [], revision: 6, contentHash: "sixth", updatedAt: later, checkedAt: later)), now: later)
     service.agentTurned(agent, store: store); service.agentTurned(agent, store: store); service.agentTurned(agent, store: store)
@@ -334,6 +355,56 @@ import Foundation
           && inline?.text.hasPrefix("Portrait of KAOS Steward · assessment rev 6") == true && inline?.text.contains(" · stale") == true && inline?.text.contains("#" + String("sixth".prefix(8))) == true,
           "Inline delivery puts the PNG in the requester's managed outputs with a one-line caption (agent, assessment time, short hash, stale flag)")
     check(PortraitService.isRequest("get me a portrait of KAOS Steward") && PortraitService.isRequest("Self-portrait please") && !PortraitService.isRequest("what is the status"), "Portrait requests are recognized in plain language")
+
+    // Queue priority and close semantics with deterministic suspended generation.
+    do {
+        let queuedAgent = store.createAgent(title: "Queued refresh"); queuedAgent.agent?.enabled = false
+        queuedAgent.agent?.assessment = first; queuedAgent.agent?.portraitMinMinutes = 10
+        let queuedService = PortraitService(); queuedService.clock = { now }
+        var starts = 0, replies = 0
+        var release: CheckedContinuation<Void, Never>?
+        queuedService.generator = { _ in
+            starts += 1
+            if starts == 1 { await withCheckedContinuation { release = $0 } }
+            return png(.blue)
+        }
+        let viewer = UUID()
+        queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id])
+        spin { release != nil }
+        queuedAgent.agent?.assessment?.contentHash = "new queued content"
+        Task { @MainActor in _ = await queuedService.request(queuedAgent, store: store, origin: .window); replies += 1 }
+        spin(0.05) { false }
+        Task { @MainActor in _ = await queuedService.request(queuedAgent, store: store, origin: .menu, force: true); replies += 1 }
+        spin(0.05) { false }
+        queuedService.unsubscribe(viewer)
+        release?.resume(); release = nil
+        spin { replies == 2 }
+        check(starts == 2 && replies == 2 && !queuedService.hasDeferred(queuedAgent.id),
+              "Refresh joining a queued window request preserves force and finishes once even after close, with no deferred timer")
+        let loads = queuedService.imageLoads
+        queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin(0.05) { false }
+        queuedService.unsubscribe(viewer)
+        check(queuedService.imageLoads == loads && starts == 2, "Uncovering unchanged cached portraits neither decodes nor generates")
+        queuedAgent.agent?.assessment?.contentHash = "deferred content"
+        queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin { queuedService.hasDeferred(queuedAgent.id) }
+        var refreshed = false
+        Task { @MainActor in _ = await queuedService.request(queuedAgent, store: store, origin: .menu, force: true); refreshed = true }
+        spin { refreshed }
+        check(starts == 3 && !queuedService.hasDeferred(queuedAgent.id), "Explicit Refresh replaces an already deferred window timer")
+        queuedService.unsubscribe(viewer)
+
+        queuedAgent.agent?.portraitMinMinutes = 0
+        queuedAgent.agent?.assessment?.contentHash = "held content"
+        queuedService.generator = { _ in starts += 1; await withCheckedContinuation { release = $0 }; return png(.blue) }
+        queuedService.subscribe(viewer, store: store, agents: [queuedAgent.id]); spin { release != nil }
+        queuedAgent.agent?.assessment?.contentHash = "closed content"
+        var stopped = false
+        Task { @MainActor in _ = await queuedService.request(queuedAgent, store: store, origin: .window); stopped = true }
+        spin(0.05) { false }
+        queuedService.unsubscribe(viewer); release?.resume(); release = nil
+        spin { stopped }
+        check(starts == 4 && stopped && !queuedService.hasDeferred(queuedAgent.id), "Closing the last viewer drops queued window-only work after the active generation finishes")
+    }
 
     // 7. Switchboard portrait command returns an inline image and a result.
     let shared = PortraitService.shared, sharedGenerator = shared.generator

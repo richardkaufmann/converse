@@ -27,20 +27,22 @@ struct GallerySelection: Equatable {
         let window = makeWindow(title: "Galleries", width: 620, height: 480)
         window.contentMinSize = NSSize(width: 560, height: 300)
         let hosting = NSHostingView(rootView: GalleryPicker { [weak self, weak window] selection in
-            guard let self else { return }
-            window?.close(); self.show(selection)
+            guard let self, let window else { return }
+            // Keep the picker alive until its action has unwound.
+            DispatchQueue.main.async { window.close(); self.show(selection) }
         })
         hosting.sizingOptions = []; window.contentView = hosting
         windows[ObjectIdentifier(window)] = Entry(window: window, selection: nil, token: UUID())
         window.makeKeyAndOrderFront(nil)
     }
-    func show(_ selection: GallerySelection) {
-        guard !selection.isEmpty else { return }
+    @discardableResult func show(_ selection: GallerySelection) -> NSWindow? {
+        guard !selection.isEmpty else { return nil }
         let window = makeWindow(title: "Gallery", width: 900, height: 660)
         let hosting = NSHostingView(rootView: GalleryView(selection: selection))
         hosting.sizingOptions = []; window.contentView = hosting
         windows[ObjectIdentifier(window)] = Entry(window: window, selection: selection, token: UUID())
         window.makeKeyAndOrderFront(nil); updateDemand(window)
+        return window
     }
     func showAll(portraits: Bool) {
         let ids = Set(Store.shared.sessions.filter { $0.agent != nil && $0.agent?.parkingLotTalkID == nil }.map(\.id))
@@ -209,7 +211,20 @@ struct GalleryView: View {
 
 @MainActor func gallerySelfTests(_ check: (Bool, String) -> Void) {
     // This entrypoint requires an isolated profile (enforced by main.swift).
-    _ = NSApplication.shared
+    // CLI tests run before application.run(): activate a test application and
+    // drain AppKit events so WindowServer occlusion notifications are delivered.
+    let app = NSApplication.shared, previousApp = NSWorkspace.shared.frontmostApplication
+    let previousPolicy = app.activationPolicy()
+    app.setActivationPolicy(.accessory); app.finishLaunching(); app.activate()
+    defer { app.setActivationPolicy(previousPolicy); previousApp?.activate(options: []) }
+    func settle(_ seconds: TimeInterval = 0.2) {
+        let until = Date().addingTimeInterval(seconds)
+        while Date() < until {
+            while let event = app.nextEvent(matching: .any, until: Date(), inMode: .default, dequeue: true) { app.sendEvent(event) }
+            app.updateWindows()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
     let store = Store.shared
     let first = store.createAgent(title: "Release garden")
     let second = store.createAgent(title: "News desk")
@@ -230,8 +245,7 @@ struct GalleryView: View {
         hosting.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 700), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = hosting; window.orderFront(nil)
-        let until = Date().addingTimeInterval(0.3)
-        while Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        settle(0.3)
         window.contentView?.layoutSubtreeIfNeeded()
         check(abs(hosting.bounds.width - width) < 2, "Gallery hosting view accepts \(Int(width))px horizontal resize")
         if let output, let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
@@ -243,11 +257,28 @@ struct GalleryView: View {
     render(GalleryView(selection: selection), name: "gallery-wide", width: 1100)
     render(GalleryView(selection: selection), name: "gallery-narrow", width: 390)
     render(GalleryPicker(show: { _ in }), name: "gallery-picker", width: 620)
+    // Exercise the actual window delegate path, not only PortraitService tokens.
+    let service = PortraitService.shared, manager = GalleryWindows()
+    first.agent?.portrait = AgentPortraitRecord(latest: .init(path: "/missing-fixture.png", cacheKey: PortraitService.cacheKey(agent: first.id, config: first.agent!), sourceRevision: 1, sourceHash: "fixture", assessedAt: Date(), generatedAt: Date(), directionVersion: "fixture"))
+    let firstWindow = manager.show(GallerySelection(portraits: [first.id], monitor: true))!
+    let secondWindow = manager.show(GallerySelection(portraits: [first.id]))!
+    firstWindow.orderFront(nil); secondWindow.orderFront(nil); settle()
+    check(service.isDemanded(first.id), "Visible gallery windows request their selected portrait")
+    firstWindow.orderOut(nil); settle(); manager.windowDidChangeOcclusionState(Notification(name: NSWindow.didChangeOcclusionStateNotification, object: firstWindow))
+    check(service.isDemanded(first.id), "Hiding one overlapping gallery preserves the other viewer")
+    secondWindow.miniaturize(nil); settle(); manager.windowDidMiniaturize(Notification(name: NSWindow.didMiniaturizeNotification, object: secondWindow))
+    check(!service.isDemanded(first.id), "Hidden and minimized galleries remove automatic portrait demand")
+    secondWindow.deminiaturize(nil); secondWindow.orderFront(nil); settle()
+    manager.windowDidDeminiaturize(Notification(name: NSWindow.didDeminiaturizeNotification, object: secondWindow))
+    check(service.isDemanded(first.id), "Restoring a gallery resumes selected demand")
+    secondWindow.close(); firstWindow.close()
+    check(!service.isDemanded(first.id) && !HostMonitor.shared.isSampling, "Closing all galleries stops portrait demand and the host sampler")
     let a = UUID(), b = UUID()
+    let sampleStarted = Date()
     HostMonitor.shared.subscribe(a); HostMonitor.shared.subscribe(b)
     let deadline = Date().addingTimeInterval(1)
     while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-    check(HostMonitor.shared.sample.physical > 0 && HostMonitor.shared.sample.swap != nil, "Host metrics read physical memory and swap without subprocesses")
+    check(HostMonitor.shared.sample.at >= sampleStarted && HostMonitor.shared.sample.resident != nil && HostMonitor.shared.sample.swap != nil, "Host metrics read physical memory and swap without subprocesses")
     HostMonitor.shared.unsubscribe(a); HostMonitor.shared.unsubscribe(b)
     for session in [first, second, third] { session.agent?.enabled = false }
 }

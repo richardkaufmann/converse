@@ -84,7 +84,7 @@ enum PortraitPrompt {
         parts.append("Mood: " + moodWords(config.assessment).joined(separator: ", ") + ".")
         parts.append(noFacts + (allowsStylisticText(direction) ? " " + stylisticText : " No text or letters except a localized ? for a missing component."))
         if !direction.isEmpty { parts.append("Owner art direction (takes precedence for subject and style): " + String(direction.prefix(4000))) }
-        var missing = config.assessment?.facts.filter { $0.value == AgentFact.unavailable }.map(\.label) ?? []
+        var missing = config.visibleAssessmentFacts.filter { $0.value == AgentFact.unavailable }.map(\.label)
         if config.assessmentProblem != nil { missing.append("Latest assessment update") }
         if !missing.isEmpty {
             parts.append("Unavailable components: " + missing.prefix(12).joined(separator: "; ") + ". Keep the available parts of the scene. Put a small ? only at the visual element corresponding to each missing component; do not turn the whole portrait into an error or invent the missing information.")
@@ -113,8 +113,10 @@ enum PortraitPrompt {
     private var inflight: [String: Task<PortraitOutcome, Never>] = [:]
     private var running: [UUID: String] = [:]
     private var queued: [UUID: Task<PortraitOutcome, Never>] = [:]
-    private var queuedExplicit: Set<UUID> = []
-    private var deferred: [UUID: (task: Task<Void, Never>, window: Bool)] = [:]
+    private struct QueuedIntent { var origin: PortraitOrigin; var force: Bool }
+    private var queuedIntent: [UUID: QueuedIntent] = [:]
+    private var deferred: [UUID: Task<Void, Never>] = [:]
+    private(set) var imageLoads = 0
     private var debounces: [UUID: Task<Void, Never>] = [:]
     private(set) var subscribers: Set<UUID> = []
     private var selections: [UUID: Set<UUID>] = [:]
@@ -123,7 +125,7 @@ enum PortraitPrompt {
     static func minInterval(_ config: AgentConfig) -> TimeInterval { max(0, config.portraitMinMinutes ?? defaultMinMinutes) * 60 }
     static func backoff(_ failures: Int) -> TimeInterval { min(6 * 3600, 60 * pow(2, Double(max(0, failures - 1)))) }
     static func cacheKey(agent: UUID, config: AgentConfig) -> String {
-        agent.uuidString + ":" + (config.assessment?.contentHash ?? "none") + ":" + PortraitPrompt.directionVersion(config.artDirection) + ":" + PortraitPrompt.directionVersion(config.objective) + ":" + PortraitPrompt.directionVersion(config.assessmentProblem?.reason)
+        agent.uuidString + ":" + (config.assessment?.contentHash ?? "none") + ":" + PortraitPrompt.directionVersion(config.artDirection) + ":" + PortraitPrompt.directionVersion(config.objective) + ":" + PortraitPrompt.directionVersion(config.assessmentProblem?.reason) + ":" + PortraitPrompt.directionVersion(config.visibleAssessmentFacts.map(\.id).joined(separator: ","))
     }
     func isGenerating(_ id: UUID) -> Bool { generating.contains(id) }
     func hasDeferred(_ id: UUID) -> Bool { deferred[id] != nil }
@@ -135,20 +137,21 @@ enum PortraitPrompt {
     }
     private func load(_ image: AgentPortraitRecord.Image?, agent: UUID, store: Store) -> Data? {
         guard let image else { return nil }
+        imageLoads += 1
         let root = store.folder.appendingPathComponent("Agents/" + agent.uuidString).resolvingSymlinksInPath().standardizedFileURL.path + "/"
         let file = URL(fileURLWithPath: image.path).resolvingSymlinksInPath().standardizedFileURL
         guard file.path.hasPrefix(root), let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 8_000_000,
               let bytes = try? Data(contentsOf: file), NSBitmapImageRep(data: bytes) != nil else { return nil }
         return bytes
     }
-    private func outcome(_ session: Session, store: Store, cached: Bool, note: String? = nil, error: String? = nil) -> PortraitOutcome {
+    private func outcome(_ session: Session, store: Store, cached: Bool, note: String? = nil, error: String? = nil, loadPNG: Bool = true, loadedPNG: Data? = nil) -> PortraitOutcome {
         let config = session.agent ?? AgentConfig()
         let image = config.portrait?.latest
-        let png = load(image, agent: session.id, store: store)
+        let png = loadPNG ? (loadedPNG ?? load(image, agent: session.id, store: store)) : nil
         let stale = image.map { $0.cacheKey != Self.cacheKey(agent: session.id, config: config) } ?? false
-        let shown = png == nil ? nil : image
+        let shown = loadPNG && png == nil ? nil : image
         return PortraitOutcome(agent: session.title, image: shown, png: png, stale: stale, cached: cached, note: note,
-                               error: png == nil ? (error ?? config.portrait?.failure ?? "No portrait yet.") : error,
+                               error: shown == nil ? (error ?? config.portrait?.failure ?? "No portrait yet.") : error,
                                caption: caption(agent: session.title, image: shown, stale: stale))
     }
 
@@ -158,45 +161,52 @@ enum PortraitPrompt {
         deliver(result, for: session, reply: reply, store: store)
         return result
     }
-    private func obtain(_ session: Session, store: Store, origin: PortraitOrigin, force: Bool, demanded: Bool = false) async -> PortraitOutcome {
+    private func obtain(_ session: Session, store: Store, origin: PortraitOrigin, force: Bool) async -> PortraitOutcome {
         guard let config = session.agent, store.sessions.contains(where: { $0 === session }) else {
             return PortraitOutcome(agent: session.title, image: nil, png: nil, stale: false, cached: false, note: nil, error: "Not an agent.", caption: "Portrait unavailable: not an agent")
         }
         let key = Self.cacheKey(agent: session.id, config: config)
-        if !force, config.portrait?.latest?.cacheKey == key, load(config.portrait?.latest, agent: session.id, store: store) != nil {
-            return outcome(session, store: store, cached: true)
+        if !force, config.portrait?.latest?.cacheKey == key {
+            // Visibility notifications need metadata only. Never read/decode PNGs on uncover.
+            if origin == .window { return outcome(session, store: store, cached: true, loadPNG: false) }
+            if let bytes = load(config.portrait?.latest, agent: session.id, store: store) {
+                return outcome(session, store: store, cached: true, loadedPNG: bytes)
+            }
         }
         if let task = inflight[key] { return await task.value }
         if let current = running[session.id], current != key {
             // The assessment changed mid-generation. That result keeps its own
             // source revision; the latest demanded content is queued behind it.
             if let task = queued[session.id] {
-                if origin != .window { queuedExplicit.insert(session.id) }
+                if origin != .window { queuedIntent[session.id]?.origin = origin }
+                if force { queuedIntent[session.id]?.force = true }
                 return await task.value
             }
             let task = Task { @MainActor [weak self] () -> PortraitOutcome in
                 guard let self else { return PortraitOutcome(agent: session.title, image: nil, png: nil, stale: false, cached: false, note: nil, error: "Portraits stopped.", caption: "") }
                 if let earlier = self.inflight[current] { _ = await earlier.value }
                 self.queued[session.id] = nil
-                let explicit = self.queuedExplicit.remove(session.id) != nil
-                let nextOrigin: PortraitOrigin = explicit ? .menu : origin
-                if nextOrigin == .window && !self.isDemanded(session.id) { return self.outcome(session, store: store, cached: true) }
-                return await self.obtain(session, store: store, origin: nextOrigin, force: force, demanded: true)
+                let intent = self.queuedIntent.removeValue(forKey: session.id) ?? QueuedIntent(origin: origin, force: force)
+                if intent.origin == .window && !self.isDemanded(session.id) { return self.outcome(session, store: store, cached: true, loadPNG: false) }
+                return await self.obtain(session, store: store, origin: intent.origin, force: intent.force)
             }
+            queuedIntent[session.id] = QueuedIntent(origin: origin, force: force)
             queued[session.id] = task
             return await task.value
         }
         let now = clock()
         if !force, let record = config.portrait {
             if let retry = record.retryAt, retry > now {
-                return outcome(session, store: store, cached: true, note: "Couldn't refresh: " + (record.failure ?? "failed") + ". Retrying after " + AgentPacing.relative(retry.timeIntervalSince(now)) + "; Refresh retries now.")
+                return outcome(session, store: store, cached: true, note: "Couldn't refresh: " + (record.failure ?? "failed") + ". Retrying after " + AgentPacing.relative(retry.timeIntervalSince(now)) + "; Refresh retries now.", loadPNG: origin != .window)
             }
             if let last = record.lastAttemptAt, now.timeIntervalSince(last) < Self.minInterval(config) {
                 let allowed = last.addingTimeInterval(Self.minInterval(config))
-                if origin == .window || demanded { scheduleDeferred(session, store: store, at: allowed, window: origin == .window) }
-                return outcome(session, store: store, cached: true, note: "Refreshes at most every " + AgentPacing.minutesText(Self.minInterval(config) / 60) + " min; showing the latest portrait.")
+                if origin == .window && isDemanded(session.id) { scheduleDeferred(session, store: store, at: allowed) }
+                return outcome(session, store: store, cached: true, note: "Refreshes at most every " + AgentPacing.minutesText(Self.minInterval(config) / 60) + " min; showing the latest portrait.", loadPNG: origin != .window)
             }
         }
+        // An immediate explicit refresh supersedes any timer for this agent.
+        deferred.removeValue(forKey: session.id)?.cancel()
         return await generate(session, store: store, key: key)
     }
     private func generate(_ session: Session, store: Store, key: String) async -> PortraitOutcome {
@@ -244,16 +254,17 @@ enum PortraitPrompt {
         inflight[key] = task
         return await task.value
     }
-    private func scheduleDeferred(_ session: Session, store: Store, at date: Date, window: Bool) {
+    private func scheduleDeferred(_ session: Session, store: Store, at date: Date) {
         guard deferred[session.id] == nil else { return }
         let delay = max(0, date.timeIntervalSince(clock()))
         let task = Task { @MainActor [weak self, weak session] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, let session, !Task.isCancelled else { return }
             self.deferred[session.id] = nil
-            _ = await self.obtain(session, store: store, origin: window ? .window : .agent, force: false)
+            guard self.isDemanded(session.id) else { return }
+            _ = await self.obtain(session, store: store, origin: .window, force: false)
         }
-        deferred[session.id] = (task, window)
+        deferred[session.id] = task
     }
     private func deliver(_ result: PortraitOutcome, for session: Session, reply: PortraitReply, store: Store) {
         let target: Session
@@ -297,7 +308,7 @@ enum PortraitPrompt {
     func unsubscribe(_ token: UUID) {
         subscribers.remove(token); selections[token] = nil
         for id in Array(debounces.keys) where !isDemanded(id) { debounces.removeValue(forKey: id)?.cancel() }
-        for (id, entry) in deferred where entry.window && !isDemanded(id) { entry.task.cancel(); deferred[id] = nil }
+        for id in Array(deferred.keys) where !isDemanded(id) { deferred.removeValue(forKey: id)?.cancel() }
     }
     /// Called after every agent turn. Without an open window this does nothing.
     func agentTurned(_ session: Session, store: Store) {

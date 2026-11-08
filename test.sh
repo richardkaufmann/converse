@@ -12,6 +12,9 @@ chmod +x "$test_dir/muse-echo"
 test_mode=--self-test
 if [[ "${1:-}" == --providers-only ]]; then test_mode=--provider-self-test; fi
 CONVERSE_DATA_DIR="$test_dir/data" CONVERSE_TEST_COMMAND="$test_dir/muse-echo" "$app/Contents/MacOS/Converse" "$test_mode"
+if [[ "$test_mode" == --self-test ]]; then
+  CONVERSE_DATA_DIR="$test_dir/gallery" CONVERSE_TEST_COMMAND="$test_dir/muse-echo" "$app/Contents/MacOS/Converse" --gallery-self-test
+fi
 python3 Tests/install_shortcut_test.py
 python3 Tests/install_supersede_test.py
 python3 Tests/test_backup_archive_test.py
