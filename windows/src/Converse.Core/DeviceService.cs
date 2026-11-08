@@ -1750,13 +1750,13 @@ public sealed partial class DeviceSyncService : IDisposable
             HomeSeq = _syncCounters.NextSequence(), Epoch = holder.Value.Epoch, Boot = _boot,
             Messages = session.Messages.Skip(start).Take(end - start).Select(m => new DeviceWireMessage
             {
-                Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt,
+                Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt, Components = m.Components,
                 ImageHashes = m.Images.Where(File.Exists).Select(ImageHash).ToArray(),
             }).ToList(),
             Offset = start, Total = total, Prepend = beforeOffset is not null,
             Draft = session.Draft, DraftVersion = _drafts.Version(draftKey),
             DraftImageHashes = session.Attachments.Where(File.Exists).Select(ImageHash).ToArray(),
-            Pending = session.Pending.Select(p => new DevicePendingDto { Id = p.Id, Text = p.Text }).ToList(),
+            Pending = session.Pending.Select(p => new DevicePendingDto { Id = p.Id, Text = p.Text, Components = p.Components }).ToList(),
             Requests = session.Requests.Select(request => new DeviceRequestDto
             {
                 Id = request.Id, Kind = request.Kind,

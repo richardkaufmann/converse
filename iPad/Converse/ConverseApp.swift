@@ -646,7 +646,7 @@ struct PadQueue: View {
             }
             ForEach(pending) { item in
                 HStack {
-                    Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1)
+                    Text(TranscriptStyle.queueSummary(item.text, components: item.components) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text, components: item.components) != nil ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
                     ForEach(itemActions(item)) { action in Button(action.label, role: action.command.action == "removeQueued" ? .destructive : nil) { send(action.command) } }
                 }

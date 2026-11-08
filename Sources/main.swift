@@ -28,6 +28,25 @@ struct Message: Codable, Identifiable, Equatable {
     var createdAt: Date? = Date()
     // Came from a .converse file. Its text never captures files from this Mac.
     var imported: Bool? = nil
+    // Inject all parts, so a typed prompt merged with switchboard traffic
+    // stays visible. Presentation only; `text` is what was sent.
+    var components: [MessageComponent]? = nil
+    // Keep `==` compiler-synthesized: the transcript's prepared-message cache
+    // keys on whole-Message equality, so it must cover `components` too.
+}
+extension Message {
+    // Synthesized decoding, except that unreadable Inject all parts never
+    // fail the archive: the message keeps its text and shows whole.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        images = try c.decode([String].self, forKey: .images)
+        delays = try c.decodeIfPresent([DelayMark].self, forKey: .delays)
+        finalReply = try c.decodeIfPresent(String.self, forKey: .finalReply)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
+        imported = try c.decodeIfPresent(Bool.self, forKey: .imported)
+        components = c.decodeComponents(forKey: .components)
+    }
 }
 struct ToolStatus: Codable {
     var model = "not reported"
@@ -575,7 +594,7 @@ final class Store: ObservableObject {
         // A first-run teaching rides with this message; the queue keeps it if the turn cannot start.
         let preamble = firstRun.teachIfNeeded(s)
         if preamble != nil || s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
-            var prompt = PendingPrompt(text: s.draft, images: s.attachments)
+            var prompt = PendingPrompt(typed: true, text: s.draft, images: s.attachments)
             prompt.hiddenPreamble = preamble
             if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
             s.draft = ""; s.attachments = []; s.queuePaused = false
@@ -584,7 +603,7 @@ final class Store: ObservableObject {
             else if !s.busy { runNext(s) }
             save(); return
         }
-        send(s)
+        send(s, input: PendingPrompt(typed: true, text: s.draft, images: s.attachments))
     }
     static let injectNothingQueued = "Queue already empty; nothing to inject."
     static let injectItemGone = "That message already started or was removed. Nothing was injected."
@@ -699,7 +718,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -760,7 +779,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -790,7 +809,9 @@ final class Store: ObservableObject {
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
-        s.messages.append(Message(role: "user", text: text, images: images))
+        // Inject all parts render separately; text that differs from the queued input shows whole.
+        let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
+        s.messages.append(Message(role: "user", text: text, images: images, components: components))
         if let context = s.restoreContext { s.restoreRetry = (text, context) }
         s.restoreContext = nil
         if clearDisplayBeforeReply {
@@ -823,7 +844,7 @@ final class Store: ObservableObject {
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && usesInteractiveMuse {
-            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
+            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID, input: input); return
         }
         if let live = s.claudeLive { deliverClaudeLive(s, live: live, prompt: prompt, responseID: responseID); save(); return }
         switch s.entry.engine {
@@ -921,7 +942,7 @@ final class Store: ObservableObject {
             }
         }
     }
-    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = []) {
+    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = [], input: PendingPrompt? = nil) {
         let connection = MuseConnection(sessionID: s.remoteID ?? s.conversationID.uuidString)
         s.muse = connection; s.museItems = [:]; s.requests = []; s.requestError = ""; s.status = "Connecting…"
         connection.event = { [weak self, weak s] method, params in
@@ -947,7 +968,9 @@ final class Store: ObservableObject {
                            s.messages[index - 1].images == images {
                             s.messages.removeSubrange((index - 1)...index)
                         }
-                        s.pending.insert(PendingPrompt(switchboardHop: s.switchboardHop, text: display, images: images), at: 0)
+                        // Inject all parts and typed flags travel with it, so the retried
+                        // message renders the same way.
+                        s.pending.insert((input ?? PendingPrompt(text: display, images: images)).held(text: display, images: images, switchboardHop: s.switchboardHop), at: 0)
                         s.interrupted = false; s.resumeAfterInterrupt = false; s.queuePaused = true
                         self.finishMuse(s, status: "Session in use · input held", notice: "Muse has this session open in another host. This prompt was not submitted and is held in the paused queue. Close the other host, then choose Resume queue or Inject now. Your conversation identity and draft are unchanged.")
                     } else { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription) }
@@ -2518,6 +2541,8 @@ struct ScrollingConversation: NSViewRepresentable {
             var body: NSAttributedString
             var formattedCopy: NSAttributedString?
             let traffic: Bool
+            /// Inject all traffic parts, relative to `body`.
+            let segmentTraffic: [NSRange]
         }
         // Per-pane and pruned to displayed history; retained bodies are immutable.
         private var preparedMessages: [UUID: PreparedMessage] = [:]
@@ -2705,12 +2730,26 @@ struct ScrollingConversation: NSViewRepresentable {
                 // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
                 if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
             }
-            let trafficSummary = !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveName)
+            // Inject all can merge traffic with typed input: each part renders on its own.
+            let segments = disclosure == nil && message.role == "user" ? TranscriptStyle.segments(visible, components: TranscriptStyle.components(message.components, from: message.text, to: visible, rewrite: Store.visibleText), resolveName: resolveName) : nil
+            let trafficSummary = segments != nil || !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveName)
+            var segmentTraffic: [NSRange] = []
             if let disclosure {
                 body = disclosure.rendered(id: message.id, expanded: expanded, fontSize: fontSize, base: base)
             } else if let summary = trafficSummary {
                 let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                 body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
+            } else if let segments {
+                body = NSMutableAttributedString(string: "")
+                for segment in segments {
+                    if body.length > 0 { body.append(NSAttributedString(string: "\n", attributes: base)) }
+                    guard let summary = segment.summary else {
+                        body.append(NSAttributedString(string: segment.text.trimmingCharacters(in: .newlines), attributes: base)); continue
+                    }
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    segmentTraffic.append(NSRange(location: body.length, length: (summary as NSString).length))
+                    body.append(NSAttributedString(string: summary, attributes: base.merging([.toolTip: segment.text, .paragraphStyle: oneLine]) { _, value in value }))
+                }
             } else if message.role == "assistant" {
                 body = MarkdownText.render(visible)
                 PaneTextSize.scale(body, by: fontSize / CGFloat(PaneTextSize.standard))
@@ -2728,7 +2767,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 ? (disclosure != nil || trafficSummary != nil
                    ? NSAttributedString(string: visible, attributes: base)
                    : NSAttributedString(attributedString: body)) : nil
-            for mark in (trafficSummary == nil && disclosure == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
+            for mark in (trafficSummary == nil && disclosure == nil && segments == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
                 let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
                 let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
                 let at = min(renderedOffset, body.length)
@@ -2750,19 +2789,21 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             let contentLength = TranscriptStyle.blockContentLength(body.string)
             body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
-            let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
+            let traffic = segments == nil && (TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true)
             if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            segmentTraffic = segmentTraffic.filter { NSMaxRange($0) <= body.length }
+            for range in segmentTraffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: range) }
             if message.role == "user" {
                 body.addAttribute(.font, value: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
             }
             let formattedCopy: NSAttributedString?
             if message.role == "user" || message.role == "assistant" {
-                formattedCopy = disclosure != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? assistantCopy! : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+                formattedCopy = disclosure != nil || segments != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? assistantCopy! : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
             } else { formattedCopy = nil }
             let result = PreparedMessage(message: message, fontSize: fontSize, collapse: collapse,
                                          expanded: expanded, dateEnvironment: dateEnvironment,
                                          resolvedNames: resolvedNames, body: NSAttributedString(attributedString: body),
-                                         formattedCopy: formattedCopy, traffic: traffic)
+                                         formattedCopy: formattedCopy, traffic: traffic, segmentTraffic: segmentTraffic)
             preparedMessages[message.id] = result
             return result
         }
@@ -2901,6 +2942,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 append("\n", [.paragraphStyle: style])
                 document.addAttribute(.paragraphStyle, value: style, range: NSRange(location: paragraphRange.location, length: document.length - paragraphRange.location))
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
+                for range in prepared.segmentTraffic { text.trafficBlocks.append(NSRange(location: start + range.location, length: range.length)) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
             stage("assemble-history")
@@ -3614,6 +3656,8 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
             $0.range == $1.range && $0.source == $1.source && $0.formatted.isEqual(to: $1.formatted)
         }
         check(copiesMatch && session.messages == original, "Prepared history preserves full Copy Message and archive: " + label)
+        check(text.trafficBlocks == cold.trafficBlocks && text.userBlocks == cold.userBlocks && text.messageLabels == cold.messageLabels,
+              "Prepared history matches fresh traffic shading, prompt blocks and message labels: " + label)
     }
     session.messages.append(Message(role: "assistant", text: "New **output**"))
     coordinator.render(text)
@@ -3665,6 +3709,35 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.render(text); compareCold("locale preference notification")
     check(coordinator.messagePreparationCount - preparedBeforeLocaleChange == session.messages.count,
           "Locale preference changes reprepare retained timestamp tooltips")
+    // Inject all parts: valid, invalid, legacy delivery-block and markerless
+    // legacy merges, plus a tell whose destination name is resolved.
+    let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+    let plainTell = "[Converse message from Fixture · session peer/three · delivery test · hop 1/100]\nStatus message"
+    let deliveryReply = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+    let peer = UUID().uuidString
+    let namedTell = "```converse\n{\"command\":\"tell\",\"to\":\"" + peer + "\",\"text\":\"Injected status\"}\n```"
+    let plainMerged = plainTell + "\n\n" + typed, namedMerged = namedTell + "\n\n" + typed
+    session.messages += [Message(role: "user", text: plainMerged, components: TranscriptStyle.components(joining: [(plainTell, "traffic"), (typed, "human")], into: plainMerged)),
+                         Message(role: "user", text: plainMerged, components: [MessageComponent(offset: 0, length: (plainTell as NSString).length, kind: "traffic"), MessageComponent(offset: (plainMerged as NSString).length + 1, length: 1, kind: "human")]),
+                         Message(role: "user", text: deliveryReply + "\n\n" + typed),
+                         Message(role: "user", text: plainMerged),
+                         Message(role: "user", text: namedMerged, components: TranscriptStyle.components(joining: [(namedTell, "traffic"), (typed, "human")], into: namedMerged)),
+                         Message(role: "assistant", text: "After the merges")]
+    coordinator.render(text); compareCold("mixed Inject all messages")
+    check(text.string.contains("Received tell from Fixture · Status message\n" + typed) && text.string.contains("Received reply from ClaudeConverse · Read-only diagnosis\n" + typed)
+          && text.string.contains("Tell to Renamed peer · Injected status\n" + typed) && text.trafficBlocks.count >= 4,
+          "Prepared mixed messages split traffic parts from typed text")
+    let preparedBeforeMixedRender = coordinator.messagePreparationCount
+    coordinator.render(text)
+    check(coordinator.messagePreparationCount == preparedBeforeMixedRender, "Unchanged mixed messages reuse their prepared bodies")
+    coordinator.resolveSessionName = { $0 == peer ? "Moved peer" : "Renamed peer" }
+    session.messages.append(Message(role: "user", text: "After the rename"))
+    coordinator.render(text); compareCold("session renamed under an injected tell")
+    check(text.string.contains("Tell to Moved peer · Injected status") && !text.string.contains("Tell to Renamed peer · Injected status"),
+          "Renaming a session referenced by an injected tell re-prepares its label")
+    let mixedIndex = session.messages.count - 4
+    session.messages[mixedIndex].components = TranscriptStyle.components(joining: [(plainTell, "traffic"), (typed, "human")], into: plainMerged)
+    coordinator.render(text); compareCold("legacy merge gained parts")
 }
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     conversationPreparedCacheSelfTests(check)
@@ -3970,6 +4043,54 @@ func selfTest() {
     styledSession.messages += [Message(role: "activity", text: "hidden tool output"), Message(role: "assistant", text: ""), Message(role: "notice", text: "Switchboard: queued"), Message(role: "assistant", text: "paragraph one\n\nparagraph two\n```swift\nlet n = 1\n```" )]
     styledCoordinator.render(styled)
     check(styled.messageLabels.map(\.number) == [1, 2, 3, 4], "Hidden activity and empty placeholders consume no numbers; visible notices and code blocks each consume one")
+    // Inject all merged a reply with Richard's typed prompt (941BAB1E). The
+    // archived text has no metadata; the new path records components.
+    let mergedReply = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+    let mergedTyped = "OK, propose: make 148 on Mac have a Debug pane."
+    let mergedTell = "[Converse message from Muse · session peer/two · delivery " + UUID().uuidString + " · hop 1/100]\nStatus update"
+    let mergedText = mergedReply + "\n\n" + mergedTyped, mergedWithTell = mergedTell + "\n\n" + mergedTyped + "\n\n" + mergedReply
+    let mergedSession = Session(entry: entry)
+    mergedSession.messages = [Message(role: "user", text: mergedText), Message(role: "assistant", text: "response"),
+                              Message(role: "user", text: mergedWithTell, components: TranscriptStyle.components(joining: [(mergedTell, "traffic"), (mergedTyped, "human"), (mergedReply, "traffic")], into: mergedWithTell)),
+                              Message(role: "user", text: mergedReply)]
+    let mergedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(mergedSession).render(mergedView)
+    let mergedString = mergedView.string as NSString
+    let typedRanges = [mergedString.range(of: mergedTyped), mergedString.range(of: mergedTyped, options: .backwards)]
+    check(typedRanges[0].location != NSNotFound && typedRanges[0] != typedRanges[1] && mergedString.range(of: "Received reply from ClaudeConverse · Read-only diagnosis").location == 0
+          && mergedString.range(of: "Received tell from Muse · Status update").location != NSNotFound && !mergedView.string.contains("[Reply to request"),
+          "Merged traffic collapses per part while the typed prompt is visible, for archived and newly recorded messages")
+    check(typedRanges.allSatisfy { (mergedView.textStorage?.attribute(.foregroundColor, at: $0.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic }
+          && (mergedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor) == TranscriptPalette.traffic
+          && !mergedView.trafficBlocks.contains { NSIntersectionRange($0, typedRanges[0]).length > 0 || NSIntersectionRange($0, typedRanges[1]).length > 0 } && mergedView.trafficBlocks.count == 4,
+          "Only the switchboard parts are orange and shaded as traffic; the typed text keeps prompt styling")
+    check(mergedView.copyBlocks.filter { $0.role == "user" }.map(\.source) == [mergedText, mergedWithTell, mergedReply] && mergedSession.messages[0].text == mergedText,
+          "Copy Message and the archive keep the exact merged text")
+    check(mergedView.userBlocks.count == 3 && mergedView.messageLabels.map(\.number) == [1, 2, 3, 4], "A merged message is still one prompt block and one message number")
+    // A plain tell has no delivery block: invalid recorded parts must show
+    // the whole message expanded, never collapse it over the typed text.
+    let plainTell = "[Converse message from Fixture · session peer/three · delivery test · hop 1/100]\nStatus message"
+    let plainTyped = "MY TYPED PROMPT MUST STAY VISIBLE", plainMerged = plainTell + "\n\n" + plainTyped
+    let plainValid = TranscriptStyle.components(joining: [(plainTell, "traffic"), (plainTyped, "human")], into: plainMerged)
+    let plainSession = Session(entry: entry)
+    plainSession.messages = [Message(role: "user", text: plainMerged, components: [MessageComponent(offset: 0, length: (plainTell as NSString).length, kind: "traffic"), MessageComponent(offset: (plainMerged as NSString).length + 1, length: 1, kind: "human")]),
+                             Message(role: "user", text: plainMerged, components: plainValid), Message(role: "user", text: plainMerged)]
+    let plainView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(plainSession).render(plainView)
+    let plainString = plainView.string as NSString
+    let plainBlocks = plainView.userBlocks.count == 3 ? plainView.userBlocks : Array(repeating: NSRange(location: 0, length: 0), count: 3)
+    let invalidBlock = plainBlocks[0], invalidTyped = plainString.range(of: plainTyped, range: plainBlocks[0]), validTyped = plainString.range(of: plainTyped, range: plainBlocks[1])
+    check(invalidTyped.location != NSNotFound && NSLocationInRange(invalidTyped.location, invalidBlock) && plainString.range(of: "[Converse message from Fixture").location == 0
+          && (plainView.textStorage?.attribute(.foregroundColor, at: invalidTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && (plainView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && !plainView.trafficBlocks.contains { NSIntersectionRange($0, invalidBlock).length > 0 },
+          "Invalid recorded parts render the whole merged message expanded: typed text visible, nothing orange or collapsed")
+    check(validTyped.location != NSNotFound && plainString.substring(with: plainBlocks[1]).hasPrefix("Received tell from Fixture · Status message\n")
+          && (plainView.textStorage?.attribute(.foregroundColor, at: validTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && plainString.substring(with: plainBlocks[2]).hasPrefix("Received tell from Fixture") && !plainString.substring(with: plainBlocks[2]).contains("\n" + plainTyped)
+          && plainView.trafficBlocks.contains { NSIntersectionRange($0, plainBlocks[2]).length == plainBlocks[2].length },
+          "Valid parts keep the typed text visible; without parts the ambiguous old merge still collapses as before")
+    check(plainView.copyBlocks.map(\.source) == [plainMerged, plainMerged, plainMerged], "Copy Message keeps the exact merged text whatever the parts")
     let rulerBlocks = [NSRange(location: 0, length: 10), NSRange(location: 20, length: 10), NSRange(location: 40, length: 10)]
     let rulerLabels = [0, 18, 40, 60].enumerated().map { TranscriptMessageLabel(location: $0.element, number: $0.offset + 1, prompt: false) }
     check(Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 25, length: 10))) == [rulerBlocks[1]] && Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 28, length: 15))) == Array(rulerBlocks[1...2]) && MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 51, length: 5)).isEmpty,

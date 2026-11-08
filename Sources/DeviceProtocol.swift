@@ -220,15 +220,38 @@ struct DeviceWireMessage: Codable, Identifiable, Equatable {
     // UTC Unix seconds, not Swift's default Date encoding (2001 epoch).
     // Optional for older peers and history with no original timestamp.
     var createdAtUnixSeconds: Double? = nil
+    // Inject all parts (UTF-16 ranges of `text`). Optional: older peers
+    // omit and ignore it; viewers then use the conservative text split.
+    var components: [MessageComponent]? = nil
     var createdAt: Date? {
         guard let seconds = createdAtUnixSeconds, seconds.isFinite,
               seconds >= -62135596800, seconds < 253402300800 else { return nil }
         return Date(timeIntervalSince1970: seconds)
     }
 }
+extension DeviceWireMessage {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        imageHashes = try c.decode([String].self, forKey: .imageHashes)
+        messageNumber = try c.decodeIfPresent(Int.self, forKey: .messageNumber)
+        createdAtUnixSeconds = try c.decodeIfPresent(Double.self, forKey: .createdAtUnixSeconds)
+        components = c.decodeComponents(forKey: .components)
+    }
+}
 struct DevicePendingDTO: Codable, Equatable, Identifiable {
     var id: UUID
     var text: String
+    // Inject all parts of a merged queue item, as on DeviceWireMessage.
+    // Optional: older peers omit and ignore it.
+    var components: [MessageComponent]? = nil
+}
+extension DevicePendingDTO {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); text = try c.decode(String.self, forKey: .text)
+        components = c.decodeComponents(forKey: .components)
+    }
 }
 struct DeviceChoiceDTO: Codable, Equatable, Identifiable {
     var id: String

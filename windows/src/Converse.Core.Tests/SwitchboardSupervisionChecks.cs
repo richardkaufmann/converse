@@ -187,13 +187,281 @@ static class SwitchboardSupervisionChecks
             check(two.Pending.Count == 2 && two.Pending[0] is { OriginHomeID: var first, Text: "mine\n\npeer\n\nlater" } && first == peer
                 && two.Pending[1] == fromOther,
                 "Inject all never merges prompts from different Group senders under one origin");
+
+            // Inject all merging traffic with typed input (Mac 941BAB1E parity).
+            var typing = Busy(); typing.Draft = "typed while busy"; store.Submit(typing);
+            check(typing.Pending.SingleOrDefault() is { Typed: true, Text: "typed while busy" }, "Composer input is marked typed in the queue");
+            var request = Guid.NewGuid();
+            string Envelope(string body, bool expected, Guid? replyTo) =>
+                $"[Converse message from ClaudeConverse · session abc · delivery {Guid.NewGuid()} · hop 2/100]\n{body}" + DeviceSyncService.ReplyInstruction(Guid.NewGuid(), expected, replyTo);
+            var reply = Envelope("Read-only diagnosis", false, request); var ask = Envelope("Which build?", true, null);
+            const string typed = "OK, propose: make 148\n\nSecond paragraph.";
+            const string replySummary = "Received reply from ClaudeConverse · Read-only diagnosis", askSummary = "Received ask from ClaudeConverse · Which build?";
+            var replyPrompt = new PendingPrompt { Text = reply, Autonomous = true, Hop = 2 };
+            var typedPrompt = new PendingPrompt { Text = typed, Typed = true };
+            var agentHuman = Busy(replyPrompt, typedPrompt);
+            store.InjectPending(agentHuman);
+            var merged = agentHuman.Pending.Single();
+            check(merged.Text == reply + "\n\n" + typed && merged.ComponentIDs!.Contains(replyPrompt.Id) && merged.ComponentIDs.Contains(typedPrompt.Id)
+                && merged.Components is [{ Offset: 0, Kind: "traffic" } a, { Kind: "human" } b] && a.Length == reply.Length && b.Offset == reply.Length + 2 && b.Length == typed.Length,
+                "Inject all records the traffic and typed parts without changing the merged text or durability IDs");
+            check(SwitchboardPresentation.Segments(merged.Text, merged.Components) is [{ Summary: replySummary } r, { Summary: null } h] && r.Text == reply && h.Text == typed,
+                "Agent then human: the reply collapses to its own summary and the typed prompt stays visible in full");
+            agentHuman.Pending.Add(new PendingPrompt { Text = ask, Autonomous = true, Hop = 1 });
+            store.InjectPending(agentHuman);
+            var remerged = agentHuman.Pending.Single();
+            check(remerged.Components?.Select(c => c.Kind).SequenceEqual(new[] { "traffic", "human", "traffic" }) == true
+                && SwitchboardPresentation.Segments(remerged.Text, remerged.Components)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, null, askSummary }) == true,
+                "Merging an already merged prompt keeps each recorded part: two summaries plus the visible typed text");
+            var humanAgent = Busy(new PendingPrompt { Text = typed, Typed = true }, new PendingPrompt { Text = reply, Hop = 2, Autonomous = true });
+            store.InjectPending(humanAgent);
+            check(SwitchboardPresentation.Segments(humanAgent.Pending[0].Text, humanAgent.Pending[0].Components) is [{ Summary: null } typedFirst, { Summary: replySummary }] && typedFirst.Text == typed,
+                "Human then agent: typed text first, then the reply's own summary");
+            var trafficOnly = Busy(new PendingPrompt { Text = reply, Hop = 2, Autonomous = true }, new PendingPrompt { Text = ask, Hop = 1, Autonomous = true });
+            store.InjectPending(trafficOnly);
+            check(SwitchboardPresentation.Segments(trafficOnly.Pending[0].Text, trafficOnly.Pending[0].Components)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, askSummary }) == true,
+                "Traffic-only merges still collapse, one summary per message");
+            var lookalike = Busy(new PendingPrompt { Text = "Switchboard: why did it fail?", Typed = true }, new PendingPrompt { Text = "and this", Typed = true });
+            store.InjectPending(lookalike);
+            check(SwitchboardPresentation.Segments(lookalike.Pending[0].Text, lookalike.Pending[0].Components) is [{ Summary: null, Text: "Switchboard: why did it fail?\n\nand this" }],
+                "Typed text that looks like a switchboard line never collapses once merged");
+            check(SwitchboardPresentation.Segments("plain one\n\nplain two", new List<MessageComponent> { new() { Offset = 0, Length = 9, Kind = "human" }, new() { Offset = 11, Length = 9, Kind = "text" } }) is null
+                && SwitchboardPresentation.Segments(reply, null) is null && SwitchboardPresentation.Segments(typed, null) is null,
+                "Unmerged traffic and plain messages, and merges with no traffic, render whole exactly as before");
+            var forged = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = merged.Text.Length + 5, Length = 3, Kind = "human" } };
+            var hiding = new List<MessageComponent> { new() { Offset = 0, Length = reply.Length, Kind = "traffic" }, new() { Offset = reply.Length + 2, Length = 4, Kind = "traffic" } };
+            check(SwitchboardPresentation.Segments(merged.Text, forged) is [{ Summary: null } forgedWhole] && forgedWhole.Text == merged.Text
+                && SwitchboardPresentation.Segments(merged.Text, hiding) is [{ Summary: null } hidingWhole] && hidingWhole.Text == merged.Text,
+                "Out-of-range ranges, or ranges leaving text uncovered, show the whole message expanded instead of hiding text");
+            // A plain tell has no delivery block, so only recorded parts can
+            // separate it from typed text. Invalid parts must never collapse it.
+            var plainTell = "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message";
+            const string humanText = "MY TYPED PROMPT MUST STAY VISIBLE";
+            var markerless = plainTell + "\n\n" + humanText;
+            var valid = SwitchboardPresentation.Components(new[] { (plainTell, "traffic"), (humanText, "human") }, markerless)!;
+            bool Expanded(IReadOnlyList<MessageComponent>? parts) => SwitchboardPresentation.Segments(markerless, parts) is [{ Summary: null } only] && only.Text == markerless;
+            check(SwitchboardPresentation.Segments(markerless, valid) is [{ Summary: "Received tell from Fixture · Status message" }, { Summary: null, Text: humanText }],
+                "Markerless tell then typed text: valid parts keep the typed prompt visible");
+            check(Expanded(new List<MessageComponent> { valid[0], new() { Offset = markerless.Length + 1, Length = 1, Kind = "human" } }),
+                "Markerless tell then typed text: an out-of-bounds part shows the whole message expanded");
+            check(Expanded(new List<MessageComponent> { valid[0], new() { Offset = valid[0].Length - 3, Length = markerless.Length - valid[0].Length + 3, Kind = "human" } }),
+                "Markerless tell then typed text: overlapping parts show the whole message expanded");
+            check(Expanded(new List<MessageComponent> { valid[0] }) && Expanded(new List<MessageComponent>()) && Expanded(new List<MessageComponent> { new() { Offset = 0, Length = 5, Kind = "traffic" } }),
+                "Markerless tell then typed text: parts leaving non-blank text uncovered, including a single or empty list, show it expanded");
+            check(SwitchboardPresentation.Segments(markerless, null) is null && SwitchboardPresentation.Summary(markerless) is not null,
+                "Without components a markerless merge is ambiguous with a multi-paragraph tell and still collapses whole, as before");
+            check(SwitchboardPresentation.QueueSummary(markerless, valid) is null && SwitchboardPresentation.QueueSummary(markerless, new List<MessageComponent> { valid[0] }) is null,
+                "Queue rows with recorded parts, valid or not, never summarize over the typed text");
+            // Metadata-only changes: the same text with different parts renders
+            // differently, so every render cache key (Windows SameLine, queue
+            // banner signature) must change with them.
+            var trafficToHuman = new List<MessageComponent> { new() { Offset = valid[0].Offset, Length = valid[0].Length, Kind = "human" }, valid[1] };
+            var partStates = new List<(string Name, List<MessageComponent>? Parts)> {
+                ("absent", null), ("valid", valid), ("invalid", new() { valid[0] }), ("empty", new()), ("traffic→human", trafficToHuman), ("reordered", new() { valid[1], valid[0] }) };
+            bool TypedVisible(IReadOnlyList<MessageComponent>? parts) => SwitchboardPresentation.Segments(markerless, parts)?.Any(s => s.Summary is null && s.Text.Contains(humanText)) == true;
+            string Rendered(IReadOnlyList<MessageComponent>? parts) => string.Join("|", (SwitchboardPresentation.Segments(markerless, parts)
+                ?? new List<TranscriptSegment> { new(markerless, SwitchboardPresentation.Summary(markerless)) }).Select(s => s.Summary ?? s.Text));
+            check(partStates.Select(s => TypedVisible(s.Parts)).SequenceEqual(new[] { false, true, true, true, true, true })
+                && Rendered(null) != Rendered(valid) && Rendered(valid) != Rendered(partStates[2].Parts) && Rendered(valid) != Rendered(trafficToHuman)
+                && SwitchboardPresentation.Segments(markerless, trafficToHuman) is [{ Summary: null } asHuman] && asHuman.Text == markerless,
+                "Same text, different parts: absent collapses; valid, invalid, empty, traffic→human and reordered parts render the typed prompt in full");
+            var queueId = Guid.NewGuid();
+            var distinct = true;
+            for (var i = 0; i < partStates.Count; i++)
+                for (var j = 0; j < partStates.Count; j++)
+                    if (i != j && (SwitchboardPresentation.SameComponents(partStates[i].Parts, partStates[j].Parts)
+                        || SwitchboardPresentation.ComponentsKey(partStates[i].Parts) == SwitchboardPresentation.ComponentsKey(partStates[j].Parts)
+                        || SwitchboardPresentation.QueueSignature(queueId, markerless, partStates[i].Parts) == SwitchboardPresentation.QueueSignature(queueId, markerless, partStates[j].Parts)))
+                        distinct = false;
+            check(distinct, "Metadata-only changes (absent→valid, valid→invalid, traffic→human, reordered, empty) change the line comparison and the queue banner signature");
+            var copy = SwitchboardPresentation.Snapshot(valid)!;
+            check(SwitchboardPresentation.SameComponents(valid, copy) && SwitchboardPresentation.QueueSignature(queueId, markerless, valid) == SwitchboardPresentation.QueueSignature(queueId, markerless, copy)
+                && SwitchboardPresentation.SameComponents(null, null) && !ReferenceEquals(copy, valid) && !ReferenceEquals(copy[0], valid[0]),
+                "Equal parts keep the cached line and banner; a cached snapshot is a detached copy");
+            var nullKind = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[],\"components\":[{\"offset\":0,\"length\":1,\"kind\":null}]}"));
+            check(SwitchboardPresentation.ComponentsKey(nullKind.Components) == "[0,1,~]" && SwitchboardPresentation.Snapshot(nullKind.Components) is [{ Kind: null }],
+                "A part with a null kind from the wire keys and snapshots without throwing");
+            // Archive/wire JSON with a null kind: every walker tolerates it, the
+            // part stays visible, and null→"" is a change.
+            var parsedNullKind = System.Text.Json.JsonSerializer.Deserialize<List<MessageComponent>>("[{\"offset\":0,\"length\":5,\"kind\":null}]")!;
+            var emptyKind = new List<MessageComponent> { new() { Offset = 0, Length = 5, Kind = "" } };
+            check(parsedNullKind is [{ Kind: null }] && SwitchboardPresentation.Segments("hello", parsedNullKind) is null
+                && SwitchboardPresentation.Segments(plainTell, new List<MessageComponent> { new() { Offset = 0, Length = plainTell.Length, Kind = null! } }) is [{ Summary: null } nullKindTell] && nullKindTell.Text == plainTell
+                && SwitchboardPresentation.ComponentsKey(parsedNullKind) != SwitchboardPresentation.ComponentsKey(emptyKind) && !SwitchboardPresentation.SameComponents(parsedNullKind, emptyKind)
+                && SwitchboardPresentation.SameComponents(parsedNullKind, SwitchboardPresentation.Snapshot(parsedNullKind))
+                && SwitchboardPresentation.QueueSignature(queueId, "hello", parsedNullKind) != SwitchboardPresentation.QueueSignature(queueId, "hello", emptyKind)
+                && SwitchboardPresentation.QueueSummary("hello", parsedNullKind) is null && SwitchboardPresentation.Components(parsedNullKind, "hello", "hello", text => text) is [{ Kind: null }],
+                "A deserialized null kind renders plain, never collapses traffic, and keys apart from an empty kind");
+            // Null list entries are invalid metadata: the whole message shows
+            // expanded, and nothing that walks the parts throws. The real wire,
+            // queue and archive types read them as MessageComponent.Undecodable().
+            var nullEntryLists = new[] { "[null]", "[{\"offset\":0,\"length\":" + plainTell.Length + ",\"kind\":\"traffic\"},null]", "[null,{\"offset\":" + (plainTell.Length + 2) + ",\"length\":" + humanText.Length + ",\"kind\":\"human\"}]" }
+                .Select(json => System.Text.Json.JsonSerializer.Deserialize<List<MessageComponent>>(json)!).ToList();
+            var nullEntriesSafe = nullEntryLists.All(parts =>
+                parts.Any(part => part is null) && Expanded(parts) && SwitchboardPresentation.QueueSummary(markerless, parts) is null
+                && SwitchboardPresentation.Components(parts, markerless, markerless, text => text) is [{ Kind: "text" } whole] && whole.Length == markerless.Length
+                && SwitchboardPresentation.Snapshot(parts) is { } snap && snap.Count == parts.Count && SwitchboardPresentation.SameComponents(parts, snap)
+                && SwitchboardPresentation.ComponentsKey(parts).Contains('!') && SwitchboardPresentation.QueueSignature(queueId, markerless, parts).Length > 0);
+            check(nullEntriesSafe && SwitchboardPresentation.ComponentsKey(nullEntryLists[0]) != SwitchboardPresentation.ComponentsKey(new List<MessageComponent>())
+                && SwitchboardPresentation.ComponentsKey(nullEntryLists[1]) != SwitchboardPresentation.ComponentsKey(new List<MessageComponent> { valid[0] }),
+                "Null component entries show the whole message expanded, key apart from their neighbours, and never throw");
+            var nullEntryWire = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"" + markerless.Replace("\n", "\\n") + "\",\"imageHashes\":[],\"components\":[null]}"));
+            var nullEntryHeld = Busy(new PendingPrompt { Text = markerless, Components = nullEntryLists[1] }, new PendingPrompt { Text = "and more", Typed = true });
+            store.InjectPending(nullEntryHeld);
+            check(nullEntryWire.Text == markerless && nullEntryWire.Components is [{ Offset: -1, Length: 0, Kind: MessageComponent.Plain }] && Expanded(nullEntryWire.Components)
+                && SwitchboardPresentation.Segments(nullEntryHeld.Pending[0].Text, nullEntryHeld.Pending[0].Components) is [{ Summary: null } nullHeldWhole] && nullHeldWhole.Text == markerless + "\n\nand more",
+                "A wire message with a null part keeps its text as the undecodable marker, and Inject all over a null part keeps it visible");
+            var archivedNullEntry = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>("{\"Role\":\"user\",\"Text\":\"kept text\",\"Components\":[null,{\"offset\":0,\"length\":9,\"kind\":null}]}")!;
+            check(archivedNullEntry.Text == "kept text" && archivedNullEntry.Components is [{ Offset: -1, Length: 0 }] && SwitchboardPresentation.Segments(archivedNullEntry.Text, archivedNullEntry.Components) is [{ Summary: null, Text: "kept text" }],
+                "An archived message with null parts loads with its text as the undecodable marker and renders it whole");
+            copy[0].Kind = "human";
+            check(!SwitchboardPresentation.SameComponents(valid, copy) && valid[0].Kind == "traffic", "Mutating a part in place is seen against the cached snapshot");
+            check(SwitchboardPresentation.QueueSummary(markerless, null) is not null && partStates.Skip(1).All(s => SwitchboardPresentation.QueueSummary(markerless, s.Parts) is null),
+                "Queue rows: same text summarizes without parts and shows typed text in full once any parts arrive");
+            // Display rewrites carry the parts, or keep the whole visible.
+            var crlf = plainTell.Replace("\n", "\r\n") + "\n\n" + humanText;
+            var crlfParts = SwitchboardPresentation.Components(new[] { (plainTell.Replace("\n", "\r\n"), "traffic"), (humanText, "human") }, crlf);
+            var normalizedParts = SwitchboardPresentation.Components(crlfParts, crlf, markerless, text => text.Replace("\r\n", "\n"));
+            check(SwitchboardPresentation.Segments(markerless, normalizedParts) is [{ Summary: not null }, { Summary: null, Text: humanText }],
+                "Newline normalization moves the recorded parts with the text");
+            check(SwitchboardPresentation.Components(valid, markerless, "rewritten whole", text => text) is [{ Offset: 0, Kind: "text" } marker] && marker.Length == "rewritten whole".Length
+                && SwitchboardPresentation.Components(null, markerless, "x", text => text) is null
+                && SwitchboardPresentation.Components(new List<MessageComponent> { valid[0] }, markerless, markerless, text => text) is [{ Kind: "text" } invalidMarker] && invalidMarker.Length == markerless.Length,
+                "A rewrite the parts cannot follow, or invalid parts, become one visible part; no parts stay no parts");
+            var invalidHeld = Busy(new PendingPrompt { Text = markerless, Components = new List<MessageComponent> { valid[0], new() { Offset = 999, Length = 1, Kind = "human" } } },
+                new PendingPrompt { Text = "and more", Typed = true });
+            store.InjectPending(invalidHeld);
+            check(SwitchboardPresentation.Segments(invalidHeld.Pending[0].Text, invalidHeld.Pending[0].Components) is [{ Summary: null } heldWhole] && heldWhole.Text == markerless + "\n\nand more",
+                "Inject all over a part with invalid ranges keeps that part visible instead of reclassifying it as traffic");
+            var pendingWire = DeviceJson.Decode<DevicePendingDto>(DeviceJson.Encode(new DevicePendingDto { Id = Guid.NewGuid(), Text = markerless, Components = valid }));
+            var olderPending = DeviceJson.Decode<DevicePendingDto>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"text\":\"x\"}"));
+            check(SwitchboardPresentation.QueueSummary(pendingWire.Text, pendingWire.Components) is null && pendingWire.Components?.Count == 2 && olderPending.Components is null
+                && !System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(new DevicePendingDto { Text = "x" })).Contains("components"),
+                "Queue snapshots carry merged parts when present and omit them otherwise");
+            // Archived shape without metadata: reply envelope, separator, typed text.
+            check(SwitchboardPresentation.Segments(reply + "\n\n" + typed, null) is [{ Summary: replySummary }, { Summary: null } legacyTyped] && legacyTyped.Text == typed,
+                "Old merged messages split after the reply's delivery block and show the remainder unattributed and in full");
+            check(SwitchboardPresentation.Segments(ask + "\n\n" + typed, null) is [{ Summary: askSummary }, { Summary: null }]
+                && SwitchboardPresentation.Segments(reply + "\n\n" + ask + "\n\n" + typed, null)?.Select(s => s.Summary).SequenceEqual(new[] { replySummary, askSummary, null }) == true
+                && SwitchboardPresentation.Segments(Envelope("Both", true, request) + "\n\n" + typed, null)?.LastOrDefault() is { Summary: null, Text: typed },
+                "Old merges split after Reply expected blocks and after each of several envelopes");
+            check(SwitchboardPresentation.Segments(Envelope("Status\n\nsecond paragraph", false, null), null) is null,
+                "A single envelope, including multi-paragraph tells without a delivery block, still collapses as before");
+            var unsafeText = reply + "\ntrailing text without the separator";
+            check(SwitchboardPresentation.Segments(unsafeText, null) is [{ Summary: null } whole] && whole.Text == unsafeText, "Content after a delivery block that cannot be split safely shows the whole message expanded");
+            check(SwitchboardPresentation.QueueSummary(reply) == "Queued reply from ClaudeConverse · Read-only diagnosis" && SwitchboardPresentation.QueueSummary(reply + "\n\n" + typed) is null,
+                "Queue rows summarize whole traffic only and never hide merged typed input");
+            var wire = DeviceJson.Decode<DeviceWireMessage>(DeviceJson.Encode(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = merged.Text, Components = merged.Components }));
+            var olderPeer = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[]}"));
+            var swiftShape = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"941BAB1E-4268-4C06-AFF5-0457C32E123D\",\"role\":\"user\",\"text\":\"x\",\"imageHashes\":[],\"components\":[{\"offset\":0,\"length\":1,\"kind\":\"traffic\"}]}"));
+            check(wire.Components?.Select(c => (c.Offset, c.Length, c.Kind)).SequenceEqual(merged.Components!.Select(c => (c.Offset, c.Length, c.Kind))) == true && olderPeer.Components is null
+                && swiftShape.Components is [{ Offset: 0, Length: 1, Kind: "traffic" }] && !System.Text.Encoding.UTF8.GetString(DeviceJson.Encode(new DeviceWireMessage { Text = "x" })).Contains("components"),
+                "The transcript DTO carries components in the Swift shape when present and omits them otherwise");
         }
         finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
+    // Shared parity vectors (also run by the Swift suite): every malformed
+    // components shape loads through the real wire, queue and archive types,
+    // keeps its text, renders whole, and re-saves as the same marker.
+    static void ComponentVectors(Action<bool, string> check)
+    {
+        string? vectorFile = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null && vectorFile is null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "Tests", "inject-components-vectors.json"))) vectorFile = Path.Combine(dir.FullName, "Tests", "inject-components-vectors.json");
+        check(vectorFile is not null, "Shared components vectors are readable");
+        if (vectorFile is null) return;
+        var file = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(vectorFile)).RootElement;
+        var text = file.GetProperty("text").GetString()!;
+        var typed = file.GetProperty("typed").GetString()!;
+        var vectors = file.GetProperty("vectors").EnumerateArray()
+            .Select(v => (Name: v.GetProperty("name").GetString()!, Raw: v.GetProperty("components").GetString()!, Expect: v.GetProperty("expect").GetString()!)).ToList();
+        // Serializes `value` without its components, then splices in the raw JSON.
+        string Spliced<T>(T value, string raw, System.Text.Json.JsonSerializerOptions? options = null)
+        {
+            var node = System.Text.Json.JsonSerializer.SerializeToNode(value, options)!.AsObject();
+            node.Remove("components"); node.Remove("Components");
+            var json = node.ToJsonString();
+            return json[..^1] + (typeof(T) == typeof(ChatMessage) || typeof(T) == typeof(PendingPrompt) ? ",\"Components\":" : ",\"components\":") + raw + "}";
+        }
+        var id = Guid.NewGuid();
+        bool Loaded(IReadOnlyList<MessageComponent>? parts, string expect)
+        {
+            var segments = SwitchboardPresentation.Segments(text, parts);
+            var whole = segments is [{ Summary: null } only] && only.Text == text;
+            var stable = SwitchboardPresentation.ComponentsKey(parts) == SwitchboardPresentation.ComponentsKey(SwitchboardPresentation.Snapshot(parts))
+                && SwitchboardPresentation.QueueSignature(id, text, parts) == SwitchboardPresentation.QueueSignature(id, text, SwitchboardPresentation.Snapshot(parts));
+            return stable && expect switch
+            {
+                "absent" => parts is null,
+                "empty" => parts is { Count: 0 } && whole,
+                "valid" => segments is [{ Summary: not null }, { Summary: null } typedPart] && typedPart.Text == typed,
+                "undecodable" => parts is [{ Offset: -1, Length: 0, Kind: MessageComponent.Plain }] && whole && SwitchboardPresentation.QueueSummary(text, parts) is null
+                    && SwitchboardPresentation.Components(parts, text, text, t => t) is [{ Kind: MessageComponent.Plain } visible] && visible.Length == text.Length,
+                _ => false,
+            };
+        }
+        var failed = new List<string>();
+        foreach (var (name, raw, expect) in vectors)
+        {
+            try
+            {
+                var wire = DeviceJson.Decode<DeviceWireMessage>(System.Text.Encoding.UTF8.GetBytes(Spliced(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = text }, raw, DeviceJson.Options)));
+                var pending = DeviceJson.Decode<DevicePendingDto>(System.Text.Encoding.UTF8.GetBytes(Spliced(new DevicePendingDto { Id = Guid.NewGuid(), Text = text }, raw, DeviceJson.Options)));
+                var archived = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>(Spliced(new ChatMessage { Role = "user", Text = text }, raw))!;
+                var queued = System.Text.Json.JsonSerializer.Deserialize<PendingPrompt>(Spliced(new PendingPrompt { Text = text }, raw))!;
+                var wireBytes = DeviceJson.Encode(wire);
+                var rewired = DeviceJson.Decode<DeviceWireMessage>(wireBytes);
+                var rearchived = System.Text.Json.JsonSerializer.Deserialize<ChatMessage>(System.Text.Json.JsonSerializer.Serialize(archived))!;
+                var exact = name != "valid" || System.Text.Encoding.UTF8.GetString(wireBytes).Contains("\"components\":" + raw);
+                if (!(new[] { wire.Text, pending.Text, archived.Text, queued.Text, rewired.Text, rearchived.Text }.All(t => t == text) && exact
+                    && new[] { wire.Components, pending.Components, archived.Components, queued.Components, rewired.Components, rearchived.Components }.All(parts => Loaded(parts, expect))))
+                    failed.Add(name);
+            }
+            catch (Exception e) { failed.Add(name + " (" + e.GetType().Name + ")"); }
+        }
+        check(vectors.Count >= 20 && failed.Count == 0, "Every shared components vector loads through DeviceWireMessage, DevicePendingDto, ChatMessage and PendingPrompt, and re-saves without throwing" + (failed.Count == 0 ? "" : ": " + string.Join(", ", failed)));
+        // One damaged message among valid ones: the whole device snapshot and
+        // the whole archive still load with every message.
+        try
+        {
+            var snapshot = System.Text.Json.JsonSerializer.SerializeToNode(new DeviceTranscriptPayload { GlobalID = "g", HomeSeq = 1, Status = "Ready" }, DeviceJson.Options)!.AsObject();
+            snapshot["messages"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new DeviceWireMessage { Id = Guid.NewGuid(), Role = "user", Text = text }, v.Raw, DeviceJson.Options))) + "]");
+            snapshot["pending"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new DevicePendingDto { Id = Guid.NewGuid(), Text = text }, v.Raw, DeviceJson.Options))) + "]");
+            var page = DeviceJson.Decode<DeviceTranscriptPayload>(System.Text.Encoding.UTF8.GetBytes(snapshot.ToJsonString()));
+            check(page.Messages.Count == vectors.Count && page.Pending.Count == vectors.Count
+                && page.Messages.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect)) && page.Pending.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect)),
+                "A device snapshot mixing every malformed shape with valid parts loads every message and queue row");
+        }
+        catch (Exception e) { check(false, "A device snapshot with malformed parts loads: " + e.GetType().Name + " " + e.Message); }
+        var root = Directory.CreateTempSubdirectory("converse-component-vectors-").FullName;
+        try
+        {
+            var seed = new SessionStore(root, new FakeRunner());
+            seed.Create(new AgentEntry { Name = "Vectors", Engine = "codex" });
+            var file2 = Path.Combine(root, "sessions.json");
+            var archive = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file2))!;
+            var session = archive["Sessions"]![0]!;
+            session["Messages"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new ChatMessage { Role = "user", Text = text }, v.Raw))) + "]");
+            session["Pending"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", vectors.Select(v => Spliced(new PendingPrompt { Text = text }, v.Raw))) + "]");
+            File.WriteAllText(file2, archive.ToJsonString());
+            bool Archived(SessionStore store) => store.Sessions is [{ } only] && only.Messages.Count == vectors.Count && only.Pending.Count == vectors.Count
+                && only.Messages.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect))
+                && only.Pending.Zip(vectors).All(p => p.First.Text == text && Loaded(p.First.Components, p.Second.Expect));
+            var loaded = new SessionStore(root, new FakeRunner());
+            var first = Archived(loaded);
+            loaded.Save();
+            check(first && Archived(new SessionStore(root, new FakeRunner())),
+                "An archive mixing every malformed shape with valid parts loads every message and queued prompt, and re-saves the marker");
+        }
+        catch (Exception e) { check(false, "An archive with malformed parts loads: " + e.GetType().Name + " " + e.Message); }
+        finally { Directory.Delete(root, true); }
     }
 
     public static async Task Run(Action<bool, string> check, Func<DeviceSyncService, DeviceSyncService, Func<bool>, Task<bool>> join)
     {
         InjectAllFlags(check);
+        ComponentVectors(check);
         await ReplyTolerance(check);
         await TrailingFence(check);
         var root = Directory.CreateTempSubdirectory("converse-supervision-").FullName;

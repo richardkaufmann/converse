@@ -1,0 +1,31 @@
+{
+ "_comment": "Inject all components decode parity (Swift decodeComponents, Core LenientComponentsConverter). Each vector's components string is raw JSON, embedded verbatim as the components value of a message carrying text. absent: null components. empty: an empty list (renders whole). valid: decodes, the tell summarizes and the typed text stays visible. undecodable: decodes as the one-part marker {offset:-1,length:0,kind:text}, the text stays intact and the whole message renders expanded; re-encoding writes the marker.",
+ "text": "[Converse message from Fixture · session test · delivery test · hop 1/100]\nStatus message\n\nMY TYPED PROMPT MUST STAY VISIBLE",
+ "typed": "MY TYPED PROMPT MUST STAY VISIBLE",
+ "vectors": [
+  {"name": "valid", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "valid"},
+  {"name": "absent", "components": "null", "expect": "absent"},
+  {"name": "empty-list", "components": "[]", "expect": "empty"},
+  {"name": "null-kind", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":null}]", "expect": "valid"},
+  {"name": "missing-kind", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33}]", "expect": "valid"},
+  {"name": "integral-numbers", "components": "[{\"offset\":0.0,\"length\":89.0,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "valid"},
+  {"name": "extra-fields", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\",\"extra\":[1,{\"x\":null}]},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "valid"},
+  {"name": "null-entry", "components": "[null]", "expect": "undecodable"},
+  {"name": "mixed-null-entry", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},null]", "expect": "undecodable"},
+  {"name": "wrong-array", "components": "5", "expect": "undecodable"},
+  {"name": "string-list", "components": "\"not a list\"", "expect": "undecodable"},
+  {"name": "object-list", "components": "{\"offset\":0}", "expect": "undecodable"},
+  {"name": "bool-list", "components": "true", "expect": "undecodable"},
+  {"name": "non-object-entry", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},7]", "expect": "undecodable"},
+  {"name": "nested-list-entry", "components": "[[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"}]]", "expect": "undecodable"},
+  {"name": "wrong-kind", "components": "[{\"offset\":0,\"length\":89,\"kind\":5}]", "expect": "undecodable"},
+  {"name": "object-kind", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":{\"v\":\"human\"}}]", "expect": "undecodable"},
+  {"name": "wrong-offset", "components": "[{\"offset\":\"bad\",\"length\":89,\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "string-length", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":\"33\",\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "null-offset", "components": "[{\"offset\":null,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "fractional-offset", "components": "[{\"offset\":0.5,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "missing-offset", "components": "[{\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"length\":33,\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "missing-length", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":91,\"kind\":\"human\"}]", "expect": "undecodable"},
+  {"name": "overflow-offset", "components": "[{\"offset\":0,\"length\":89,\"kind\":\"traffic\"},{\"offset\":99999999999999999999,\"length\":33,\"kind\":\"human\"}]", "expect": "undecodable"}
+ ]
+}
