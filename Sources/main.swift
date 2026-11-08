@@ -4591,6 +4591,15 @@ if CommandLine.arguments.contains("--groups-self-test") {
     converseGroupSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
     exit(failures == 0 ? 0 : 1)
 }
+// Focused run of the user-only lot Undo checks; the full suite also runs them.
+if CommandLine.arguments.contains("--lot-undo-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    parkingUserUndoSelfTests(check); parkingDropSelfTests(check)
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--transcript-render-profile") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
           ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
