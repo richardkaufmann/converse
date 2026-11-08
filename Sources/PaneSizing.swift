@@ -214,7 +214,9 @@ final class WrapFreeze {
     deinit { thaw() }
     func freeze(in view: NSView?) {
         guard let view else { return }
-        if let text = view as? NSTextView, let container = text.textContainer, !frozen.contains(where: { $0.container === container }) {
+        // A lot of ordinary size reflows live so its gutter and comments stay in line.
+        if let text = view as? NSTextView, (text as? ParkingOutlineText)?.reflowsDuringResize != true,
+           let container = text.textContainer, !frozen.contains(where: { $0.container === container }) {
             frozen.append((container, container.widthTracksTextView))
             container.widthTracksTextView = false
         }
@@ -230,6 +232,7 @@ final class WrapFreeze {
             ConversationTextView.markResize(in: container.textView)
             container.widthTracksTextView = tracks
             Self.matchTrackedWidth(container)
+            (container.textView as? ParkingOutlineText)?.widthSettled()
         }
     }
     // Re-enabling widthTracksTextView only follows *later* frame changes. The
