@@ -479,6 +479,8 @@ struct ParkingLotEditor: NSViewRepresentable {
             do {
                 try PerformanceCapture.shared.measure(.lotRowsCommit) { try parent.lot.replaceUserRows(rows, revision: expected.revision) }
                 render(caret: caret)
+            } catch let conflict as ParkingLotStore.StaleUserEdit {
+                parent.lot.notice = conflict.localizedDescription; render()
             } catch { parent.lot.error = error.localizedDescription; render() }
         }
         func restore(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
@@ -2368,11 +2370,20 @@ func parkingUserUndoSelfTests(_ check: (Bool, String) -> Void) {
             check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before after" && lot.error.isEmpty,
                   "Refreshed native pane appends the human keystroke to current rows")
         } else {
-            check(lot.document == external && lot.error.contains("changed"),
+            check(lot.document == external && lot.error.isEmpty && lot.notice.contains("changed"),
                   "Stale native pane rejects the stale keystroke and reports a revision conflict")
             check(coordinator.displayed == external && text.string.contains("Session updated B"),
                   "Rejected stale edit refreshes the native pane to the saved session transaction")
+            do {
+                try lot.apply(.init(revision: lot.document.revision, operations: [
+                    .init(action: "comment", id: other.id, text: "Agent remains writable")
+                ]), author: "Synthetic session")
+                check(lot.document.rows.first { $0.id == other.id }?.notes?.last?.text == "Agent remains writable",
+                      "A rejected stale user edit does not block the next current-revision agent transaction")
+            } catch { check(false, "Agent edit after stale user rejection: " + error.localizedDescription) }
+            coordinator.render()
             type(" retry")
+            check(lot.notice.isEmpty, "Successful typing clears the stale-edit notice")
             check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before retry" && sessionIntact(),
                   "Typing again after stale rejection preserves both authors' saved changes")
         }
@@ -2381,6 +2392,19 @@ func parkingUserUndoSelfTests(_ check: (Bool, String) -> Void) {
               "\(label) pane: Undo reverses only the human's typing and never rolls back the session transaction")
         let reloaded = ParkingLotStore(folder: home, id: lot.id)
         check(reloaded.document == lot.document, "\(label) native interleave persists the same complete document on disk")
+    }
+    do {
+        let f = fixture("save-failure")
+        let before = f.lot.document
+        f.lot.snapshotCheck = { _ in throw AgentFailure.message("Synthetic save failure") }
+        f.type(" unsaved", into: f.a.id)
+        check(f.lot.document == before && f.lot.error.contains("Synthetic save failure"),
+              "A real save failure remains a blocking error and preserves the document")
+        f.lot.snapshotCheck = nil
+        do {
+            try f.session([.init(action: "update", id: f.b.id, text: "Must not save")])
+            check(false, "Agent edits must remain blocked after a real save failure")
+        } catch { check(f.lot.document == before, "A real save error still blocks agents until recovered") }
     }
     let undoLot = ParkingLotStore(folder: root.appendingPathComponent("undo"), id: UUID())
     let human = ParkingLotRow(heading: false, text: "Human work already present")

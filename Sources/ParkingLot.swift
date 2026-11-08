@@ -27,7 +27,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     @Published private(set) var document = ParkingLotDocument()
     @Published private(set) var active = false
     @Published var error = ""
-    /// Why the last Undo or Redo was refused. Unlike `error`, it never blocks other writers.
+    /// A rejected user edit or Undo notice; unlike `error`, it never blocks other writers.
     @Published var notice = ""
     @Published private(set) var readOnlyReason: String?
     @Published private(set) var lastSeenRevision = 0
@@ -227,9 +227,12 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             throw AgentFailure.message("Parking Lot exceeds its size limit (500 entries, 20,000 characters per entry).")
         }
     }
+    struct StaleUserEdit: LocalizedError {
+        var errorDescription: String? { "Parking Lot changed. Please try your edit again." }
+    }
     func replaceUserRows(_ rows: [ParkingLotRow], revision: Int, undoName: String? = nil) throws {
         try requireWritable()
-        guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
+        guard revision == document.revision else { throw StaleUserEdit() }
         try PerformanceCapture.shared.measure(.lotValidate) { try Self.validate(rows) }
         if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows), user: true, undoName: undoName) }
     }
