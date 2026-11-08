@@ -2637,12 +2637,20 @@ await CheckGroupLeave();
     Check(ResponseImages.ParseWebRefs("![w](https://example.com/w_(1).png)").Single().Url == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses");
     var unbalanced = ResponseImages.ParseFileRefs("![x](/tmp/a(b.png) and more)");
     Check(unbalanced.Count == 1 && unbalanced[0].Path == "/tmp/a(b.png" && unbalanced[0].Length == "![x](/tmp/a(b.png)".Length, "An unbalanced parenthesis keeps the original first-closer match");
-    var overlong = "![x](/tmp/a(" + new string('b', 5000) + ").png)";
-    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 5000), "A target past the bound is not extended");
+    var overlong = "![x](/tmp/a(" + new string('b', 4080) + ")" + new string('c', 20) + ".png)";
+    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 4080), "A target past the bound is not extended");
+    Check(ResponseImages.ParseFileRefs("![x](/tmp/" + new string('a', 5000) + ".png)").Count == 0, "A target beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![" + new string('x', 513) + "](/tmp/a.png)").Count == 0, "A caption beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![a[b](/tmp/a.png)").Count == 0, "A bracket inside a caption means it is not an image");
     var hostile = string.Concat(Enumerable.Repeat("![x](/tmp/a()", 20000));
     var hostileClock = System.Diagnostics.Stopwatch.StartNew();
     var hostileRefs = ResponseImages.ParseFileRefs(hostile);
     Check(hostileRefs.Count == ResponseImages.MaxImages && hostileClock.ElapsedMilliseconds < 2000, "Repeated open parentheses stay bounded");
+    // The limit is generous: unbounded scans take minutes on this input, and a loaded machine must not fail it.
+    var unclosed = string.Concat(Enumerable.Repeat("![x](a", 200_000));
+    var unclosedClock = System.Diagnostics.Stopwatch.StartNew();
+    Check(ResponseImages.ParseFileRefs(unclosed).Count == 0 && ResponseImages.ParseWebRefs(unclosed).Count == 0 && unclosedClock.Elapsed < TimeSpan.FromSeconds(30),
+        "Repeated unclosed image openers on one line stay bounded");
     var web = ResponseImages.ParseFileRefs("![w](https://example.com/a.png)");
     Check(web.Count == 0 && ResponseImages.ParseWebRefs("![w](https://example.com/a.png)").Count == 1,
         "HTTPS refs route to the web parser, not the file parser");
