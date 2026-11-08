@@ -390,7 +390,7 @@ struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; va
 final class Store: ObservableObject {
     static func transcriptMessageNumbers(_ messages: [Message], after start: Int = 0) -> [UUID: Int] {
         var result: [UUID: Int] = [:], number = max(0, start)
-        for message in messages where message.role != "activity" {
+        for message in messages where message.role != "activity" && !(message.role == "notice" && TranscriptStyle.isQueueReceipt(message.text)) {
             guard TranscriptStyle.blockContentLength(visibleText(message.text)) > 0 || !message.images.isEmpty else { continue }
             number += 1; result[message.id] = number
         }
@@ -2992,8 +2992,9 @@ struct ScrollingConversation: NSViewRepresentable {
                 reusable = 0; oldReuseEnd = 0; removedPrefix = 0; dropped = 0
             }
             let unchangedPrefix = oldReuseEnd - removedPrefix
-            let trimAnchor = removedPrefix > 0 ? text.resizeAnchor().map {
-                ConversationTextView.ResizeAnchor(character: max(0, $0.character - removedPrefix), viewportY: $0.viewportY)
+            // A trim that falls back to a full rebuild still moved the reader's text.
+            let trimAnchor = candidateRemoval > 0 ? text.resizeAnchor().map {
+                ConversationTextView.ResizeAnchor(character: max(0, $0.character - candidateRemoval), viewportY: $0.viewportY)
             } : nil
             renderedAttachments = session.attachments
             historyBuildCount += 1
@@ -3116,8 +3117,8 @@ struct ScrollingConversation: NSViewRepresentable {
             if session.draft.isEmpty && selection.length == 0 && !text.explicitCursor { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else {
-                let start = min(max(0, selection.location - removedPrefix), document.length)
-                let end = min(max(0, NSMaxRange(selection) - removedPrefix), document.length)
+                let start = min(max(0, selection.location - candidateRemoval), document.length)
+                let end = min(max(0, NSMaxRange(selection) - candidateRemoval), document.length)
                 text.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
