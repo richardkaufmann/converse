@@ -171,9 +171,11 @@ struct SidebarSortMenu: View {
             Picker("Sort sessions", selection: Binding(get: { order.sort }, set: { order.setSort($0) })) {
                 ForEach(SidebarSort.allCases, id: \.self) { Text($0.title).tag($0) }
             }.pickerStyle(.inline)
+            Divider()
+            Button(order.reordering ? "Done Reordering" : "Reorder") { order.toggleReordering() }
         } label: { Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("Sort sessions: " + order.sort.title).accessibilityLabel("Sort sessions")
+            .help("Sort or reorder sessions: " + order.sort.title).accessibilityLabel("Sort or reorder sessions")
     }
 }
 private struct SidebarWindowKey: EnvironmentKey { static let defaultValue = "" }

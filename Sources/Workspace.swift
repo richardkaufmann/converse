@@ -546,6 +546,7 @@ struct SessionPane: View {
                 SessionProviderLogo(session: session, guide: Store.shared.firstRun)
                 SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
+                SessionPaneEllipsisMenu(session: session)
                 PaneButton(label: "P") { workspace.park(session.id) }.accessibilityLabel("Park " + session.title).help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
