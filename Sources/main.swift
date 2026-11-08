@@ -2555,7 +2555,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var renderedMessageNumberOffset = 0
         var renderedAttachments: [String] = []
         var renderedFontSize: CGFloat?
-        var messageStarts: [UUID: Int] = [:]
+        // Boundaries belong to occurrences, not IDs: imported history may repeat an ID.
+        var messageStarts: [Int] = []
         var expandedDisclosures: Set<UUID> = []
         private var disclosureNeedsRender = false
         private var renderedCollapse: Bool?
@@ -2952,7 +2953,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 }
             }
             var unchangedPrefix = reusable == previous?.count ? historyEnd
-                : previous.flatMap { reusable < $0.count ? messageStarts[$0[reusable].id] : nil } ?? 0
+                : (reusable < messageStarts.count ? messageStarts[reusable] : 0)
             if reusable == 0 || unchangedPrefix > min(assembledDocument.length, current.length) {
                 reusable = 0; unchangedPrefix = 0
             }
@@ -3000,11 +3001,10 @@ struct ScrollingConversation: NSViewRepresentable {
             text.userBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
             text.trafficBlocks.removeAll { $0.location >= unchangedPrefix || NSMaxRange($0) > unchangedPrefix }
             text.copyBlocks.removeAll { $0.range.location >= unchangedPrefix || NSMaxRange($0.range) > unchangedPrefix }
-            let reusedIDs = Set(messages.prefix(reusable).map(\.id))
-            messageStarts = messageStarts.filter { reusedIDs.contains($0.key) }
+            messageStarts = Array(messageStarts.prefix(reusable))
             for message in messages.dropFirst(reusable) {
                 messageAssemblyCount += 1
-                messageStarts[message.id] = document.length
+                messageStarts.append(document.length)
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
                 let bodyBegan = profile ? ProcessInfo.processInfo.systemUptime : 0
@@ -3860,6 +3860,24 @@ func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
     coordinator.render(text); compareCold("draft preserved across append")
     check(text.selectedRange().location == text.inputStart + draftOffset && session.draft == "A native draft with é😀",
           "Suffix assembly preserves draft-relative caret and draft text")
+    let uniqueMessages = session.messages
+    let duplicate = Message(role: "assistant", text: "Repeated **message**")
+    session.messages = [Message(role: "user", text: "Prefix"), duplicate, duplicate]
+    coordinator.render(text); compareCold("duplicate IDs initially")
+    session.messages[1].text = "Earlier duplicate changed"
+    coordinator.render(text); compareCold("earlier duplicate changed")
+    session.messages[2].text = "Later duplicate changed"
+    coordinator.render(text); compareCold("later duplicate changed")
+    session.messages.removeLast()
+    coordinator.render(text); compareCold("duplicate occurrence removed")
+    session.messages = [duplicate, duplicate]
+    coordinator.render(text)
+    session.messages.append(Message(role: "assistant", text: "Appended after duplicates"))
+    coordinator.render(text); compareCold("append after identical duplicate IDs")
+    session.messages.removeFirst()
+    coordinator.render(text); compareCold("first duplicate occurrence removed")
+    session.messages = uniqueMessages
+    coordinator.render(text); compareCold("unique history restored")
     let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("converse-assembly-" + UUID().uuidString + ".png")
     defer { try? FileManager.default.removeItem(at: imageURL) }
     func writeImage(_ color: NSColor, modified: TimeInterval) {
@@ -3903,7 +3921,7 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     performanceSession.draft = "External draft hydration"
     performanceCoordinator.render(performanceText)
     check(performanceCoordinator.historyBuildCount == 1 && (performanceText.string as NSString).substring(from: performanceText.inputStart) == performanceSession.draft, "Programmatic draft hydration replaces only the editable tail")
-    let previousPrefix = performanceCoordinator.messageStarts[performanceSession.messages.last!.id]!
+    let previousPrefix = performanceCoordinator.messageStarts.last!
     performanceSession.messages[performanceSession.messages.count - 1].text += " Streamed suffix."
     performanceCoordinator.render(performanceText)
     check(performanceCoordinator.messagePreparationCount == 601, "A streamed suffix prepares only one of 600 retained messages")
