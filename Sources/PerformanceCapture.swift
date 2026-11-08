@@ -6,6 +6,7 @@ final class PerformanceCapture {
     static let shared = PerformanceCapture()
     enum Operation: String, Codable, CaseIterable {
         case mainQueueDelay, keyDelivery, keyHandling, textInsertion, transcriptRender
+        case paneArrangement, transcriptMount, transcriptInitialRender, transcriptLayout
         case archiveSnapshot, archiveEncodeWrite, checkedSave, sidebarPublish
         case mouseHover, dragDelivery, dragHandling, dragFrameWait, dragApply, resizeDraw, wrapThaw
         case lotEditHandling, lotEditCommit, lotAckEncodeQueue, lotEditToAckProcessed, lotAckSendFailed

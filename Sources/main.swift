@@ -1736,14 +1736,33 @@ final class ConversationScrollView: NSScrollView {
     func revealInitialTail() { initialTailPending = true; needsLayout = true }
     /// An update that arrived while detached; see ScrollingConversation.updateNSView.
     var renderWhenAttached: (() -> Void)?
+    var initialRenderPending = false
+    private(set) var initialContentWidth: CGFloat?
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil, let render = renderWhenAttached { renderWhenAttached = nil; render() }
+        // Mount the empty native view first. Pane sizing owns when its content
+        // becomes expensive: never render at the construction/default width.
+        if window != nil, renderWhenAttached != nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window, self.renderWhenAttached != nil else { return }
+                if let layout = WindowPaneLayout.forWindow(window) { layout.transcriptMounted() }
+                else {
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    self.renderAfterPaneArrangement()
+                }
+            }
+        }
         if initialTailPending { needsLayout = true }
+    }
+    func renderAfterPaneArrangement() {
+        guard window != nil, bounds.width > 0, bounds.height > 0, let render = renderWhenAttached else { return }
+        renderWhenAttached = nil; initialRenderPending = false
+        if initialContentWidth == nil { initialContentWidth = (documentView as? NSTextView)?.textContainer?.containerSize.width }
+        render()
     }
     override func layout() {
         super.layout()
-        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        guard window != nil, bounds.width > 0, bounds.height > 0, !initialRenderPending else { return }
         if initialTailPending {
             initialTailPending = false; tile(); jumpToLatest()
         } else if followState.following && !selecting && !isFindBarVisible { followLatest() }
@@ -1877,7 +1896,7 @@ final class ConversationScrollView: NSScrollView {
         guard !tiling else { return }
         tiling = true; defer { tiling = false }
         super.tile()
-        (documentView as? ConversationTextView)?.fitDocumentHeight()
+        if !initialRenderPending { (documentView as? ConversationTextView)?.fitDocumentHeight() }
         refreshLatest()
     }
 }
@@ -2457,7 +2476,9 @@ struct ScrollingConversation: NSViewRepresentable {
     var onImageRemove: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(session) }
     func makeNSView(context: Context) -> NSScrollView {
+        let mount = PerformanceCapture.shared.begin()
         let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
+        scroll.initialRenderPending = true
         scroll.contentView = InputClipView()
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.borderType = .noBorder; scroll.backgroundColor = NSColor.textBackgroundColor
@@ -2486,20 +2507,23 @@ struct ScrollingConversation: NSViewRepresentable {
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
         text.loadImage = Self.imageLoader(session)
-        text.isEditable = inputEnabled
+        text.isEditable = false // Enabled after the initial transcript is ready.
         text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
         scroll.verticalRulerView = MessageNumberRuler(scroll: scroll, text: text)
         scroll.hasVerticalRuler = true; scroll.rulersVisible = lineNumbers
-        context.coordinator.render(text)
-        if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
-        if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
-        else { scroll.revealInitialTail() } // Startup: wait for the actual pane width and height.
-        DispatchQueue.main.async {
-            // A newly mounted pane must not steal focus from a question answer,
-            // settings field, or another pane's draft.
+        scroll.renderWhenAttached = { [weak coordinator = context.coordinator, weak text, weak scroll] in
+            guard let coordinator, let text, let scroll else { return }
+            let capture = PerformanceCapture.shared
+            capture.measure(.transcriptInitialRender) { coordinator.render(text) }
+            text.isEditable = text.submit != nil // Use the latest permission from updateNSView.
+            if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
+            if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
+            else { scroll.revealInitialTail() }
+            capture.end(.transcriptMount, mount)
+            // A newly mounted pane must not steal focus from another input.
             guard let window = text.window, window.isKeyWindow,
                   window.firstResponder == nil || window.firstResponder === window else { return }
             window.makeFirstResponder(text)
@@ -2516,7 +2540,7 @@ struct ScrollingConversation: NSViewRepresentable {
         if let text = scroll.documentView as? ConversationTextView {
             text.droppedFileSourceDevice = droppedFileSourceDevice
             text.fontSize = CGFloat(textSize ?? Store.shared.textSize(for: session))
-            text.isEditable = inputEnabled
+            text.isEditable = inputEnabled && (scroll as? ConversationScrollView)?.initialRenderPending != true
             text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
@@ -2527,6 +2551,7 @@ struct ScrollingConversation: NSViewRepresentable {
             // moved to another pane). Rendering there lays out the whole
             // history at a meaningless width, once per detached copy; catch up
             // if the view is attached again instead.
+            if let conversation = scroll as? ConversationScrollView, conversation.initialRenderPending { return }
             if let conversation = scroll as? ConversationScrollView, scroll.window == nil {
                 conversation.renderWhenAttached = { [weak coordinator = context.coordinator, weak text] in
                     if let coordinator, let text { coordinator.render(text); text.refreshDecorations() }
@@ -2544,6 +2569,8 @@ struct ScrollingConversation: NSViewRepresentable {
         } : nil
     }
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        // An abandoned empty mount must not overwrite the retained reading position.
+        guard (scroll as? ConversationScrollView)?.initialRenderPending != true else { return }
         coordinator.session.textScrollOrigin = scroll.contentView.bounds.origin
         coordinator.session.textSelection = (scroll.documentView as? NSTextView)?.selectedRange()
     }
@@ -3112,7 +3139,7 @@ struct ScrollingConversation: NSViewRepresentable {
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
             stage("replace-storage")
-            text.layoutManager?.ensureLayout(for: text.textContainer!)
+            PerformanceCapture.shared.measure(.transcriptLayout) { text.layoutManager?.ensureLayout(for: text.textContainer!) }
             stage("ensure-layout")
             text.fitDocumentHeight()
             if addedAttachment {
@@ -4913,7 +4940,19 @@ if CommandLine.arguments.contains("--pane-text-benchmark") {
 }
 if CommandLine.arguments.contains("--pane-sizing-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
-    paneSizingSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }; exit(0)
+    let capture = PerformanceCapture.shared
+    if let path = ProcessInfo.processInfo.environment["CONVERSE_PANE_PROFILE"] {
+        capture.configure(folder: URL(fileURLWithPath: path), enabled: true, historySeconds: 600)
+    }
+    paneSizingSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }
+    if capture.enabled {
+        var exported = false
+        capture.prepareExport { file in print("Pane telemetry: " + (file?.path ?? "unavailable")); exported = true }
+        let deadline = Date().addingTimeInterval(5)
+        while !exported && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        if !exported { exit(1) }
+    }
+    exit(0)
 }
 if CommandLine.arguments.contains("--provider-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh --providers-only for isolated tests.\n", stderr); exit(2) }
