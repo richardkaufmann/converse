@@ -48,7 +48,7 @@ final class GroupMapFeed {
     private let main: Run
     private let heartbeatSeconds: TimeInterval?
     private let performance: PerformanceCapture
-    private let emit: (Data, @escaping () -> Void) -> Void
+    private let emit: (Data, @escaping (Bool) -> Void) -> Void
     private let builder = GroupMapBuilder()
     private var coalescer: GroupMapCoalescer!
     private var shared: Set<AnyCancellable> = []
@@ -62,7 +62,7 @@ final class GroupMapFeed {
 
     init(store: Store, service: DeviceSyncService, minimumInterval: TimeInterval = 0.25, heartbeatSeconds: TimeInterval? = 5,
          now: @escaping () -> Date = Date.init, schedule: GroupMapCoalescer.Schedule? = nil, worker: Run? = nil, main: Run? = nil, performance: PerformanceCapture = .shared,
-         emit: @escaping (Data, @escaping () -> Void) -> Void) {
+         emit: @escaping (Data, @escaping (Bool) -> Void) -> Void) {
         self.store = store; self.service = service; self.now = now; self.heartbeatSeconds = heartbeatSeconds; self.performance = performance; self.emit = emit
         let queue = DispatchQueue(label: "local.richard.Converse.groupmap", qos: .utility)
         self.worker = worker ?? { queue.async(execute: $0) }
@@ -92,6 +92,12 @@ final class GroupMapFeed {
         shared.removeAll(); perSession.removeAll()
         service.groupMapTellObserver = nil
     }
+    /// The page lost what it had (reload or crash), so anything in flight is void.
+    func resync() {
+        guard isRunning else { return }
+        generation += 1; wantsFull = true
+        coalescer.stop(); coalescer.mark()
+    }
     private func observe(_ sessions: [Session]) {
         let current = Set(sessions.map(\.id))
         for id in perSession.keys where !current.contains(id) { perSession.removeValue(forKey: id) }
@@ -108,19 +114,47 @@ final class GroupMapFeed {
     }
     private func receive(_ event: SwitchboardTellEvent) {
         let at = now()
-        if event.phase == .sent, let source = event.source, let target = event.target {
+        // An ask has a durable expectation. A copy here would resurface as a
+        // stale tell once that expectation retires.
+        if event.phase == .sent, event.kind != .ask, let source = event.source, let target = event.target {
             tells[event.id] = GroupMapTellRecord(id: event.id, phase: .sent, source: source, target: target, kind: event.kind ?? .tell, at: at)
         } else { tells[event.id]?.phase = event.phase }
+        retainTells(at: at)
+        coalescer.mark()
+    }
+    // Also run on capture: a Queued remote tell gets no later event to expire it.
+    private func retainTells(at: Date) {
         tells = tells.filter { at.timeIntervalSince($0.value.at) <= Self.tellRetention }
         if tells.count > Self.maximumTells {
             for record in tells.values.sorted(by: { $0.at < $1.at }).prefix(tells.count - Self.maximumTells) { tells.removeValue(forKey: record.id) }
         }
-        coalescer.mark()
+    }
+    /// A queue report counts only from a current Group member, while fresh, for
+    /// the delivery's own recipient on that member's home and the sender here.
+    private func confirmedRemoteQueued(at: Date) -> Set<UUID> {
+        guard let localID = service.localDeviceID else { return [] }
+        var reported: [String: [UUID: DeviceQueueWatch]] = [:]
+        for (home, value) in service.switchboardQueueReports where service.acceptsParticipant(home: home, groupID: value.report.groupID)
+            && at.timeIntervalSince(value.at) >= 0 && at.timeIntervalSince(value.at) <= Self.remoteEvidenceSeconds {
+            reported[home] = Dictionary(value.report.entries.map { ($0.delivery, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+        guard !reported.isEmpty else { return [] }
+        var confirmed = Set<UUID>()
+        for session in store.sessions {
+            let source = DeviceGlobalID(home: localID, session: session.id).string
+            for item in session.switchboardExpectations {
+                guard let home = DeviceGlobalID(item.target)?.home, let entry = reported[home]?[item.id],
+                      entry.target == item.target, entry.source == source else { continue }
+                confirmed.insert(item.id)
+            }
+        }
+        return confirmed
     }
     func capture() -> GroupMapInput {
         let span = performance.begin()
         defer { performance.end(.groupMapCapture, span) }
         let at = now(), localID = service.localDeviceID, group = service.currentGroup
+        retainTells(at: at)
         let sessions = store.sessions.map { session -> GroupMapInput.LocalSession in
             // Only prompt IDs are read; prompt text never leaves the Store.
             let hasQueued = session.switchboardObligations.contains { $0.state == "queued" }
@@ -142,11 +176,8 @@ final class GroupMapFeed {
                 homes.append(GroupMapInput.RemoteHome(deviceID: device.deviceID, name: service.displayName(for: device.deviceID), online: false, reachable: false, rows: []))
             }
         }
-        let remoteQueued = service.switchboardQueueReports.values.filter {
-            at.timeIntervalSince($0.at) >= 0 && at.timeIntervalSince($0.at) <= Self.remoteEvidenceSeconds
-        }.flatMap { $0.report.entries.map(\.delivery) }
         return GroupMapInput(localDeviceID: localID, localDeviceName: localID.map { service.displayName(for: $0) } ?? "This Mac", groupName: group?.name,
-            sessions: sessions, homes: homes, pendingTellIDs: service.groupMapPendingTellIDs, remoteQueuedIDs: Set(remoteQueued), tells: Array(tells.values), now: at)
+            sessions: sessions, homes: homes, pendingTellIDs: service.groupMapPendingTellIDs, remoteQueuedIDs: confirmedRemoteQueued(at: at), tells: Array(tells.values), now: at)
     }
     private func perform() {
         let input = capture(), token = generation, full = wantsFull
@@ -159,8 +190,10 @@ final class GroupMapFeed {
             self?.main { [weak self] in
                 guard let self, token == self.generation else { return }
                 guard let data else { self.coalescer.finished(); return }
-                self.emit(data) { [weak self] in
+                self.emit(data) { [weak self] applied in
                     guard let self, token == self.generation else { return }
+                    // The page may be half updated, and a diff assumes it is not.
+                    if !applied { self.wantsFull = true }
                     self.coalescer.finished()
                 }
             }

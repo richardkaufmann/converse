@@ -240,10 +240,12 @@ enum GroupMapModel {
         if item.homeAccepted == true { return (.awaitingAnswer, "The recipient's home accepted it. A transport receipt is not an answer.") }
         return (.unknown, "No acceptance from the recipient's home is on record")
     }
-    static func state(of tell: GroupMapTellRecord) -> (state: GroupMapDeliveryState, detail: String) {
+    /// A queued ack is all a remote home reports for a plain tell, so it stays
+    /// Queued as a local one would: nothing equivalent to "submitted" ever arrives.
+    static func state(of tell: GroupMapTellRecord, pendingTell: Bool) -> (state: GroupMapDeliveryState, detail: String) {
         switch tell.phase {
-        case .sent: return (.sent, "Sent; waiting for the recipient's home to accept it")
-        case .accepted: return (.delivered, "The recipient's home accepted it. Queued does not mean read.")
+        case .sent: return pendingTell ? (.sent, "Sent; waiting for the recipient's home to accept it") : (.unknown, "Converse did not see whether the recipient's home accepted it")
+        case .accepted: return (.queued, "The recipient's home queued it. Queued does not mean read.")
         case .rejected: return (.failed, "The recipient's home rejected it")
         case .unconfirmed: return (.unknown, "The recipient's home did not confirm it in time")
         }
@@ -355,7 +357,7 @@ enum GroupMapModel {
                        createdAt: item.createdAt, recipient: remote ? "unknown" : nil)
             }
         }
-        for tell in input.tells { append(id: tell.id, from: tell.source, to: tell.target, kind: tell.kind, result: state(of: tell), createdAt: tell.at, recipient: "unknown") }
+        for tell in input.tells { append(id: tell.id, from: tell.source, to: tell.target, kind: tell.kind, result: state(of: tell, pendingTell: input.pendingTellIDs.contains(tell.id)), createdAt: tell.at, recipient: "unknown") }
 
         // Pending first, then newest: a flood of old records cannot hide live work.
         deliveries.sort {

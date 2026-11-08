@@ -153,6 +153,7 @@ final class DeviceSyncService: ObservableObject {
     var storeOverride: Store?
     // Set only while View → Group is visible.
     var groupMapTellObserver: ((SwitchboardTellEvent) -> Void)?
+    var participantTellConfirmationSeconds: TimeInterval = 20
     var parkingLibraryOverride: ParkingLotLibrary?
     var parkingLibrary: ParkingLotLibrary { parkingLibraryOverride ?? .shared }
     #endif
@@ -2035,10 +2036,11 @@ extension DeviceSyncService {
         source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " [" + target + "] · " + id.uuidString + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
         participantStore.save()
         sendEnvelope(peer, DeviceEnvelope(kind: "participant.tell", commandID: id, payload: try? JSONEncoder().encode(payload)))
-        groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: .sent, source: payload.source, target: global.string, kind: inReplyTo != nil ? .reply : replyExpected ? .ask : .tell))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-            guard let self, let pending = self.pendingTells.removeValue(forKey: id), let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
+        groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: .sent, source: payload.source, target: global.string, kind: replyExpected ? .ask : inReplyTo != nil ? .reply : .tell))
+        DispatchQueue.main.asyncAfter(deadline: .now() + participantTellConfirmationSeconds) { [weak self] in
+            guard let self, let pending = self.pendingTells.removeValue(forKey: id) else { return }
             self.groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: .unconfirmed))
+            guard let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
             if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {
                 source.messages[at].text = source.messages[at].text.replacingOccurrences(of: "awaiting home acceptance →", with: "delivery unconfirmed →")
             }
@@ -2056,7 +2058,7 @@ extension DeviceSyncService {
             guard let pending = pendingTells[id], pending.home == origin, pending.group == group,
                   let bytes = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: bytes) else { return true }
             pendingTells.removeValue(forKey: id)
-            groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: ack.outcome == "queued" ? .accepted : .rejected))
+            groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: ack.outcome == "queued" ? .accepted : ack.outcome == "rejected" ? .rejected : .unconfirmed))
             if let source = store.sessions.first(where: { $0.id == pending.source }) {
                 store.switchboardReceipt(source, delivery: id, accepted: ack.outcome == "queued")
                 if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {

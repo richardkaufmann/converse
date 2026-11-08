@@ -41,10 +41,13 @@ private final class GroupMapScriptProxy: NSObject, WKScriptMessageHandler {
 /// GroupMap.apply; the page may report only that it is ready or has failed.
 final class GroupMapPage: NSObject, WKNavigationDelegate {
     private static let handlerName = "groupMap"
+    private static let maximumRecoveriesPerMinute = 3
     let webView: WKWebView
     let schemes = GroupMapSchemeHandler()
     private let proxy = GroupMapScriptProxy()
     var onReady: (() -> Void)?
+    var onLost: (() -> Void)?
+    private var recoveries: [Date] = []
     private(set) var isReady = false
     private(set) var errors: [String] = []
     private(set) var refusedNavigations: [String] = []
@@ -68,12 +71,13 @@ final class GroupMapPage: NSObject, WKNavigationDelegate {
         if type == "ready" { isReady = true; onReady?() }
         if type == "error" { errors.append(String((message["message"] as? String ?? "").prefix(300))) }
     }
-    func apply(_ data: Data, completion: @escaping () -> Void) {
+    func apply(_ data: Data, completion: @escaping (Bool) -> Void) {
+        guard isReady else { completion(false); return }
         let span = PerformanceCapture.shared.begin()
         webView.callAsyncJavaScript("GroupMap.apply(payload)", arguments: ["payload": String(decoding: data, as: UTF8.self)], in: nil, in: .page) { result in
             PerformanceCapture.shared.end(.groupMapApply, span)
-            if case .failure(let error) = result { self.errors.append(String(error.localizedDescription.prefix(300))) }
-            completion()
+            if case .failure(let error) = result { self.errors.append(String(error.localizedDescription.prefix(300))); completion(false); return }
+            completion(true)
         }
     }
     func setPaused(_ paused: Bool) { webView.callAsyncJavaScript("GroupMap.setPaused(paused)", arguments: ["paused": paused], in: nil, in: .page, completionHandler: nil) }
@@ -81,12 +85,44 @@ final class GroupMapPage: NSObject, WKNavigationDelegate {
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.handlerName)
-        onReady = nil
+        onReady = nil; onLost = nil
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.request.url?.scheme == GroupMapResources.scheme { decisionHandler(.allow); return }
         refusedNavigations.append(action.request.url?.absoluteString ?? "")
         decisionHandler(.cancel)
+    }
+    // A reload replaces the page; it is not ready until the new one says so.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { isReady = false }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        isReady = false; onLost?()
+        let now = Date()
+        recoveries = recoveries.filter { now.timeIntervalSince($0) < 60 } + [now]
+        guard recoveries.count <= Self.maximumRecoveriesPerMinute else { errors.append("The map page keeps crashing; stopped reloading it."); return }
+        load()
+    }
+}
+
+/// Keeps a page and its feed in step: the feed runs only while the page is
+/// loaded and visible, and every freshly loaded page gets a complete snapshot.
+final class GroupMapLink {
+    let page: GroupMapPage
+    let feed: GroupMapFeed
+    private let isVisible: () -> Bool
+    init(page: GroupMapPage, feed: GroupMapFeed, isVisible: @escaping () -> Bool) {
+        self.page = page; self.feed = feed; self.isVisible = isVisible
+        page.onReady = { [weak self] in self?.pageReady() }
+        page.onLost = { [weak feed] in feed?.stop() }
+    }
+    func sync() {
+        guard page.isReady else { return }
+        let visible = isVisible()
+        if visible, !feed.isRunning { page.setPaused(false); feed.start() }
+        else if !visible, feed.isRunning { feed.stop(); page.setPaused(true) }
+    }
+    private func pageReady() {
+        page.setPaused(!isVisible())
+        feed.resync(); sync()
     }
 }
 
@@ -94,37 +130,35 @@ final class GroupMapPage: NSObject, WKNavigationDelegate {
 final class GroupMapWindows: NSObject, NSWindowDelegate {
     static let shared = GroupMapWindows()
     private var window: NSWindow?
-    private var page: GroupMapPage?
-    private var feed: GroupMapFeed?
+    private var link: GroupMapLink?
 
+    /// Centers first: setting the autosave name restores any remembered frame.
+    static func place(_ window: NSWindow, autosaveName: String) {
+        window.center(); window.setFrameAutosaveName(autosaveName)
+    }
     func show() {
         if let window { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Group"; window.isReleasedWhenClosed = false; window.setFrameAutosaveName("ConverseGroupMap")
+        window.title = "Group"; window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 480, height: 320)
         let page = GroupMapPage(frame: window.contentLayoutRect)
         page.webView.autoresizingMask = [.width, .height]
         window.contentView = page.webView
         let feed = GroupMapFeed(store: .shared, service: Store.shared.participantService) { [weak page] data, done in
-            guard let page else { done(); return }
+            guard let page else { done(false); return }
             page.apply(data, completion: done)
         }
-        page.onReady = { [weak self] in self?.syncVisibility() }
+        link = GroupMapLink(page: page, feed: feed) { [weak window] in window?.occlusionState.contains(.visible) ?? false }
         window.delegate = self
-        self.window = window; self.page = page; self.feed = feed
+        self.window = window
         page.load()
-        window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        Self.place(window, autosaveName: "ConverseGroupMap")
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    private func syncVisibility() {
-        guard let window, let page, let feed, page.isReady else { return }
-        let visible = window.occlusionState.contains(.visible)
-        if visible, !feed.isRunning { page.setPaused(false); feed.start() }
-        else if !visible, feed.isRunning { feed.stop(); page.setPaused(true) }
-    }
-    func windowDidChangeOcclusionState(_ notification: Notification) { syncVisibility() }
+    func windowDidChangeOcclusionState(_ notification: Notification) { link?.sync() }
     func windowWillClose(_ notification: Notification) {
-        feed?.stop(); page?.teardown()
+        link?.feed.stop(); link?.page.teardown()
         window?.delegate = nil
-        window = nil; page = nil; feed = nil
+        window = nil; link = nil
     }
 }
