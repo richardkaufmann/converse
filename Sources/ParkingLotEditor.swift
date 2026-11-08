@@ -600,7 +600,16 @@ final class ParkingOutlineText: NSTextView {
     }
     weak var owner: ParkingLotEditor.Coordinator?
     private var suppressSubstitutions = false
-    private var immediateSubstitution: ImmediateSubstitution?
+    /// The row and caret right after a substitution or file-link drop. Another
+    /// writer's save re-renders the pane, but an immediate Backspace still
+    /// belongs to the user's own substitution while this row and caret match.
+    private struct RowCaret: Equatable { let id: UUID; let text: String; let offset: Int }
+    private var immediateSubstitution: RowCaret?
+    private func rowCaret() -> RowCaret? {
+        guard let owner, selectedRange().length == 0, let index = owner.projection.index(at: selectedRange().location) else { return nil }
+        let entry = owner.projection.entries[index]
+        return entry.placeholder ? nil : RowCaret(id: entry.row.id, text: entry.row.text, offset: selectedRange().location - entry.range.location)
+    }
     override var undoManager: UndoManager? { owner?.parent.lot.undoManager }
     @objc func undo(_ sender: Any?) {
         let substituted = undoManager?.undoActionName == TextSubstitutions.undoName
@@ -626,10 +635,10 @@ final class ParkingOutlineText: NSTextView {
         setSelectedRange(NSRange(location: caret + (match.replacement as NSString).length - match.range.length, length: 0))
         undoManager?.setActionName(TextSubstitutions.undoName)
         owner.parent.lot.substitutionFeedback.converted()
-        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+        immediateSubstitution = rowCaret()
     }
     override func deleteBackward(_ sender: Any?) {
-        if immediateSubstitution?.matches(self) == true, [TextSubstitutions.undoName, Self.fileLinkUndoName].contains(undoManager?.undoActionName ?? "") { undo(sender); return }
+        if immediateSubstitution != nil, immediateSubstitution == rowCaret(), [TextSubstitutions.undoName, Self.fileLinkUndoName].contains(undoManager?.undoActionName ?? "") { undo(sender); return }
         immediateSubstitution = nil
         if let owner, selectedRange().length == 0,
            let index = owner.projection.index(at: selectedRange().location) {
@@ -786,7 +795,7 @@ final class ParkingOutlineText: NSTextView {
         guard owner.parent.lot.document.revision != revision else { return }
         setSelectedRange(NSRange(location: start + (linked as NSString).length, length: 0))
         undoManager?.setActionName(Self.fileLinkUndoName)
-        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+        immediateSubstitution = rowCaret()
         owner.refreshLinks(settle: true)
     }
     func rowRect(_ entry: ParkingOutline.Entry) -> NSRect {
@@ -1192,12 +1201,14 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     check(lot.document.rows == original.rows, "Native Undo restores a multi-row-capable outline transaction")
     text.redo(nil)
     check(lot.document.rows[0].text == "Fresh features", "Native Redo restores the edited outline")
-    lot.update(lot.document.rows[0].id, text: "Another writer")
-    text.undoManager?.undo()
-    check(lot.document.rows[0].text == "Fresh features", "Undo reverses the newest lot change before earlier text edits")
-    text.redo(nil)
-    check(lot.document.rows[0].text == "Another writer", "Redo restores the newest lot change before continuing edits")
-    lot.error = ""
+    do {
+        try lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "update", id: lot.document.rows[0].id, text: "Another writer")]), author: "Session")
+        check(!lot.undoManager.canRedo && lot.undoManager.undoActionName == "Typing", "A session save joins neither Undo nor Redo, and the user's Typing stays next")
+        text.undoManager?.undo()
+        check(lot.document.rows[0].text == "Another writer" && lot.notice == "Can't undo: Session changed this item since.",
+              "Undo of typing into a row a session changed since reports a conflict instead of restoring the old text")
+    } catch { check(false, "Native Undo session fixture: " + error.localizedDescription) }
+    lot.notice = ""
     lot.update(lot.document.rows[1].id, text: "Existing item"); coordinator.render()
     lot.setDone(lot.document.rows[1].id, true); coordinator.render()
     let doneRange = coordinator.projection.entries.first { $0.row.id == lot.document.rows[1].id }!.range
@@ -1355,14 +1366,15 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let beforeDirect = lot.document.rows
     let direct = store.parkingLotCommand(command, session: session, lot: lot, confirm: { _ in asked = true; return false }, requiresConfirmation: false)
     check(!asked && direct.contains("confirmation off") && !direct.contains("approved") && lot.document.rows[0].text == "Saved without review", "With confirmation off, session edits save without the review sheet")
+    let afterDirect = lot.document.rows
     lot.undoManager.undo()
-    check(lot.document.rows == beforeDirect, "Lot Undo reverses an edit saved without confirmation")
+    check(lot.document.rows == afterDirect && lot.notice.hasPrefix("Can't undo:"), "Lot Undo never reverses a session edit saved without confirmation")
     command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision - 1, operations: [.init(action: "update", id: id, text: "Stale direct")])
     let staleDirect = store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false)
-    check(staleDirect.contains("No changes applied") && lot.document.rows == beforeDirect, "With confirmation off, a stale revision still applies nothing")
+    check(staleDirect.contains("No changes applied") && lot.document.rows == afterDirect, "With confirmation off, a stale revision still applies nothing")
     session.supportAutonomous = true
     command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: id, text: "Autonomous")])
-    check(store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false).contains("Nothing was read or changed") && lot.document.rows == beforeDirect, "Confirmation off never lets autonomous messages bypass scope")
+    check(store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false).contains("Nothing was read or changed") && lot.document.rows == afterDirect, "Confirmation off never lets autonomous messages bypass scope")
     session.supportAutonomous = false
     check(store.switchboardTeaching(session).contains("If a lot's confirmation is off"), "Session teaching explains lots with confirmation off")
     let newID = UUID(), target = lot.document.rows.last!.id
@@ -1551,6 +1563,19 @@ func parkingDropSelfTests(_ check: (Bool, String) -> Void) {
     check(drop(["https://y.com/z" as NSString]) && row() == "Dragged https://y.com/z" && linked(9) == URL(string: "https://y.com/z") && cleanDisplay(), "Dropped text is inserted and its links style immediately")
     text.undo(nil)
     check(row() == "Dragged ", "Undo removes dropped text")
+    // A session save between the drop and Backspace re-renders the pane but never joins the drop's Undo.
+    lot.update(item, text: "Logo is with "); coordinator.render(caret: (item, 13))
+    let heading = lot.document.rows[0].id
+    check(drop([plain as NSURL]), "Dropping a file before a session save inserts its link")
+    do {
+        try lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "update", id: heading, text: "Session heading")]), author: "Session")
+        coordinator.render()
+        text.deleteBackward(nil)
+        check(row() == "Logo is with /Users/me/Desktop/converse.jpeg" && lot.document.rows[0].text == "Session heading",
+              "Backspace after a drop and a session save restores only the plain path, keeping the session change")
+        text.undo(nil)
+        check(row() == "Logo is with " && lot.document.rows[0].text == "Session heading", "Undo then removes only the user's drop")
+    } catch { check(false, "Drop with session save: " + error.localizedDescription) }
     window.close()
 }
 
@@ -1886,4 +1911,244 @@ final class ParkingLotScrollView: NSScrollView {
         defer { PerformanceCapture.shared.end(.lotScrollHandling, measurement) }
         super.scrollWheel(with: event)
     }
+}
+
+// Native Undo affects only the user's own edits. Session, agent and device
+// saves stay out of the history and survive Undo/Redo of earlier user edits.
+func parkingUserUndoSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("parking-user-undo-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    struct Fixture {
+        let lot: ParkingLotStore, coordinator: ParkingLotEditor.Coordinator, text: ParkingOutlineText
+        let heading: ParkingLotRow, a: ParkingLotRow, b: ParkingLotRow, c: ParkingLotRow
+        func row(_ id: UUID) -> ParkingLotRow? { lot.document.rows.first { $0.id == id } }
+        /// One insertion at the end of a row; `keys` types character by character.
+        func type(_ value: String, into id: UUID, keys: Bool = false) {
+            coordinator.render()  // SwiftUI refreshes the pane after each save.
+            let entry = coordinator.projection.entries.first { $0.row.id == id }!
+            text.setSelectedRange(NSRange(location: NSMaxRange(entry.range), length: 0))
+            for piece in keys ? value.map(String.init) : [value] { text.insertText(piece, replacementRange: text.selectedRange()) }
+        }
+        func session(_ operations: [ParkingLotEdits.Operation], author: String = "Session") throws {
+            try lot.apply(.init(revision: lot.document.revision, operations: operations), author: author)
+        }
+    }
+    func fixture(_ name: String) -> Fixture {
+        let lot = ParkingLotStore(folder: root.appendingPathComponent(name), id: UUID(), name: name)
+        let heading = ParkingLotRow(heading: true, text: "Work")
+        let a = ParkingLotRow(heading: false, text: "Alpha", parentID: heading.id)
+        let b = ParkingLotRow(heading: false, text: "Bravo", parentID: heading.id)
+        let c = ParkingLotRow(heading: false, text: "Charlie", parentID: heading.id)
+        lot.openStarter([heading, a, b, c])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator
+        coordinator.text = text; coordinator.render()
+        return Fixture(lot: lot, coordinator: coordinator, text: text, heading: heading, a: a, b: b, c: c)
+    }
+    do {
+        // The incident shape: a session transaction lands after typing, then ⌘Z.
+        let f = fixture("transaction")
+        f.type(" mine", into: f.a.id)
+        check(f.lot.undoManager.undoActionName == "Typing", "Native typing registers a Typing Undo")
+        let added = UUID(), child = UUID()
+        try f.session([
+            .init(action: "update", id: f.b.id, text: "Session B"), .init(action: "update", id: f.c.id, done: true),
+            .init(action: "comment", id: f.c.id, text: "Checked"), .init(action: "add", id: added, text: "SESSION OUTPUT", heading: true),
+            .init(action: "add", id: child, text: "Session addition", parentID: added), .init(action: "update", id: added, tag: "blue"),
+            .init(action: "update", id: child, text: "Session addition, revised")
+        ])
+        f.coordinator.render()
+        let external = f.lot.document
+        f.text.undo(nil)
+        check(f.row(f.a.id)?.text == "Alpha" && f.row(f.b.id)?.text == "Session B" && f.row(f.c.id)?.isDone == true
+              && f.row(f.c.id)?.notes?.count == 1 && f.row(added)?.tag == .blue && f.row(child)?.text == "Session addition, revised"
+              && f.lot.document.rows.count == external.rows.count && f.lot.document.revision == external.revision + 1,
+              "⌘Z after a session transaction undoes the user's typing and keeps all seven session edits")
+        check(f.lot.notice.isEmpty && f.lot.error.isEmpty && f.coordinator.displayed == f.lot.document, "Undo across a session transaction saves cleanly and refreshes the pane")
+        check(ParkingLotStore(folder: root.appendingPathComponent("transaction"), id: f.lot.id).document == f.lot.document, "The merged Undo result is what is saved on disk")
+        // Redo after Undo, with another session change in between.
+        try f.session([.init(action: "update", id: f.heading.id, text: "Session heading")])
+        f.text.redo(nil)
+        check(f.row(f.a.id)?.text == "Alpha mine" && f.row(f.heading.id)?.text == "Session heading" && f.row(f.b.id)?.text == "Session B",
+              "Redo after an intervening session change repeats only the user's typing")
+        f.text.undo(nil)
+        try f.session([.init(action: "update", id: f.a.id, text: "Session Alpha")])
+        f.text.redo(nil)
+        check(f.row(f.a.id)?.text == "Session Alpha" && f.lot.notice == "Can't redo: Session changed this item since." && !f.lot.undoManager.canRedo,
+              "Redo of a row a session changed since reports a conflict and drops the entry")
+    } catch { check(false, "User Undo transaction fixture: " + error.localizedDescription) }
+    do {
+        // Different rows: a user tag change, a session text change on another row.
+        let f = fixture("different")
+        f.lot.setTag(f.a.id, .red)
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+        check(f.lot.undoManager.undoActionName == "Color Tag", "A session save leaves the user's own action name on Undo")
+        f.lot.undoManager.undo()
+        check(f.row(f.a.id)?.tag == nil && f.row(f.b.id)?.text == "Session B", "Undo of a user tag keeps a session edit to a different row")
+        f.lot.undoManager.redo()
+        check(f.row(f.a.id)?.tag == .red && f.row(f.b.id)?.text == "Session B", "Redo of the tag keeps the session edit")
+        // Same row: no clobber, a named conflict, and other writers are not blocked.
+        f.type("!", into: f.c.id)
+        let typed = f.lot.document.rows
+        try f.session([.init(action: "update", id: f.c.id, text: "Session Charlie")], author: "Planner")
+        let changed = f.lot.document
+        f.text.undo(nil)
+        check(f.lot.document == changed && f.lot.notice == "Can't undo: Planner changed this item since." && f.lot.error.isEmpty,
+              "Undo of typing into a row a session changed since shows a conflict and saves nothing")
+        check(!f.lot.undoManager.canRedo && typed != changed.rows, "A conflicting Undo is dropped rather than retried over newer work")
+        try f.session([.init(action: "comment", id: f.b.id, text: "Still writable")], author: "Planner")
+        check(f.row(f.b.id)?.notes?.count == 1, "An Undo conflict notice never blocks session edits")
+        f.lot.undoManager.undo()
+        check(f.row(f.a.id)?.tag == nil && f.row(f.c.id)?.text == "Session Charlie", "Older user entries still undo independently after a conflict")
+        f.type("x", into: f.b.id)
+        check(f.lot.notice.isEmpty, "The next user edit clears the Undo notice")
+    } catch { check(false, "User Undo row fixture: " + error.localizedDescription) }
+    do {
+        // External additions, deletions and structure changes.
+        let f = fixture("structure")
+        f.lot.delete(f.b.id)
+        check(f.lot.undoManager.undoActionName == "Delete", "Deleting an item registers Delete")
+        let note = UUID()
+        try f.session([.init(action: "add", id: note, text: "Session note", before: f.c.id, parentID: f.heading.id),
+                       .init(action: "add", text: "Session child", parentID: f.a.id)])
+        f.lot.undoManager.undo()
+        let ids = f.lot.document.rows.map(\.id)
+        check(f.row(f.b.id) == f.b && ids.firstIndex(of: f.b.id)! < ids.firstIndex(of: note)! && f.lot.document.rows.count == 6
+              && (try? ParkingLotTree.normalized(f.lot.document.rows)) == f.lot.document.rows,
+              "Undo restores a deleted item in place, keeping session additions around it")
+        f.lot.undoManager.redo()
+        check(f.row(f.b.id) == nil && f.row(note) != nil, "Redo deletes the item again and keeps session additions")
+        f.lot.undoManager.undo()
+        // A session nests a new row under the user's new item: removing it would orphan the child.
+        let mine = f.lot.insert(text: "Mine", after: f.c.id)
+        try f.session([.init(action: "add", text: "Under yours", parentID: mine)], author: "Planner")
+        let nested = f.lot.document
+        f.lot.undoManager.undo()
+        check(f.lot.document == nested && f.lot.notice == "Can't undo: Planner changed this item since.", "Undo of an insertion a session nested under is a conflict")
+        // The user indents C; a session moves A. Undo outdents C and keeps the session's move.
+        f.lot.changeIndent(f.c.id, deeper: true)
+        let indentedUnder = f.row(f.c.id)?.parentID
+        try f.session([.init(action: "move", id: f.a.id, before: nil, parentID: f.heading.id)])
+        f.lot.undoManager.undo()
+        check(indentedUnder != f.heading.id && f.row(f.c.id)?.parentID == f.heading.id && f.lot.document.rows.last(where: { $0.parentID == f.heading.id })?.id == f.a.id,
+              "Undo of an indent keeps a session move of another row")
+        // A session deletes the section the user's deleted item belonged to.
+        f.lot.delete(f.c.id)
+        try f.session([.init(action: "delete", id: f.heading.id)])
+        let gone = f.lot.document
+        f.lot.undoManager.undo()
+        check(f.lot.document == gone && f.lot.notice == "Can't undo: another writer deleted this item since.", "Undo cannot restore an item into a section a session deleted")
+    } catch { check(false, "User Undo structure fixture: " + error.localizedDescription) }
+    do {
+        // A user move, then a session edit in another section.
+        let f = fixture("move")
+        let other = ParkingLotRow(heading: true, text: "Later")
+        try f.session([.init(action: "add", id: other.id, text: other.text, heading: true)])
+        f.lot.undoManager.removeAllActions()
+        check(f.lot.moveToSection(f.a.id, heading: other.id) && f.lot.undoManager.undoActionName == "Move", "Move registers a Move Undo")
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B"), .init(action: "add", text: "Late idea", parentID: other.id)])
+        f.lot.undoManager.undo()
+        check(ParkingLotStore.section(of: f.a.id, in: f.lot.document.rows) == f.heading.id && f.lot.document.rows[1].id == f.a.id
+              && f.row(f.b.id)?.text == "Session B" && f.lot.document.rows.last?.text == "Late idea",
+              "Undo of a move puts the item back and keeps session edits")
+    } catch { check(false, "User Undo move fixture: " + error.localizedDescription) }
+    do {
+        // Substitution, then a session save, then Backspace: only the substitution reverts.
+        for refresh in [false, true] {
+            let f = fixture(refresh ? "substitution-refreshed" : "substitution-stale")
+            f.type(" :-) ", into: f.a.id, keys: true)
+            guard f.row(f.a.id)?.text == "Alpha 🙂 " else { check(false, "Substitution fixture converts"); continue }
+            try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+            if refresh { f.coordinator.render() }
+            f.text.deleteBackward(nil)
+            check(f.row(f.a.id)?.text == "Alpha :-) " && f.row(f.b.id)?.text == "Session B",
+                  "Backspace after a substitution and a session save (\(refresh ? "refreshed" : "stale") pane) reverts only the substitution")
+        }
+        // A session save while the user's substitution Undo group is open never joins it.
+        let f = fixture("open-group")
+        f.lot.undoManager.beginUndoGrouping()
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+        f.coordinator.render(); f.type("!", into: f.a.id)
+        f.lot.undoManager.setActionName(TextSubstitutions.undoName)
+        f.lot.undoManager.endUndoGrouping()
+        f.text.undo(nil)
+        check(f.row(f.a.id)?.text == "Alpha" && f.row(f.b.id)?.text == "Session B" && !f.lot.undoManager.canUndo,
+              "A session save inside an open native Undo group is not part of the user's Undo")
+        // Same-row session change: Backspace stays an ordinary Backspace; Undo reports the conflict.
+        let g = fixture("substitution-overlap")
+        g.type(" :-) ", into: g.a.id, keys: true)
+        try g.session([.init(action: "update", id: g.a.id, text: "Session Alpha 🙂 ")])
+        g.coordinator.render()
+        let caret = g.coordinator.projection.entries.first { $0.row.id == g.a.id }!.range
+        g.text.setSelectedRange(NSRange(location: NSMaxRange(caret), length: 0))
+        g.text.deleteBackward(nil)
+        check(g.row(g.a.id)?.text == "Session Alpha 🙂", "Backspace after a session rewrote the substituted row deletes one character, never the session's text")
+    } catch { check(false, "User Undo substitution fixture: " + error.localizedDescription) }
+    // Converse Development's interleaving probe (codex/lot-concurrent-edit-repro), now with no rollback.
+    for refresh in [false, true] {
+        let home = root.appendingPathComponent(refresh ? "refreshed" : "stale")
+        let lot = ParkingLotStore(folder: home, id: UUID(), name: "Synthetic concurrent edits")
+        let heading = ParkingLotRow(heading: true, text: "Fixture")
+        let human = ParkingLotRow(heading: false, text: "Human A", parentID: heading.id)
+        let other = ParkingLotRow(heading: false, text: "Original B", parentID: heading.id)
+        lot.openStarter([heading, human, other])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        text.isRichText = false; text.owner = coordinator; text.delegate = coordinator
+        coordinator.text = text; coordinator.render()
+        func type(_ suffix: String) {
+            let entry = coordinator.projection.entries.first { $0.row.id == human.id }!
+            text.setSelectedRange(NSRange(location: NSMaxRange(entry.range), length: 0))
+            text.insertText(suffix, replacementRange: text.selectedRange())
+        }
+        type(" before")
+        let addedHeading = UUID(), addedItem = UUID()
+        do {
+            try lot.apply(.init(revision: lot.document.revision, operations: [
+                .init(action: "update", id: other.id, text: "Session updated B"),
+                .init(action: "add", id: addedHeading, text: "SESSION OUTPUT", heading: true),
+                .init(action: "add", id: addedItem, text: "Session addition", parentID: addedHeading)
+            ]), author: "Synthetic session")
+        } catch { check(false, "Concurrent fixture session transaction: " + error.localizedDescription); continue }
+        let external = lot.document
+        if refresh { coordinator.render() }
+        type(" after")
+        let label = refresh ? "refreshed" : "stale"
+        func sessionIntact() -> Bool {
+            lot.document.rows.first { $0.id == other.id }?.text == "Session updated B"
+                && lot.document.rows.contains { $0.id == addedHeading } && lot.document.rows.contains { $0.id == addedItem }
+        }
+        check(sessionIntact(), "\(label) native pane typing preserves the session update and added subtree")
+        if refresh {
+            check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before after" && lot.error.isEmpty,
+                  "Refreshed native pane appends the human keystroke to current rows")
+        } else {
+            check(lot.document == external && lot.error.contains("changed"),
+                  "Stale native pane rejects the stale keystroke and reports a revision conflict")
+            check(coordinator.displayed == external && text.string.contains("Session updated B"),
+                  "Rejected stale edit refreshes the native pane to the saved session transaction")
+            type(" retry")
+            check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before retry" && sessionIntact(),
+                  "Typing again after stale rejection preserves both authors' saved changes")
+        }
+        text.undo(nil); text.undo(nil)
+        check(lot.document.rows.first { $0.id == human.id }?.text == "Human A" && sessionIntact() && !lot.undoManager.canUndo,
+              "\(label) pane: Undo reverses only the human's typing and never rolls back the session transaction")
+        let reloaded = ParkingLotStore(folder: home, id: lot.id)
+        check(reloaded.document == lot.document, "\(label) native interleave persists the same complete document on disk")
+    }
+    let undoLot = ParkingLotStore(folder: root.appendingPathComponent("undo"), id: UUID())
+    let human = ParkingLotRow(heading: false, text: "Human work already present")
+    let other = ParkingLotRow(heading: false, text: "Original B")
+    undoLot.openStarter([human, other])
+    do {
+        try undoLot.apply(.init(revision: undoLot.document.revision, operations: [
+            .init(action: "update", id: other.id, text: "Session B"), .init(action: "add", id: UUID(), text: "Session output", heading: true)
+        ]), author: "Synthetic session")
+        let applied = undoLot.document
+        check(!undoLot.undoManager.canUndo, "A session transaction never appears on the user's Undo stack")
+        undoLot.undoManager.undo()
+        check(undoLot.document == applied, "Undo immediately after a session transaction leaves it in place")
+    } catch { check(false, "Session-only Undo fixture: " + error.localizedDescription) }
 }

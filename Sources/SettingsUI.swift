@@ -2,49 +2,6 @@ import AppKit
 import SwiftUI
 import Security
 
-struct TranscriptLimits: Codable, Equatable {
-    var days: Int? = nil
-    var count: Int? = 1000
-    var valid: Bool { [days, count].allSatisfy { $0 == nil || (1...1_000_000).contains($0!) } }
-    /// Delete a prefix only, retaining the prompt that starts a retained turn.
-    func cut(_ messages: [Message], now: Date) -> Int {
-        guard valid else { return 0 }
-        let counted = messages.indices.filter { ["user", "assistant"].contains(messages[$0].role) }
-        var boundary = 0
-        if let count, counted.count > count { boundary = counted[counted.count - count] }
-        if let days {
-            let oldest = now.addingTimeInterval(-Double(days) * 86400)
-            // Unknown legacy times are never assumed to be old.
-            let ageBoundary = messages.firstIndex { $0.createdAt == nil || $0.createdAt! >= oldest } ?? messages.count
-            boundary = max(boundary, ageBoundary)
-        }
-        if boundary >= messages.count { return messages.count }
-        if messages[boundary].role != "user", let prompt = messages[..<boundary].lastIndex(where: { $0.role == "user" }) { boundary = prompt }
-        return boundary
-    }
-}
-extension Store {
-    @discardableResult func trimIdleTranscripts(now: Date = Date()) -> Int {
-        guard !applicationQuitting else { return 0 }
-        var removed = 0
-        for session in sessions {
-            guard !session.busy, !session.compacting, !session.changingSetting,
-                  session.draft.isEmpty, session.attachments.isEmpty, session.pending.isEmpty,
-                  session.requests.isEmpty, session.handoffPending == nil, session.restoreRetry == nil,
-                  !session.switchboardObligations.contains(where: { !$0.terminal }),
-                  !session.switchboardExpectations.contains(where: { !$0.answered }) else { continue }
-            let cut = session.transcriptLimits.cut(session.messages, now: now)
-            guard cut > 0 else { continue }
-            let deleted = Set(session.messages.prefix(cut).map(\.id))
-            session.messages.removeFirst(cut)
-            if let marker = session.clearedThroughMessageID, deleted.contains(marker) { session.clearedThroughMessageID = nil }
-            removed += cut
-        }
-        if removed > 0 { save() }
-        return removed
-    }
-}
-
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General", debug = "Debug", jolly = "Jolly", welcome = "New User Experience / Reset"
     var id: String { rawValue }
@@ -88,8 +45,10 @@ struct SettingsView: View {
                             if let session = store.sessions.first(where: { $0.id == sessionID }) {
                                 TranscriptLimitsView(session: session).id(session.id)
                             }
-                            Text("Limits apply to this Mac’s saved transcript. Each prompt and each response counts as one message; a prompt/response pair counts as two. A retained turn stays together, so the count can exceed the limit. Attachments and provider-owned history are not deleted.")
+                            TranscriptDefaultLimitsView()
+                            Text("Limits apply to this Mac’s saved transcript; the assistant’s own provider history isn’t changed. " + TranscriptLimits.unitExplanation + " " + TranscriptLimits.imageExplanation)
                                 .font(.caption).foregroundStyle(.secondary)
+                            TrimImagesView(store: store)
                             Divider()
                             ModelsSettingsView(state: state)
 
@@ -109,24 +68,76 @@ struct TranscriptLimitsView: View {
     @State private var days = ""
     @State private var count = ""
     @State private var saved = false
-    private func parse(_ text: String) -> Int? { Int(text.trimmingCharacters(in: .whitespaces)) }
-    private var valid: Bool { [days, count].allSatisfy { $0.isEmpty || parse($0).map { (1...1_000_000).contains($0) } == true } }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack { Text("Delete messages older than"); TextField("None", text: $days).frame(width: 85); Text("days") }
-            HStack { Text("Keep the most recent"); TextField("None", text: $count).frame(width: 85); Text("prompts and responses") }
-            Text("Leave either field blank for None. Defaults: no age limit, 1,000 messages. Checked once a minute while the session is idle, with no draft or pending work. Either limit can remove older messages.")
-                .font(.caption).foregroundStyle(.secondary)
+            TranscriptLimitFields(days: $days, count: $count)
+            Text("Leave either field blank for None. Defaults: no age limit, 1,000 messages. " + TranscriptLimits.timingExplanation)
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Save limits") {
-                    session.transcriptLimits = TranscriptLimits(days: parse(days), count: parse(count))
-                    Store.shared.save(); saved = true
-                }.disabled(!valid)
-                if saved { Text("Saved · applies when idle").font(.caption).foregroundStyle(.secondary) }
+                    saved = Store.shared.applyTranscriptLimits(session, TranscriptLimits(days: TranscriptLimitFields.parse(days), count: TranscriptLimitFields.parse(count)))
+                }.disabled(!TranscriptLimitFields.valid(days, count))
+                if saved { Text("Saved · " + session.transcriptLimits.summary).font(.caption).foregroundStyle(.secondary) }
             }
         }.textFieldStyle(.roundedBorder)
             .onAppear { days = session.transcriptLimits.days.map(String.init) ?? ""; count = session.transcriptLimits.count.map(String.init) ?? "" }
             .onChange(of: days) { _, _ in saved = false }.onChange(of: count) { _, _ in saved = false }
+    }
+}
+struct TranscriptLimitFields: View {
+    @Binding var days: String
+    @Binding var count: String
+    static func parse(_ text: String) -> Int? { Int(text.trimmingCharacters(in: .whitespaces)) }
+    static func valid(_ days: String, _ count: String) -> Bool {
+        [days, count].allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty || parse($0).map { TranscriptLimits.range.contains($0) } == true }
+    }
+    var body: some View {
+        HStack { Text("Delete messages older than"); TextField("None", text: $days).frame(width: 85); Text("days") }
+        HStack { Text("Keep the most recent"); TextField("None", text: $count).frame(width: 85); Text("messages (each prompt and each response is one)") }
+    }
+}
+/// Seeds sessions created from now on; existing sessions keep their own limits.
+struct TranscriptDefaultLimitsView: View {
+    @State private var days = ""
+    @State private var count = ""
+    @State private var saved = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("New sessions start with").font(.subheadline.bold())
+            TranscriptLimitFields(days: $days, count: $count)
+            HStack {
+                Button("Save default") {
+                    TranscriptLimits.newSessionDefault = TranscriptLimits(days: TranscriptLimitFields.parse(days), count: TranscriptLimitFields.parse(count)); saved = true
+                }.disabled(!TranscriptLimitFields.valid(days, count))
+                if saved { Text("Saved · applies to sessions you create next").font(.caption).foregroundStyle(.secondary) }
+            }
+        }.textFieldStyle(.roundedBorder)
+            .onAppear { let limits = TranscriptLimits.newSessionDefault; days = limits.days.map(String.init) ?? ""; count = limits.count.map(String.init) ?? "" }
+            .onChange(of: days) { _, _ in saved = false }.onChange(of: count) { _, _ in saved = false }
+    }
+}
+/// Removes every image from the chosen sessions' transcripts after confirmation.
+struct TrimImagesView: View {
+    @ObservedObject var store: Store
+    @State private var chosen: Set<UUID> = []
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Trim all images").font(.subheadline.bold())
+            Text("Removes every image from the chosen transcripts and deletes its file from Converse’s Attachments folder when nothing else uses it. Text, drafts and queued prompts are kept.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(store.sessions) { session in
+                        let images = session.messages.reduce(0) { $0 + $1.images.count }
+                        Toggle(session.title + (images > 0 ? " · \(images) image" + (images == 1 ? "" : "s") : ""), isOn: Binding(
+                            get: { chosen.contains(session.id) }, set: { if $0 { chosen.insert(session.id) } else { chosen.remove(session.id) } }))
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 140)
+            Button("Trim All Images…") {
+                if store.confirmTrimAllImages(store.sessions.filter { chosen.contains($0.id) }) { chosen = [] }
+            }.disabled(chosen.isEmpty)
+        }
     }
 }
 final class ProfileResetState: ObservableObject {

@@ -12,6 +12,9 @@ struct TranscriptDisclosure {
 
     static func parse(_ source: String, role: String, resolveName: (String) -> String? = { _ in nil }) -> Self? {
         let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if role != "assistant", let summary = TranscriptSelfRead.disclosureSummary(text) {
+            return Self(prefix: "", details: text, summary: summary)
+        }
         if role != "assistant", text.hasPrefix("[Parking Lot · "),
            let start = text.range(of: "\n{"),
            let json = String(text[start.lowerBound...]).data(using: .utf8) {

@@ -283,7 +283,7 @@ import Foundation
           "The switchboard portrait command shows the image inline and sends the session its result")
     command("```converse\n{\"command\":\"portrait\",\"agent\":\"Nobody\"}\n```")
     check(requester.messages.last?.text.contains("no single agent is named") == true, "An unknown portrait target explains what to use instead")
-    check(store.switchboardTeaching(requester).contains(SwitchboardCommand.portraitTeaching) && SwitchboardCommand.conversationPolicy.contains("\"command\":\"portrait\"") && SwitchboardTeaching.version == 4,
+    check(store.switchboardTeaching(requester).contains(SwitchboardCommand.portraitTeaching) && SwitchboardCommand.conversationPolicy.contains("\"command\":\"portrait\"") && SwitchboardTeaching.version == 5,
           "Sessions are taught the portrait command (lesson version 4)")
 
     // 8. Jolly holds a portrait request open until PNG + caption.

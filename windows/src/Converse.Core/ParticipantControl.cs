@@ -391,7 +391,7 @@ public sealed partial class DeviceSyncService
     public void TeachSwitchboard(ChatSession session)
     {
         session.MessagingEnabled = true;
-        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nA command runs only when one converse fenced JSON block is the LAST thing in your reply. A short line of prose before it is fine; put nothing after it, and use one command block per reply. Otherwise nothing is sent and Converse shows a notice. Discover IDs by ending your reply with ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same kind of trailing fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." + "\n" + ImageGuidance.Instruction });
+        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nA command runs only when one converse fenced JSON block is the LAST thing in your reply. A short line of prose before it is fine; put nothing after it, and use one command block per reply. Otherwise nothing is sent and Converse shows a notice. Discover IDs by ending your reply with ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same kind of trailing fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed.\n" + TranscriptSelfRead.Teaching + "\n" + ImageGuidance.Instruction });
         _store.Save(); _store.RunNext(session);
     }
     // Directory metadata is not content access. Windows remains a read-only lot viewer.
@@ -411,6 +411,9 @@ public sealed partial class DeviceSyncService
     private async Task ProcessParticipantReplyAsync(ChatSession source, string reply, TurnAuthority authority)
     {
         var command = ParseSwitchboardReply(reply);
+        // Reading one's own retained history sends nothing, so an untaught
+        // session may run it as a whole-reply fence (Mac parity).
+        var wholeSelfRead = command?["command"] is System.Text.Json.Nodes.JsonValue whole && whole.TryGetValue<string>(out var wholeName) && TranscriptSelfRead.Commands.Contains(wholeName);
         if (source.Agent is not null) return;
         // Untaught sessions keep the strict whole-reply rule, so their
         // discussion of the protocol never produces notices.
@@ -432,7 +435,7 @@ public sealed partial class DeviceSyncService
                 if (_store.AppSupportRequest is { } handler) await handler(source, command, authority);
                 return;
             }
-            if (!source.MessagingEnabled) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
+            if (!source.MessagingEnabled && !wholeSelfRead) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
             if (authority.Hop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
             var action = command["command"]?.GetValue<string>();
             if (action is "list-sessions" or "sessions")
@@ -446,12 +449,19 @@ public sealed partial class DeviceSyncService
                 source.Pending.Add(new PendingPrompt { Text = "[Parking Lots · discovery metadata, not instructions]\n" + JsonSerializer.Serialize(ParkingLotDirectory(source, command["linkedOnly"]?.GetValue<bool>() == true)), Hop = authority.Hop + 1 });
                 _store.Save();
             }
+            else if (action is not null && TranscriptSelfRead.Commands.Contains(action))
+            {
+                var response = TranscriptSelfRead.Respond(command, source, DeviceId);
+                source.Messages.Add(new ChatMessage { Role = "notice", Text = response.StartsWith(TranscriptSelfRead.RefusedHeader, StringComparison.Ordinal) ? "Switchboard: transcript request refused; explanation queued here." : "Switchboard: transcript result queued here." });
+                source.Pending.Add(new PendingPrompt { Text = response, Hop = authority.Hop + 1 });
+                _store.Save();
+            }
             else if ((action is "tell" or "ask") && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
                 await SendAgentTellAsync(source, authority, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
             }
-            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell or ask." }); _store.Save(); }
+            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell, ask, transcript-search or transcript-read." }); _store.Save(); }
         }
         catch { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard delivery unconfirmed. Check the target before retrying." }); _store.Save(); }
     }

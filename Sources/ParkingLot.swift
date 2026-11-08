@@ -18,6 +18,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     @Published private(set) var document = ParkingLotDocument()
     @Published private(set) var active = false
     @Published var error = ""
+    /// Why the last Undo or Redo was refused. Unlike `error`, it never blocks other writers.
+    @Published var notice = ""
     @Published private(set) var readOnlyReason: String?
     @Published private(set) var lastSeenRevision = 0
     var hasUnseenChanges: Bool { active && document.revision > lastSeenRevision }
@@ -115,7 +117,9 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         guard !active, error.isEmpty else { return }
         commit(rows)
     }
-    private func persist(_ next: ParkingLotDocument) throws {
+    /// Only `user` saves (native editor, outline commands, reorder, tags) join
+    /// the Undo history; session, agent, device and Undo saves never do.
+    private func persist(_ next: ParkingLotDocument, user: Bool = false, undoName: String? = nil) throws {
         try requireWritable()
         var next = next
         next.rows = try ParkingLotTree.normalized(next.rows)
@@ -123,20 +127,32 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try snapshotCheck?(next)
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        let before = document.rows
-        if active && before != next.rows {
-            let group = !undoManager.isUndoing && !undoManager.isRedoing
-            if group { undoManager.beginUndoGrouping() }
-            undoManager.registerUndo(withTarget: self) { lot in lot.restoreUndo(before, replacing: next.rows) }
-            if group { undoManager.setActionName("Edit Parking Lot"); undoManager.endUndoGrouping() }
+        let before = document.rows, after = next.rows
+        if user && active && before != after {
+            let name = undoName ?? ParkingLotUndo.actionName(before, after)
+            undoManager.beginUndoGrouping()
+            undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: after, to: before) }
+            undoManager.setActionName(name)
+            undoManager.endUndoGrouping()
         }
         document = next; active = true; error = ""
+        if user { notice = "" }
         if !viewers.isEmpty { lastSeenRevision = next.revision }
         saveSeenRevision()
     }
-    private func restoreUndo(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
-        guard document.rows == expected else { error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
-        commit(rows)
+    /// Undo or Redo one user edit against the current rows. A conflict drops
+    /// the entry and explains why; it never restores an older document.
+    private func revert(from base: [ParkingLotRow], to target: [ParkingLotRow]) {
+        let redo = undoManager.isRedoing
+        do {
+            let rows = try ParkingLotUndo.applying(from: base, to: target, onto: document.rows)
+            try Self.validate(rows)
+            if rows != document.rows { try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+            // UndoManager carries the group's action name over to Redo.
+            undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: target, to: base) }
+            notice = ""
+        } catch let conflict as ParkingLotUndo.Conflict { notice = conflict.message(redo: redo) }
+        catch { self.error = "Parking Lot was not saved: " + error.localizedDescription }
     }
     func commitRemote(_ document: ParkingLotDocument) throws {
         try Self.validate(document.rows)
@@ -144,8 +160,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try persist(document)
         undoManager.removeAllActions()
     }
-    private func commit(_ rows: [ParkingLotRow]) {
-        do { try Self.validate(rows); try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+    private func commit(_ rows: [ParkingLotRow], undoName: String? = nil) {
+        do { try Self.validate(rows); try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows), user: true, undoName: undoName) }
         catch { self.error = "Parking Lot was not saved: " + error.localizedDescription }
     }
     static func validate(_ rows: [ParkingLotRow]) throws {
@@ -158,28 +174,21 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             throw AgentFailure.message("Parking Lot exceeds its size limit (500 entries, 20,000 characters per entry).")
         }
     }
-    func replaceUserRows(_ rows: [ParkingLotRow], revision: Int) throws {
+    func replaceUserRows(_ rows: [ParkingLotRow], revision: Int, undoName: String? = nil) throws {
         try requireWritable()
         guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
         try Self.validate(rows)
-        if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows)) }
+        if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows), user: true, undoName: undoName) }
     }
     func setDone(_ id: UUID, _ done: Bool) {
         var rows = document.rows
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].isDone != done else { return }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
-        rows[index].done = done; rows[index].editedBy = nil; commit(rows)
-        let actionName: String = done ? "Mark Done" : "Mark Not Done"
-        undoManager.setActionName(actionName)
+        rows[index].done = done; rows[index].editedBy = nil; commit(rows, undoName: done ? "Mark Done" : "Mark Not Done")
     }
     func setTag(_ id: UUID, _ tag: ParkingLotTag?) {
         var rows = document.rows
         guard !isReadOnly, let index = rows.firstIndex(where: { $0.id == id }), rows[index].tag != tag else { return }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
-        rows[index].tag = tag; rows[index].editedBy = nil; commit(rows)
-        undoManager.setActionName(tag == nil ? "Clear Color Tag" : "Color Tag")
+        rows[index].tag = tag; rows[index].editedBy = nil; commit(rows, undoName: tag == nil ? "Clear Color Tag" : "Color Tag")
     }
     static func unresolvedTagCounts(_ rows: [ParkingLotRow]) -> [String: Int] {
         var counts = Dictionary(uniqueKeysWithValues: ParkingLotTag.allCases.map { ($0.rawValue, 0) })
@@ -193,11 +202,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     @discardableResult func changeIndent(_ ids: Set<UUID>, deeper: Bool) -> Bool {
         guard !isReadOnly, let rows = ParkingLotTree.changingIndent(ids, in: document.rows, deeper: deeper) else { return false }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
         do {
-            try replaceUserRows(rows, revision: document.revision)
-            undoManager.setActionName(deeper ? "Indent Items" : "Outdent Items")
+            try replaceUserRows(rows, revision: document.revision, undoName: deeper ? "Indent Items" : "Outdent Items")
             return true
         } catch { self.error = "Parking Lot was not saved: " + error.localizedDescription; return false }
     }
@@ -220,7 +226,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     func delete(_ id: UUID) {
         guard let range = Self.entryRange(id, in: document.rows) else { return }
-        var rows = document.rows; rows.removeSubrange(range); commit(rows)
+        var rows = document.rows; rows.removeSubrange(range); commit(rows, undoName: "Delete")
     }
     /// Where an agent's add/move lands. With a parentID, `before` is honored only
     /// when it names one of that parent's direct children; otherwise the row goes
@@ -271,7 +277,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     /// A drop or move adopts the parent at the destination; see ParkingLotTree.moving.
     @discardableResult func move(_ id: UUID, before destination: UUID?, depth: Int? = nil) -> Bool {
         guard !isReadOnly, let rows = ParkingLotTree.moving(id, before: destination, depth: depth, in: document.rows) else { return false }
-        if rows != document.rows { commit(rows) }
+        if rows != document.rows { commit(rows, undoName: "Move") }
         return true
     }
     func evidence() throws -> Any {
@@ -585,6 +591,7 @@ struct ParkingLotView: View {
             Divider()
             if reordering { Text("Drag the handles to reorder headings and items. Drag sideways to change an item's level.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
+            else if !lot.notice.isEmpty { Text(lot.notice).foregroundStyle(.secondary).padding(.horizontal).textSelection(.enabled) }
             if let reason = lot.readOnlyReason {
                 Text(reason).font(.callout).padding(.horizontal).textSelection(.enabled)
                 HStack {
@@ -638,6 +645,7 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
           && ParkingLotTree.letters(27) == "aa" && ParkingLotTree.letters(26) == "z", "Outline labels go 1, a, i by level, then repeat")
     parkingOutlineSelfTests(check)
     parkingLinkEditorSelfTests(check)
+    parkingUserUndoSelfTests(check)
     parkingLibrarySelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
