@@ -2967,6 +2967,7 @@ await CheckGroupLeave();
     Check(SidebarMarkers.LoopPaused(ran) == false && SidebarMarkers.PausedReason(ran) is null, "Running loops are not paused");
 }
 await SwitchboardSupervisionChecks.Run(Check, JoinPair);
+await TranscriptSelfReadChecks.Run(Check);
 await AppSupportChecks.Run(Check);
 await TurnAuthorityChecks.Run(Check);
 await AgentChecks.Run(Check, JoinPair);

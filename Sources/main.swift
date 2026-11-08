@@ -104,6 +104,9 @@ struct SavedSession: Codable {
     // This pane's text size; nil follows the global default.
     var textSize: Double? = nil
     var transcriptLimits: TranscriptLimits? = nil
+    // The highest message number transcript limits have deleted, so retained
+    // messages keep their numbers. Absent means nothing was trimmed.
+    var trimmedMessageNumber: Int? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -162,9 +165,12 @@ final class Session: ObservableObject, Identifiable {
     var messageNumberOffset = 0 { didSet { if messageNumberOffset != oldValue { messagesRevision &+= 1 } } }
     private var numberedMessagesRevision: UInt64?
     private var cachedMessageNumbers: [UUID: Int] = [:]
+    // Local sessions only (persisted): numbering continues after trimming.
+    // The pane counts from messageNumberOffset, so the two move together.
+    var trimmedMessageNumber = 0 { didSet { if trimmedMessageNumber != oldValue { messageNumberOffset = trimmedMessageNumber; messagesRevision &+= 1 } } }
     func transcriptMessageNumbers() -> [UUID: Int] {
         if numberedMessagesRevision != messagesRevision {
-            cachedMessageNumbers = Store.transcriptMessageNumbers(messages)
+            cachedMessageNumbers = Store.transcriptMessageNumbers(messages, after: trimmedMessageNumber)
             numberedMessagesRevision = messagesRevision
         }
         return cachedMessageNumbers
@@ -293,6 +299,7 @@ final class Session: ObservableObject, Identifiable {
         switchboardTeachingVersion = saved.switchboardTeachingVersion ?? (saved.switchboardEnabled == true ? 1 : nil)
         teachingBannerDismissed = saved.teachingBannerDismissed; textSize = saved.textSize
         transcriptLimits = saved.transcriptLimits ?? TranscriptLimits()
+        trimmedMessageNumber = max(0, saved.trimmedMessageNumber ?? 0); messageNumberOffset = trimmedMessageNumber
         switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
         switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
@@ -315,7 +322,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize, transcriptLimits: transcriptLimits) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize, transcriptLimits: transcriptLimits, trimmedMessageNumber: trimmedMessageNumber > 0 ? trimmedMessageNumber : nil) }
 }
 /// Writes archives off the main thread: one serial queue, newest snapshot per
 /// folder wins, at most one background write per `minimumInterval`; checked
@@ -379,8 +386,8 @@ final class ArchiveWriter {
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil; var paneTextSize: Double? = nil }
 final class Store: ObservableObject {
-    static func transcriptMessageNumbers(_ messages: [Message]) -> [UUID: Int] {
-        var result: [UUID: Int] = [:], number = 0
+    static func transcriptMessageNumbers(_ messages: [Message], after start: Int = 0) -> [UUID: Int] {
+        var result: [UUID: Int] = [:], number = max(0, start)
         for message in messages where message.role != "activity" {
             guard TranscriptStyle.blockContentLength(visibleText(message.text)) > 0 || !message.images.isEmpty else { continue }
             number += 1; result[message.id] = number
@@ -537,7 +544,8 @@ final class Store: ObservableObject {
         if entry.accountDirectory == nil, let profile = (entry.accountID.flatMap { id in accounts.first { $0.id == id && $0.engine == entry.engine } } ?? (entry.accountID == nil ? preferredLogin(engine: entry.engine) : nil)) {
             entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         }
-        let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
+        let s = Session(entry: entry); s.transcriptLimits = TranscriptLimits.newSessionDefault
+        sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
         MainActor.assumeIsolated { if AgentConversation.shared.owns(s) { AgentConversation.shared.stop(resumeQueued: false) } }
@@ -3952,6 +3960,8 @@ func selfTest() {
     lotPortableExportSelfTests(check)
     conversationLayoutSelfTests(check)
     settingsSelfTests(check)
+    transcriptSelfReadSelfTests(check)
+    transcriptRetentionSelfTests(check)
     sessionSettingsMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)

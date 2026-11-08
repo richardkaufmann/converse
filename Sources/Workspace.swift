@@ -351,6 +351,9 @@ struct SidebarSession: View {
                 }
                 Button("Teach Session To Talk To Other Sessions") { Store.shared.teachSwitchboard(session) }.help(SwitchboardTeaching.talkHelp)
                 if session.switchboardEnabled { Button("Disable session messaging") { session.switchboardEnabled = false; Store.shared.save() } }
+                Divider()
+                Button("Transcript Limits…") { TranscriptLimitsPanel.show(session) }.help(session.transcriptLimits.summary + ". Deletes older prompts and responses and their images from this Mac.")
+                Button("Trim All Images…") { Store.shared.confirmTrimAllImages([session]) }.help("Removes every image from this transcript after confirmation. Drafts and queued prompts keep theirs.")
             }
             .alert("Close ‘\(session.title)’?", isPresented: closeBinding) {
                 Button("Cancel", role: .cancel) {}

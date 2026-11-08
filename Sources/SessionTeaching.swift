@@ -5,8 +5,9 @@ import SwiftUI
 /// yellow Re-teach banner once.
 enum SwitchboardTeaching {
     /// 1: every lesson before versions were recorded. 2: round 135. 3: inline image delivery.
-    static let version = 3
-    static let talkHelp = "Teaches this session to message your other sessions (tell and ask) and to read and edit Parking Lots through the switchboard. Sends one visible message."
+    /// 4: transcript-search / transcript-read of the session's own transcript.
+    static let version = 4
+    static let talkHelp = "Teaches this session to message your other sessions (tell and ask), to read and edit Parking Lots, and to search and read its own transcript through the switchboard. Sends one visible message."
     static let controlHelp = "Lets this session operate Converse for you: create sessions, agents and Parking Lots, and change settings. Normally only App Support needs this."
 }
 
