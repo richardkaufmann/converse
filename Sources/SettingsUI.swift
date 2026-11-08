@@ -300,6 +300,18 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
     titlePreview("paused")
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         let appearance = NSAppearance(named: appearanceName)!
+        let invitation = NSHostingView(rootView: FeedbackInvitationPanel(repository: {}, issue: {}, report: {}, close: {}).background(Color(nsColor: .windowBackgroundColor)))
+        invitation.frame = NSRect(x: 0, y: 0, width: 488, height: 480)
+        let invitationWindow = NSWindow(contentRect: invitation.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        invitationWindow.appearance = appearance; invitation.appearance = appearance; invitationWindow.contentView = invitation
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        invitation.layoutSubtreeIfNeeded()
+        appearance.performAsCurrentDrawingAppearance {
+            if let bitmap = invitation.bitmapImageRepForCachingDisplay(in: invitation.bounds) {
+                invitation.cacheDisplay(in: invitation.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("feedback-invitation-" + appearanceName.rawValue + ".png"))
+            }
+        }
         for (index, category) in SettingsCategory.allCases.enumerated() {
             let state = WindowState(); state.settingsCategory = category
             let view = NSHostingView(rootView: SettingsView(state: state))

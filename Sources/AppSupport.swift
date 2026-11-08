@@ -443,3 +443,212 @@ extension Store {
         save()
     }
 }
+
+/// A local invitation, deliberately outside agent prompts and transcripts.
+final class FeedbackInvitation: ObservableObject {
+    static let shared = FeedbackInvitation()
+    @Published private(set) var visible = false
+    private var state = FeedbackInvitationState(release: "")
+    let surfaces = NSHashTable<NSView>.weakObjects()
+    var isMonitoring: Bool { timer != nil || eventMonitor != nil }
+    private var supportVisible: Bool {
+        surfaces.allObjects.contains { view in
+            guard let window = view.window, window.isVisible, !window.isMiniaturized,
+                  window.occlusionState.contains(.visible), !view.isHiddenOrHasHiddenAncestor,
+                  !view.visibleRect.isEmpty, let index = NSApp.orderedWindows.firstIndex(of: window) else { return false }
+            let rect = window.convertToScreen(view.convert(view.visibleRect, to: nil))
+            let covers = NSApp.orderedWindows.prefix(index).filter { $0.isVisible && !$0.isMiniaturized && $0.alphaValue > 0 }.map(\.frame)
+            return FeedbackInvitationVisibility.exposed(rect, beneath: covers)
+        }
+    }
+    private var file: URL?
+    private var timer: Timer?
+    private var eventMonitor: Any?
+    private var lastInput: TimeInterval = -.infinity
+    private var lastTick: TimeInterval = 0
+    private var remaining = FeedbackInvitationState.bannerSeconds
+    private var publishing = false
+    private let writes = DispatchQueue(label: "Converse.feedback-invitation.persistence", qos: .utility)
+
+    func start(folder: URL, info: [String: Any] = Bundle.main.infoDictionary ?? [:], environment: [String: String] = ProcessInfo.processInfo.environment, arguments: [String] = CommandLine.arguments) {
+        guard timer == nil, FeedbackInvitationState.allowed(info: info, environment: environment, arguments: arguments) else { return }
+        let target = folder.appendingPathComponent("feedback-invitation.json")
+        let release = ConverseAbout.version + "/" + ConverseAbout.build
+        if FileManager.default.fileExists(atPath: target.path) {
+            // Do not overwrite a damaged record and accidentally ask again.
+            guard let data = try? Data(contentsOf: target), let saved = try? JSONDecoder().decode(FeedbackInvitationState.self, from: data) else { return }
+            state = saved; state.useRelease(release)
+        } else { state = FeedbackInvitationState(release: release) }
+        file = target
+        guard !state.suppressed, !state.askedReleases.contains(state.release) else { return }
+        lastTick = ProcessInfo.processInfo.systemUptime
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
+            self?.lastInput = ProcessInfo.processInfo.systemUptime
+            return event
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.tick() }
+    }
+    private func tick() {
+        let now = ProcessInfo.processInfo.systemUptime, elapsed = now - lastTick
+        lastTick = now
+        // Foreground with recent human input; sleeping or a stalled run loop adds no time.
+        let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
+        if active {
+            if visible { remaining -= elapsed; if remaining <= 0 { dismiss() } }
+        }
+        if active && supportVisible && state.eligible && !publishing {
+            publishing = true
+            var consumed = state; consumed.markShown()
+            persist(consumed) { [weak self] ok in
+                guard let self else { return }
+                self.publishing = false
+                guard ok, !self.state.suppressed else { return }
+                self.state = consumed; self.remaining = FeedbackInvitationState.bannerSeconds; self.visible = true
+            }
+        }
+    }
+    func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
+        guard file != nil, !state.suppressed, !publishing, !state.askedReleases.contains(state.release) else { return }
+        state.completedTurn(success: success, interrupted: interrupted, humanDirected: humanDirected)
+        if success && !interrupted && humanDirected { persist(state) }
+    }
+    private func persist(_ value: FeedbackInvitationState, completion: ((Bool) -> Void)? = nil) {
+        guard let file, let data = try? JSONEncoder().encode(value) else { completion?(false); return }
+        writes.async {
+            let ok: Bool
+            do { try data.write(to: file, options: [.atomic]); ok = true } catch { ok = false }
+            if let completion { DispatchQueue.main.async { completion(ok) } }
+        }
+    }
+    func dismiss() {
+        visible = false; timer?.invalidate(); timer = nil
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
+    }
+    func feedbackWasGiven() {
+        guard file != nil else { return }
+        state.markFeedbackGiven()
+        dismiss()
+        persist(state)
+    }
+    func openInvitation() {
+        dismiss()
+        FeedbackInvitationWindow.shared.show()
+    }
+}
+
+/// A non-interactive view measures actual clipping/window visibility, including a scrolled-away sidebar row.
+struct FeedbackInvitationSurface: NSViewRepresentable {
+    final class Probe: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    func makeNSView(context: Context) -> NSView {
+        let view = Probe(); FeedbackInvitation.shared.surfaces.add(view); return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
+struct FeedbackInvitationBanner: View {
+    @ObservedObject private var invitation = FeedbackInvitation.shared
+    var body: some View {
+        if invitation.visible {
+            HStack(spacing: 8) {
+                Button("Thoughts About Converse?") { invitation.openInvitation() }
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+                Button { invitation.dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.plain).accessibilityLabel("Dismiss appreciation invitation")
+            }.foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color(red: 0.08, green: 0.32, blue: 0.65), in: RoundedRectangle(cornerRadius: 5))
+        }
+    }
+}
+
+struct FeedbackInvitationPanel: View {
+    var repository: () -> Void
+    var issue: () -> Void
+    var report: () -> Void
+    var close: () -> Void
+    var feedbackGiven: () -> Void = {}
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                ParkingLotShoe().frame(width: 52, height: 52).accessibilityHidden(true)
+                Text("Thoughts About Converse").font(.title2.bold())
+            }
+            Text("Hi, we appreciate feedback on GitHub. Converse doesn’t check your GitHub activity. The Open GitHub button below brings up the repository in your browser. If you like what you see, please consider pressing the star icon at the top of that page.")
+            Text("You can also use the other buttons to file an issue or bug. THANK YOU!")
+            HStack {
+                Button("Open GitHub", action: repository)
+                Button("File an Issue…", action: issue)
+                Button("File a Bug…", action: report)
+            }
+            Text("Already given feedback? Tell us below and this app will remember locally, even after upgrades.").font(.callout)
+            HStack {
+                Button("I’ve given feedback", action: feedbackGiven)
+                Spacer()
+                Button("Not Now", action: close).keyboardShortcut(.cancelAction)
+            }
+        }.font(.body).padding(24).frame(width: 440).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
+    static let shared = FeedbackInvitationWindow()
+    private var window: NSWindow?
+    func show() {
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Thoughts About Converse"; window.isReleasedWhenClosed = false; window.delegate = self
+        let panel = FeedbackInvitationPanel(repository: {
+            NSWorkspace.shared.open(URL(string: "https://github.com/richardkaufmann/converse")!)
+        }, issue: {
+            NSWorkspace.shared.open(ConverseAbout.bugReports)
+        }, report: {
+            AppDelegate.shared.reportConverseBug()
+        }, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
+            FeedbackInvitation.shared.feedbackWasGiven()
+            self?.window?.close()
+        })
+        let host = NSHostingView(rootView: panel)
+        window.contentView = host; window.setContentSize(host.fittingSize)
+        self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) { window = nil }
+}
+
+/// Subtract higher app-window frames; window-level visibility alone is insufficient.
+enum FeedbackInvitationVisibility {
+    static func exposed(_ rect: CGRect, beneath covers: [CGRect]) -> Bool {
+        guard !rect.isEmpty else { return false }
+        var pieces = [rect]
+        for cover in covers {
+            pieces = pieces.flatMap { piece -> [CGRect] in
+                let cut = piece.intersection(cover)
+                guard !cut.isNull && !cut.isEmpty else { return [piece] }
+                return [CGRect(x: piece.minX, y: piece.minY, width: piece.width, height: cut.minY - piece.minY),
+                        CGRect(x: piece.minX, y: cut.maxY, width: piece.width, height: piece.maxY - cut.maxY),
+                        CGRect(x: piece.minX, y: cut.minY, width: cut.minX - piece.minX, height: cut.height),
+                        CGRect(x: cut.maxX, y: cut.minY, width: piece.maxX - cut.maxX, height: cut.height)].filter { !$0.isEmpty }
+            }
+            if pieces.isEmpty { return false }
+        }
+        return !pieces.isEmpty
+    }
+}
+
+func feedbackInvitationControllerSelfTests(_ check: (Bool, String) -> Void) {
+    let rect = CGRect(x: 10, y: 10, width: 100, height: 30)
+    check(FeedbackInvitationVisibility.exposed(rect, beneath: []), "Uncovered feedback surface admits the invitation")
+    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 0, y: 0, width: 200, height: 200)]), "A higher app window covering App Support prevents consumption")
+    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30), CGRect(x: 60, y: 10, width: 50, height: 30)]), "Several higher windows can jointly cover the feedback surface")
+    check(FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30)]), "Partly exposed App Support still admits its banner")
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let controller = FeedbackInvitation()
+    controller.start(folder: folder, info: ["ConverseDemo": true], environment: [:], arguments: [])
+    check(!controller.isMonitoring, "Demo controller never installs timers or input monitors")
+    controller.start(folder: folder, info: [:], environment: ["CONVERSE_DATA_DIR": folder.path], arguments: [])
+    check(!controller.isMonitoring, "Data-directory automation never installs invitation monitors")
+    controller.start(folder: folder, info: [:], environment: [:], arguments: [])
+    check(controller.isMonitoring, "Normal controller starts its visibility and activity monitor")
+    controller.dismiss()
+    check(!controller.isMonitoring && !controller.visible, "Dismissing the invitation removes timer and input monitor")
+}

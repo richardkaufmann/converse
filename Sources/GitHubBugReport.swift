@@ -154,6 +154,7 @@ private struct BugReportView: View {
                                 defer { sending = false }
                                 do {
                                     let url = try await report.submit(token: token, api: AgentAPI()); receipt = url
+                                    FeedbackInvitation.shared.feedbackWasGiven()
                                     status = "Filed on GitHub."; completion("Bug report filed: " + url.absoluteString)
                                 } catch { status = error.localizedDescription; completion(status) }
                             }

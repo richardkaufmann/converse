@@ -186,6 +186,7 @@ final class Session: ObservableObject, Identifiable {
     var switchboardProgress: (revision: UInt64, at: Date)?
     var switchboardTurnStart: Int?
     var switchboardHop = 0
+    var feedbackHumanTurn = false
     var interrupted = false
     var resumeAfterInterrupt = false
     // Queued prompt IDs whose archive write is still in flight, or failed
@@ -718,7 +719,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next, feedbackHumanInitiated: next.switchboardHop == nil)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -739,6 +740,7 @@ final class Store: ObservableObject {
         let completedTurn = success && !s.interrupted, turnCompletion = s.turnCompletion
         s.turnCompletion = nil
         if Workspace.shared.flagsUnseenResponse(s, success: success, interrupted: s.interrupted) { s.unseenResponse = true }
+        FeedbackInvitation.shared.completedTurn(success: success, interrupted: s.interrupted, humanDirected: s.feedbackHumanTurn && turnCompletion == nil && s.agent == nil && s.switchboardHop == 0 && !s.supportAutonomous && !s.supportContinuation && s.supportProbeCompletion == nil)
         importResponseImages(s)
         finishSupportProbe(s, success: success)
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
@@ -779,7 +781,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil, feedbackHumanInitiated: Bool = true) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -808,6 +810,7 @@ final class Store: ObservableObject {
         s.supportContinuation = supportContinuation; s.supportAutonomous = supportAutonomous || agentLoopTick || preservingAgentDraft != nil
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
+        s.feedbackHumanTurn = feedbackHumanInitiated
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         // Inject all parts render separately; text that differs from the queued input shows whole.
         let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
@@ -3033,8 +3036,9 @@ struct Conversation: View {
                 }.padding(.horizontal, 10).padding(.vertical, 3)
                 Divider()
             }
-            Divider()
+            Divider().background { if session.supportAssistant { FeedbackInvitationSurface() } }
             SessionTeachingBanner(store: store, session: session)
+            if session.supportAssistant { FeedbackInvitationBanner() }
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
@@ -3367,6 +3371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
         CharacterLatencyProbe.shared.start(app: self)
+        FeedbackInvitation.shared.start(folder: Store.shared.folder)
         if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
             Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Store.shared.trimIdleTranscripts() }
         }
@@ -4516,6 +4521,8 @@ func selfTest() {
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     performanceCaptureSelfTests(check)
     performanceDebugSelfTests(check)
+    feedbackInvitationSelfTests(check)
+    feedbackInvitationControllerSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
