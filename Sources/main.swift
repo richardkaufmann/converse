@@ -2210,22 +2210,32 @@ final class ConversationTextView: NSTextView {
         let formatted: NSAttributedString
     }
     var copyBlocks: [CopyBlock] = []
-    override func copy(_ sender: Any?) {
+    override func copy(_ sender: Any?) { copySelection(to: .general) }
+    func copySelection(to board: NSPasteboard) {
         let range = selectedRange()
         guard let textStorage, range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= textStorage.length else { return }
         let plain = TranscriptClipboard.plainText(textStorage.attributedSubstring(from: range))
-        super.copy(sender)
-        NSPasteboard.general.setString(plain, forType: .string)
+        board.clearContents()
+        _ = writeSelection(to: board, types: writablePasteboardTypes)
+        board.setString(plain, forType: .string)
+    }
+    override func writeSelection(to board: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        let ranges = selectedRanges.map(\.rangeValue)
+        guard let textStorage, LocalImageFallback.hasFileLink(textStorage, in: ranges) else { return super.writeSelection(to: board, type: type) }
+        let selection = NSMutableAttributedString()
+        for range in ranges where NSMaxRange(range) <= textStorage.length { selection.append(textStorage.attributedSubstring(from: range)) }
+        return LocalImageFallback.writeSelection(selection, to: board, type: type) ?? super.writeSelection(to: board, type: type)
     }
     func copyBlock(_ index: Int, to pasteboard: NSPasteboard) {
         guard copyBlocks.indices.contains(index) else { return }
         let block = copyBlocks[index]
         pasteboard.clearContents()
         pasteboard.setString(block.source, forType: .string)
-        if let rtf = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+        let formatted = LocalImageFallback.withoutFileLinks(block.formatted)
+        if let rtf = try? formatted.data(from: NSRange(location: 0, length: formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
             pasteboard.setData(rtf, forType: .rtf)
         }
-        if let html = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.html]) {
+        if let html = try? formatted.data(from: NSRange(location: 0, length: formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.html]) {
             pasteboard.setData(html, forType: .html)
         }
     }

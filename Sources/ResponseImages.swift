@@ -70,6 +70,38 @@ enum LocalImageFallback {
         guard exists(url.path) else { return "The image file is no longer available at " + url.path + ". Ask the assistant to recreate it or send it as a Converse attachment." }
         reveal(url); return nil
     }
+    private static func isFileLink(_ value: Any?) -> Bool { ((value as? URL) ?? (value as? String).flatMap(URL.init(string:)))?.isFileURL == true }
+    static func hasFileLink(_ text: NSAttributedString, in ranges: [NSRange]) -> Bool {
+        var found = false
+        for range in ranges where range.length > 0 && NSMaxRange(range) <= text.length {
+            text.enumerateAttribute(.link, in: range) { value, _, stop in if isFileLink(value) { found = true; stop.pointee = true } }
+        }
+        return found
+    }
+    // Formatted clipboard data keeps the visible text but no link into this
+    // Mac's files. The transcript itself keeps its in-app reveal.
+    static func withoutFileLinks(_ text: NSAttributedString) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString(attributedString: text)
+        text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            guard isFileLink(value) else { return }
+            for key in [NSAttributedString.Key.link, .toolTip, attribute] { result.removeAttribute(key, range: range) }
+        }
+        return result
+    }
+    // A selection holding a file link writes rich text without it and none of
+    // AppKit's URL types. Nil leaves plain text to AppKit.
+    static func writeSelection(_ selection: NSAttributedString, to board: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool? {
+        let documentType: NSAttributedString.DocumentType
+        switch type.rawValue {
+        case NSPasteboard.PasteboardType.string.rawValue, "NSStringPboardType": return nil
+        case NSPasteboard.PasteboardType.rtf.rawValue, "NeXT Rich Text Format v1.0 pasteboard type": documentType = .rtf
+        case NSPasteboard.PasteboardType.rtfd.rawValue, "com.apple.flat-rtfd", "NeXT RTFD pasteboard type": documentType = .rtfd
+        default: return false
+        }
+        let clean = withoutFileLinks(selection)
+        guard let data = try? clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: documentType]) else { return false }
+        return board.setData(data, forType: type)
+    }
 }
 
 extension Store {
@@ -239,6 +271,33 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
             check(revealed.count == 1 && notices.last?.contains("no longer available") == true, "Missing local fallback reports the path without opening Finder")
         }
+        func hasHyperlink(_ data: Data?) -> Bool { String(decoding: data ?? Data(), as: UTF8.self).contains("HYPERLINK") }
+        let formattedBoard = NSPasteboard.withUniqueName()
+        fallbackText.copyBlock(0, to: formattedBoard)
+        let formattedRTF = formattedBoard.data(forType: .rtf), formattedHTML = String(decoding: formattedBoard.data(forType: .html) ?? Data(), as: UTF8.self)
+        let decodedRTF = formattedRTF.flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+        check(formattedRTF != nil && !hasHyperlink(formattedRTF) && decodedRTF?.string.contains("image%20with%20spaces.png") == true, "Copy Message RTF keeps the fallback text without its file link")
+        check(!formattedHTML.isEmpty && !formattedHTML.contains("href=\"file:") && !formattedHTML.lowercased().contains("reveal image"), "Copy Message HTML carries no file link")
+        check(formattedBoard.string(forType: .string) == fallbackSource, "Copy Message plain text stays the exact source")
+        formattedBoard.releaseGlobally()
+        if position >= 0 {
+            let selectionBoard = NSPasteboard.withUniqueName()
+            fallbackText.setSelectedRange(NSRange(location: position, length: 12))
+            fallbackText.copySelection(to: selectionBoard)
+            let selectionRTF = selectionBoard.data(forType: .rtf)
+            check(selectionRTF != nil && !hasHyperlink(selectionRTF) && selectionBoard.data(forType: .URL) == nil && selectionBoard.string(forType: NSPasteboard.PasteboardType("public.url-name")) == nil,
+                  "Selection copy writes rich text without a file link or URL types")
+            check(selectionBoard.string(forType: .string)?.contains(fallbackSpaced.absoluteString) == true, "Selection copy plain text still names the file")
+            selectionBoard.releaseGlobally()
+            check(fallbackText.textStorage?.attribute(.link, at: position, effectiveRange: nil) as? URL == fallbackSpaced && fallbackText.textStorage?.attribute(LocalImageFallback.attribute, at: position, effectiveRange: nil) as? URL == fallbackSpaced,
+                  "Copying leaves the in-app reveal link in place")
+        }
+        let mixedLinks = NSMutableAttributedString(string: "web file")
+        mixedLinks.addAttribute(.link, value: URL(string: "https://example.com/a")!, range: NSRange(location: 0, length: 3))
+        mixedLinks.addAttribute(.link, value: "file:///tmp/a.png", range: NSRange(location: 4, length: 4))
+        let cleanedLinks = LocalImageFallback.withoutFileLinks(mixedLinks)
+        check(cleanedLinks.attribute(.link, at: 0, effectiveRange: nil) as? URL == URL(string: "https://example.com/a") && cleanedLinks.attribute(.link, at: 4, effectiveRange: nil) == nil && cleanedLinks.string == "web file",
+              "Formatted copy strips file links only, whether stored as URL or string")
         var probedRemoteDisk = false
         _ = LocalImageFallback.follow(fallbackSpaced, onHome: false, exists: { _ in probedRemoteDisk = true; return true }, reveal: { _ in check(false, "Remote path must never reveal") })
         check(!probedRemoteDisk, "Remote image fallback does not even probe the viewer's filesystem")
