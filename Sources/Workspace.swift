@@ -371,13 +371,23 @@ struct WindowTitle: View {
             Text(DemoReset.testName ?? state.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
             Text(ConverseAbout.versionBuild).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
             if capture.recording || capture.paused {
-                Text(capture.recording ? "RECORDING" : "PAUSED")
+                Text(capture.recording ? "PERF MONITORING" : "PAUSED")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white).padding(.horizontal, 6).frame(height: 16)
                     .background(capture.recording ? Color.red : Color(red: 0.38, green: 0.38, blue: 0.40), in: Capsule())
                     .fixedSize()
-                    .accessibilityLabel(capture.recording ? "Performance telemetry recording" : "Performance telemetry paused")
-                    .help(capture.recording ? "Recording performance timings. Pause in Settings → Debug." : "Performance buffer is frozen. Settings → Debug to record or turn off.")
+                    .accessibilityLabel(capture.recording ? "Performance monitoring" : "Performance monitoring paused")
+                    .help("Local performance timings only. No conversation text or keystrokes are recorded; nothing is uploaded.")
+                Button("Record") { capture.record(folder: Store.shared.folder) }
+                    .controlSize(.mini)
+                    .disabled(capture.recording || capture.busy)
+                    .accessibilityLabel("Record performance timings")
+                    .help("Start a new rolling performance buffer. The last paused capture stays saved until you pause again.")
+                Button("Pause") { capture.pause() }
+                    .controlSize(.mini)
+                    .disabled(!capture.recording || capture.busy)
+                    .accessibilityLabel("Pause performance monitoring")
+                    .help("Freeze and save the recent performance buffer for inspection.")
             }
         }
             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())

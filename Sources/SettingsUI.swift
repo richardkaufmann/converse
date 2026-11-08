@@ -370,6 +370,13 @@ final class PerformanceDebugState: ObservableObject {
         PerformanceCapture.shared.configure(folder: folder, enabled: true, historySeconds: history)
         recording = true; paused = false; status = "Recording recent activity. Pause after a stutter."
     }
+    func setMonitoringEnabled(_ enabled: Bool, folder: URL) {
+        guard !busy else { return }
+        if enabled {
+            automatic = true
+            if !recording && !paused { record(folder: folder) }
+        } else { turnOff() }
+    }
     func pause() {
         guard recording, !busy, let folder else { return }
         request += 1; let token = request
@@ -427,7 +434,12 @@ struct PerformanceDebugView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Text("Debug").font(.title2.bold())
-            Toggle("Record automatically on launch", isOn: $capture.automatic)
+            Toggle("Performance monitoring", isOn: Binding(
+                get: { capture.recording || capture.paused },
+                set: { capture.setMonitoringEnabled($0, folder: Store.shared.folder) }))
+                .disabled(capture.busy)
+            Text("On starts monitoring and remembers your choice for the next launch. Use Record and Pause beside the window title to capture a stutter.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Keep a rolling buffer of typing, rendering, saving and main-thread timings locally. No conversations, key characters or credentials are recorded. Nothing is uploaded.")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 16) {
@@ -436,19 +448,12 @@ struct PerformanceDebugView: View {
                     .accessibilityLabel("History in seconds")
             }.disabled(capture.busy)
             HStack(spacing: 14) {
-                Button("Record") { capture.record(folder: Store.shared.folder) }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-                    .disabled(capture.recording || capture.busy)
-                Button("Pause") { capture.pause() }
-                    .disabled(!capture.recording || capture.busy)
-                Button("Off") { capture.turnOff() }
-                    .disabled((!capture.recording && !capture.paused) || capture.busy)
                 Button("Export…") { capture.export() }
                     .disabled(capture.file == nil || capture.busy)
             }
             Text(capture.status).foregroundStyle(.secondary).accessibilityIdentifier("performanceCaptureStatus")
             if let error = capture.exportError { Text(error).foregroundStyle(.red) }
-            Text("You can close Settings while recording. Pause freezes the recent buffer. Off also disables automatic recording. Record starts a new buffer; Export saves the last paused buffer, which stays saved until you pause again.")
+            Text("You can close Settings while monitoring. Pause freezes the recent buffer. Off also disables monitoring at launch. Record starts a new buffer; Export saves the last paused buffer, which stays saved until you pause again.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
@@ -473,15 +478,18 @@ func performanceDebugSelfTests(_ check: (Bool, String) -> Void) {
     probe.turnOff(); probe.history = 120
     probe.initialize(folder: folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
     check(!probe.automatic && probe.history == 120 && defaults.object(forKey: "performanceRecordOnLaunch") as? Bool == false, "Explicit Off and history survive initialization using injected preferences")
-    probe.record(folder: folder)
+    probe.setMonitoringEnabled(true, folder: folder)
+    check(probe.recording && probe.automatic && defaults.bool(forKey: "performanceRecordOnLaunch"), "Monitoring On starts capture and remembers the launch choice")
     PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 125)
     probe.pause()
     let deadline = Date().addingTimeInterval(5)
     while probe.busy && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
     guard let file = probe.file, let bytes = try? Data(contentsOf: file), !probe.busy else { check(false, "Controller pause writes isolated capture"); return }
+    probe.setMonitoringEnabled(true, folder: folder)
+    check(probe.paused && !probe.recording && (try? Data(contentsOf: file)) == bytes, "Monitoring On while paused preserves the frozen capture")
     probe.record(folder: folder)
     PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 500)
-    probe.turnOff()
+    probe.setMonitoringEnabled(false, folder: folder)
     check(!probe.recording && !probe.paused && probe.file == file && (try? Data(contentsOf: file)) == bytes, "Record then Off preserves the previous paused export bytes")
     let standardAfter = ["performanceRecordOnLaunch", "performanceHistorySeconds"].map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
     check(standardAfter == standardBefore, "Controller regression tests never alter standard recording or history preferences")
