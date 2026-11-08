@@ -21,11 +21,13 @@ enum RestoreContext {
         return (message.role == "user" ? "User: " : "Assistant: ") + clip(text, messageLimit)
     }
     /// Framing, the handoff note when present, the last ten user/assistant
-    /// messages oldest first (each and all capped), then the transcript path.
+    /// messages oldest first (each and all capped), then the transcript path
+    /// and how to read further back with transcript-search / transcript-read.
     static func block(messages: [Message], handoff: String?, transcript: String) -> String {
         var head = [framing]
         if let handoff { head.append("Read the handoff note first: " + handoff) }
-        let tail = "Full transcript: " + transcript
+        // The hint names a whole-reply command, which runs even before teaching.
+        let tail = "Full transcript: " + transcript + "\n" + TranscriptSelfRead.importHint
         let recent = messages.filter { ["user", "assistant"].contains($0.role) }.suffix(messageCount).map(label)
         guard !recent.isEmpty else { return (head + [tail]).joined(separator: "\n") }
         // Newest messages win the shared budget; an older one may be cut short.

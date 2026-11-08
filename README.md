@@ -226,6 +226,8 @@ General’s **Collapse Parking Lot data and outgoing messages** setting keeps la
 
 Set a session’s transcript limits from its sidebar menu (**Transcript Limits…**) or in General: age in days and the number of recent messages, where each prompt and each response counts as one. Leave either field blank for **None**. Defaults are no age limit and **1,000 messages**; **New sessions start with** changes that for sessions you create later. Retained turns stay together, so the count may be one higher. Converse checks about a minute after launch and every minute after that while the session is idle, with no draft or pending work, and asks before a new limit deletes anything. Trimming removes older messages from this Mac’s saved transcript, plus image files only those messages used inside Converse’s own Attachments folder, never the provider’s own history or files elsewhere. **Trim All Images…** clears every image from chosen sessions after confirming. Export first if you want an archive.
 
+Taught sessions can also search and read their own retained transcript (`transcript-search`, `transcript-read`) in bounded pages marked as reference data. They can never read another session’s.
+
 **New User Experience / Reset** opens the welcome walkthrough and provides **Reset on Quit**. The reset requires typing **YES** and can be cancelled before quitting. Quitting schedules the reset; the next launch backs up and clears this edition’s local profile and setup; ordinary updates preserve them. Production, Demo and TEST editions use separate profiles. Opening Converse Demo in TestFlight will not show your normal Converse Group.
 
 ### Text substitutions

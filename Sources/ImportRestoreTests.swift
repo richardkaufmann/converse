@@ -20,7 +20,7 @@ func importRestoreSelfTests(_ check: (Bool, String) -> Void) {
     history[14].images = ["/tmp/picture.png"]
     let block = RestoreContext.block(messages: history, handoff: nil, transcript: "/data/transcript.md")
     let positions = (5...14).compactMap { block.range(of: "message \($0) body")?.lowerBound }
-    check(block.hasPrefix(RestoreContext.framing) && block.contains("The last 10 messages:") && block.hasSuffix("Full transcript: /data/transcript.md") && !block.contains("handoff note"),
+    check(block.hasPrefix(RestoreContext.framing) && block.contains("The last 10 messages:") && block.hasSuffix("Full transcript: /data/transcript.md\n" + TranscriptSelfRead.importHint) && !block.contains("handoff note"),
           "The catch-up block frames the context as a record and ends with the transcript path")
     check(positions.count == 9 && positions == positions.sorted() && !block.contains("message 4 body") && !block.contains("a notice") && block.contains("User: message 5 body"),
           "The block holds exactly the last ten user/assistant messages, oldest first and role-labeled")
@@ -29,7 +29,7 @@ func importRestoreSelfTests(_ check: (Bool, String) -> Void) {
           "Each message is capped at 2,000 characters, and images appear as [image]")
     let huge = (1...12).map { Message(role: $0 % 2 == 1 ? "user" : "assistant", text: "m\($0) " + String(repeating: "y", count: 5_000)) }
     let capped = RestoreContext.block(messages: huge, handoff: "/data/handoff.md", transcript: "/data/transcript.md")
-    check(capped.count <= RestoreContext.blockLimit && capped.contains("m12 ") && capped.contains("Read the handoff note first: /data/handoff.md\n") && capped.hasSuffix("Full transcript: /data/transcript.md"),
+    check(capped.count <= RestoreContext.blockLimit && capped.contains("m12 ") && capped.contains("Read the handoff note first: /data/handoff.md\n") && capped.hasSuffix("Full transcript: /data/transcript.md\n" + TranscriptSelfRead.importHint),
           "The whole block stays within 16,000 characters and keeps the newest messages")
     check(RestoreContext.merge("NEW", previous: nil, into: "  ") == "NEW\n\n" && RestoreContext.merge("NEW", previous: nil, into: "mine") == "NEW\n\n---\nmine"
           && RestoreContext.merge("NEW", previous: "OLD", into: "OLD\n\n---\nmine") == "NEW\n\n---\nmine" && RestoreContext.merge("NEW", previous: "OLD", into: "OLX, edited\n\nmine") == nil,

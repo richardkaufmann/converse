@@ -3960,6 +3960,7 @@ func selfTest() {
     lotPortableExportSelfTests(check)
     conversationLayoutSelfTests(check)
     settingsSelfTests(check)
+    transcriptSelfReadSelfTests(check)
     transcriptRetentionSelfTests(check)
     sessionSettingsMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")

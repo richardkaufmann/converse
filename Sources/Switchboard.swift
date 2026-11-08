@@ -8,7 +8,7 @@ struct SwitchboardCommand: Decodable {
     [Converse switchboard instructions]
     Continue using the agent response JSON object required by your runtime, with a tell array for messages. Do not use converse command fences or list-sessions; use exact watched-session IDs from the supplied evidence and stay within your configured scope. Tell is one-way: omit replyExpected or set it false. Ask uses replyExpected:true and expects an answer, blocker, or explicit decline. To answer a request, include a tell to the sender with inReplyTo set to the request UUID. A transport acknowledgement is not an answer. Do not send receipt-only tells. Recovery notices do not create new reply obligations. Refreshing these instructions does not resolve outstanding requests; answer those with the matching inReplyTo. If the target is outside your scope, explain the blocker to the human. Supervision may request recover with a target and delivery UUID from host switchboardDeliveries evidence only when canRecover is true. The host enforces selected-session scope, one recovery per delivery, cooldowns, and human pauses. No arbitrary urgent text injection is granted.
     """
-    static let conversationPolicy = "Switchboard: interpret “tell <session> <message>” as a one-way tell; no reply or receipt turn is requested. Interpret “ask <session> <question>” as ask: a correlated answer, blocker, or decline is expected. A transport acknowledgement is not an answer. Use exact IDs from list-sessions. Commands execute only when a converse JSON fence is the last thing in your reply (one per reply): {\"command\":\"ask\",\"to\":\"ID\",\"text\":\"question\"} (use command tell for one-way messages). Reply to a request with tell and inReplyTo set to its request UUID; do not ask merely to acknowledge receipt. Legacy tell with replyExpected:true also requests an answer. Parking Lot discovery: {\"command\":\"parking-lot-list\",\"linkedOnly\":true} lists lots linked to this session. Links guide selection, not permissions; ask if several fit. Remote lots list their home and read-only limitations."
+    static let conversationPolicy = "Switchboard: interpret “tell <session> <message>” as a one-way tell; no reply or receipt turn is requested. Interpret “ask <session> <question>” as ask: a correlated answer, blocker, or decline is expected. A transport acknowledgement is not an answer. Use exact IDs from list-sessions. Commands execute only when a converse JSON fence is the last thing in your reply (one per reply): {\"command\":\"ask\",\"to\":\"ID\",\"text\":\"question\"} (use command tell for one-way messages). Reply to a request with tell and inReplyTo set to its request UUID; do not ask merely to acknowledge receipt. Legacy tell with replyExpected:true also requests an answer. Parking Lot discovery: {\"command\":\"parking-lot-list\",\"linkedOnly\":true} lists lots linked to this session. Links guide selection, not permissions; ask if several fit. Remote lots list their home and read-only limitations. " + TranscriptSelfRead.policy
     let command: String
     var to: String?
     var text: String?
@@ -17,6 +17,14 @@ struct SwitchboardCommand: Decodable {
     var parkingLotEdits: ParkingLotEdits?
     var lotID: UUID?
     var linkedOnly: Bool?
+    // transcript-search / transcript-read (TranscriptSelfRead).
+    var query: String?
+    var limit: Int?
+    var beforeMessage: Int?
+    var fromMessage: Int?
+    var count: Int?
+    var fromCharacter: Int?
+    var session: String?
     static func parse(_ text: String) -> SwitchboardCommand? {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = "```converse\n", suffix = "\n```"
@@ -106,7 +114,7 @@ extension Store {
         This session can now send messages to other Converse sessions. Your session ID is \(s.id.uuidString).
         \(responseImageTeaching(s))
         The user may type natural language such as 'tell <name> <message>', 'ask <name> <question>', or 'tell <name> urgently <message>'. Interpret that request and use this protocol.
-        CRITICAL: A switchboard command executes only when one converse fenced JSON block is the LAST thing in your final reply. This applies to list-sessions, tell, ask, tell-urgently and every Parking Lot command. A short line of prose before the block is fine. Put NOTHING after it, and use only one command block per reply. A block followed by text, or several blocks in one reply, runs nothing; Converse shows a notice that nothing was sent. Do not claim delivery merely because you included a block.
+        CRITICAL: A switchboard command executes only when one converse fenced JSON block is the LAST thing in your final reply. This applies to list-sessions, tell, ask, tell-urgently, every Parking Lot command and the transcript commands. A short line of prose before the block is fine. Put NOTHING after it, and use only one command block per reply. A block followed by text, or several blocks in one reply, runs nothing; Converse shows a notice that nothing was sent. Do not claim delivery merely because you included a block.
         Discover CURRENT session IDs and human-readable names by ending your reply with exactly this fenced block:
         ```converse
         {"command":"list-sessions"}
@@ -125,6 +133,7 @@ extension Store {
         Use {"command":"parking-lot-list"} to discover named lots on this home and in the current Group. Add "linkedOnly":true to answer which lots are linked to this session. Links are routing hints, never permission grants. Honor an explicit user choice; otherwise prefer a relevant linked lot and ask if multiple lots fit. Remote entries identify their home and read-only capabilities; local read/edit commands cannot address a remote lot. For local lots, include "lotID":"EXACT-LOT-UUID" in read or edit commands. An omitted lotID works only when exactly one lot exists. Never guess which lot the user meant. Group viewers can read a lot on another home through the app; read/edit commands address this execution home.
         \(ParkingLotStore.placementGuidance)
         To read it, end your reply with a converse fenced block containing {"command":"parking-lot-read"}; nothing may follow it. The next input contains rows with stable IDs, headings, comments and a revision. Read before editing. Explain concrete proposed changes and ask the user to confirm before proceeding with edits, unless the lot's confirmation is off and the user already asked for that change. Then emit {"command":"parking-lot-edit","parkingLotEdits":{"revision":CURRENT_REVISION,"operations":[...]}} as the last thing in your reply, in one converse fence. Operations: {"action":"add","heading":true|false,"text":"...","before":"ROW-ID"}; {"action":"update","id":"ROW-ID","text":"..."}; {"action":"comment","id":"ROW-ID","text":"..."}; {"action":"move","id":"ROW-ID","before":"ROW-ID"}; {"action":"delete","id":"ROW-ID"}. An add or update operation may include "done":true to mark complete or "done":false to reopen; an update with done needs no text. Done headings do not change their children. Omit before to append. Moving a heading moves its section too. Add can include a new UUID in id so later operations in the same batch can target the new heading. Never change or reuse an existing row ID. Links may be written as a bare https URL or [label](https://url) and appear clickable; a local file may be written as an absolute path or [label](file:///path) and reveals in Finder on this Mac; a bare path ends at the first space, so for paths containing spaces use [label](file:///path) with spaces encoded as %20. The host shows a review before saving; stale revisions apply nothing. If a lot's confirmation is off (parking-lot-list access says edits save immediately), edits save immediately; say what you changed. No extra agent opt-in is required for an ordinary human-directed session. Autonomous messages cannot use this path to bypass an agent's scope.
+        \(TranscriptSelfRead.teaching)
         On add or move, optional "parentID":"ROW-ID" nests an item under that heading or item. Keep rows in preorder and place children after their parent. Moving or deleting an item includes its nested descendants. Headings remain top level.
         Example: 'Sort these based on whether they are for Converse or KAOS; make the headings clear, leaving unclear or universal items as they are.' Read the outline and available context, propose Converse and KAOS headings, preserve item wording and comments, and move only confidently classified entries. Leave ambiguous and shared entries in place. Confirm the proposed reorganization with the user before editing. Do not claim to know what a session contains merely because its title is in the directory.
         \(answering ? "Look up sessions when you need to address one. Do not acknowledge these instructions. Answer the user's message below." : "First acknowledge these instructions briefly. Look up sessions when you need to address one.")
@@ -230,7 +239,9 @@ extension Store {
             let bare = try? JSONDecoder().decode(SwitchboardCommand.self, from: Data(commandText.trimmingCharacters(in: .whitespacesAndNewlines).utf8))
             guard let request = fenced ?? bare, fenced != nil || ["list-sessions", "tell", "ask", "tell-urgently"].contains(request.command) else { continue }
             s.switchboardHandled.append(reply.id)
-            guard s.switchboardEnabled else {
+            // Reading one's own retained history sends nothing, so an untaught
+            // session may run it as a whole-reply fence (import recovery).
+            guard s.switchboardEnabled || (fenced != nil && TranscriptSelfRead.commands.contains(request.command)) else {
                 note("command ignored: session messaging is disabled. Right-click this conversation and choose Teach Session To Talk To Other Sessions, then ask it to try again. Nothing was sent.")
                 save(); continue
             }
@@ -271,12 +282,16 @@ extension Store {
                 } else { response = "Choose a Parking Lot with parking-lot-list, then pass its lotID. Nothing changed." }
                 note("Parking Lot result queued here.")
                 enqueueSwitchboard(s, text: response, hop: s.switchboardHop + 1, autonomous: s.supportAutonomous)
+            case "transcript-search", "transcript-read":
+                let response = transcriptSelfRead(request, session: s)
+                note(response.hasPrefix(TranscriptSelfRead.refusedHeader) ? "transcript request refused; explanation queued here." : "transcript result queued here.")
+                enqueueSwitchboard(s, text: response, hop: s.switchboardHop + 1, autonomous: s.supportAutonomous)
             case "tell", "ask", "tell-urgently":
                 if let failure = deliverSwitchboard(from: s, to: request.to ?? "", text: request.text ?? "", id: reply.id, hop: s.switchboardHop + 1, urgent: request.command == "tell-urgently", replyExpected: request.command == "ask" || request.replyExpected == true, suppliedReply: request.inReplyTo) {
                     note("delivery failed: " + failure); save()
                 }
             default:
-                note("unknown command ‘\(request.command)’. Supported: list-sessions, tell, ask, tell-urgently, parking-lot-list, parking-lot-read, parking-lot-edit."); save()
+                note("unknown command ‘\(request.command)’. Supported: list-sessions, tell, ask, tell-urgently, parking-lot-list, parking-lot-read, parking-lot-edit, transcript-search, transcript-read."); save()
             }
         }
     }
