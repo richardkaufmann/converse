@@ -179,8 +179,14 @@ enum AgentAssessments {
     static let historyLimit = 10
     static let maxFacts = 12
     static let teaching = """
-    Return assessment EVERY turn, even when reply is empty: {summary: at most two sentences on progress against the objective, status: "on-track"|"at-risk"|"blocked"|"done", mood: optional 3-5 single words describing the agent's current spirit for portrait art, facts: 5-7 glanceable rows [{id, label, value, kind, source, observedAt, detail}], detail: optional nested JSON with deeper levels (sub-facts, lists, links) than the rows show}. kind is "measured", "evidence" or "judgment". measuredFacts in the evidence are host measurements: to show one, include {id: its exact id, kind: "measured"}; Converse fills in label, value, source and observedAt. Never type a measured value yourself; a measured fact Converse does not have shows Unavailable. evidence facts must be traceable to supplied sessions, lots, Discord or this run's research: source names the session id, lot or exact URL, and observedAt is the source's time. judgment facts are your explicitly labelled opinion; source "judgment". Each fact may carry detail: any nested JSON shown when the human hovers or selects that row. Keep facts relevant to THIS agent's objective. An unchanged assessment is expected when nothing changed; do not reword it just to look fresh. Never put credentials or private transcript excerpts in an assessment.
+    Return assessment EVERY turn, even when reply is empty: {summary: at most two sentences on progress against the objective, status: "on-track"|"at-risk"|"blocked"|"done", mood: optional 3-5 single words describing the agent's current spirit for portrait art, facts: 5-7 glanceable rows [{id, label, value, kind, source, observedAt, detail}], detail: optional nested JSON with deeper levels (sub-facts, lists, links) than the rows show}. kind is "measured", "evidence" or "judgment". measuredFacts in the evidence are host measurements: to show one, include {id: its exact id, kind: "measured"}; Converse fills in label, value, source and observedAt. Never type a measured value yourself; a measured fact Converse does not have shows Unavailable. evidence facts must be traceable to supplied sessions, lots, Discord or this run's research: source names the session id, lot or exact URL, and observedAt is the source's time. judgment facts are your explicitly labelled opinion; source "judgment". Each fact may carry detail: any nested JSON shown when the human hovers or selects that row. Keep facts relevant to THIS agent's objective. An unchanged assessment is expected when nothing changed; do not reword it just to look fresh. Never put credentials or private transcript excerpts in an assessment. Missing optional inputs do not invalidate the rest: retain available evidence and explicitly note Unavailable for those inputs.
     """
+
+    static func missingInput(_ id: String, label: String, now: Date) -> AgentFact {
+        AgentFact(id: "input." + id, label: label, value: AgentFact.unavailable, kind: .measured,
+                  source: "Converse input check", observedAt: now,
+                  detail: .object(["note": .string("This input could not be read. The assessment continues with the available evidence.")]))
+    }
 
     // MARK: Host measurements
 
@@ -263,6 +269,10 @@ enum AgentAssessments {
                 if let fact = fact(item, measured: measured, previous: previous, now: now, sourceRetrieved: sourceRetrieved), !facts.contains(where: { $0.id == fact.id }) { facts.append(fact) }
             }
         }
+        // Host input notices take priority over the bounded model fact list.
+        let missing = measured.filter { $0.id.hasPrefix("input.") }
+        let missingIDs = Set(missing.map(\.id))
+        facts = missing + facts.filter { !missingIDs.contains($0.id) }
         let mood = raw["mood"].flatMap { value -> [String]? in
             guard case .array(let items) = value else { return nil }
             let words = items.compactMap { $0.string.map { clip($0, 24) } }.filter { !$0.isEmpty }.prefix(5)
@@ -415,6 +425,21 @@ struct AgentWidgetContent: Equatable {
 }
 
 extension AgentConfig {
+    /// Apply current lot access to both normal counts and missing-input notices.
+    /// Used by native cards, remote widgets and the image prompt.
+    var visibleAssessmentFacts: [AgentFact] {
+        let facts = (assessment?.facts ?? []).filter { fact in
+            var parts = fact.id.split(separator: ".").map(String.init)
+            if parts.first == "input" { parts.removeFirst() }
+            guard fact.kind == .measured, parts.count >= 2, parts[0] == "lot", let lot = UUID(uuidString: parts[1]) else { return true }
+            return watchedSessions.contains(lot) || (watchedParticipants ?? []).contains { DeviceGlobalID($0)?.session == lot }
+        }
+        return facts.filter { $0.id.hasPrefix("input.") } + facts.filter { !$0.id.hasPrefix("input.") }
+    }
+    var assessmentNeedsConfirmation: Bool { assessmentProblem != nil || assessment?.seeded == true }
+    func assessmentAge(now: Date = Date()) -> String {
+        AgentAge.assessment(assessment?.checkedAt, now: now, confirmed: !assessmentNeedsConfirmation)
+    }
     func widgetContent(now: Date = Date()) -> AgentWidgetContent {
         var config = self
         config.seedAssessmentFromScoreboard(now: now)
@@ -424,12 +449,7 @@ extension AgentConfig {
         guard let assessment = config.assessment else {
             return AgentWidgetContent(summary: AgentWidgetContent.empty, status: nil, freshness: freshness, facts: [], revision: nil, shortHash: nil, updatedAt: nil, checkedAt: nil, problem: problem)
         }
-        // Revoking a Parking Lot hides its stored counts at once, before the next turn re-measures.
-        let facts = assessment.facts.filter { fact in
-            let parts = fact.id.split(separator: ".")
-            guard fact.kind == .measured, parts.count == 3, parts[0] == "lot", let lot = UUID(uuidString: String(parts[1])) else { return true }
-            return watchedSessions.contains(lot) || (watchedParticipants ?? []).contains { DeviceGlobalID($0)?.session == lot }
-        }
+        let facts = config.visibleAssessmentFacts
         return AgentWidgetContent(summary: assessment.summary, status: assessment.status, freshness: freshness,
                                   facts: Array(facts.prefix(AgentAssessment.displayedFacts)), revision: assessment.revision,
                                   shortHash: assessment.shortHash, updatedAt: assessment.updatedAt, checkedAt: assessment.checkedAt, problem: problem)
@@ -444,6 +464,11 @@ extension AgentConfig {
 }
 
 enum AgentAge {
+    static func assessment(_ date: Date?, now: Date = Date(), confirmed: Bool = true) -> String {
+        guard let date else { return "No assessment" }
+        return confirmed && now.timeIntervalSince(date) < 300 ? "Current" : (now.timeIntervalSince(date) < 60 ? "<1m" : short(date, now: now))
+    }
+
     /// "now", "4m", "3h", "2d".
     static func short(_ date: Date?, now: Date = Date()) -> String {
         guard let date else { return "—" }

@@ -12,6 +12,7 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     workspaceSelfTests(check)
     switchboardSelfTests(check)
     switchboardSupervisionSelfTests(check)
+    groupMapSelfTests(check)
     switchboardReplyToleranceSelfTests(check)
     switchboardTrailingFenceSelfTests(check)
     groupSwitchboardSelfTests(check)

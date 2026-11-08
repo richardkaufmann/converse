@@ -415,6 +415,14 @@ struct ParkingLotSidebar: View {
         lot.open()
         workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
     }
+    // Only the hovered row asks which panes are free.
+    private var placement: PanePlacement {
+        let devices = DeviceSyncService.shared, localPane = workspace.pane(for: lot.id, in: state.id)
+        return PanePlacement(localPane: localPane,
+                             elsewhere: ShownElsewhere.resolve(localPane: localPane, window: ShownElsewhere.window(workspace.placements[lot.id], here: state.id, names: workspace.names),
+                                                               device: ShownElsewhere.device(devices.remoteDisplayHolder(lot.id), me: devices.identity?.deviceID) { devices.displayName(for: $0) }),
+                             free: paneHover.overButtons ? Set((1...3).filter { workspace.paneIsAvailable($0, for: lot.id, in: state.id) }) : [])
+    }
     var body: some View {
         HStack(spacing: 6) {
             Group {
@@ -424,18 +432,24 @@ struct ParkingLotSidebar: View {
                         .accessibilityLabel("Unseen Parking Lot changes")
                 } else { Color.clear.accessibilityHidden(true) }
             }.frame(width: 12, height: 12)
-            Button { show() } label: {
+            SidebarRevealName(location: workspace.placements[lot.id],
+                              windowName: workspace.placements[lot.id].flatMap { workspace.names[$0.windowID] },
+                              deviceName: ShownElsewhere.device(DeviceSyncService.shared.remoteDisplayHolder(lot.id), me: DeviceSyncService.shared.identity?.deviceID) { DeviceSyncService.shared.displayName(for: $0) },
+                              parkedHelp: "Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.",
+                              onParked: { show() }) {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
+            }.layoutPriority(-1)
             ProviderLogo(engine: "parking").frame(width: 24)
             PaneButtonGroup(hover: paneHover) {
-                PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
-                    .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
+                let shown = placement
+                PaneButton(label: "P", look: shown.look(.park, stripHovered: paneHover.overButtons)) { workspace.park(lot.id) }
+                    .accessibilityLabel(shown.parkLabel(lot.name)).help(shown.parkHelp("Park this Parking Lot without deleting it"))
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane, available: workspace.paneIsAvailable(pane, for: lot.id, in: state.id), stripHovered: paneHover.overButtons) { show(pane) }
+                    PaneButton(label: String(pane), look: shown.look(.pane(pane), stripHovered: paneHover.overButtons)) { show(pane) }
+                        .accessibilityLabel("Show " + lot.name + " in pane " + String(pane)).accessibilityValue(shown.paneValue(pane)).help(shown.paneHelp(pane, item: "this Parking Lot"))
                 }
-                PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
+                PaneButton(label: "X", look: shown.look(.close, stripHovered: paneHover.overButtons)) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")
             }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
@@ -610,7 +624,7 @@ struct ParkingLotView: View {
                 ProviderLogo(engine: "parking")
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
-                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+                PaneButton(label: "P") { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
             }.padding(.horizontal, 8).padding(.vertical, 4)
             HStack(spacing: 6) {
                 Button(reordering ? "Done" : "Reorder") {

@@ -37,6 +37,10 @@ struct SwitchboardExpectation: Codable, Identifiable {
     var id: UUID
     var target: String
     var answered: Bool = false
+    // Evidence for View → Group; absent in archives from older releases.
+    var createdAt: Date? = nil
+    var homeAccepted: Bool? = nil
+    var replyDeliveryID: UUID? = nil
 }
 
 extension Store {
@@ -150,7 +154,7 @@ extension Store {
     func switchboardSent(_ source: Session, to: String, id: UUID, replyExpected: Bool, inReplyTo: UUID?, remote: Bool) {
         if replyExpected {
             source.switchboardExpectations.removeAll { $0.answered }
-            source.switchboardExpectations.append(SwitchboardExpectation(id: id, target: switchboardAddress(to)))
+            source.switchboardExpectations.append(SwitchboardExpectation(id: id, target: switchboardAddress(to), createdAt: Date()))
         }
         if let index = source.switchboardObligations.firstIndex(where: { $0.id == inReplyTo && $0.kind == "request" }) {
             source.switchboardObligations[index].state = remote ? "awaitingReceipt" : "resolved"
@@ -160,7 +164,10 @@ extension Store {
         }
     }
     func switchboardReceipt(_ source: Session, delivery: UUID, accepted: Bool) {
-        if !accepted, let index = source.switchboardExpectations.firstIndex(where: { $0.id == delivery }) { source.switchboardExpectations[index].answered = true }
+        if let index = source.switchboardExpectations.firstIndex(where: { $0.id == delivery }) {
+            source.switchboardExpectations[index].homeAccepted = accepted
+            if !accepted { source.switchboardExpectations[index].answered = true }
+        }
         for index in source.switchboardObligations.indices where source.switchboardObligations[index].replyDeliveryID == delivery {
             source.switchboardObligations[index].state = accepted ? "resolved" : "deliveryFailed"
         }
@@ -179,6 +186,7 @@ extension Store {
             $0.id == inReplyTo && !$0.answered && $0.target == switchboardAddress(source)
         }) {
             target.switchboardExpectations[index].answered = true
+            target.switchboardExpectations[index].replyDeliveryID = id
             target.switchboardObligations.append(SwitchboardObligation(id: id, source: switchboardAddress(source), sourceName: name,
                 promptID: prompt.id, kind: "reply", groupID: group, originHomeID: home))
         }

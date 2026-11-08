@@ -5,6 +5,7 @@ struct AgentSetupView: View {
     @ObservedObject var session: Session
     @ObservedObject var parkingLots = ParkingLotLibrary.shared
     @State private var settings: AgentConfig
+    @State private var original: AgentConfig
     @State private var metaKey = ""
     @State private var metaKeySaved = true
     private var metaKeyAvailable: Bool { !removeSecrets.contains("meta") && (metaKeySaved || !metaKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
@@ -20,7 +21,7 @@ struct AgentSetupView: View {
     @State private var loadingModels = false
     var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
-    init(session: Session, onClose: (() -> Void)? = nil) { self.session = session; self.onClose = onClose; _settings = State(initialValue: session.agent ?? AgentConfig()) }
+    init(session: Session, onClose: (() -> Void)? = nil) { self.session = session; self.onClose = onClose; _settings = State(initialValue: session.agent ?? AgentConfig()); _original = State(initialValue: session.agent ?? AgentConfig()) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Agent Setup · " + session.title).font(.title2.bold())
@@ -154,7 +155,7 @@ struct AgentSetupView: View {
                     if !error.isEmpty { Text(error).foregroundStyle(.red) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); error = "" }.disabled(!testingServices.isEmpty); Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction).disabled(!testingServices.isEmpty) }
+            HStack { Button("Cancel") { close() }; Button("Reload settings") { settings = session.agent ?? AgentConfig(); original = settings; error = "" }.disabled(!testingServices.isEmpty); Spacer(); Button("Save") { save() }.keyboardShortcut(.defaultAction).disabled(!testingServices.isEmpty) }
         }.padding(22).frame(width: 650, height: 750).onAppear { loadModels() }
     }
     private func loadModels() {
@@ -208,6 +209,16 @@ struct AgentSetupView: View {
     }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func save() {
+        // A portrait-only save must not demand repairs to an unrelated connector.
+        if let existing = session.agent, removeSecrets.isEmpty,
+           [metaKey, githubKey, discordToken, homeAssistantToken].allSatisfy({ $0.isEmpty }),
+           AgentPortraitSettings.onlyPortraitChanged(from: original, to: settings) {
+            do {
+                session.agent = try AgentPortraitSettings.applying(settings, baseline: original, current: existing)
+                Store.shared.save(); PortraitService.shared.agentTurned(session, store: .shared); close()
+            } catch { self.error = error.localizedDescription }
+            return
+        }
         settings.repository = settings.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Enter a model."; return }
         guard settings.repository.isEmpty || AgentRepoSnapshot.validRepository(settings.repository) else { error = "Enter a repository as owner/name, or leave it blank."; return }

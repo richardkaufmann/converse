@@ -70,6 +70,38 @@ enum LocalImageFallback {
         guard exists(url.path) else { return "The image file is no longer available at " + url.path + ". Ask the assistant to recreate it or send it as a Converse attachment." }
         reveal(url); return nil
     }
+    private static func isFileLink(_ value: Any?) -> Bool { ((value as? URL) ?? (value as? String).flatMap(URL.init(string:)))?.isFileURL == true }
+    static func hasFileLink(_ text: NSAttributedString, in ranges: [NSRange]) -> Bool {
+        var found = false
+        for range in ranges where range.length > 0 && NSMaxRange(range) <= text.length {
+            text.enumerateAttribute(.link, in: range) { value, _, stop in if isFileLink(value) { found = true; stop.pointee = true } }
+        }
+        return found
+    }
+    // Formatted clipboard data keeps the visible text but no link into this
+    // Mac's files. The transcript itself keeps its in-app reveal.
+    static func withoutFileLinks(_ text: NSAttributedString) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString(attributedString: text)
+        text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            guard isFileLink(value) else { return }
+            for key in [NSAttributedString.Key.link, .toolTip, attribute] { result.removeAttribute(key, range: range) }
+        }
+        return result
+    }
+    // A selection holding a file link writes rich text without it and none of
+    // AppKit's URL types. Nil leaves plain text to AppKit.
+    static func writeSelection(_ selection: NSAttributedString, to board: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool? {
+        let documentType: NSAttributedString.DocumentType
+        switch type.rawValue {
+        case NSPasteboard.PasteboardType.string.rawValue, "NSStringPboardType": return nil
+        case NSPasteboard.PasteboardType.rtf.rawValue, "NeXT Rich Text Format v1.0 pasteboard type": documentType = .rtf
+        case NSPasteboard.PasteboardType.rtfd.rawValue, "com.apple.flat-rtfd", "NeXT RTFD pasteboard type": documentType = .rtfd
+        default: return false
+        }
+        let clean = withoutFileLinks(selection)
+        guard let data = try? clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: documentType]) else { return false }
+        return board.setData(data, forType: type)
+    }
 }
 
 extension Store {
@@ -239,6 +271,33 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
             check(revealed.count == 1 && notices.last?.contains("no longer available") == true, "Missing local fallback reports the path without opening Finder")
         }
+        func hasHyperlink(_ data: Data?) -> Bool { String(decoding: data ?? Data(), as: UTF8.self).contains("HYPERLINK") }
+        let formattedBoard = NSPasteboard.withUniqueName()
+        fallbackText.copyBlock(0, to: formattedBoard)
+        let formattedRTF = formattedBoard.data(forType: .rtf), formattedHTML = String(decoding: formattedBoard.data(forType: .html) ?? Data(), as: UTF8.self)
+        let decodedRTF = formattedRTF.flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+        check(formattedRTF != nil && !hasHyperlink(formattedRTF) && decodedRTF?.string.contains("image%20with%20spaces.png") == true, "Copy Message RTF keeps the fallback text without its file link")
+        check(!formattedHTML.isEmpty && !formattedHTML.contains("href=\"file:") && !formattedHTML.lowercased().contains("reveal image"), "Copy Message HTML carries no file link")
+        check(formattedBoard.string(forType: .string) == fallbackSource, "Copy Message plain text stays the exact source")
+        formattedBoard.releaseGlobally()
+        if position >= 0 {
+            let selectionBoard = NSPasteboard.withUniqueName()
+            fallbackText.setSelectedRange(NSRange(location: position, length: 12))
+            fallbackText.copySelection(to: selectionBoard)
+            let selectionRTF = selectionBoard.data(forType: .rtf)
+            check(selectionRTF != nil && !hasHyperlink(selectionRTF) && selectionBoard.data(forType: .URL) == nil && selectionBoard.string(forType: NSPasteboard.PasteboardType("public.url-name")) == nil,
+                  "Selection copy writes rich text without a file link or URL types")
+            check(selectionBoard.string(forType: .string)?.contains(fallbackSpaced.absoluteString) == true, "Selection copy plain text still names the file")
+            selectionBoard.releaseGlobally()
+            check(fallbackText.textStorage?.attribute(.link, at: position, effectiveRange: nil) as? URL == fallbackSpaced && fallbackText.textStorage?.attribute(LocalImageFallback.attribute, at: position, effectiveRange: nil) as? URL == fallbackSpaced,
+                  "Copying leaves the in-app reveal link in place")
+        }
+        let mixedLinks = NSMutableAttributedString(string: "web file")
+        mixedLinks.addAttribute(.link, value: URL(string: "https://example.com/a")!, range: NSRange(location: 0, length: 3))
+        mixedLinks.addAttribute(.link, value: "file:///tmp/a.png", range: NSRange(location: 4, length: 4))
+        let cleanedLinks = LocalImageFallback.withoutFileLinks(mixedLinks)
+        check(cleanedLinks.attribute(.link, at: 0, effectiveRange: nil) as? URL == URL(string: "https://example.com/a") && cleanedLinks.attribute(.link, at: 4, effectiveRange: nil) == nil && cleanedLinks.string == "web file",
+              "Formatted copy strips file links only, whether stored as URL or string")
         var probedRemoteDisk = false
         _ = LocalImageFallback.follow(fallbackSpaced, onHome: false, exists: { _ in probedRemoteDisk = true; return true }, reveal: { _ in check(false, "Remote path must never reveal") })
         check(!probedRemoteDisk, "Remote image fallback does not even probe the viewer's filesystem")
@@ -298,6 +357,27 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             check(Date().timeIntervalSince(started) < 0.5 && TranscriptStyle.localImageReferences(neutral).isEmpty && local.count <= 1 && web.count <= 1, "10,000 nested image openers are scanned in bounded time: " + tail)
         }
         check(TranscriptStyle.imageReferences("![" + String(repeating: "a", count: 600) + "](https://example.com/w.png)").isEmpty && TranscriptStyle.imageReferences("![Chart](https://example.com/w.png)").count == 1, "Image captions longer than 512 characters are not treated as images")
+        let balancedShot = "![x](/tmp/shot(1).png)"
+        let balancedRefs = TranscriptStyle.localImageReferences(balancedShot)
+        check(balancedRefs.count == 1 && balancedRefs.first?.url.path == "/tmp/shot(1).png" && balancedRefs.first?.range == NSRange(location: 0, length: (balancedShot as NSString).length), "Image paths keep balanced parentheses")
+        check(TranscriptStyle.localImageReferences("![x](/tmp/a(b(c))(d).png) ![y](/tmp/y.png)").map(\.url.path) == ["/tmp/a(b(c))(d).png", "/tmp/y.png"], "Nested parentheses end at the image's own closer and the next image still parses")
+        check(TranscriptStyle.localImageReferences("![x](file:///tmp/my%20shot(1).png)").first?.url.path == "/tmp/my shot(1).png" && TranscriptStyle.localImageReferences("![x](file:///tmp/my shot(1).png)").first?.url.path == "/tmp/my shot(1).png", "File URLs keep balanced parentheses, encoded or with raw spaces")
+        check(TranscriptStyle.imageReferences("![w](https://example.com/w_(1).png)").first?.url.absoluteString == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses")
+        check(TranscriptStyle.imageLinks("![w](https://example.com/w_(1).png) tail") == "w: [https://example.com/w\\_(1).png](https://example.com/w_(1).png) tail", "Image fallbacks replace the whole parenthesized reference")
+        let unbalancedLine = "![x](/tmp/a(b.png) and more)"
+        check(TranscriptStyle.localImageReferences(unbalancedLine).first?.url.path == "/tmp/a(b.png" && TranscriptStyle.localImageReferences(unbalancedLine).first?.range.length == ("![x](/tmp/a(b.png)" as NSString).length, "An unbalanced parenthesis keeps the original first-closer match")
+        let pastBound = "![x](/tmp/a(" + String(repeating: "b", count: 4080) + ")" + String(repeating: "c", count: 20) + ".png)"
+        check(TranscriptStyle.localImageReferences(pastBound).first?.url.path.hasSuffix("b") == true, "Balanced scanning never reads past the target bound")
+        let balancedFallback = MarkdownText.inline(balancedShot), balancedURL = URL(fileURLWithPath: "/tmp/shot(1).png")
+        var balancedAttribute: URL?
+        balancedFallback.enumerateAttribute(LocalImageFallback.attribute, in: NSRange(location: 0, length: balancedFallback.length)) { value, _, _ in if let url = value as? URL { balancedAttribute = url } }
+        check(balancedAttribute == balancedURL && !balancedFallback.string.hasSuffix(".png)"), "A parenthesized local image renders one complete fallback link")
+        check(ConverseExchange.neutralizeLocalImages(balancedShot) == "[x](/tmp/shot(1).png)" && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages(balancedShot)).isEmpty, "Import neutralization covers parenthesized paths")
+        do {
+            let hostile = String(repeating: "![x](/tmp/a()", count: 20_000), started = Date()
+            let found = TranscriptStyle.localImageReferences(hostile)
+            check(found.count == 20_000 && found.allSatisfy { $0.url.path == "/tmp/a(" } && Date().timeIntervalSince(started) < 1, "Repeated open parentheses stay linear and keep their first-closer matches")
+        }
         check(TranscriptStyle.localImageReferences("![![x](/tmp/a.png)").count == 1 && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages("![![x](/tmp/a.png)")).isEmpty, "A nested local embed is still found and neutralized")
         // Nested opening markers once needed one round per level; any depth now goes in one pass.
         for depth in [2, 6, 10, 100, 5_000] {

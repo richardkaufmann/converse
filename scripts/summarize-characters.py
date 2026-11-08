@@ -11,7 +11,7 @@ def correlate(row, capture):
     start, end = row["scheduled"], row["drawn"]
     return sorted({event["operation"] for event in capture["slowEvents"]
                    if event["mainThread"]
-                   and event["operation"] not in ("mainQueueDelay", "keyDelivery", "dragDelivery", "resizeDraw", "dragFrameWait", "lotEditToAckProcessed", "lotAckSendFailed")
+                   and event["operation"] not in ("mainQueueDelay", "keyDelivery", "dragDelivery", "resizeDraw", "dragFrameWait", "lotEditToAckProcessed", "groupMapApply", "lotAckSendFailed")
                    and event["uptime"] > start
                    and event["uptime"] - event["milliseconds"] / 1000 < end})
 

@@ -57,6 +57,17 @@ final class ParkingLotFinder: ObservableObject {
     @Published private(set) var current: Int?
     @Published private(set) var focusRequest = 0
     weak var editor: ParkingLotEditor.Coordinator?
+    // Counted by the idle self-test: an open bar must not do this work unprompted.
+    private(set) var refreshes = 0, scans = 0
+    /// Everything the matches are computed from; while it holds, they are still right.
+    private struct Scan: Equatable { var query: String; var caseSensitive: Bool; var substitutions: Bool; var rows: [ParkingLotRow] }
+    private var scanned: Scan?
+    private var substitutionsObserver: AnyCancellable?
+    init() {
+        // Turning substitutions on or off changes which markers can match, and
+        // nothing else re-renders. $enabled fires before the value changes.
+        substitutionsObserver = TextSubstitutions.shared.$enabled.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in self?.editorRendered() }
+    }
     var canReplace: Bool { editor?.canEditText == true }
     var status: String {
         if query.isEmpty { return "" }
@@ -70,19 +81,27 @@ final class ParkingLotFinder: ObservableObject {
         editor?.applyFindHighlights()
     }
     func close() {
-        visible = false; current = nil
+        visible = false; select(nil)
         editor?.clearFindHighlights()
     }
     private func rows() -> [ParkingLotRow] { editor?.parent.lot.document.rows ?? [] }
     /// Recomputes the matches; a save elsewhere can move or remove the current one.
+    /// Publishes only real changes, since each publication updates the pane and comes back here.
     func refresh(fromCaret: Bool = false) {
+        refreshes += 1
         let previous = current.flatMap { matches.indices.contains($0) ? matches[$0] : nil }
-        matches = ParkingLotFind.matches(query, in: rows(), caseSensitive: caseSensitive)
-        if fromCaret, let caret = editor?.findCaret { current = index(atOrAfter: caret) }
-        else if let previous, let same = matches.firstIndex(of: previous) { current = same }
-        else { current = matches.isEmpty ? nil : min(current ?? 0, matches.count - 1) }
+        let scan = Scan(query: query, caseSensitive: caseSensitive, substitutions: TextSubstitutions.shared.enabled, rows: rows())
+        if scan != scanned {
+            scans += 1; scanned = scan
+            let found = ParkingLotFind.matches(query, in: scan.rows, caseSensitive: caseSensitive)
+            if found != matches { matches = found }
+        }
+        if fromCaret, let caret = editor?.findCaret { select(index(atOrAfter: caret)) }
+        else if let previous, let same = matches.firstIndex(of: previous) { select(same) }
+        else { select(matches.isEmpty ? nil : min(current ?? 0, matches.count - 1)) }
         editor?.applyFindHighlights()
     }
+    private func select(_ index: Int?) { if index != current { current = index } }
     /// The first match at or after a position in the rows, wrapping to the first.
     private func index(atOrAfter position: (UUID, Int)) -> Int? {
         guard !matches.isEmpty else { return nil }
@@ -99,7 +118,7 @@ final class ParkingLotFinder: ObservableObject {
     func previous() { advance(by: -1) }
     private func advance(by step: Int) {
         guard visible, !matches.isEmpty else { NSSound.beep(); return }
-        current = current.map { ($0 + step + matches.count) % matches.count } ?? (step > 0 ? 0 : matches.count - 1)
+        select(current.map { ($0 + step + matches.count) % matches.count } ?? (step > 0 ? 0 : matches.count - 1))
         showCurrent()
     }
     private func showCurrent() {
@@ -114,7 +133,7 @@ final class ParkingLotFinder: ObservableObject {
         let after = match.range.location + (replacement as NSString).length
         guard editor.saveFindResult(rows, undoName: "Replace", caret: (match.row, after)) else { return false }
         refresh()
-        current = self.index(atOrAfter: (match.row, after))
+        select(self.index(atOrAfter: (match.row, after)))
         showCurrent()
         return true
     }
@@ -253,4 +272,131 @@ func parkingFindSelfTests(_ check: (Bool, String) -> Void) {
         check(!lockedFinder.replaceCurrent() && lockedFinder.replaceAll() == 0 && readOnly.document == saved, "Replace and Replace All are refused in a read-only lot")
     } catch { check(false, "Read-only Find fixture: " + error.localizedDescription) }
     window.close()
+    parkingFindIdleSelfTests(check)
+}
+
+/// The real pane, so SwiftUI's update pass takes part: an open bar has to go quiet.
+private func parkingFindIdleSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-find-idle-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shared = TextSubstitutions.shared, wasEnabled = shared.enabled
+    defer { try? shared.setEnabled(wasEnabled) }
+    try? shared.setEnabled(true)
+    let h = ParkingLotRow(heading: true, text: "Launch plan"), a = ParkingLotRow(heading: false, text: "Plan the **plan**", parentID: h.id)
+    let nested = ParkingLotRow(heading: false, text: "A nested plan", parentID: a.id), other = ParkingLotRow(heading: false, text: "Nothing here", parentID: h.id)
+    let lot = ParkingLotStore(folder: folder.appendingPathComponent("lot"), id: UUID())
+    lot.openStarter([h, a, nested, other])
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    let hosting = NSHostingView(rootView: ParkingLotView(lot: lot, workspace: Workspace(), pane: 1))
+    hosting.frame = NSRect(x: 0, y: 0, width: 700, height: 500); window.contentView = hosting
+    func run(_ seconds: TimeInterval) {
+        let end = Date().addingTimeInterval(seconds)
+        repeat { RunLoop.current.run(until: Date().addingTimeInterval(0.01)); hosting.layoutSubtreeIfNeeded() } while Date() < end
+    }
+    func find(_ view: NSView) -> ParkingOutlineText? { (view as? ParkingOutlineText) ?? view.subviews.lazy.compactMap(find).first }
+    run(0.1)
+    for _ in 0..<50 where find(hosting) == nil { run(0.02) }
+    guard let text = find(hosting), let coordinator = text.owner else { check(false, "The idle Find test hosts the real Parking Lot pane"); return }
+    let finder = coordinator.parent.finder
+    var publications = 0
+    let counting = finder.objectWillChange.sink { _ in publications += 1 }
+    defer { counting.cancel() }
+    /// Lets the action's own updates finish, then counts what an idle bar still does.
+    func expectIdle(_ label: String) {
+        run(0.25)
+        let start = (publications, finder.refreshes, finder.scans, coordinator.findHighlightPasses)
+        run(0.25)
+        let cycles = (publications - start.0, finder.refreshes - start.1, finder.scans - start.2, coordinator.findHighlightPasses - start.3)
+        let report = "\(cycles.0) publications, \(cycles.1) refreshes, \(cycles.2) scans, \(cycles.3) highlight passes in 250 ms"
+        check(cycles == (0, 0, 0, 0), "An open Find bar does no work while idle after \(label): \(report)")
+    }
+    func highlighted() -> [NSRange] {
+        guard let manager = text.layoutManager else { return [] }
+        let length = (text.string as NSString).length
+        var ranges: [NSRange] = [], location = 0
+        while location < length {
+            var run = NSRange()
+            if manager.temporaryAttribute(.backgroundColor, atCharacterIndex: location, longestEffectiveRange: &run, in: NSRange(location: 0, length: length)) != nil { ranges.append(run) }
+            location = max(NSMaxRange(run), location + 1)
+        }
+        return ranges
+    }
+    func expected() -> [NSRange] {
+        finder.matches.compactMap { match in
+            coordinator.projection.entries.first { $0.row.id == match.row }.map { NSRange(location: $0.range.location + match.range.location, length: match.range.length) }
+        }
+    }
+    finder.open(); finder.query = "plan"
+    expectIdle("opening")
+    check(finder.visible && finder.matches.count == 4 && highlighted() == expected() && highlighted().count == 4, "An open bar highlights every shown match")
+
+    // Rendering with nothing new publishes nothing.
+    var before = (publications, finder.scans)
+    let passes = coordinator.findHighlightPasses
+    for _ in 0..<5 { finder.editorRendered() }
+    check(publications == before.0 && finder.scans == before.1 && coordinator.findHighlightPasses == passes, "Refreshing unchanged state neither publishes, rescans nor repaints")
+
+    window.makeFirstResponder(text)
+    let end = coordinator.projection.entries.first { $0.row.id == other.id }!
+    text.setSelectedRange(NSRange(location: NSMaxRange(end.range), length: 0))
+    text.insertText(" plan", replacementRange: text.selectedRange())
+    expectIdle("typing")
+    check(finder.matches.count == 5 && highlighted() == expected(), "Typing a match updates the count and highlights")
+
+    try? lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "update", id: other.id, text: "No longer")]), author: "Session")
+    expectIdle("an external edit")
+    check(finder.matches.count == 4 && highlighted() == expected() && highlighted().count == 4, "A session's edit updates the count and highlights")
+
+    coordinator.toggle(a.id)
+    expectIdle("collapsing")
+    check(finder.matches.count == 4 && !coordinator.projection.entries.contains { $0.row.id == nested.id } && highlighted() == expected() && highlighted().count == 3, "Collapsing keeps the hidden match counted and highlights only what is shown")
+    coordinator.toggle(a.id)
+    expectIdle("expanding")
+    check(highlighted() == expected() && highlighted().count == 4, "Expanding highlights the match that reappears")
+
+    window.setContentSize(NSSize(width: 480, height: 420)); hosting.frame.size = NSSize(width: 480, height: 420)
+    expectIdle("resizing")
+    check(finder.matches.count == 4 && highlighted() == expected() && highlighted().count == 4, "Resizing keeps the highlights")
+    coordinator.discardDisplayedState(); coordinator.render()
+    expectIdle("a full rebuild")
+    check(highlighted() == expected() && highlighted().count == 4, "A full rebuild of the text restores the highlights over unchanged matches")
+
+    before = (publications, finder.scans)
+    let start = finder.current!
+    finder.next()
+    check(publications == before.0 + 1 && finder.scans == before.1 && finder.current == (start + 1) % 4, "Moving to the next match publishes once, without rescanning")
+    let selected = finder.matches[finder.current!], shown = coordinator.projection.entries.first { $0.row.id == selected.row }!
+    check(text.selectedRange() == NSRange(location: shown.range.location + selected.range.location, length: selected.range.length), "Navigation still selects the match")
+    expectIdle("navigating")
+    coordinator.toggle(a.id)
+    run(0.25)
+    let hiddenIndex = finder.matches.firstIndex { $0.row == nested.id }!
+    while finder.current != hiddenIndex { finder.next() }
+    expectIdle("navigating into a collapsed section")
+    check(coordinator.projection.entries.contains { $0.row.id == nested.id } && highlighted() == expected() && highlighted().count == 4, "Navigating into a collapsed section opens it and highlights the match")
+
+    finder.replacement = "goal"
+    check(finder.replaceCurrent(), "Replace still replaces with the bar open")
+    expectIdle("replacing")
+    check(finder.matches.count == 3 && highlighted() == expected() && highlighted().count == 3, "Replace updates the matches and highlights")
+
+    finder.query = "**"
+    expectIdle("searching for a hidden marker")
+    check(finder.matches.isEmpty && highlighted().isEmpty, "Hidden emphasis markers are not found")
+    try? shared.setEnabled(false)
+    expectIdle("turning substitutions off")
+    check(finder.matches.count == 2, "Turning substitutions off makes literal markers findable with the bar open: \(finder.matches.count)")
+    try? shared.setEnabled(true)
+    expectIdle("turning substitutions on")
+    check(finder.matches.isEmpty, "Turning substitutions back on hides them from Find again")
+
+    finder.query = "plan"
+    finder.close()
+    expectIdle("closing")
+    check(!finder.visible && finder.current == nil && highlighted().isEmpty, "Done clears the highlights")
+    finder.open()
+    expectIdle("reopening")
+    check(finder.visible && finder.current != nil && highlighted() == expected() && !highlighted().isEmpty, "Reopening restores the current match and highlights without a new search")
 }

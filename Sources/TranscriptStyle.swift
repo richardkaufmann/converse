@@ -371,6 +371,42 @@ struct TranscriptImageReference {
     var url: URL
 }
 extension TranscriptStyle {
+    // A bare target ends at its first `)`. If that leaves a `(` open, the
+    // parenthesis is part of the path: scan to the balancing `)` within the
+    // target's bound. Stopping at the next `![` keeps a whole line linear.
+    // No balancing `)` leaves the original match unchanged.
+    private static func balancedImageMatch(_ match: NSTextCheckingResult, in source: NSString) -> (target: NSRange, whole: NSRange) {
+        guard match.range(at: 2).location == NSNotFound else { return (match.range(at: 2), match.range) }
+        let bare = match.range(at: 3)
+        var depth = 0
+        for index in bare.location..<NSMaxRange(bare) where source.character(at: index) == 40 { depth += 1 }
+        guard depth > 0 else { return (bare, match.range) }
+        let spaced = source.substring(with: bare).hasPrefix("file://")
+        func isSpace(_ unit: unichar) -> Bool { UnicodeScalar(unit).map(CharacterSet.whitespacesAndNewlines.contains) ?? false }
+        let limit = min(source.length, bare.location + 4096)
+        var index = NSMaxRange(bare)
+        func closed(_ end: Int, _ close: Int) -> (target: NSRange, whole: NSRange) {
+            (NSRange(location: bare.location, length: end - bare.location), NSRange(location: match.range.location, length: close + 1 - match.range.location))
+        }
+        while index < limit {
+            let unit = source.character(at: index)
+            if unit == 33, index + 1 < source.length, source.character(at: index + 1) == 91 { break }
+            if unit == 13 { break }
+            if !spaced, isSpace(unit) {
+                var next = index
+                while next < limit, isSpace(source.character(at: next)) { next += 1 }
+                if depth == 0, next < limit, source.character(at: next) == 41 { return closed(index, next) }
+                break
+            }
+            if unit == 40 { depth += 1 }
+            else if unit == 41 {
+                if depth == 0 { return closed(index, index) }
+                depth -= 1
+            }
+            index += 1
+        }
+        return (bare, match.range)
+    }
     // Captions stop at any bracket, and caption and target are bounded and
     // never backtrack, so each `!` costs a few steps even on long nested or
     // unclosed lines. A bracket inside a caption means it is not an image.
@@ -388,13 +424,13 @@ extension TranscriptStyle {
             let source = line as NSString
             for match in expression.matches(in: line, range: NSRange(location: 0, length: source.length)) {
                 guard match.range.location == 0 || source.substring(with: NSRange(location: match.range.location - 1, length: 1)) != "\\" else { continue }
-                let urlRange = match.range(at: 2).location == NSNotFound ? match.range(at: 3) : match.range(at: 2)
-                let path = source.substring(with: urlRange).trimmingCharacters(in: .whitespaces)
+                let balanced = balancedImageMatch(match, in: source)
+                let path = source.substring(with: balanced.target).trimmingCharacters(in: .whitespaces)
                 let candidate: URL
                 if path.hasPrefix("/") { candidate = URL(fileURLWithPath: path.removingPercentEncoding ?? path) }
                 else if let url = URL(string: path), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" { candidate = url }
                 else { continue }
-                result.append(TranscriptImageReference(range: NSRange(location: offset + match.range.location, length: match.range.length), caption: source.substring(with: match.range(at: 1)), url: candidate))
+                result.append(TranscriptImageReference(range: NSRange(location: offset + balanced.whole.location, length: balanced.whole.length), caption: source.substring(with: match.range(at: 1)), url: candidate))
             }
         }
         return result
@@ -415,9 +451,9 @@ extension TranscriptStyle {
             let source = line as NSString
             for match in regex.matches(in: line, range: NSRange(location: 0, length: source.length)) {
                 guard match.range.location == 0 || source.substring(with: NSRange(location: match.range.location - 1, length: 1)) != "\\" else { continue }
-                let range = match.range(at: 2).location == NSNotFound ? match.range(at: 3) : match.range(at: 2)
-                guard let url = URL(string: source.substring(with: range)), ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { continue }
-                result.append(TranscriptImageReference(range: NSRange(location: offset + match.range.location, length: match.range.length), caption: source.substring(with: match.range(at: 1)), url: url))
+                let balanced = balancedImageMatch(match, in: source)
+                guard let url = URL(string: source.substring(with: balanced.target)), ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { continue }
+                result.append(TranscriptImageReference(range: NSRange(location: offset + balanced.whole.location, length: balanced.whole.length), caption: source.substring(with: match.range(at: 1)), url: url))
             }
         }
         return result

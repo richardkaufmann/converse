@@ -100,7 +100,10 @@ public sealed class DeviceCommandRecord
 public sealed class DeviceCommandStore
 {
     private readonly string _file;
-    public Dictionary<Guid, DeviceCommandRecord> Records { get; } = new();
+    // Overlapping connections deliver commands concurrently.
+    private readonly object _gate = new();
+    private readonly Dictionary<Guid, DeviceCommandRecord> _records = new();
+    public Dictionary<Guid, DeviceCommandRecord> Records { get { lock (_gate) return new(_records); } }
 
     public DeviceCommandStore(string folder)
     {
@@ -111,64 +114,74 @@ public sealed class DeviceCommandStore
         foreach (var record in decoded)
         {
             if (record.Outcome is "running" or "accepted") record.Outcome = "uncertain";
-            Records[record.Id] = record;
+            _records[record.Id] = record;
         }
         Save();
     }
 
     public bool Begin(Guid id, string origin, string sessionId = "", string payloadHash = "", string? hashScheme = null)
     {
-        if (Records.ContainsKey(id)) return false;
-        Records[id] = new DeviceCommandRecord { Id = id, Origin = origin, Outcome = "accepted", UpdatedAt = DateTime.UtcNow, SessionID = sessionId, PayloadHash = payloadHash, HashScheme = hashScheme };
-        Save();
-        return true;
+        lock (_gate)
+        {
+            if (_records.ContainsKey(id)) return false;
+            _records[id] = new DeviceCommandRecord { Id = id, Origin = origin, Outcome = "accepted", UpdatedAt = DateTime.UtcNow, SessionID = sessionId, PayloadHash = payloadHash, HashScheme = hashScheme };
+            Save();
+            return true;
+        }
     }
 
     // Compares under the scheme the record was written with.
     public bool BindingMatches(Guid id, string origin, string sessionId, byte[] payload) =>
-        Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId
+        Find(id) is { } record && record.Origin == origin && record.SessionID == sessionId
         && DeviceCommandBinding.Hash(payload, record.HashScheme) is { } hash && record.PayloadHash == hash;
 
     // An earlier home hashed raw bytes, so a key-reordered retry of the same
     // command misses. Its original may already have run: never call it rejected.
     public bool RawBindingUnconfirmed(Guid id, string origin, string sessionId) =>
-        Records.TryGetValue(id, out var record) && record.Origin == origin && record.SessionID == sessionId
+        Find(id) is { } record && record.Origin == origin && record.SessionID == sessionId
         && (record.HashScheme ?? DeviceCommandBinding.RawScheme) == DeviceCommandBinding.RawScheme;
 
     // Recovery-ledger receipts survive an application-data restore that lost
     // this store. Seed only missing IDs; an existing local record stays as-is.
     public void SeedIfMissing(IEnumerable<DeviceCommandRecord> receipts)
     {
-        var changed = false;
-        foreach (var receipt in receipts)
+        lock (_gate)
         {
-            if (receipt.Id == Guid.Empty || Records.ContainsKey(receipt.Id)) continue;
-            Records[receipt.Id] = new DeviceCommandRecord
+            var changed = false;
+            foreach (var receipt in receipts)
             {
-                Id = receipt.Id,
-                Origin = receipt.Origin,
-                Outcome = receipt.Outcome is "accepted" or "running" ? "uncertain" : receipt.Outcome,
-                UpdatedAt = receipt.UpdatedAt == default ? DateTime.UtcNow : receipt.UpdatedAt,
-                SessionID = receipt.SessionID,
-                PayloadHash = receipt.PayloadHash,
-                HashScheme = receipt.HashScheme,
-            };
-            changed = true;
+                if (receipt.Id == Guid.Empty || _records.ContainsKey(receipt.Id)) continue;
+                _records[receipt.Id] = new DeviceCommandRecord
+                {
+                    Id = receipt.Id,
+                    Origin = receipt.Origin,
+                    Outcome = receipt.Outcome is "accepted" or "running" ? "uncertain" : receipt.Outcome,
+                    UpdatedAt = receipt.UpdatedAt == default ? DateTime.UtcNow : receipt.UpdatedAt,
+                    SessionID = receipt.SessionID,
+                    PayloadHash = receipt.PayloadHash,
+                    HashScheme = receipt.HashScheme,
+                };
+                changed = true;
+            }
+            if (changed) Save();
         }
-        if (changed) Save();
     }
 
     public void MarkRunning(Guid id) => Update(id, "running");
     public void MarkCompleted(Guid id) => Update(id, "completed");
     public void MarkFailed(Guid id) => Update(id, "failed");
-    public string? Outcome(Guid id) => Records.TryGetValue(id, out var record) ? record.Outcome : null;
+    public string? Outcome(Guid id) => Find(id)?.Outcome;
 
     private void Update(Guid id, string outcome)
     {
-        if (!Records.TryGetValue(id, out var record)) return;
-        record.Outcome = outcome; record.UpdatedAt = DateTime.UtcNow; Save();
+        lock (_gate)
+        {
+            if (!_records.TryGetValue(id, out var record)) return;
+            record.Outcome = outcome; record.UpdatedAt = DateTime.UtcNow; Save();
+        }
     }
-    private void Save() => AtomicJson.Write(_file, Records.Values.ToList());
+    private DeviceCommandRecord? Find(Guid id) { lock (_gate) return _records.GetValueOrDefault(id); }
+    private void Save() { lock (_gate) AtomicJson.Write(_file, _records.Values.ToList()); }
 }
 
 public sealed class DeviceOutboxRecord
@@ -276,6 +289,16 @@ public sealed class DeviceDraftTracker
         if (version <= Version(session)) return false;
         Adopt(session, version, text); return true;
     }
+}
+
+// A data folder override is a separate profile, so its saved keys live under
+// their own vault resource: a test run can neither read nor replace real ones.
+public static class CredentialScope
+{
+    public static string Resource(string resource, string? dataFolder) =>
+        string.IsNullOrWhiteSpace(dataFolder) ? resource
+        : resource + "." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(dataFolder).ToUpperInvariant())));
 }
 
 internal static class AtomicJson

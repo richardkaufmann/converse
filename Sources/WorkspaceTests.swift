@@ -135,7 +135,7 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         let tested = Workspace(), window = WindowState(workspace: tested)
         tested.assign(other, to: window.id, pane: 1)
         check(!tested.paneIsAvailable(1, for: mine, in: window.id) && tested.paneIsAvailable(2, for: mine, in: window.id) && tested.paneIsAvailable(3, for: mine, in: window.id), "With one pane up, panes 2 and 3 are free for another session")
-        // Red P/X: decided from where else the session is displayed; 1/2/3 orange is unchanged.
+        // Red P/X: decided from where else the session is displayed.
         let names = panes.names
         let nobody = ShownElsewhere(window: ShownElsewhere.window(nil, here: here.id, names: names), device: ShownElsewhere.device(nil, me: "me") { _ in "iPad" })
         check(!nobody.isShown && nobody.label == nil && nobody.help("Park") == "Park" && !PaneButton.showsElsewhere(shownElsewhere: nobody.isShown, rowHovered: true), "A session displayed nowhere else keeps normal P and X")
@@ -164,7 +164,30 @@ func workspaceSelfTests(_ check: (Bool, String) -> Void) {
         check(ShownElsewhere.remoteDevice(remoteRow, home: "home", homeName: "Richard-Air", me: "me", name: lookup) == "iPad", "A remote session another viewer holds names that viewer")
         let decoded = try? JSONDecoder().decode(DeviceSidebarRow.self, from: Data(#"{"globalID":"h/x","sessionID":"\#(UUID().uuidString)","title":"T","assistant":"A","engine":"claude","model":"m","effort":"e","access":"a","status":"Ready","busy":false,"queued":0,"queuePaused":false}"#.utf8))
         check(decoded != nil && decoded?.shownOnHome == nil, "Rows from older homes decode without the home display flag")
-        check(PaneButton.showsOpen(available: true, selected: false, stripHovered: true) && !PaneButton.showsOpen(available: true, selected: true, stripHovered: true) && !PaneButton.showsOpen(available: false, selected: false, stripHovered: true) && !PaneButton.showsOpen(available: true, selected: false, stripHovered: false), "Pane 1/2/3 orange logic is unchanged")
+        // The strip's pure visual state, slot by slot.
+        func looks(_ placed: PanePlacement, hovered: Bool, enabled: Bool = true) -> [PaneLook] { [1, 2, 3].map { placed.look(.pane($0), stripHovered: hovered, enabled: enabled) } }
+        let parked = PanePlacement(free: [2, 3])
+        check(looks(parked, hovered: true) == [.plain, .open, .open], "A parked item colours only open panes blue on strip hover; an occupied pane stays plain")
+        check(looks(parked, hovered: false) == [.plain, .plain, .plain], "No pane is coloured until the strip is hovered")
+        let inWindowHere = PanePlacement(localPane: 2, free: [2, 3])
+        check(looks(inWindowHere, hovered: true) == [.plain, .current, .open] && looks(inWindowHere, hovered: false) == [.plain, .current, .plain], "The item's own pane stays green and a move inside this window is blue")
+        let taken = PanePlacement(elsewhere: ShownElsewhere(window: "Research"), free: [1, 3])
+        check(looks(taken, hovered: true) == [.taking, .plain, .taking], "An item in another window colours open panes purple")
+        check(looks(PanePlacement(elsewhere: ShownElsewhere(device: "iPad"), free: [1]), hovered: true)[0] == .taking, "An item homed or shown on another device colours open panes purple")
+        check(looks(PanePlacement(free: [1]), hovered: true)[0] == .open, "A session homed on another device and displayed nowhere goes in blue")
+        check(looks(PanePlacement(localPane: 1, elsewhere: ShownElsewhere(device: "iPad"), free: [2]), hovered: true) == [.current, .open, .plain], "An item already in this window never counts as taken from elsewhere")
+        check(looks(taken, hovered: true, enabled: false) == [.plain, .plain, .plain] && parked.look(.close, stripHovered: true, enabled: false) == .redLetter && taken.look(.close, stripHovered: false, rowHovered: true, enabled: false) == .warning, "Disabled slots ignore strip hover, but a disabled X still warns that the item is shown elsewhere")
+        check(parked.look(.park, stripHovered: false) == .greyed && parked.look(.park, stripHovered: true) == .greyed, "P is grey when the item is in no pane anywhere, hovered or not")
+        check(inWindowHere.look(.park, stripHovered: false) == .plain && inWindowHere.look(.park, stripHovered: true, rowHovered: true) == .plain, "P stays plain when the item is in a pane here")
+        check(taken.look(.park, stripHovered: false) == .plain && taken.look(.park, stripHovered: false, rowHovered: true) == .warning, "P is live for an item shown elsewhere and warns on row hover")
+        check(PanePlacement(elsewhere: ShownElsewhere(device: "iPad")).look(.park, stripHovered: false) == .plain, "P is live for an item shown on another device")
+        check(parked.look(.close, stripHovered: false) == .redLetter && parked.look(.close, stripHovered: true) == .warning, "X is a red letter on white, and white on red while the strip is hovered")
+        check(taken.look(.close, stripHovered: false, rowHovered: true) == .warning && parked.look(.close, stripHovered: false, rowHovered: true) == .redLetter, "Hovering the row alone turns X red only when the item is shown elsewhere")
+        check(PanePlacement(closing: true).look(.close, stripHovered: true) == .closing, "X stays in its confirming state while the close alert is up")
+        check(parked.parkHelp("Park it") == "Not in a pane anywhere, so there is nothing to park." && parked.parkLabel("Notes") == "Notes is already parked" && taken.parkHelp("Park it") == "Shown in Research\nPark it" && taken.parkLabel("Notes") == "Park Notes", "P's tooltip and label say what a click will do")
+        check(parked.paneHelp(2, item: "this session") == "Show this session in pane 2 here." && parked.paneHelp(1, item: "this session") == "Replace what is in pane 1 here with this session.", "Pane tooltips separate an open pane from replacing its occupant")
+        check(inWindowHere.paneHelp(3, item: "this Parking Lot") == "Move this Parking Lot to pane 3 here." && inWindowHere.paneHelp(2, item: "this Parking Lot") == "Already showing in pane 2 here.", "Pane tooltips cover a move inside this window and the current pane")
+        check(taken.paneHelp(1, item: "this session") == "Shown in Research\nShow this session in pane 1 here, taking it from there." && taken.paneValue(1) == "Shown in Research" && inWindowHere.paneValue(2) == "Current pane" && parked.paneValue(2) == "", "Taking from another display says so in the tooltip and to VoiceOver")
     }
     sidebarHoverSelfTests(check)
 }
@@ -223,14 +246,17 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
             let y = host.isFlipped ? local.y : host.bounds.height - local.y
             return bitmap.colorAt(x: Int(local.x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB)
         }
-        // Sample the fill left of the label glyph. Orange and green read lighter here than their nominal fills; white is (1, 1, 1).
+        // Sample the fill left of the label glyph; white is (1, 1, 1). Offscreen, blue reads about (0.36, 0.47, 0.85) and purple (0.53, 0.35, 0.77).
         func fill(_ index: Int) -> NSColor? { color(NSPoint(x: button(index).x - 6, y: button(index).y)) }
-        func orange(_ index: Int) -> Bool { fill(index).map { $0.redComponent > 0.8 && $0.greenComponent > 0.45 && $0.greenComponent < 0.8 && $0.blueComponent < 0.5 } ?? false }
+        func blue(_ index: Int) -> Bool { fill(index).map { $0.blueComponent > 0.7 && $0.redComponent < 0.45 } ?? false }
+        func purple(_ index: Int) -> Bool { fill(index).map { $0.blueComponent > 0.6 && $0.redComponent > 0.45 && $0.greenComponent < 0.45 } ?? false }
         func green(_ index: Int) -> Bool { fill(index).map { $0.greenComponent - $0.redComponent > 0.1 && $0.greenComponent - $0.blueComponent > 0.1 } ?? false }
-        func orangePanes() -> Set<Int> { Set((1...3).filter { orange($0) }) }
-        // Red P/X carry a white label, so sample the fill's corner, clear of the glyph. Offscreen, red reads
-        // about (0.86, 0.47, 0.37) and orange (0.90, 0.67, 0.36): green separates them.
-        func red(_ index: Int) -> Bool { color(NSPoint(x: button(index).x - 7, y: button(index).y - 7)).map { $0.redComponent > 0.75 && $0.greenComponent < 0.56 && $0.blueComponent < 0.5 } ?? false }
+        func bluePanes() -> Set<Int> { Set((1...3).filter { blue($0) }) }
+        func purplePanes() -> Set<Int> { Set((1...3).filter { purple($0) }) }
+        func grey(_ index: Int) -> Bool { fill(index).map { abs($0.redComponent - $0.blueComponent) < 0.03 && $0.redComponent > 0.8 && $0.redComponent < 0.97 } ?? false }
+        func redLetter(_ index: Int) -> Bool { fill(index).map { $0.redComponent > 0.97 && $0.greenComponent > 0.97 } ?? false }
+        // Red P/X carry a white label, so sample the fill's corner, clear of the glyph. Offscreen, red reads about (0.73, 0.33, 0.22).
+        func red(_ index: Int) -> Bool { color(NSPoint(x: button(index).x - 7, y: button(index).y - 7)).map { $0.redComponent > 0.65 && $0.greenComponent < 0.5 && $0.blueComponent < 0.4 } ?? false }
         func snapshot(_ path: String) {
             guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
             host.cacheDisplay(in: host.bounds, to: bitmap)
@@ -246,17 +272,17 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     let local = Harness(SidebarSession(session: session, workspace: workspace, state: state, showsModel: false))
     guard let hover = local.row?.hoverState, local.strip != nil else { check(false, "Sidebar row hosts its card anchor and pane strip tracker"); local.close(); return }
     check(local.tracked == [local.rect(local.row!), local.rect(local.strip!)] && local.rect(local.strip!).width == 98, "The pane strip tracks only its own 98 points, not the whole row")
-    check(local.orangePanes().isEmpty, "No pane is orange before the strip is hovered")
+    check(local.bluePanes().isEmpty && local.grey(0) && local.redLetter(4), "Before hover no pane is coloured, P is grey and X is a red letter on white")
     local.move(to: local.name); settle(0.6)
     check(hover.wantsDetails && local.cards.count == 1 && local.cards.last?.contains("Hover") == true, "Hovering a session's name opens its summary card")
     local.row?.closeDetails(); local.cards = []
     local.move(to: local.button(0))
     check(hover.overButtons && !hover.wantsDetails, "Hovering P suppresses the summary card")
-    check(local.orangePanes() == [2, 3], "Hovering P with only pane 1 occupied shows panes 2 and 3 orange")
+    check(local.bluePanes() == [2, 3] && local.purplePanes().isEmpty && local.red(4) && local.grey(0), "Hovering P with only pane 1 occupied shows panes 2 and 3 blue and X white on red")
     local.move(to: local.button(4)); settle(0.6)
-    check(local.orangePanes() == [2, 3] && local.cards.isEmpty, "Hovering X still shows the free panes and never stacks the card on the buttons")
+    check(local.bluePanes() == [2, 3] && local.cards.isEmpty, "Hovering X still shows the free panes and never stacks the card on the buttons")
     local.move(to: local.name)
-    check(!hover.overButtons && local.orangePanes().isEmpty, "Leaving the strip clears the orange panes")
+    check(!hover.overButtons && local.bluePanes().isEmpty && local.redLetter(4), "Leaving the strip clears the pane colours and restores X")
     settle(0.6)
     check(hover.wantsDetails && local.cards.count == 1, "Moving from the buttons back to the name brings the summary card back")
     local.row?.closeDetails(); local.cards = []
@@ -267,15 +293,15 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     local.row?.closeDetails(); local.cards = []
     workspace.assign(session.id, to: state.id, pane: 2); settle()
     local.move(to: local.button(1))
-    check(local.green(2) && local.orangePanes() == [3], "The session's own pane stays green while the other free pane turns orange")
+    check(local.green(2) && local.bluePanes() == [3] && !local.grey(0), "The session's own pane stays green, the other free pane is blue and P is live")
     workspace.assign(UUID(), to: state.id, pane: 3); workspace.assign(UUID(), to: state.id, pane: 2); settle()
     local.move(to: local.button(2))
-    check(local.orangePanes().isEmpty, "Nothing turns orange when every pane holds another session")
+    check(local.bluePanes().isEmpty && local.purplePanes().isEmpty, "Nothing is coloured when every pane holds another session")
     local.move(to: local.outside)
     check(!hover.inside && !hover.overButtons, "Leaving the row clears all hover state")
     local.close()
 
-    // A session showing in another window: P and X red on row hover, 1/2/3 orange as before.
+    // A session showing in another window: P and X red on row hover, 1/2/3 purple over the strip.
     let elsewhereSpace = Workspace(), elsewhereState = WindowState(workspace: elsewhereSpace), otherWindow = WindowState(workspace: elsewhereSpace)
     let shown = Session(entry: Entry(name: "Elsewhere", command: "claude", directory: "~", engine: "claude"))
     shown.accountStatus = "test"
@@ -286,11 +312,11 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     if let awayHover = away.row?.hoverState, away.strip != nil {
         check(!away.red(0) && !away.red(4), "P and X are not red before the row is hovered")
         away.move(to: away.name)
-        check(awayHover.inside && away.red(0) && away.red(4) && away.orangePanes().isEmpty, "Hovering a row shown in another window turns P and X red, not 1/2/3")
+        check(awayHover.inside && away.red(0) && away.red(4) && away.purplePanes().isEmpty, "Hovering a row shown in another window turns P and X red, not 1/2/3")
         away.move(to: away.button(2))
-        check(away.red(0) && away.red(4) && away.orangePanes() == [2, 3], "Over the strip, free panes still turn orange beside the red P and X")
+        check(away.red(0) && away.red(4) && away.purplePanes() == [2, 3] && away.bluePanes().isEmpty, "Over the strip, free panes turn purple beside the red P and X")
         away.move(to: away.outside)
-        check(!away.red(0) && !away.red(4) && away.orangePanes().isEmpty, "Leaving the row restores P and X")
+        check(!away.red(0) && !away.red(4) && away.purplePanes().isEmpty, "Leaving the row restores P and X")
         away.move(to: away.name)
         check(away.tracked.count == 2 && away.rect(away.strip!).width == 98, "Red P and X never change the strip's layout")
         away.snapshot("/tmp/claude-px-elsewhere.png")
@@ -312,6 +338,22 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     check(homeOnly.row?.hoverState?.inside == true && !homeOnly.red(0) && !homeOnly.red(4), "A row shown nowhere else keeps normal P and X on hover")
     homeOnly.close()
 
+    // The tiles keep their own fixed colours whichever appearance the sidebar is in.
+    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+        let space = Workspace(), window = WindowState(workspace: space), away = WindowState(workspace: space), parked = Session(entry: Entry(name: "Parked", command: "claude", directory: "~", engine: "claude")), taken = Session(entry: Entry(name: "Taken", command: "claude", directory: "~", engine: "claude"))
+        parked.accountStatus = "test"; taken.accountStatus = "test"
+        space.assign(taken.id, to: away.id, pane: 2); space.assign(other, to: window.id, pane: 1)
+        let open = Harness(SidebarSession(session: parked, workspace: space, state: window, showsModel: false)), take = Harness(SidebarSession(session: taken, workspace: space, state: window, showsModel: false))
+        for row in [open, take] { row.window.appearance = NSAppearance(named: appearance); settle() }
+        check(open.grey(0) && open.redLetter(4) && !take.grey(0), "Idle P and X read correctly in " + name + " mode")
+        open.snapshot("/tmp/claude-px-idle-" + name + ".png")
+        open.move(to: open.button(0)); take.move(to: take.button(0))
+        check(open.bluePanes() == [2, 3] && open.red(4), "Blue panes and red X read correctly in " + name + " mode")
+        check(take.purplePanes() == [2, 3] && take.bluePanes().isEmpty, "Purple panes read correctly in " + name + " mode")
+        open.snapshot("/tmp/claude-px-open-" + name + ".png"); take.snapshot("/tmp/claude-px-taking-" + name + ".png")
+        open.close(); take.close()
+    }
+
     let remoteRow = DeviceSidebarRow(globalID: "home/" + UUID().uuidString, sessionID: UUID(), title: "Remote Hover", assistant: "Claude", engine: "claude", model: "m", effort: "e", access: "a", status: "Ready", busy: false, queued: 0, queuePaused: false)
     let remote = Harness(RemoteSidebarRow(row: remoteRow, homeName: "Studio", online: true, showsModel: false, localPane: nil, freePanes: [2, 3], elsewhere: ShownElsewhere(device: "Studio"), park: {}, assign: { _ in }))
     guard let remoteHover = remote.row?.hoverState, remote.strip != nil else { check(false, "Remote sidebar row hosts its card anchor and pane strip tracker"); remote.close(); return }
@@ -319,9 +361,9 @@ func sidebarHoverSelfTests(_ check: (Bool, String) -> Void) {
     check(remoteHover.wantsDetails && remote.cards.last?.contains("Remote Hover") == true, "Hovering a remote session's name opens its summary card")
     remote.row?.closeDetails(); remote.cards = []
     remote.move(to: remote.button(3)); settle(0.6)
-    check(remote.orangePanes() == [2, 3] && remote.cards.isEmpty, "Hovering a remote row's strip shows its free panes orange without the card")
+    check(remote.purplePanes() == [2, 3] && remote.cards.isEmpty, "Hovering a remote row's strip shows its free panes purple without the card")
     remote.move(to: remote.name); settle(0.6)
-    check(remote.orangePanes().isEmpty && remote.cards.count == 1, "Leaving a remote row's strip restores its name card")
+    check(remote.purplePanes().isEmpty && remote.cards.count == 1, "Leaving a remote row's strip restores its name card")
     check(remote.red(0) && remote.red(4), "A hovered remote row shown on its home turns P and X red")
     remote.move(to: remote.outside)
     check(!remote.red(0) && !remote.red(4), "Leaving a remote row restores P and X")

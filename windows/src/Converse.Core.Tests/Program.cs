@@ -278,6 +278,27 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && commands.BindingMatches(id, "device-a", "s1", boundBytes) && !commands.BindingMatches(id, "device-a", "s2", boundBytes) && !commands.BindingMatches(id, "device-b", "s1", boundBytes), "Dedup binds origin session hash");
         commands.MarkRunning(id);
         Check(new DeviceCommandStore(root).Outcome(id) == "uncertain", "Running command recovers as uncertain");
+        // Overlapping connections can deliver one command at the same moment.
+        var raceRoot = Path.Combine(root, "race");
+        var raced = new DeviceCommandStore(raceRoot);
+        var racedWinners = 0;
+        var distinctIds = Enumerable.Range(0, 64).Select(_ => Guid.NewGuid()).ToList();
+        for (var round = 0; round < 200; round++)
+        {
+            var shared = Guid.NewGuid();
+            using var start = new Barrier(8);
+            var winners = 0;
+            var racers = Enumerable.Range(0, 8).Select(_ => Task.Factory.StartNew(() =>
+            {
+                start.SignalAndWait();
+                if (raced.Begin(shared, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme)) Interlocked.Increment(ref winners);
+            }, TaskCreationOptions.LongRunning)).ToArray();
+            Task.WaitAll(racers);
+            if (winners == 1) racedWinners++;
+        }
+        Check(racedWinners == 200, "Concurrent Begin calls for one command admit exactly one winner");
+        Parallel.ForEach(distinctIds, new ParallelOptions { MaxDegreeOfParallelism = 8 }, commandId => raced.Begin(commandId, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme));
+        Check(distinctIds.All(new DeviceCommandStore(raceRoot).Records.ContainsKey), "Concurrent Begin calls persist every distinct command");
         var outbox = new DeviceOutboxStore(root);
         var record = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = "home/s", Payload = new DeviceCommandPayload { Action = "submit", Text = "keep me" }, PayloadHash = "h", Epoch = 4 };
         outbox.Add(record);
@@ -1092,6 +1113,9 @@ MdnsChecks.RunGroupDevices(Check);
         "Help search ranks title hits before body-only hits");
     var rejected = false;
     try { HelpDocument.Load("{\"schemaVersion\":99,\"topics\":[]}"); } catch (InvalidDataException) { rejected = true; }
+    Check(HelpDocument.RenderPlain("![pic](a.png)See [docs](https://x.example/a(1)) now.") == "See docs now.", "Help plain text removes images before link labels, with parentheses");
+    Check(HelpDocument.RenderPlain("# Title\n**bold** and *italic* and `code`\n* item\n2*3*4") == "Title\nbold and italic and code\n* item\n2*3*4", "Help plain text removes single-star emphasis but keeps list bullets and arithmetic");
+    Check(new HelpDocument { SourceCommit = "abc123" }.SourceCommitSuffix == " @abc123" && new HelpDocument { SourceCommit = "unknown" }.SourceCommitSuffix == "" && new HelpDocument { SourceCommit = "" }.SourceCommitSuffix == "", "Help hides a source revision the build could not determine");
     Check(rejected, "Help loader rejects unsupported schema versions");
     // Generated artifact, when present next to the test runner or in the app Assets, must load.
     var candidates = new[]
@@ -2543,6 +2567,20 @@ await CheckGroupLeave();
     Check(angled.Count == 1 && angled[0].Path == "C:/pics/my cat.png", "Angle-bracket path with spaces parses");
     var fenced = ResponseImages.ParseFileRefs("```\n![no](/tmp/no.png)\n```\n> ![q](/tmp/q.png)\n`![c](/tmp/c.png)`\n\\![e](/tmp/e.png)");
     Check(fenced.Count == 0, "Fenced, quoted, inline-code, and escaped refs stay text");
+    const string shot = "![x](/tmp/shot(1).png)";
+    var balanced = ResponseImages.ParseFileRefs(shot);
+    Check(balanced.Count == 1 && balanced[0].Path == "/tmp/shot(1).png" && balanced[0].Start == 0 && balanced[0].Length == shot.Length, "Image paths keep balanced parentheses");
+    var nestedParens = ResponseImages.ParseFileRefs("![x](/tmp/a(b(c))(d).png) ![y](/tmp/y.png)");
+    Check(nestedParens.Count == 2 && nestedParens[0].Path == "/tmp/a(b(c))(d).png" && nestedParens[1].Path == "/tmp/y.png", "Nested parentheses end at the image's own closer and the next image still parses");
+    Check(ResponseImages.ParseWebRefs("![w](https://example.com/w_(1).png)").Single().Url == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses");
+    var unbalanced = ResponseImages.ParseFileRefs("![x](/tmp/a(b.png) and more)");
+    Check(unbalanced.Count == 1 && unbalanced[0].Path == "/tmp/a(b.png" && unbalanced[0].Length == "![x](/tmp/a(b.png)".Length, "An unbalanced parenthesis keeps the original first-closer match");
+    var overlong = "![x](/tmp/a(" + new string('b', 5000) + ").png)";
+    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 5000), "A target past the bound is not extended");
+    var hostile = string.Concat(Enumerable.Repeat("![x](/tmp/a()", 20000));
+    var hostileClock = System.Diagnostics.Stopwatch.StartNew();
+    var hostileRefs = ResponseImages.ParseFileRefs(hostile);
+    Check(hostileRefs.Count == ResponseImages.MaxImages && hostileClock.ElapsedMilliseconds < 2000, "Repeated open parentheses stay bounded");
     var web = ResponseImages.ParseFileRefs("![w](https://example.com/a.png)");
     Check(web.Count == 0 && ResponseImages.ParseWebRefs("![w](https://example.com/a.png)").Count == 1,
         "HTTPS refs route to the web parser, not the file parser");

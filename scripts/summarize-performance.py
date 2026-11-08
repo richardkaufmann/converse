@@ -31,7 +31,7 @@ def summarize(capture):
         start = end - stall["milliseconds"] / 1000
         overlapping = set()
         for event in events:
-            if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "sessionScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "lotAckSendFailed") or not event["mainThread"]:
+            if event["operation"] in ("mainQueueDelay", "keyDelivery", "lotKeyDelivery", "lotScrollDelivery", "sessionScrollDelivery", "dragDelivery", "dragFrameWait", "resizeDraw", "lotEditToAckProcessed", "groupMapApply", "lotAckSendFailed") or not event["mainThread"]:
                 continue
             event_start = event["uptime"] - event["milliseconds"] / 1000
             if event_start < end and event["uptime"] > start:
