@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Group</title>
+<link rel="stylesheet" href="group-map.css">
+</head>
+<body>
+<header id="bar">
+  <strong id="title">Group</strong>
+  <span id="summary"></span>
+  <ul id="legend" aria-label="Message states"></ul>
+  <span class="spacer"></span>
+  <button id="mesh" type="button" aria-pressed="true">Permissions</button>
+  <button id="fit" type="button">Fit</button>
+</header>
+<main id="stage">
+  <svg id="canvas" role="group" aria-label="Group sessions and agents by device">
+    <defs>
+      <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z"/></marker>
+    </defs>
+    <g id="root">
+      <g id="devices"></g>
+      <g id="edges"></g>
+      <g id="flows"></g>
+      <g id="pulses"></g>
+      <g id="nodes"></g>
+    </g>
+  </svg>
+  <p id="empty" hidden>No sessions to show yet.</p>
+  <div id="tip" role="tooltip" hidden></div>
+  <aside id="detail" hidden aria-label="Selected item"></aside>
+</main>
+<div id="announce" class="sr-only" aria-live="polite"></div>
+<script src="d3.v7.9.0.min.js"></script>
+<script src="group-map.js"></script>
+</body>
+</html>

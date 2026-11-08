@@ -113,6 +113,11 @@ with `CONVERSE_DATA_DIR` set, types into synthetic 130- and 500-row lots in the 
 pane and prints each stage's cost per keystroke; `CONVERSE_LOT_PROFILE_KEYS` and
 `CONVERSE_LOT_PROFILE_PAUSE` lengthen a run so a sampler can attach.
 
+View → Group records `groupMapCapture` (its bounded Store snapshot on the main
+thread), `groupMapBuild` (graph, diff and encode on a worker) and `groupMapApply`
+(the asynchronous round trip into the page, excluded from the summarizers' blocking
+list). None of them runs while the window is closed or hidden.
+
 To measure the delay a person sees on iPad, also instrument its local edit/queue,
 send-to-matching-ack interval, and acknowledgment-to-visible-update interval.
 Match acknowledgment IDs locally without recording lot contents. Calculate each

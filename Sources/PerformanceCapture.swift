@@ -16,6 +16,8 @@ final class PerformanceCapture {
         case lotSubstitution, lotProjectionEdit, lotRowsCommit, lotValidate, lotNormalize, lotSnapshotCheck
         case lotEncodeWrite, lotUndoRegister, lotPublish, lotSeenWrite, lotRender, lotProjectionBuild
         case lotAttributes, lotStorageApply, lotSelection, lotCommentButtons, lotImageSpacing, lotScrollVisible, lotDraw
+        // View → Group: Store capture on main, worker build, page apply round trip.
+        case groupMapCapture, groupMapBuild, groupMapApply
     }
     struct Span { let start: Double; let generation: Int; let mainThread: Bool }
     struct Event: Codable {
