@@ -278,6 +278,16 @@ public sealed class DeviceDraftTracker
     }
 }
 
+// A data folder override is a separate profile, so its saved keys live under
+// their own vault resource: a test run can neither read nor replace real ones.
+public static class CredentialScope
+{
+    public static string Resource(string resource, string? dataFolder) =>
+        string.IsNullOrWhiteSpace(dataFolder) ? resource
+        : resource + "." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(dataFolder).ToUpperInvariant())));
+}
+
 internal static class AtomicJson
 {
     // Concurrent saves of one store share a .tmp path; Windows rejects that as a sharing violation.

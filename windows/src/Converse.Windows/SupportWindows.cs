@@ -20,7 +20,7 @@ internal static class SetupPreview
 #endif
     public static string Name => Demo ? "Converse Demo" : "Converse Setup Preview";
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Name);
-    public static string CredentialResource => Demo ? "Converse.Demo.Agent" : Enabled ? "Converse.SetupPreview.Agent" : "Converse.Agent";
+    public static string CredentialResource => Demo ? "Converse.Demo.Agent" : Enabled ? "Converse.SetupPreview.Agent" : CredentialScope.Resource("Converse.Agent", Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR"));
     public static void Initialize()
     {
         if (Enabled) Environment.SetEnvironmentVariable("CONVERSE_DATA_DIR", Folder);
