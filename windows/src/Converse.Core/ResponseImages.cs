@@ -19,6 +19,40 @@ public static class ResponseImages
         @"!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s\)]+))\s*\)",
         RegexOptions.Compiled);
 
+    private const int MaxTargetLength = 4096;
+
+    // A bare target ends at its first ')'. If that leaves a '(' open, the
+    // parenthesis is part of the path: scan to the balancing ')' within the
+    // target's bound. Stopping at the next "![" keeps a whole line linear.
+    // No balancing ')' leaves the original match unchanged.
+    private static (string Target, int Length) BalancedTarget(string line, Match match)
+    {
+        if (match.Groups[2].Success) return (match.Groups[2].Value, match.Length);
+        var group = match.Groups[3];
+        var depth = group.ValueSpan.Count('(');
+        if (depth == 0) return (group.Value, match.Length);
+        var limit = Math.Min(line.Length, group.Index + MaxTargetLength);
+        for (var i = group.Index + group.Length; i < limit; i++)
+        {
+            var c = line[i];
+            if (c == '!' && i + 1 < line.Length && line[i + 1] == '[') break;
+            if (char.IsWhiteSpace(c))
+            {
+                var next = i;
+                while (next < limit && char.IsWhiteSpace(line[next])) next++;
+                if (depth == 0 && next < limit && line[next] == ')') return (line[group.Index..i], next + 1 - match.Index);
+                break;
+            }
+            if (c == '(') depth++;
+            else if (c == ')')
+            {
+                if (depth == 0) return (line[group.Index..i], i + 1 - match.Index);
+                depth--;
+            }
+        }
+        return (group.Value, match.Length);
+    }
+
     private static readonly Regex DriveRooted = new(@"^[A-Za-z]:[\\/]", RegexOptions.Compiled);
 
     private static readonly byte[] PngSignature = { 137, 80, 78, 71, 13, 10, 26, 10 };
@@ -48,9 +82,9 @@ public static class ResponseImages
             {
                 if (found.Count >= MaxImages) break;
                 if (match.Index > 0 && line[match.Index - 1] == '\\') continue;
-                var target = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
+                var (target, length) = BalancedTarget(line, match);
                 if (!IsFileRef(target)) continue;
-                found.Add((lineStart + match.Index, match.Length, match.Groups[1].Value, target));
+                found.Add((lineStart + match.Index, length, match.Groups[1].Value, target));
             }
         }
         return found;
@@ -79,9 +113,9 @@ public static class ResponseImages
             {
                 if (found.Count >= MaxImages) break;
                 if (match.Index > 0 && line[match.Index - 1] == '\\') continue;
-                var target = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
+                var (target, length) = BalancedTarget(line, match);
                 if (!target.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) continue;
-                found.Add((lineStart + match.Index, match.Length, match.Groups[1].Value, target));
+                found.Add((lineStart + match.Index, length, match.Groups[1].Value, target));
             }
         }
         return found;

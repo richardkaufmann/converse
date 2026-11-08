@@ -321,7 +321,7 @@ public sealed partial class MainWindow : Window
                 ? "Converse (development build: no generated Help artifact bundled)."
                 : $"Converse {_help.AppVersion}"
                   + (_help.AppBuild.Length > 0 ? $" ({_help.AppBuild})" : "")
-                  + $" · source {_help.SourceCommit}",
+                  + (_help.SourceCommitSuffix.Length > 0 ? " · source " + _help.SourceCommit : ""),
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap,
         });
@@ -377,10 +377,10 @@ public sealed partial class MainWindow : Window
             Text = help is null
                 ? "Help content is generated at build time from README.md (scripts/build-help.py); this build does not include it yet."
                 : $"Converse Help · version {help.AppVersion}" + (help.AppBuild.Length > 0 ? $" ({help.AppBuild})" : "")
-                  + $" · source {help.Source} @{help.SourceCommit}",
+                  + $" · source {help.Source}{help.SourceCommitSuffix}",
             TextWrapping = TextWrapping.Wrap,
         };
-        void ShowTopic(HelpTopic? topic) => body.Text = topic is null ? "" : RenderMarkdownPlain(topic.Markdown);
+        void ShowTopic(HelpTopic? topic) => body.Text = topic is null ? "" : HelpDocument.RenderPlain(topic.Markdown);
         void Refill()
         {
             var results = help?.Search(search.Text) ?? Array.Empty<HelpTopic>();
@@ -394,7 +394,8 @@ public sealed partial class MainWindow : Window
             if (topics.SelectedIndex >= 0 && topics.SelectedIndex < results.Count) ShowTopic(results[topics.SelectedIndex]);
         };
         Refill();
-        var panel = new StackPanel { Spacing = 8, Width = 640 };
+        // ContentDialog limits content to 548 less 24 padding each side; wider clips the text.
+        var panel = new StackPanel { Spacing = 8, Width = 500 };
         panel.Children.Add(version);
         panel.Children.Add(search);
         panel.Children.Add(topics);
@@ -407,18 +408,6 @@ public sealed partial class MainWindow : Window
             XamlRoot = Content.XamlRoot,
         };
         await dialog.ShowAsync();
-    }
-
-
-    // Minimal native rendering adapter for the shared markdown subset:
-    // keep paragraph structure, drop emphasis/code markers, links become labels.
-    private static string RenderMarkdownPlain(string markdown)
-    {
-        var text = System.Text.RegularExpressions.Regex.Replace(markdown, @"\[([^\]]+)\]\([^)]*\)", "$1");
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"!\[[^\]]*\]\([^)]*\)", "");
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"^#{1,6}\s*", "",
-            System.Text.RegularExpressions.RegexOptions.Multiline);
-        return text.Replace("**", "").Replace("`", "").Trim();
     }
 
 
