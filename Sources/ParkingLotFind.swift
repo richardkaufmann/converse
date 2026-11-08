@@ -6,7 +6,7 @@ import SwiftUI
 // sections are searched too, and replacing is an ordinary user edit of the rows.
 enum ParkingLotFind {
     struct Match: Equatable { var row: UUID; var range: NSRange }
-    /// Matches in visible text only; hidden link syntax never matches.
+    /// Matches in visible text only; hidden link syntax and emphasis markers never match.
     static func matches(_ query: String, in rows: [ParkingLotRow], caseSensitive: Bool = false) -> [Match] {
         guard !query.isEmpty else { return [] }
         var results: [Match] = []
@@ -30,7 +30,7 @@ enum ParkingLotFind {
         LotLinks.find(in: text).filter(\.isMarkdown).flatMap { link -> [NSRange] in
             [NSRange(location: link.range.location, length: link.label.location - link.range.location),
              NSRange(location: NSMaxRange(link.label), length: NSMaxRange(link.range) - NSMaxRange(link.label))]
-        }
+        } + (TextSubstitutions.shared.enabled ? LotInline.delimiters(in: text) : [])
     }
     static func replacing(_ targets: [Match], with replacement: String, in rows: [ParkingLotRow]) -> [ParkingLotRow] {
         let byRow = Dictionary(grouping: targets, by: \.row)

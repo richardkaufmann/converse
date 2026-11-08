@@ -233,7 +233,11 @@ struct ParkingLotEditor: NSViewRepresentable {
         context.coordinator.parent = self
         finder.editor = context.coordinator
         if changedLot { context.coordinator.text?.configureTextScaling(); context.coordinator.observeLot() }
+        // Find's published matches refresh after SwiftUI finishes this update.
+        context.coordinator.deferFindRefresh = true
         context.coordinator.render()
+        context.coordinator.deferFindRefresh = false
+        DispatchQueue.main.async { finder.editorRendered() }
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ParkingLotEditor
@@ -243,6 +247,7 @@ struct ParkingLotEditor: NSViewRepresentable {
         var displayed: ParkingLotDocument?
         var displayedCollapsed: Set<UUID> = []
         var rendering = false
+        var deferFindRefresh = false
         init(_ parent: ParkingLotEditor) { self.parent = parent; super.init(); parent.finder.editor = self }
         private var lotObserver: AnyCancellable?
         private var renderQueued = false
@@ -310,7 +315,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             text.updateCommentButtons()
             text.needsDisplay = true
             if caret != nil { capture.measure(.lotScrollVisible) { text.scrollRangeToVisible(text.selectedRange()) } }
-            parent.finder.editorRendered()
+            if !deferFindRefresh { parent.finder.editorRendered() }
         }
         /// The styled text of `entries`, whose rows and separators fill `range` of the display.
         private func styled(_ entries: ArraySlice<ParkingOutline.Entry>, in range: NSRange, width: CGFloat, standard: NSParagraphStyle) -> NSMutableAttributedString {
@@ -349,7 +354,8 @@ struct ParkingLotEditor: NSViewRepresentable {
         static let hiddenFont = NSFont.systemFont(ofSize: 0.01)
         func styleLinks(_ storage: NSMutableAttributedString, _ entry: ParkingOutline.Entry) {
             let links = LotLinks.find(in: entry.row.text)
-            guard !links.isEmpty else { return }
+            let spans = TextSubstitutions.shared.enabled ? LotInline.spans(in: entry.row.text) : []
+            guard !links.isEmpty || !spans.isEmpty else { return }
             storage.addAttributes([.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize),
                                    .foregroundColor: ParkingOutlineText.color(for: entry.row)], range: entry.range)
             storage.removeAttribute(.link, range: entry.range); storage.removeAttribute(.toolTip, range: entry.range)
@@ -361,6 +367,22 @@ struct ParkingLotEditor: NSViewRepresentable {
                 guard link.isMarkdown else { continue }
                 let opening = NSRange(location: entry.range.location + link.range.location, length: 1)
                 let closing = NSRange(location: NSMaxRange(label), length: NSMaxRange(link.range) - link.label.location - link.label.length)
+                for syntax in [opening, closing] { storage.addAttributes([.font: Self.hiddenFont, .foregroundColor: NSColor.clear], range: syntax) }
+            }
+            // Like a bare link, finished emphasis converts once the caret is past
+            // its word and stays literal while the caret is inside it.
+            for span in spans {
+                if let caret, caret >= span.range.location, caret <= LotInline.tokenEnd(span, in: entry.row.text) { continue }
+                let content = NSRange(location: entry.range.location + span.content.location, length: span.content.length)
+                storage.enumerateAttribute(.font, in: content) { value, run, _ in
+                    guard let font = value as? NSFont, font.pointSize >= 1 else { return }
+                    var styled = font
+                    if span.bold { styled = NSFontManager.shared.convert(styled, toHaveTrait: .boldFontMask) }
+                    if span.italic { styled = NSFontManager.shared.convert(styled, toHaveTrait: .italicFontMask) }
+                    storage.addAttribute(.font, value: styled, range: run)
+                }
+                let opening = NSRange(location: entry.range.location + span.range.location, length: span.marker)
+                let closing = NSRange(location: NSMaxRange(content), length: span.marker)
                 for syntax in [opening, closing] { storage.addAttributes([.font: Self.hiddenFont, .foregroundColor: NSColor.clear], range: syntax) }
             }
         }
@@ -478,6 +500,34 @@ struct ParkingLotEditor: NSViewRepresentable {
                 parent.collapsed.remove(projection.entries[index].row.id)
             }
             save(edit.rows, expected: displayed, caret: (edit.caretID, edit.caretOffset)); return false
+        }
+        /// Toggles emphasis on each selected row's text as one edit.
+        func toggleInline(_ style: LotInline.Style, in selection: NSRange) {
+            let document = parent.lot.document
+            guard canEditText, let textView = text else { NSSound.beep(); return }
+            let touched: [(entry: ParkingOutline.Entry, part: NSRange)] = projection.entries.compactMap { entry in
+                guard !entry.placeholder else { return nil }
+                if selection.length == 0 {
+                    guard selection.location >= entry.range.location, selection.location <= NSMaxRange(entry.range) else { return nil }
+                    return (entry, NSRange(location: selection.location - entry.range.location, length: 0))
+                }
+                let overlap = NSIntersectionRange(selection, entry.range)
+                return overlap.length > 0 ? (entry, NSRange(location: overlap.location - entry.range.location, length: overlap.length)) : nil
+            }
+            guard !touched.isEmpty else { NSSound.beep(); return }
+            let on = !touched.allSatisfy { LotInline.isActive(style, in: $0.entry.row.text, selection: $0.part) }
+            var rows = document.rows, caret: (UUID, Int)?, kept: NSRange?
+            for (entry, part) in touched {
+                guard let index = rows.firstIndex(where: { $0.id == entry.row.id }) else { continue }
+                let result = LotInline.toggling(style, in: rows[index].text, selection: part, on: on)
+                rows[index].text = result.text; rows[index].editedBy = nil
+                caret = (entry.row.id, result.selection.location)
+                if touched.count == 1, result.selection.length > 0 { kept = result.selection }
+            }
+            save(rows, expected: document, caret: caret, undoName: style == .bold ? "Bold" : "Italic")
+            if let kept, let id = caret?.0, let entry = projection.entries.first(where: { $0.row.id == id }) {
+                textView.setSelectedRange(NSRange(location: entry.range.location + kept.location, length: kept.length))
+            }
         }
         func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil, undoName: String? = nil) {
             do {
@@ -816,6 +866,19 @@ final class ParkingOutlineText: NSTextView {
         defer { PerformanceCapture.shared.end(.lotTextInsertion, measurement) }
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
+        // A space finishing **markup** counts as a substitution for Undo and the feedback button.
+        if typedSpace, let owner, let index = owner.projection.index(at: selectedRange().location),
+           LotInline.completes(in: owner.projection.entries[index].row.text, at: selectedRange().location - owner.projection.entries[index].range.location) {
+            owner.parent.lot.substitutionFeedback.converted()
+            guard TextSubstitutions.shared.enabled else { super.insertText(value, replacementRange: replacementRange); return }
+            undoManager?.beginUndoGrouping()
+            super.insertText(value, replacementRange: replacementRange)
+            undoManager?.setActionName(TextSubstitutions.undoName)
+            undoManager?.endUndoGrouping()
+            immediateSubstitution = rowCaret()
+            owner.refreshLinks()
+            return
+        }
         super.insertText(value, replacementRange: replacementRange)
         guard typedSpace, let owner, let match = PerformanceCapture.shared.measure(.lotSubstitution, { TextSubstitutions.match(in: string, caret: selectedRange().location) }) else { return }
         owner.parent.lot.substitutionFeedback.converted()
@@ -857,6 +920,8 @@ final class ParkingOutlineText: NSTextView {
         }
         super.deleteBackward(sender)
     }
+    @objc func toggleBold(_ sender: Any?) { owner?.toggleInline(.bold, in: selectedRange()) }
+    @objc func toggleItalic(_ sender: Any?) { owner?.toggleInline(.italic, in: selectedRange()) }
     override func performTextFinderAction(_ sender: Any?) {
         let tag = (sender as? NSMenuItem)?.tag ?? (sender as? NSControl)?.tag ?? 0
         guard let finder = owner?.parent.finder, let action = NSTextFinder.Action(rawValue: tag) else { return }
@@ -916,8 +981,50 @@ final class ParkingOutlineText: NSTextView {
         let markdown = owner.projection.markdown(selectedRange()), plain = Self.labels(markdown)
         board.clearContents(); board.setString(plain, forType: .string)
         if plain != markdown { board.setString(markdown, forType: Self.markdownType) }
+        if let rich = Self.richText(plain) { board.setData(rich, forType: .rtf) }
     }
     static let markdownType = NSPasteboard.PasteboardType("app.converse.parking-markdown")
+    /// RTF for pasting elsewhere, showing Markdown emphasis as real bold and
+    /// italic. Plain text keeps the Markdown; nil when there is no emphasis.
+    static func richText(_ markdown: String) -> Data? {
+        let spans = LotInline.spans(in: markdown)
+        guard !spans.isEmpty else { return nil }
+        let source = markdown as NSString, result = NSMutableAttributedString()
+        let body = NSFont.systemFont(ofSize: 13)
+        func add(_ text: String, _ font: NSFont) { result.append(NSAttributedString(string: text, attributes: [.font: font])) }
+        var cursor = 0
+        for span in spans {
+            add(source.substring(with: NSRange(location: cursor, length: span.range.location - cursor)), body)
+            var font = body
+            if span.bold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
+            if span.italic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
+            add(source.substring(with: span.content), font)
+            cursor = NSMaxRange(span.range)
+        }
+        add(source.substring(from: cursor), body)
+        return try? result.data(from: NSRange(location: 0, length: result.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+    /// Markdown for rich text pasted from another app; nil when it has no bold or italic.
+    static func markdown(fromRTF data: Data) -> String? {
+        guard let rich = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) else { return nil }
+        var output = "", found = false
+        rich.enumerateAttribute(.font, in: NSRange(location: 0, length: rich.length)) { value, range, _ in
+            let text = (rich.string as NSString).substring(with: range)
+            let traits = (value as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
+            let stars = (traits.contains(.boldFontMask) ? 2 : 0) + (traits.contains(.italicFontMask) ? 1 : 0)
+            guard stars > 0 else { output += text; return }
+            // Whitespace stays outside the markers, line by line.
+            output += text.components(separatedBy: "\n").map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return line }
+                found = true
+                let lead = String(line.prefix { $0 == " " }), tail = String(String(line.reversed()).prefix { $0 == " " })
+                let marker = String(repeating: "*", count: stars)
+                return lead + marker + trimmed + marker + tail
+            }.joined(separator: "\n")
+        }
+        return found ? output : nil
+    }
     static func labels(_ text: String) -> String {
         let source = NSMutableString(string: text)
         for link in LotLinks.find(in: text).reversed() where link.isMarkdown {
@@ -972,7 +1079,8 @@ final class ParkingOutlineText: NSTextView {
             } catch { owner.parent.lot.error = error.localizedDescription }
             return
         }
-        if let value = board.string(forType: Self.markdownType) ?? board.string(forType: .string) {
+        let imported = board.data(forType: .rtf).flatMap(Self.markdown(fromRTF:))
+        if let value = board.string(forType: Self.markdownType) ?? imported ?? board.string(forType: .string) {
             insertText(value, replacementRange: selectedRange())
             if !LotLinks.find(in: value).isEmpty { owner.refreshLinks(settle: true) }
         }
@@ -1338,6 +1446,96 @@ private func parkingHeadingLayoutSelfTests(_ check: (Bool, String) -> Void) {
     window.close()
 }
 
+/// Bold and italic: toggling, conversion, undo and clipboard flavors.
+private func parkingInlineSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-inline-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shared = TextSubstitutions.shared, wasEnabled = shared.enabled
+    defer { try? shared.setEnabled(wasEnabled) }
+    try? shared.setEnabled(true)
+    let lot = ParkingLotStore(folder: folder.appendingPathComponent("lot"), id: UUID())
+    let h = ParkingLotRow(heading: true, text: "Notes"), a = ParkingLotRow(heading: false, text: "alpha beta", parentID: h.id), b = ParkingLotRow(heading: false, text: "gamma", parentID: h.id)
+    lot.openStarter([h, a, b])
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+    text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    window.contentView = text; coordinator.render(); window.makeFirstResponder(text)
+    func entry(_ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func row(_ id: UUID) -> String { lot.document.rows.first { $0.id == id }!.text }
+    func place(_ id: UUID, _ offset: Int, _ length: Int = 0) { text.setSelectedRange(NSRange(location: entry(id).range.location + offset, length: length)) }
+    func font(_ id: UUID, _ offset: Int) -> NSFont? { text.textStorage?.attribute(.font, at: entry(id).range.location + offset, effectiveRange: nil) as? NSFont }
+    func hidden(_ id: UUID, _ offset: Int) -> Bool { (font(id, offset)?.pointSize ?? 13) < 1 }
+    func bold(_ id: UUID, _ offset: Int) -> Bool { font(id, offset).map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } ?? false }
+    func italic(_ id: UUID, _ offset: Int) -> Bool { font(id, offset).map { NSFontManager.shared.traits(of: $0).contains(.italicFontMask) } ?? false }
+    func matches(_ step: String) {
+        let incremental = ParkingLotRenderSignature(text, coordinator)
+        coordinator.discardDisplayedState(); coordinator.render()
+        check(incremental == ParkingLotRenderSignature(text, coordinator), "Incremental display equals a full render after: " + step)
+    }
+    place(a.id, 0, 5); text.toggleBold(nil)
+    check(row(a.id) == "**alpha** beta" && text.selectedRange() == NSRange(location: entry(a.id).range.location + 2, length: 5) && lot.undoManager.undoActionName == "Bold", "Command-B wraps the selection and keeps it selected")
+    matches("toggling bold")
+    place(b.id, 0); coordinator.refreshLinks()
+    check(hidden(a.id, 0) && bold(a.id, 2) && hidden(a.id, 7) && !bold(a.id, 10) && row(a.id) == "**alpha** beta", "Away from the caret, markers hide and the word is bold, with the text unchanged")
+    place(a.id, 9); coordinator.refreshLinks()
+    check(!hidden(a.id, 0) && !bold(a.id, 2), "With the caret touching the span it shows literally for editing")
+    place(a.id, 12); coordinator.refreshLinks()
+    check(hidden(a.id, 0) && bold(a.id, 2), "Past its word, the span converts again")
+    place(a.id, 12); text.toggleItalic(nil)
+    check(row(a.id) == "**alpha** *beta*" && text.selectedRange().length == 0, "Command-I at a caret styles the word and keeps a caret")
+    place(b.id, 0); coordinator.refreshLinks()
+    check(italic(a.id, 11) && !bold(a.id, 11), "Italic styles only its own word")
+    matches("toggling italic at a caret")
+    text.undo(nil); text.undo(nil)
+    check(row(a.id) == "alpha beta" && lot.undoManager.canRedo, "Undo reverses each style change")
+    text.redo(nil); text.redo(nil)
+    check(row(a.id) == "**alpha** *beta*", "Redo reapplies them")
+    text.undo(nil)
+    place(a.id, 2, 5); text.toggleBold(nil)
+    check(row(a.id) == "alpha beta", "Command-B on styled text removes the style")
+    text.undo(nil); text.undo(nil)
+    // Typing markup converts at the trailing space, with substitution feedback and Undo.
+    lot.update(b.id, text: "see "); coordinator.render(caret: (b.id, 4))
+    for key in "**done**" { text.insertText(String(key), replacementRange: text.selectedRange()) }
+    check(row(b.id) == "see **done**" && !hidden(b.id, 4) && !bold(b.id, 6), "Finished markup stays literal while the caret is at its end")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    check(row(b.id) == "see **done** " && hidden(b.id, 4) && bold(b.id, 6) && lot.substitutionFeedback.offersDisable(shared), "A trailing space converts the markup and offers the substitutions control")
+    check(lot.undoManager.undoActionName == TextSubstitutions.undoName, "The converting space is a Text Substitution step in Undo")
+    text.undo(nil)
+    check(row(b.id) == "see **done**" && !hidden(b.id, 4) && lot.substitutionFeedback.offersDisable(shared), "Undo removes the space and shows the markup literally again")
+    text.insertText(" ", replacementRange: text.selectedRange()); text.deleteBackward(nil)
+    check(row(b.id) == "see **done**", "Immediate Backspace undoes the conversion too")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    try? shared.setEnabled(false); coordinator.discardDisplayedState(); coordinator.render()
+    check(!hidden(b.id, 4) && !bold(b.id, 6), "With substitutions off, markup stays literal")
+    try? shared.setEnabled(true); coordinator.discardDisplayedState(); coordinator.render()
+    // Clipboard: Markdown stays in plain text and the Lot; RTF carries real styling.
+    lot.update(b.id, text: "see **done** and *soon*"); coordinator.render(caret: (h.id, 0))
+    place(b.id, 0, (row(b.id) as NSString).length)
+    let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+    text.copySelection(to: board)
+    check(board.string(forType: .string) == "see **done** and *soon*" && board.data(forType: .rtf) != nil, "Copy keeps Markdown as plain text and adds rich text")
+    let rich = board.data(forType: .rtf).flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+    if let rich, let range = rich.string.range(of: "done") {
+        let at = NSRange(range, in: rich.string).location
+        check(rich.string == "see done and soon" && (rich.attribute(.font, at: at, effectiveRange: nil) as? NSFont).map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } == true, "Rich text shows real bold without markers")
+    } else { check(false, "Copied rich text decodes") }
+    check(ParkingOutlineText.markdown(fromRTF: board.data(forType: .rtf)!) == "see **done** and *soon*", "Rich text converts back to Markdown when pasted here")
+    let plainRich = NSAttributedString(string: "plain words", attributes: [.font: NSFont.systemFont(ofSize: 13)])
+    check(ParkingOutlineText.markdown(fromRTF: try! plainRich.data(from: NSRange(location: 0, length: 11), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])) == nil, "Rich text without emphasis pastes as its plain text")
+    place(b.id, (row(b.id) as NSString).length); text.paste(from: board)
+    check(row(b.id) == "see **done** and *soon*see **done** and *soon*", "Pasting copied emphasis back keeps it")
+    text.undo(nil)
+    let exported = ExportSession(lot: lot)
+    let html = try? TranscriptExport.html(sessions: [exported], order: .sequential, content: .prompts, lineNumbers: false)
+    check(html?.contains("<strong>done</strong>") == true && html?.contains("<em>soon</em>") == true, "HTML export renders bold and italic")
+    check(ParkingLotStore.markdown(lot.document.rows).contains("**done**"), "Markdown export keeps the markers")
+    check(ParkingLotFind.matches("done", in: lot.document.rows).count == 1 && ParkingLotFind.matches("**", in: lot.document.rows).isEmpty, "Find sees the words and never the hidden markers")
+    window.close()
+}
+
 /// Tab/Shift-Tab transitions and Backspace at a heading, in a native pane.
 private func parkingFlexibleNestingEditorSelfTests(_ check: (Bool, String) -> Void) {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-nesting-" + UUID().uuidString)
@@ -1437,6 +1635,7 @@ private func parkingFlexibleNestingEditorSelfTests(_ check: (Bool, String) -> Vo
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     parkingFlexibleNestingEditorSelfTests(check)
     parkingFindSelfTests(check)
+    parkingInlineSelfTests(check)
     parkingHeadingLayoutSelfTests(check)
     parkingLotTextScalingSelfTests(check)
     parkingLotResizeSelfTests(check)
