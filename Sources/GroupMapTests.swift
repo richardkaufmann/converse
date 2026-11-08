@@ -489,6 +489,21 @@ private func groupMapPageSelfTests(_ check: (Bool, String) -> Void, now: Date) {
         _ = pump(until: { finished })
         return result
     }
+    let defaultSize = Store.shared.paneTextSize
+    var lotResizeCalls = 0
+    let originalLotResize = PaneTextScaling.allLots
+    PaneTextScaling.allLots = { _ in lotResizeCalls += 1 }
+    window.makeFirstResponder(nil)
+    AppDelegate.changePaneText(.bigger, in: window)
+    check(pump { (evaluate("parseFloat(getComputedStyle(document.body).fontSize)") as? Double ?? 0) > 12 }, "Group map: Bigger increases rendered text even with no focused child")
+    check(Store.shared.paneTextSize == defaultSize && lotResizeCalls == 0, "Group map: text shortcuts do not resize session panes or Parking Lots")
+    AppDelegate.changePaneText(.smaller, in: window)
+    check(pump { evaluate("parseFloat(getComputedStyle(document.body).fontSize)") as? Double == 12 }, "Group map: Smaller restores the previous rendered size")
+    window.makeFirstResponder(page.webView)
+    AppDelegate.changePaneText(.bigger, in: window)
+    AppDelegate.changePaneText(.reset, in: window)
+    check(pump { evaluate("parseFloat(getComputedStyle(document.body).fontSize)") as? Double == 12 } && page.webView.textSize == PaneTextSize.standard, "Group map: Actual Size resets focused map text")
+    PaneTextScaling.allLots = originalLotResize
     let stats = evaluate("JSON.stringify(GroupMap.stats())") as? String ?? "{}"
     let parsed = (try? JSONSerialization.jsonObject(with: Data(stats.utf8))) as? [String: Any] ?? [:]
     check(parsed["nodes"] as? Int == 6 && parsed["devices"] as? Int == 3 && (parsed["deliveries"] as? Int ?? 0) > 0, "Group map: nodes, devices and deliveries render in the page")

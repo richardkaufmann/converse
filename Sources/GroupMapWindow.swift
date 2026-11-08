@@ -37,12 +37,29 @@ private final class GroupMapScriptProxy: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { page?.receive(message.body) }
 }
 
+/// Text sizing belongs to this window, leaving the graph's pan/zoom unchanged.
+final class GroupMapWebView: WKWebView, PaneTextScalable {
+    private(set) var textSize = PaneTextSize.standard
+    func applyPaneText(_ change: PaneTextChange) {
+        switch change {
+        case .bigger: textSize = PaneTextSize.bigger(textSize)
+        case .smaller: textSize = PaneTextSize.smaller(textSize)
+        case .reset: textSize = PaneTextSize.standard
+        }
+        applyTextScale()
+    }
+    func applyTextScale() {
+        callAsyncJavaScript("document.documentElement.style.setProperty('--text-scale', String(scale))",
+            arguments: ["scale": textSize / PaneTextSize.standard], in: nil, in: .page, completionHandler: nil)
+    }
+}
+
 /// The web view plus its one-way bridge. Native data arrives only through
 /// GroupMap.apply; the page may report only that it is ready or has failed.
 final class GroupMapPage: NSObject, WKNavigationDelegate {
     private static let handlerName = "groupMap"
     private static let maximumRecoveriesPerMinute = 3
-    let webView: WKWebView
+    let webView: GroupMapWebView
     let schemes = GroupMapSchemeHandler()
     private let proxy = GroupMapScriptProxy()
     var onReady: (() -> Void)?
@@ -58,7 +75,7 @@ final class GroupMapPage: NSObject, WKNavigationDelegate {
         configuration.setURLSchemeHandler(schemes, forURLScheme: GroupMapResources.scheme)
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(proxy, name: Self.handlerName)
-        webView = WKWebView(frame: frame, configuration: configuration)
+        webView = GroupMapWebView(frame: frame, configuration: configuration)
         super.init()
         proxy.page = self
         webView.navigationDelegate = self
@@ -68,7 +85,7 @@ final class GroupMapPage: NSObject, WKNavigationDelegate {
     func load() { webView.load(URLRequest(url: URL(string: GroupMapResources.scheme + "://app/group-map.html")!)) }
     fileprivate func receive(_ body: Any) {
         guard let message = body as? [String: Any], let type = message["type"] as? String else { return }
-        if type == "ready" { isReady = true; onReady?() }
+        if type == "ready" { isReady = true; webView.applyTextScale(); onReady?() }
         if type == "error" { errors.append(String((message["message"] as? String ?? "").prefix(300))) }
     }
     func apply(_ data: Data, completion: @escaping (Bool) -> Void) {

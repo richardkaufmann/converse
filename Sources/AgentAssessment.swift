@@ -464,6 +464,11 @@ extension AgentConfig {
 }
 
 enum AgentAge {
+    static func relative(_ date: Date?, now: Date = Date()) -> String {
+        let age = short(date, now: now)
+        return age == "now" || age == "—" ? age : age + " ago"
+    }
+
     static func assessment(_ date: Date?, now: Date = Date(), confirmed: Bool = true) -> String {
         guard let date else { return "No assessment" }
         return confirmed && now.timeIntervalSince(date) < 300 ? "Current" : (now.timeIntervalSince(date) < 60 ? "<1m" : short(date, now: now))

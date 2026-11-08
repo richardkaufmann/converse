@@ -51,11 +51,11 @@ struct AgentAssessmentCard: View {
                     Text("No assessment yet. The agent's next turn adds one.").font(.callout).foregroundStyle(.secondary)
                 }
                 if let problem = config.assessmentProblem {
-                    Label(problem.reason + " · " + AgentAge.short(problem.at, now: now) + " ago", systemImage: "exclamationmark.triangle")
+                    Label(problem.reason + " · " + AgentAge.relative(problem.at, now: now), systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 if let failure = config.portrait?.failure {
-                    Label("Portrait couldn't refresh: " + failure + " · " + AgentAge.short(config.portrait?.failedAt, now: now) + " ago", systemImage: "photo")
+                    Label("Portrait couldn't refresh: " + failure + " · " + AgentAge.relative(config.portrait?.failedAt, now: now), systemImage: "photo")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if !config.visibleAssessmentFacts.isEmpty {
@@ -75,7 +75,7 @@ struct AgentAssessmentCard: View {
                     DisclosureGroup("Earlier assessments", isExpanded: $showHistory) {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(history, id: \.revision) { item in
-                                Text(item.status.label + " · " + AgentAge.short(item.updatedAt, now: now) + " ago" + (item.heartbeats > 0 ? " · unchanged for \(item.heartbeats) more checks" : "") + "\n" + item.summary)
+                                Text(item.status.label + " · " + AgentAge.relative(item.updatedAt, now: now) + (item.heartbeats > 0 ? " · unchanged for \(item.heartbeats) more checks" : "") + "\n" + item.summary)
                                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -88,9 +88,9 @@ struct AgentAssessmentCard: View {
         }
     }
     private func revisionLine(_ assessment: AgentAssessment, now: Date) -> String {
-        var line = "Updated " + AgentAge.short(assessment.updatedAt, now: now) + " ago"
+        var line = "Updated " + AgentAge.relative(assessment.updatedAt, now: now)
         // Unchanged turns collapse into one line instead of repeating the card.
-        if let beats = assessment.heartbeats, beats > 0 { line += " · no change in \(beats) check" + (beats == 1 ? "" : "s") + ", last " + AgentAge.short(assessment.checkedAt, now: now) + " ago" }
+        if let beats = assessment.heartbeats, beats > 0 { line += " · no change in \(beats) check" + (beats == 1 ? "" : "s") + ", last " + AgentAge.relative(assessment.checkedAt, now: now) }
         if assessment.seeded == true { line += " · seeded from the last scoreboard" }
         return line
     }
@@ -99,7 +99,7 @@ struct AgentAssessmentCard: View {
     }
     @ViewBuilder private func factRow(_ fact: AgentFact, now: Date) -> some View {
         let age = AgentAge.short(fact.observedAt, now: now)
-        expandable(id: "fact." + fact.id, label: nil, accessibility: fact.label + ": " + fact.value + ", " + fact.kind.label + ", observed " + (age == "—" ? "at an unknown time" : age + " ago"), row: {
+        expandable(id: "fact." + fact.id, label: nil, accessibility: fact.label + ": " + fact.value + ", " + fact.kind.label + ", observed " + (age == "—" ? "at an unknown time" : AgentAge.relative(fact.observedAt, now: now)), row: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(fact.label).font(.caption).foregroundStyle(.secondary).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                 Text(fact.value).font(.callout.monospacedDigit()).lineLimit(2).foregroundStyle(fact.value == AgentFact.unavailable ? .secondary : .primary)
@@ -238,11 +238,11 @@ struct AgentPortraitCard: View {
                         .disabled(generating).help("Request a new portrait now, even if one was made recently.")
                 }
                 if let latest {
-                    Text("Updated " + AgentAge.short(latest.generatedAt, now: context.date) + " ago" + (stale ? " · newer information available" : ""))
+                    Text("Updated " + AgentAge.relative(latest.generatedAt, now: context.date) + (stale ? " · newer information available" : ""))
                         .font(.caption).foregroundStyle(stale ? .orange : .secondary)
                 }
                 if let failure = config.portrait?.failure {
-                    Text("Couldn't refresh: " + failure + " · " + AgentAge.short(config.portrait?.failedAt, now: context.date) + " ago").font(.caption).foregroundStyle(.orange).lineLimit(3)
+                    Text("Couldn't refresh: " + failure + " · " + AgentAge.relative(config.portrait?.failedAt, now: context.date)).font(.caption).foregroundStyle(.orange).lineLimit(3)
                 }
             }
         }
