@@ -445,20 +445,29 @@ extension Store {
 }
 
 /// A local invitation, deliberately outside agent prompts and transcripts.
+/// Two steps: the banner is laid out once App Support is on screen, and the
+/// release is consumed (feedback_ask = true) only after the banner itself has
+/// been measurably exposed. Expiry counts from that moment.
 final class FeedbackInvitation: ObservableObject {
     static let shared = FeedbackInvitation()
     @Published private(set) var visible = false
+    private(set) var consumed = false
     private var state = FeedbackInvitationState(release: "")
+    /// App Support's sidebar row and pane: where the banner would appear.
     let surfaces = NSHashTable<NSView>.weakObjects()
+    /// The banners themselves, sidebar and pane.
+    let banners = NSHashTable<NSView>.weakObjects()
     var isMonitoring: Bool { timer != nil || eventMonitor != nil }
-    private var supportVisible: Bool {
-        surfaces.allObjects.contains { view in
+    private func exposed(_ views: [NSView], minimumFraction: CGFloat) -> Bool {
+        let screens = NSScreen.screens.map(\.frame)
+        return views.contains { view in
             guard let window = view.window, window.isVisible, !window.isMiniaturized,
                   window.occlusionState.contains(.visible), !view.isHiddenOrHasHiddenAncestor,
-                  !view.visibleRect.isEmpty, let index = NSApp.orderedWindows.firstIndex(of: window) else { return false }
+                  !view.visibleRect.isEmpty else { return false }
+            guard let covers = FeedbackInvitationVisibility.covers(above: window) else { return false }
+            let full = window.convertToScreen(view.convert(view.bounds, to: nil))
             let rect = window.convertToScreen(view.convert(view.visibleRect, to: nil))
-            let covers = NSApp.orderedWindows.prefix(index).filter { $0.isVisible && !$0.isMiniaturized && $0.alphaValue > 0 }.map(\.frame)
-            return FeedbackInvitationVisibility.exposed(rect, beneath: covers)
+            return FeedbackInvitationVisibility.exposed(rect, of: full, screens: screens, beneath: covers, minimumFraction: minimumFraction)
         }
     }
     private var file: URL?
@@ -480,7 +489,7 @@ final class FeedbackInvitation: ObservableObject {
             state = saved; state.useRelease(release)
         } else { state = FeedbackInvitationState(release: release) }
         file = target
-        guard !state.suppressed, !state.askedReleases.contains(state.release) else { return }
+        guard !state.suppressed, !state.feedbackAsk else { return }
         lastTick = ProcessInfo.processInfo.systemUptime
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
             self?.lastInput = ProcessInfo.processInfo.systemUptime
@@ -493,22 +502,23 @@ final class FeedbackInvitation: ObservableObject {
         lastTick = now
         // Foreground with recent human input; sleeping or a stalled run loop adds no time.
         let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
-        if active {
-            if visible { remaining -= elapsed; if remaining <= 0 { dismiss() } }
-        }
-        if active && supportVisible && state.eligible && !publishing {
+        if active && consumed { remaining -= elapsed; if remaining <= 0 { dismiss(); return } }
+        guard active, !publishing, !state.suppressed else { return }
+        if !visible {
+            if state.eligible && exposed(surfaces.allObjects, minimumFraction: 0) { visible = true }
+        } else if !consumed && state.eligible && exposed(banners.allObjects, minimumFraction: FeedbackInvitationVisibility.minimumBannerFraction) {
             publishing = true
-            var consumed = state; consumed.markShown()
-            persist(consumed) { [weak self] ok in
+            var shown = state; shown.markShown()
+            persist(shown) { [weak self] ok in
                 guard let self else { return }
                 self.publishing = false
                 guard ok, !self.state.suppressed else { return }
-                self.state = consumed; self.remaining = FeedbackInvitationState.bannerSeconds; self.visible = true
+                self.state = shown; self.consumed = true; self.remaining = FeedbackInvitationState.bannerSeconds
             }
         }
     }
     func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
-        guard file != nil, !state.suppressed, !publishing, !state.askedReleases.contains(state.release) else { return }
+        guard file != nil, !state.suppressed, !publishing, !state.feedbackAsk else { return }
         state.completedTurn(success: success, interrupted: interrupted, humanDirected: humanDirected)
         if success && !interrupted && humanDirected { persist(state) }
     }
@@ -520,7 +530,9 @@ final class FeedbackInvitation: ObservableObject {
             if let completion { DispatchQueue.main.async { completion(ok) } }
         }
     }
+    /// Clicking the banner or its X means it was seen, so either consumes it.
     func dismiss() {
+        if visible && !consumed && state.eligible { var shown = state; shown.markShown(); state = shown; persist(shown); consumed = true }
         visible = false; timer?.invalidate(); timer = nil
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
     }
@@ -539,8 +551,10 @@ final class FeedbackInvitation: ObservableObject {
 /// A non-interactive view measures actual clipping/window visibility, including a scrolled-away sidebar row.
 struct FeedbackInvitationSurface: NSViewRepresentable {
     final class Probe: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    /// The banner probes itself; other surfaces only mark where it would appear.
+    var banner = false
     func makeNSView(context: Context) -> NSView {
-        let view = Probe(); FeedbackInvitation.shared.surfaces.add(view); return view
+        let view = Probe(); (banner ? FeedbackInvitation.shared.banners : FeedbackInvitation.shared.surfaces).add(view); return view
     }
     func updateNSView(_ view: NSView, context: Context) {}
 }
@@ -557,11 +571,13 @@ struct FeedbackInvitationBanner: View {
                     .buttonStyle(.plain).accessibilityLabel("Dismiss appreciation invitation")
             }.foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Color(red: 0.08, green: 0.32, blue: 0.65), in: RoundedRectangle(cornerRadius: 5))
+                .background { FeedbackInvitationSurface(banner: true) }
         }
     }
 }
 
 struct FeedbackInvitationPanel: View {
+    static let message = "Hi, we appreciate feedback on GitHub. This isn’t tracked. The button below brings up the GitHub repo in your browser. If you like what you see, please consider pressing the star icon at the top of that page. In addition, you can press the other buttons to file an issue or bug. THANK YOU!"
     var repository: () -> Void
     var issue: () -> Void
     var report: () -> Void
@@ -573,10 +589,11 @@ struct FeedbackInvitationPanel: View {
                 ParkingLotShoe().frame(width: 52, height: 52).accessibilityHidden(true)
                 Text("Thoughts About Converse").font(.title2.bold())
             }
-            Text("Hi, we appreciate feedback on GitHub. Converse doesn’t check your GitHub activity. The Open GitHub button below brings up the repository in your browser. If you like what you see, please consider pressing the star icon at the top of that page.")
-            Text("You can also use the other buttons to file an issue or bug. THANK YOU!")
+            Text(Self.message)
             HStack {
-                Button("Open GitHub", action: repository)
+                // Only opens the repository in the browser; starring stays on GitHub.
+                Button(action: repository) { Label("Star on GitHub", systemImage: "star") }
+                    .help("Opens github.com/richardkaufmann/converse in your browser")
                 Button("File an Issue…", action: issue)
                 Button("File a Bug…", action: report)
             }
@@ -614,11 +631,37 @@ final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) { window = nil }
 }
 
-/// Subtract higher app-window frames; window-level visibility alone is insufficient.
+/// Window-level visibility alone is insufficient: clip to the displays, then
+/// subtract every higher Converse window, panel and sheet.
 enum FeedbackInvitationVisibility {
-    static func exposed(_ rect: CGRect, beneath covers: [CGRect]) -> Bool {
-        guard !rect.isEmpty else { return false }
-        var pieces = [rect]
+    /// At least half of the banner must be on screen and uncovered.
+    static let minimumBannerFraction: CGFloat = 0.5
+    /// Frames above `window`. orderedWindows omits panels and sheets, whose
+    /// stacking is unknown, so every visible one counts as a cover.
+    /// Nil when the window is not in the stacking order at all.
+    struct Layer { var id: ObjectIdentifier; var frame: CGRect; var shown: Bool }
+    static func layer(_ window: NSWindow) -> Layer {
+        Layer(id: ObjectIdentifier(window), frame: window.frame, shown: window.isVisible && !window.isMiniaturized && window.alphaValue > 0)
+    }
+    static func covers(above window: NSWindow) -> [CGRect]? {
+        covers(above: ObjectIdentifier(window), ordered: NSApp.orderedWindows.map(layer), all: NSApp.windows.map(layer))
+    }
+    static func covers(above target: ObjectIdentifier, ordered: [Layer], all: [Layer]) -> [CGRect]? {
+        guard let index = ordered.firstIndex(where: { $0.id == target }) else { return nil }
+        let stacked = Set(ordered.map(\.id))
+        return (ordered.prefix(index).filter(\.shown) + all.filter { $0.shown && $0.id != target && !stacked.contains($0.id) }).map(\.frame)
+    }
+    /// `rect` is the view's clipped visible rect and `full` its whole bounds,
+    /// both in screen coordinates. Displays never overlap, so the exposed
+    /// pieces on each one add up.
+    static func exposed(_ rect: CGRect, of full: CGRect, screens: [CGRect], beneath covers: [CGRect], minimumFraction: CGFloat) -> Bool {
+        guard !rect.isEmpty, !full.isEmpty else { return false }
+        let area = uncovered(screens.map { rect.intersection($0) }.filter { !$0.isNull && !$0.isEmpty }, beneath: covers)
+            .reduce(0) { $0 + $1.width * $1.height }
+        return area > 0 && area >= minimumFraction * full.width * full.height
+    }
+    static func uncovered(_ start: [CGRect], beneath covers: [CGRect]) -> [CGRect] {
+        var pieces = start
         for cover in covers {
             pieces = pieces.flatMap { piece -> [CGRect] in
                 let cut = piece.intersection(cover)
@@ -628,18 +671,38 @@ enum FeedbackInvitationVisibility {
                         CGRect(x: piece.minX, y: cut.minY, width: cut.minX - piece.minX, height: cut.height),
                         CGRect(x: cut.maxX, y: cut.minY, width: piece.maxX - cut.maxX, height: cut.height)].filter { !$0.isEmpty }
             }
-            if pieces.isEmpty { return false }
+            if pieces.isEmpty { break }
         }
-        return !pieces.isEmpty
+        return pieces
     }
 }
 
 func feedbackInvitationControllerSelfTests(_ check: (Bool, String) -> Void) {
-    let rect = CGRect(x: 10, y: 10, width: 100, height: 30)
-    check(FeedbackInvitationVisibility.exposed(rect, beneath: []), "Uncovered feedback surface admits the invitation")
-    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 0, y: 0, width: 200, height: 200)]), "A higher app window covering App Support prevents consumption")
-    check(!FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30), CGRect(x: 60, y: 10, width: 50, height: 30)]), "Several higher windows can jointly cover the feedback surface")
-    check(FeedbackInvitationVisibility.exposed(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30)]), "Partly exposed App Support still admits its banner")
+    typealias V = FeedbackInvitationVisibility
+    let rect = CGRect(x: 10, y: 10, width: 100, height: 30), screen = [CGRect(x: 0, y: 0, width: 1000, height: 800)]
+    func shown(_ rect: CGRect, beneath covers: [CGRect], screens: [CGRect] = screen) -> Bool {
+        V.exposed(rect, of: rect, screens: screens, beneath: covers, minimumFraction: V.minimumBannerFraction)
+    }
+    check(shown(rect, beneath: []), "An uncovered banner on screen consumes the invitation")
+    check(!shown(rect, beneath: [CGRect(x: 0, y: 0, width: 200, height: 200)]), "A higher app window covering the banner prevents consumption")
+    check(!shown(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30), CGRect(x: 60, y: 10, width: 50, height: 30)]), "Several higher windows can jointly cover the banner")
+    check(shown(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30)]) && !shown(rect, beneath: [CGRect(x: 10, y: 10, width: 51, height: 30)]),
+          "Half the banner must stay uncovered")
+    check(!shown(CGRect(x: 990, y: 10, width: 100, height: 30), beneath: []), "A banner mostly off the display edge is not consumed")
+    check(!shown(rect, beneath: [], screens: []), "No display means nothing is visible")
+    check(shown(CGRect(x: 960, y: 10, width: 80, height: 30), beneath: [], screens: screen + [CGRect(x: 1000, y: 0, width: 800, height: 600)]),
+          "A banner straddling two displays counts both exposed parts")
+    check(!V.exposed(CGRect(x: 10, y: 10, width: 100, height: 1), of: rect, screens: screen, beneath: [], minimumFraction: V.minimumBannerFraction),
+          "A visible sliver of a clipped banner is not enough")
+    let objects = (0..<5).map { _ in NSObject() } // kept alive so identifiers stay distinct
+    let (window, above, below, panel, hidden) = (ObjectIdentifier(objects[0]), ObjectIdentifier(objects[1]), ObjectIdentifier(objects[2]), ObjectIdentifier(objects[3]), ObjectIdentifier(objects[4]))
+    let frame = CGRect(x: 1, y: 2, width: 3, height: 4)
+    let ordered = [V.Layer(id: above, frame: frame, shown: true), V.Layer(id: window, frame: .zero, shown: true), V.Layer(id: below, frame: .zero, shown: true)]
+    let all = ordered + [V.Layer(id: panel, frame: frame.offsetBy(dx: 5, dy: 0), shown: true), V.Layer(id: hidden, frame: frame, shown: false)]
+    check(V.covers(above: window, ordered: ordered, all: all) == [frame, frame.offsetBy(dx: 5, dy: 0)],
+          "Higher windows and visible panels or sheets cover the banner; lower and hidden ones do not")
+    check(V.covers(above: panel, ordered: ordered, all: all) == nil, "A window outside the stacking order is never treated as visible")
+    withExtendedLifetime(objects) {}
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
     let controller = FeedbackInvitation()

@@ -216,6 +216,8 @@ final class Session: ObservableObject, Identifiable {
     // Remote viewers' unseen marker: the newest assistant response this home
     // holds. A running turn's partial reply never counts until it finishes.
     var lastResponseAt: Date? { Session.lastResponseAt(messages, busy: busy) }
+    // Recently changed sidebar sort: the newest message either way, else creation.
+    var lastChangedAt: Date { messages.last { $0.createdAt != nil }?.createdAt ?? createdAt }
     static func lastResponseAt(_ messages: [Message], busy: Bool) -> Date? {
         var candidates = messages[...]
         if busy, let turn = messages.lastIndex(where: { $0.role == "user" }) { candidates = messages[..<turn] }
@@ -727,7 +729,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next, feedbackHumanInitiated: next.switchboardHop == nil)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -789,7 +791,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil, feedbackHumanInitiated: Bool = true) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -818,7 +820,8 @@ final class Store: ObservableObject {
         s.supportContinuation = supportContinuation; s.supportAutonomous = supportAutonomous || agentLoopTick || preservingAgentDraft != nil
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
-        s.feedbackHumanTurn = feedbackHumanInitiated
+        // Only composer text counts. App-generated, relayed and handoff prompts never do.
+        s.feedbackHumanTurn = input?.humanTyped == true
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
         // Inject all parts render separately; text that differs from the queued input shows whole.
         let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
@@ -3180,7 +3183,7 @@ struct RootView: View {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(width: 24, height: 12).accessibilityHidden(true)
-                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.reordering.toggle() }.frame(width: 98, alignment: .leading)
+                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.toggleReordering() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -3492,7 +3495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
+    @objc func about() { ConverseAboutWindow.shared.show() }
     @objc func newWindow() { makeWindow(WindowState()) }
     private func makeWindow(_ state: WindowState) {
         state.setup = !Store.shared.setupCompleted
@@ -4533,6 +4536,8 @@ func selfTest() {
     performanceDebugSelfTests(check)
     feedbackInvitationSelfTests(check)
     feedbackInvitationControllerSelfTests(check)
+    sidebarSortSelfTests(check)
+    aboutSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)

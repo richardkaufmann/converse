@@ -2450,3 +2450,16 @@ extension ConverseTests {
         XCTAssertFalse(frames.contains { $0.kind == DeviceMessageKind.command.rawValue }, "A legacy record is never re-encoded and resent")
     }
 }
+
+extension ConverseTests {
+    func testSidebarSortOrdersRemoteRowsByTitleOrLatestResponse() {
+        func row(_ title: String, _ seconds: Double?) -> DeviceSidebarRow {
+            var value = DeviceSidebarRow(globalID: title, sessionID: UUID(), title: title, assistant: "Claude", engine: "claude", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+            value.lastResponseAt = seconds.map(Date.init(timeIntervalSince1970:)); return value
+        }
+        let rows = [row("beta", 100), row("Alpha", nil), row("Gamma", 300), row("Delta", 100)]
+        XCTAssertEqual(SidebarSort.rows(rows, by: .alphabetical).map(\.title), ["Alpha", "beta", "Delta", "Gamma"])
+        XCTAssertEqual(SidebarSort.rows(rows, by: .recent).map(\.title), ["Gamma", "beta", "Delta", "Alpha"], "Latest response first; ties and undated rows by title")
+        XCTAssertEqual(SidebarSort.rows(rows, by: .manual).map(\.title), ["Alpha", "beta", "Delta", "Gamma"], "iPad has no drag order, so manual reads as alphabetical")
+    }
+}

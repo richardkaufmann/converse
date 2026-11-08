@@ -242,7 +242,7 @@ Create another session with **+** when you want an independent task or a second 
 
 Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show scoreboard**, **Run once**).
 
-To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart.
+To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart. To sort sessions instead, open the **˯** menu beside **+** on this device's heading and choose **Alphabetical** or **Recently changed** (newest activity first); **Manual order** brings back your dragged order, and clicking **Reorder** switches to it. The choice is remembered.
 
 ### Add images and filenames
 
