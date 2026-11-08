@@ -238,6 +238,11 @@ private func parkingLotIncrementalRenderSelfTests(_ check: (Bool, String) -> Voi
         coordinator.render(); matches("a remote device's commit")
     } catch { check(false, "Incremental render session fixture: " + error.localizedDescription) }
     lot.changeIndent(item, deeper: true); coordinator.render(); matches("indenting renumbers later rows")
+    lot.changeIndent(item, deeper: true); coordinator.render(); matches("a flexible indent beyond the row above")
+    lot.changeIndent(item, deeper: false); coordinator.render(); matches("removing a flexible indent")
+    let topLevel = lot.document.rows.first { !$0.heading && $0.id != item && (try? ParkingLotTree.nodes(lot.document.rows))?[$0.id]?.depth == 1 }!.id
+    lot.changeIndent(topLevel, deeper: false); coordinator.render(); matches("outdenting a top-level item into a heading")
+    text.undo(nil); matches("Undo of an outdent to a heading")
     lot.delete(linked); coordinator.render(); matches("deleting a row renumbers its section")
     collapsed = [heading]; coordinator.render(); matches("collapsing a section")
     collapsed = []; coordinator.render(); matches("expanding a section")

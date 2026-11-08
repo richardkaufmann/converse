@@ -2654,7 +2654,7 @@ extension DeviceSyncService {
         sendEnvelope(peer, DeviceEnvelope(kind: kind, boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: Data(reason.utf8)))
     }
     private func lotSnapshot(_ lot: ParkingLotStore, epoch: UInt64, document: ParkingLotDocument? = nil) throws -> LotSnapshot {
-        var wire = document ?? lot.document; wire.schemaVersion = ParkingLotDocument.currentSchemaVersion
+        var wire = document ?? lot.document; wire.schemaVersion = max(3, ParkingLotDocument.schemaVersion(for: wire.rows))
         for index in wire.rows.indices {
             wire.rows[index].images = try wire.rows[index].images.map { paths in try paths.map { path in
                 guard let hash = imageHash(path: path) else { throw ParkingLotError.message("A lot image is unavailable on home. Restore or remove it there before taking this lot.") }

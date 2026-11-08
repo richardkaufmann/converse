@@ -50,11 +50,10 @@ struct EditableLotPane: View {
     private var hierarchy: [UUID: ParkingLotTree.Node] { (try? ParkingLotTree.nodes(rows)) ?? [:] }
     private var labels: [UUID: String] {
         let nodes = hierarchy
-        var counts: [UUID?: Int] = [:], result: [UUID: String] = [:]
+        let numbers = ParkingLotTree.numbers(rows)
+        var result: [UUID: String] = [:]
         for row in rows where !row.heading {
-            let parent = nodes[row.id]?.parentID
-            counts[parent, default: 0] += 1
-            result[row.id] = ParkingLotTree.label(counts[parent]!, depth: nodes[row.id]?.depth ?? 1) + "."
+            result[row.id] = ParkingLotTree.label(numbers[row.id] ?? 1, depth: nodes[row.id]?.depth ?? 1) + "."
         }
         return result
     }
@@ -664,7 +663,8 @@ enum LotEntryEditing {
             }
         }
         if !heading && parent == nil { parent = ParkingLotTree.parentForInsertion(at: index, in: rows, heading: false) }
-        let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parent)
+        let anchorRow = anchor.flatMap { id in rows.first { $0.id == id } }
+        let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parent, indent: heading || anchorRow?.heading != false ? nil : anchorRow?.indent)
         rows.insert(row, at: index)
         _ = try ParkingLotTree.nodes(rows)
         let before = index + 1 < rows.count && (heading ? rows[index + 1].heading : tree[rows[index + 1].id]?.parentID == parent) ? rows[index + 1].id : nil
@@ -680,13 +680,13 @@ enum LotEntryEditing {
         let prefix = text.substring(to: selection.location), suffix = text.substring(from: NSMaxRange(selection))
         let parent = original.heading ? original.id : original.parentID
         if selection.length == 0 && selection.location == 0 && !text.isEqual(to: "") && !original.heading {
-            let blank = ParkingLotRow(heading: false, text: "", parentID: original.parentID)
+            let blank = ParkingLotRow(heading: false, text: "", parentID: original.parentID, indent: original.indent)
             rows.insert(blank, at: index)
             return Result(rows: rows, focus: original.id, operation: LotOperation(kind: .insert, row: blank, before: original.id, parentID: blank.parentID))
         }
         let destination = original.heading ? index + 1 : (ParkingLotTree.range(id, in: rows)?.upperBound ?? index + 1)
         rows[index].text = prefix
-        let next = ParkingLotRow(heading: false, text: suffix, parentID: parent)
+        let next = ParkingLotRow(heading: false, text: suffix, parentID: parent, indent: original.heading ? nil : original.indent)
         rows.insert(next, at: destination)
         _ = try ParkingLotTree.nodes(rows)
         let tree = try ParkingLotTree.nodes(rows)

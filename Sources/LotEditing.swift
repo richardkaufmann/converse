@@ -20,7 +20,8 @@ enum LotEditing {
         value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
     static func validate(_ document: ParkingLotDocument, wireImages: Bool = true) throws {
-        guard document.schemaVersion == ParkingLotDocument.currentSchemaVersion,
+        // Schema 3 is what older holders send; 4 only appears on lots using flexible nesting.
+        guard (3...ParkingLotDocument.currentSchemaVersion).contains(document.schemaVersion),
               document.revision >= 0, document.revision < Int.max,
               document.rows.count <= 500 else { throw ParkingLotError.message("Unsupported or oversized Parking Lot document.") }
         _ = try ParkingLotTree.nodes(document.rows)
@@ -140,7 +141,7 @@ struct LotOperation: Codable, Equatable {
         case .move:
             guard let rowID, let range = ParkingLotTree.range(rowID, in: rows) else { throw ParkingLotError.message("The moved entry no longer exists.") }
             var moving = Array(rows[range]); rows.removeSubrange(range)
-            moving[0].parentID = moving[0].heading ? nil : parentID
+            moving[0].parentID = moving[0].heading ? nil : parentID; moving[0].indent = nil
             rows.insert(contentsOf: moving, at: try position(before, parent: moving[0].parentID, heading: moving[0].heading, rows: rows))
         case .deleteSubtree:
             guard let rowID, let range = ParkingLotTree.range(rowID, in: rows) else { throw ParkingLotError.message("The deleted entry no longer exists.") }
@@ -174,6 +175,8 @@ struct LotOperation: Codable, Equatable {
             rows = replacement
         }
         result.rows = try ParkingLotTree.normalized(rows)
+        // The same stamp the home's snapshot carries, so acknowledgements compare equal.
+        result.schemaVersion = max(3, ParkingLotDocument.schemaVersion(for: result.rows))
         guard result.revision < Int.max - 1 else { throw ParkingLotError.message("Parking Lot revision exhausted.") }
         result.revision += 1
         try LotEditing.validate(result)

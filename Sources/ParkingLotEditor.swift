@@ -41,9 +41,9 @@ struct ParkingOutline {
         var projected: [(ParkingLotRow, UUID?, Bool, Int, Int)] = []
         let hierarchy = (try? ParkingLotTree.nodes(rows)) ?? [:]
         let parents = Set(hierarchy.values.compactMap(\.parentID))
+        let numbers = ParkingLotTree.numbers(rows)
         var section: UUID?, sectionHidden = false, count = 0
         var hiddenByID: [UUID: Bool] = [:]
-        var counts: [UUID?: Int] = [:]
         func empty(_ heading: Bool, before: UUID?) {
             let key = heading ? "heading" : (section?.uuidString ?? "root")
             let cached = placeholders[key]
@@ -60,11 +60,10 @@ struct ParkingOutline {
                 projected.append((row, nil, false, 0, 0))
             } else {
                 let parent = hierarchy[row.id]?.parentID
-                counts[parent, default: 0] += 1
-                if parent == section { count = counts[parent] ?? count }
+                if parent == section, hierarchy[row.id]?.depth ?? 1 <= 1 { count = numbers[row.id] ?? count }
                 let hidden = parent.flatMap { hiddenByID[$0] } ?? false
                 hiddenByID[row.id] = hidden || collapsed.contains(row.id)
-                if !hidden { projected.append((row, nil, false, counts[parent] ?? 1, hierarchy[row.id]?.depth ?? 1)) }
+                if !hidden { projected.append((row, nil, false, numbers[row.id] ?? 1, hierarchy[row.id]?.depth ?? 1)) }
             }
         }
         if !sectionHidden && !projected.isEmpty { empty(false, before: nil) }
@@ -128,7 +127,8 @@ struct ParkingOutline {
         let firstParent = first.row.heading ? first.row.id : ((try? ParkingLotTree.nodes(rows))?[first.row.id]?.parentID ?? first.row.parentID)
         var insertedHeading: UUID?
         for (i, piece) in pieces.enumerated() {
-            var row = preserveSuffix ? (i == pieces.count - 1 ? first.row : ParkingLotRow(heading: false, text: "")) : (i == 0 ? base : ParkingLotRow(heading: false, text: ""))
+            // A row Return creates sits at the same level as the row it came from.
+            var row = preserveSuffix ? (i == pieces.count - 1 ? first.row : ParkingLotRow(heading: false, text: "")) : (i == 0 ? base : ParkingLotRow(heading: false, text: "", indent: first.row.heading ? nil : first.row.indent))
             row.text = piece.replacingOccurrences(of: "\u{2028}", with: "\n"); row.editedBy = nil
             // Plain text round trips through Markdown, keeping pasted headings and lists.
             if insertion.contains("\n") && (i > 0 || prefix.isEmpty) {
@@ -546,7 +546,7 @@ struct ParkingLotEditor: NSViewRepresentable {
                 parent.collapsed.remove(entry.row.id)
             } else { index = document.rows.count }
             if !heading && parentID == nil { parentID = ParkingLotTree.parentForInsertion(at: index, in: document.rows, heading: false) }
-            let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parentID)
+            let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parentID, indent: heading || entry?.row.heading != false ? nil : entry?.row.indent)
             var rows = document.rows; rows.insert(row, at: index)
             save(rows, expected: document, caret: (row.id, 0)); text?.window?.makeFirstResponder(text)
         }
@@ -572,6 +572,7 @@ struct ParkingLotEditor: NSViewRepresentable {
                 }
                 guard !entries.isEmpty else { NSSound.beep(); return }
                 let ids = Set(entries.map { $0.row.id })
+                if !deeper { parent.collapsed.subtract(ids) }
                 guard parent.lot.changeIndent(ids, deeper: deeper) else { NSSound.beep(); return }
                 render()
                 let moved = projection.entries.filter { ids.contains($0.row.id) }
@@ -584,6 +585,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             let offset = projection.entries.first(where: { $0.row.id == id }).map { entry in
                 max(0, min(entry.range.length, (text?.selectedRange().location ?? entry.range.location) - entry.range.location))
             } ?? 0
+            if !deeper { parent.collapsed.remove(id) }
             if parent.lot.changeIndent(id, deeper: deeper) { render(caret: (id, offset)) }
             else { NSSound.beep() }
         }
@@ -785,6 +787,16 @@ final class ParkingOutlineText: NSTextView {
         if let owner, selectedRange().length == 0,
            let index = owner.projection.index(at: selectedRange().location) {
             let entry = owner.projection.entries[index]
+            // Backspace at a heading's start never merges it into the section
+            // above; the caret just moves to the end of the row before it.
+            if entry.row.heading, selectedRange().location == entry.range.location {
+                if index > 0 {
+                    let previous = owner.projection.entries[index - 1]
+                    setSelectedRange(NSRange(location: NSMaxRange(previous.range), length: 0))
+                    scrollRangeToVisible(selectedRange())
+                }
+                return
+            }
             if !entry.placeholder && !entry.row.heading && !entry.hasChildren && entry.row.text.isEmpty && (entry.row.images ?? []).isEmpty {
                 let document = owner.parent.lot.document
                 let previous = owner.projection.entries.prefix(index).last { !$0.placeholder }
@@ -1264,7 +1276,104 @@ private func parkingHeadingLayoutSelfTests(_ check: (Bool, String) -> Void) {
     window.close()
 }
 
+/// Tab/Shift-Tab transitions and Backspace at a heading, in a native pane.
+private func parkingFlexibleNestingEditorSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-nesting-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    func fixture(_ name: String) -> (ParkingLotStore, ParkingLotEditor.Coordinator, ParkingOutlineText, UnsafeMutablePointer<Set<UUID>>, ParkingLotRow, ParkingLotRow, ParkingLotRow, ParkingLotRow, ParkingLotRow) {
+        let lot = ParkingLotStore(folder: folder.appendingPathComponent(name), id: UUID())
+        let h = ParkingLotRow(heading: true, text: "Work"), a = ParkingLotRow(heading: false, text: "Alpha", parentID: h.id)
+        let b = ParkingLotRow(heading: false, text: "Bravo", parentID: h.id), c = ParkingLotRow(heading: false, text: "Charlie", parentID: b.id)
+        let d = ParkingLotRow(heading: false, text: "Delta", parentID: h.id)
+        lot.openStarter([h, a, b, c, d])
+        let collapsed = UnsafeMutablePointer<Set<UUID>>.allocate(capacity: 1); collapsed.initialize(to: [])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: Binding(get: { collapsed.pointee }, set: { collapsed.pointee = $0 }), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+        text.isRichText = false; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text; coordinator.render()
+        return (lot, coordinator, text, collapsed, h, a, b, c, d)
+    }
+    func tab(_ text: ParkingOutlineText, shift: Bool = false) {
+        text.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? .shift : [], timestamp: 0, windowNumber: 0, context: nil,
+                                            characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!)
+    }
+    func entry(_ coordinator: ParkingLotEditor.Coordinator, _ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func caret(_ text: ParkingOutlineText, _ coordinator: ParkingLotEditor.Coordinator, _ id: UUID, _ offset: Int? = nil) {
+        let found = entry(coordinator, id); text.setSelectedRange(NSRange(location: found.range.location + (offset ?? found.range.length), length: 0))
+    }
+    do {
+        // Tab on the first item, twice; Undo restores each step.
+        let (lot, coordinator, text, _, _, a, _, _, _) = fixture("tab")
+        let start = lot.document.rows
+        caret(text, coordinator, a.id); tab(text)
+        check(lot.document.rows[1].indent == 1 && entry(coordinator, a.id).depth == 2 && text.selectedRange().length == 0, "Tab on the first item in a section indents it deeper than its heading")
+        tab(text)
+        check(entry(coordinator, a.id).depth == 3, "A second Tab goes deeper again")
+        check(ParkingLotStore(folder: folder.appendingPathComponent("tab"), id: lot.id).document == lot.document && lot.document.schemaVersion == 4, "Flexible indents survive reload, stamped schema 4")
+        text.undo(nil); text.undo(nil)
+        check(lot.document.rows == start && lot.document.schemaVersion == 2, "Undo reverses each Tab and the lot returns to the old schema")
+        text.redo(nil)
+        check(lot.document.rows[1].indent == 1, "Redo repeats a flexible indent")
+    }
+    do {
+        // Shift-Tab on a top-level item becomes a heading; Undo and a collapsed row.
+        let (lot, coordinator, text, collapsed, _, _, b, c, d) = fixture("heading")
+        let start = lot.document.rows
+        collapsed.pointee = [b.id]; coordinator.render()
+        caret(text, coordinator, b.id, 2); tab(text, shift: true)
+        let converted = lot.document.rows.first { $0.id == b.id }!
+        check(converted.heading && converted.parentID == nil && lot.document.rows.first { $0.id == c.id }?.parentID == b.id && lot.document.rows.first { $0.id == d.id }?.parentID == b.id,
+              "Shift-Tab on a top-level item makes it a heading, adopting the items after it")
+        check(!collapsed.pointee.contains(b.id) && entry(coordinator, c.id).row.id == c.id && entry(coordinator, d.id).row.id == d.id && text.selectedRange().location == entry(coordinator, b.id).range.location + 2,
+              "The new heading opens so nothing disappears, and the caret stays in its text")
+        text.undo(nil)
+        check(lot.document.rows == start, "One Undo restores the item, its children and the adopted siblings")
+        text.redo(nil)
+        check(lot.document.rows.first { $0.id == b.id }?.heading == true, "Redo makes it a heading again")
+        let hidden = ParkingLotFolding(rows: lot.document.rows, collapsed: [b.id]).hiddenCount
+        check(hidden == 2, "A heading made from an item folds its adopted section")
+    }
+    do {
+        // Return on an indented row keeps its level; a selection outdents to headings together.
+        let (lot, coordinator, text, _, _, a, b, _, d) = fixture("return")
+        caret(text, coordinator, a.id); tab(text)
+        caret(text, coordinator, a.id); text.insertText("\n", replacementRange: text.selectedRange())
+        let created = lot.document.rows[2]
+        check(created.text.isEmpty && created.indent == 1 && created.parentID == lot.document.rows[0].id, "Return on an indented item creates its sibling at the same level")
+        text.undo(nil); caret(text, coordinator, a.id); tab(text, shift: true)
+        text.setSelectedRange(NSRange(location: entry(coordinator, b.id).range.location, length: NSMaxRange(entry(coordinator, d.id).range) - entry(coordinator, b.id).range.location))
+        tab(text, shift: true)
+        check(lot.document.rows.first { $0.id == b.id }?.heading == true && lot.document.rows.first { $0.id == d.id }?.heading == true && text.selectedRange().length > 0,
+              "Shift-Tab on several selected top-level items makes each a heading and keeps the selection")
+    }
+    do {
+        // Backspace at a heading only moves the caret.
+        let (lot, coordinator, text, _, h, a, _, _, d) = fixture("backspace")
+        let second = ParkingLotRow(heading: true, text: "Later")
+        let last = ParkingLotRow(heading: false, text: "After", parentID: second.id)
+        try lot.replaceUserRows(lot.document.rows + [second, last], revision: lot.document.revision); coordinator.render()
+        let before = lot.document
+        caret(text, coordinator, second.id, 0)
+        let ready = coordinator.projection.entries.last { $0.placeholder && !$0.row.heading && $0.before == second.id }!
+        text.deleteBackward(nil)
+        check(lot.document == before && text.selectedRange() == NSRange(location: ready.range.location, length: 0), "Backspace at a heading's start moves to the ever-present New item row above, changing nothing")
+        check(lot.undoManager.undoActionName != "Typing" || lot.document == before, "Moving the caret adds no Undo step")
+        try lot.replaceUserRows(lot.document.rows.filter { $0.id != d.id }, revision: lot.document.revision); coordinator.render()
+        let revised = lot.document
+        caret(text, coordinator, second.id, 0); text.deleteBackward(nil)
+        check(lot.document == revised && text.selectedRange().location == NSMaxRange(coordinator.projection.entries[coordinator.projection.entries.firstIndex { $0.row.id == second.id }! - 1].range), "Backspace at a heading always lands at the end of the entry above")
+        caret(text, coordinator, h.id, 0); text.deleteBackward(nil)
+        check(lot.document == revised && text.selectedRange().location == 0, "Backspace at the first heading does nothing")
+        caret(text, coordinator, h.id, 2); text.deleteBackward(nil)
+        check(lot.document.rows.first?.text == "Wrk", "Backspace elsewhere in a heading still deletes one character")
+        text.undo(nil)
+        // A selection reaching the start of a heading still deletes normally.
+        caret(text, coordinator, a.id); text.setSelectedRange(NSRange(location: entry(coordinator, a.id).range.location, length: 2)); text.deleteBackward(nil)
+        check(lot.document.rows.first { $0.id == a.id }?.text == "pha", "Backspace with a selection is ordinary deletion")
+    } catch { check(false, "Heading Backspace fixture: " + error.localizedDescription) }
+}
+
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
+    parkingFlexibleNestingEditorSelfTests(check)
     parkingHeadingLayoutSelfTests(check)
     parkingLotTextScalingSelfTests(check)
     parkingLotResizeSelfTests(check)

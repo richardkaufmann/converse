@@ -2103,7 +2103,12 @@ extension ConverseTests {
         let sibling = ParkingLotRow(heading: false, text: "Second", parentID: heading.id)
         let nextHeading = ParkingLotRow(heading: true, text: "Later")
         let rows = [heading, parent, child, sibling, nextHeading]
-        XCTAssertNil(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: false), "The Video lot's first item is already at the outermost item level")
+        let converted = try XCTUnwrap(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: false))
+        XCTAssertTrue(converted[1].heading, "Outdenting a top-level item makes it a heading")
+        XCTAssertEqual(try LotOperation(kind: .outdent, rowIDs: [parent.id]).applying(to: ParkingLotDocument(rows: rows), author: "iPhone").rows.map(\.heading), converted.map(\.heading))
+        let deeper = try XCTUnwrap(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: true))
+        XCTAssertEqual(deeper[1].indent, 1, "A first item can sit deeper than its heading")
+        XCTAssertEqual(try LotEntryEditing.splitting(parent.id, at: NSRange(location: 0, length: 0), in: deeper).rows[1].indent, 1, "Return before an indented item keeps its level")
         let outdented = try LotOperation(kind: .outdent, rowIDs: [child.id]).applying(to: ParkingLotDocument(rows: rows), author: "iPhone")
         XCTAssertEqual(outdented.rows[2].parentID, heading.id)
         XCTAssertEqual(outdented.rows.map(\.id), rows.map(\.id))

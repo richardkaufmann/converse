@@ -39,7 +39,7 @@ enum LotPortableExport {
                 }
             } else { document.rows[index].images = nil }
         }
-        document.schemaVersion = document.rows.contains { $0.tag != nil } ? 3 : 2
+        document.schemaVersion = ParkingLotDocument.schemaVersion(for: document.rows)
         let name = clean(snapshot.name)
         let envelope = Envelope(exportedAt: ISO8601DateFormatter().string(from: Date()),
                                 app: App(version: version, build: build, platform: "iOS"),

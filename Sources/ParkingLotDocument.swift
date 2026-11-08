@@ -46,10 +46,18 @@ struct ParkingLotRow: Codable, Equatable, Identifiable {
     // in preorder; this ID gives nested items a stable parent across edits.
     var parentID: UUID? = nil
     var tag: ParkingLotTag? = nil
+    // Extra outline levels beyond one below the parent, for an item shown deeper
+    // than the row before it allows. Nil on every row that does not need it.
+    var indent: Int? = nil
     var isDone: Bool { done == true }
 }
 struct ParkingLotDocument: Codable, Equatable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
+    /// The lowest version that keeps every field in `rows`: older builds refuse
+    /// a newer document rather than silently dropping tags or flexible indents.
+    static func schemaVersion(for rows: [ParkingLotRow]) -> Int {
+        rows.contains { ($0.indent ?? 0) > 0 } ? 4 : rows.contains { $0.tag != nil } ? 3 : 2
+    }
     var schemaVersion: Int = currentSchemaVersion
     var revision: Int = 0
     var rows: [ParkingLotRow] = []
@@ -97,28 +105,33 @@ enum ParkingLotTree {
     }
     static func nodes(_ rows: [ParkingLotRow]) throws -> [UUID: Node] {
         var result: [UUID: Node] = [:]
-        var path: [UUID] = []
+        var path: [(id: UUID, depth: Int)] = []
         var section: UUID?
         for row in rows {
             guard result[row.id] == nil else { throw ParkingLotError.message("Parking Lot has duplicate row IDs.") }
+            let indent = row.indent ?? 0
+            guard indent >= 0, indent < maximumDepth, !row.heading || indent == 0 else {
+                throw ParkingLotError.message("A Parking Lot row has an invalid indent.")
+            }
             if row.heading {
                 guard row.parentID == nil else { throw ParkingLotError.message("A Parking Lot heading must be at the top level.") }
                 result[row.id] = Node(parentID: nil, depth: 0)
-                path = [row.id]; section = row.id
+                path = [(row.id, 0)]; section = row.id
                 continue
             }
             let parentID = row.parentID ?? section
             if let parentID {
-                guard let position = path.firstIndex(of: parentID) else {
+                guard let position = path.firstIndex(where: { $0.id == parentID }) else {
                     throw ParkingLotError.message("A Parking Lot item must follow its parent and stay inside its section.")
                 }
+                let depth = path[position].depth + 1 + indent
+                guard depth <= maximumDepth else { throw ParkingLotError.message("Parking Lot nesting is limited to eight levels.") }
                 path = Array(path.prefix(position + 1))
-                guard path.count <= maximumDepth else { throw ParkingLotError.message("Parking Lot nesting is limited to eight levels.") }
-                result[row.id] = Node(parentID: parentID, depth: path.count)
-                path.append(row.id)
+                result[row.id] = Node(parentID: parentID, depth: depth)
+                path.append((row.id, depth))
             } else {
-                result[row.id] = Node(parentID: nil, depth: 0)
-                path = [row.id]
+                result[row.id] = Node(parentID: nil, depth: indent)
+                path = [(row.id, indent)]
             }
         }
         return result
@@ -128,15 +141,41 @@ enum ParkingLotTree {
         return rows.map { row in
             var copy = row
             if !copy.heading { copy.parentID = hierarchy[row.id]?.parentID }
+            if copy.indent == 0 { copy.indent = nil }
             return copy
         }
     }
+    /// The row and its descendants. Depth alone cannot decide this: a later row
+    /// can be indented deeper without being nested under this one.
     static func range(_ id: UUID, in rows: [ParkingLotRow]) -> Range<Int>? {
-        guard let index = rows.firstIndex(where: { $0.id == id }),
-              let hierarchy = try? nodes(rows), let depth = hierarchy[id]?.depth else { return nil }
-        var end = index + 1
-        while end < rows.count, (hierarchy[rows[end].id]?.depth ?? 0) > depth { end += 1 }
+        guard let index = rows.firstIndex(where: { $0.id == id }), let hierarchy = try? nodes(rows) else { return nil }
+        var members: Set<UUID> = [id], end = index + 1
+        while end < rows.count, let parent = hierarchy[rows[end].id]?.parentID, members.contains(parent) {
+            members.insert(rows[end].id); end += 1
+        }
         return index..<end
+    }
+    /// Each item's number among its siblings at the same depth. A shallower
+    /// sibling ends a deeper run, so that run restarts if it resumes.
+    static func numbers(_ rows: [ParkingLotRow]) -> [UUID: Int] {
+        guard let hierarchy = try? nodes(rows) else { return [:] }
+        var counters: [UUID?: [Int: Int]] = [:], result: [UUID: Int] = [:]
+        for row in rows where !row.heading {
+            guard let node = hierarchy[row.id] else { continue }
+            var counts = (counters[node.parentID] ?? [:]).filter { $0.key <= node.depth }
+            counts[node.depth, default: 0] += 1
+            counters[node.parentID] = counts
+            result[row.id] = counts[node.depth]
+        }
+        return result
+    }
+    /// The deepest row on the path before `index` that can parent an item at
+    /// `depth`, with the extra levels the item needs to reach that depth.
+    static func placement(at index: Int, depth: Int, in rows: [ParkingLotRow], hierarchy: [UUID: Node]) -> (parent: UUID?, indent: Int?) {
+        var candidate = index > 0 ? rows[index - 1].id : nil
+        while let id = candidate, (hierarchy[id]?.depth ?? 0) >= depth { candidate = hierarchy[id]?.parentID }
+        let extra = depth - (candidate.flatMap { hierarchy[$0]?.depth }.map { $0 + 1 } ?? 0)
+        return (candidate, extra > 0 ? extra : nil)
     }
     static func parentForInsertion(at index: Int, in rows: [ParkingLotRow], heading: Bool) -> UUID? {
         guard !heading else { return nil }
@@ -148,30 +187,34 @@ enum ParkingLotTree {
     static func depth(of id: UUID, in rows: [ParkingLotRow]) -> Int {
         (try? nodes(rows))?[id]?.depth ?? 0
     }
-    static func canIndent(_ id: UUID, in rows: [ParkingLotRow]) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }), !rows[index].heading,
-              let hierarchy = try? nodes(rows), let node = hierarchy[id], node.depth < maximumDepth else { return false }
-        return rows[..<index].last(where: { !$0.heading && hierarchy[$0.id]?.parentID == node.parentID }) != nil
-    }
-    static func canOutdent(_ id: UUID, in rows: [ParkingLotRow]) -> Bool {
-        guard let hierarchy = try? nodes(rows), let parent = hierarchy[id]?.parentID,
-              let row = rows.first(where: { $0.id == parent }) else { return false }
-        return !row.heading
-    }
+    static func canIndent(_ id: UUID, in rows: [ParkingLotRow]) -> Bool { changingIndent(id, in: rows, deeper: true) != nil }
+    /// Every item can outdent: a top-level item becomes a heading.
+    static func canOutdent(_ id: UUID, in rows: [ParkingLotRow]) -> Bool { rows.contains { $0.id == id && !$0.heading } }
     static func changingIndent(_ id: UUID, in rows: [ParkingLotRow], deeper: Bool) -> [ParkingLotRow]? {
         guard let index = rows.firstIndex(where: { $0.id == id }), !rows[index].heading,
               let hierarchy = try? nodes(rows), let node = hierarchy[id] else { return nil }
         var result = rows
         if deeper {
-            guard canIndent(id, in: rows),
-                  let previous = rows[..<index].last(where: { !$0.heading && hierarchy[$0.id]?.parentID == node.parentID }) else { return nil }
-            result[index].parentID = previous.id
+            // The item goes one level deeper under whatever precedes it; with no
+            // row at the level above, it keeps its parent and records the gap.
+            let target = placement(at: index, depth: node.depth + 1, in: rows, hierarchy: hierarchy)
+            result[index].parentID = target.parent; result[index].indent = target.indent
+        } else if (rows[index].indent ?? 0) > 0 {
+            result[index].indent = rows[index].indent == 1 ? nil : rows[index].indent! - 1
         } else {
             // Outliner outdent: the row stays put and adopts its following
             // siblings after its own children. No row moves.
-            guard canOutdent(id, in: rows), let parent = node.parentID else { return nil }
-            result[index].parentID = hierarchy[parent]?.parentID
-            for later in result.indices where later > index && hierarchy[rows[later].id]?.parentID == parent { result[later].parentID = id }
+            let parent = node.parentID, topLevel = parent.map { id in rows.contains { $0.id == id && $0.heading } } ?? true
+            if topLevel {
+                result[index].heading = true; result[index].parentID = nil; result[index].indent = nil
+            } else {
+                let target = placement(at: index, depth: node.depth - 1, in: rows, hierarchy: hierarchy)
+                result[index].parentID = target.parent; result[index].indent = target.indent
+            }
+            for later in (index + 1)..<rows.count {
+                if rows[later].heading { break }
+                if hierarchy[rows[later].id]?.parentID == parent { result[later].parentID = id }
+            }
         }
         return (try? nodes(result)) == nil ? nil : result
     }
@@ -201,9 +244,8 @@ enum ParkingLotTree {
             let deepest = min(previousDepth + 1, maximumDepth - height)
             guard next <= deepest else { return nil }
             let wanted = min(max(depth ?? max(1, previousDepth), next), deepest)
-            var parent = previous?.id, level = previousDepth
-            while level >= wanted, let current = parent { parent = tree[current]?.parentID; level -= 1 }
-            moving[0].parentID = parent
+            let target = placement(at: index, depth: wanted, in: remaining, hierarchy: tree)
+            moving[0].parentID = target.parent; moving[0].indent = target.indent
         }
         remaining.insert(contentsOf: moving, at: index)
         return (try? nodes(remaining)) == nil ? nil : remaining

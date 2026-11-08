@@ -374,7 +374,7 @@ extension Store {
         } catch { return "Parking Lot: " + error.localizedDescription + " No changes applied." }
     }
     /// Sent with every read so sessions taught before nesting still edit correctly.
-    static let parkingLotReadGuide = "[Outline: rows are in display order. An item's parentID is the heading or item it is nested under; an item without one belongs to the heading above it. To nest, add or move with \"parentID\":\"ROW-ID\" (before is optional and must name one of that parent's children). Moving or deleting a row takes its nested children with it. Headings are never nested. Edit with parking-lot-edit using this revision.]"
+    static let parkingLotReadGuide = "[Outline: rows are in display order. An item's parentID is the heading or item it is nested under; an item without one belongs to the heading above it. To nest, add or move with \"parentID\":\"ROW-ID\" (before is optional and must name one of that parent's children). Moving or deleting a row takes its nested children with it. Headings are never nested. An item's indent is extra display levels; leave it alone, and a move clears it. Edit with parking-lot-edit using this revision.]"
     func parkingLotReviewSummary(_ edits: ParkingLotEdits, session: Session, lot: ParkingLotStore) throws -> String? {
             let proposed = try lot.preview(edits, author: session.title)
             let current = lot.document.rows
