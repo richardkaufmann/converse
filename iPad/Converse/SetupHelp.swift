@@ -90,18 +90,31 @@ struct PadHelp: View {
         }
         // Manifest video links play here; every other Help link opens as usual.
         .environment(\.openURL, OpenURLAction { videos.open($0) ? .handled : .systemAction })
-        .sheet(item: $videos.playback) { PadHelpVideo(playback: $0, close: videos.close) }
+        .fullScreenCover(item: $videos.playback) { PadHelpVideo(playback: $0, close: videos.close) }
         .onDisappear(perform: videos.close)
     }
 }
 
 // Done, swipe-down and closing Help all clear the presenter's playback, which
-// stops it and releases the player.
+// stops it and releases the player. Full screen in every orientation; on a
+// landscape phone Done moves to a side rail so the video keeps the height.
 struct PadHelpVideo: View {
     @ObservedObject var playback: HelpVideoPlayback
     let close: () -> Void
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     var body: some View {
-        NavigationStack {
+        let rail = verticalSizeClass == .compact
+        // AnyLayout keeps the player's identity across rotation: the same
+        // AVKit controller and AVPlayer, so position and pause state survive.
+        let layout = rail ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        let bar = rail ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 12))
+        layout {
+            bar {
+                if !rail { Text(playback.video.title + " · " + playback.video.durationLabel).font(.headline).lineLimit(1) }
+                Spacer(minLength: 0)
+                Button("Done", action: close).fontWeight(.semibold)
+            }.padding(rail ? .vertical : .horizontal, 12).padding(rail ? .horizontal : .vertical, 10)
+                .frame(maxWidth: rail ? nil : .infinity, maxHeight: rail ? .infinity : nil)
             Group {
                 if case .failed(let message) = playback.state {
                     VStack(spacing: 14) {
@@ -109,14 +122,38 @@ struct PadHelpVideo: View {
                         Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
                         // Opened directly: Help's openURL handler would route it back here.
                         if let url = playback.video.browserURL { Button("Open link") { UIApplication.shared.open(url) } }
-                    }.padding()
+                    }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    VideoPlayer(player: playback.player).overlay { if playback.state == .loading { ProgressView() } }
+                    HelpVideoPlayerView(player: playback.player).overlay { if playback.state == .loading { ProgressView() } }
                 }
-            }.navigationTitle(playback.video.title + " · " + playback.video.durationLabel).navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done", action: close) } }
-        }.onDisappear(perform: close)
+            }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
+        .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { drag in
+            if drag.translation.height > 120 && abs(drag.translation.width) < drag.translation.height / 2 { close() }
+        })
+        .onDisappear(perform: close)
     }
+}
+
+// AVKit's own player: scrubbing, AirPlay and aspect-fit, so the whole frame
+// shows with black bars instead of being cropped. Picture in Picture stays
+// off so dismissing a Help video always ends playback.
+struct HelpVideoPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer?
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.videoGravity = .resizeAspect
+        controller.allowsPictureInPicturePlayback = false
+        controller.entersFullScreenWhenPlaybackBegins = false
+        controller.view.backgroundColor = .black
+        return controller
+    }
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player { controller.player = player }
+    }
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) { controller.player = nil }
 }
 
 struct PadAbout: View {
