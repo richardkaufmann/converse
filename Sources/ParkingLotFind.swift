@@ -304,9 +304,19 @@ private func parkingFindIdleSelfTests(_ check: (Bool, String) -> Void) {
     let counting = finder.objectWillChange.sink { _ in publications += 1 }
     defer { counting.cancel() }
     /// Lets the action's own updates finish, then counts what an idle bar still does.
+    /// Draining counts run-loop passes rather than elapsed time, so a loaded machine
+    /// cannot land typing's delayed chrome refresh in the counted window. A bar that
+    /// keeps working never drains, and that fails here.
     func expectIdle(_ label: String) {
-        run(0.25)
-        let start = (publications, finder.refreshes, finder.scans, coordinator.findHighlightPasses)
+        func counters() -> (Int, Int, Int, Int) { (publications, finder.refreshes, finder.scans, coordinator.findHighlightPasses) }
+        var last = counters(), quietPasses = 0
+        let deadline = Date().addingTimeInterval(20)
+        while quietPasses < 25, Date() < deadline {
+            run(0.01)
+            if counters() != last || lot.chromeRefreshPending { last = counters(); quietPasses = 0 } else { quietPasses += 1 }
+        }
+        guard quietPasses >= 25 else { check(false, "An open Find bar does no work while idle after \(label): still working after 20 s"); return }
+        let start = counters()
         run(0.25)
         let cycles = (publications - start.0, finder.refreshes - start.1, finder.scans - start.2, coordinator.findHighlightPasses - start.3)
         let report = "\(cycles.0) publications, \(cycles.1) refreshes, \(cycles.2) scans, \(cycles.3) highlight passes in 250 ms"
