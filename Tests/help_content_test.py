@@ -130,6 +130,8 @@ class HelpContentTests(unittest.TestCase):
                          (root / 'windows/src/Converse.Windows/ConversationPane.xaml').read_text())
         self.assertNotIn('filename="scoreboard.png"', (root / 'Sources/AgentDiscord.swift').read_text())
         self.assertNotIn('filename=\\"scoreboard.png\\"', (root / 'Sources/AgentDiscord.swift').read_text())
+        self.assertNotIn('optional scoreboard stay on the chosen home',
+                         (root / 'Sources/AgentUI.swift').read_text())
 
     def test_removed_change_assistant_menu_name_stays_removed(self):
         for relative in ('Sources/Workspace.swift', 'Sources/DeviceUI.swift',
