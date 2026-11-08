@@ -278,6 +278,27 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             && commands.BindingMatches(id, "device-a", "s1", boundBytes) && !commands.BindingMatches(id, "device-a", "s2", boundBytes) && !commands.BindingMatches(id, "device-b", "s1", boundBytes), "Dedup binds origin session hash");
         commands.MarkRunning(id);
         Check(new DeviceCommandStore(root).Outcome(id) == "uncertain", "Running command recovers as uncertain");
+        // Overlapping connections can deliver one command at the same moment.
+        var raceRoot = Path.Combine(root, "race");
+        var raced = new DeviceCommandStore(raceRoot);
+        var racedWinners = 0;
+        var distinctIds = Enumerable.Range(0, 64).Select(_ => Guid.NewGuid()).ToList();
+        for (var round = 0; round < 200; round++)
+        {
+            var shared = Guid.NewGuid();
+            using var start = new Barrier(8);
+            var winners = 0;
+            var racers = Enumerable.Range(0, 8).Select(_ => Task.Factory.StartNew(() =>
+            {
+                start.SignalAndWait();
+                if (raced.Begin(shared, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme)) Interlocked.Increment(ref winners);
+            }, TaskCreationOptions.LongRunning)).ToArray();
+            Task.WaitAll(racers);
+            if (winners == 1) racedWinners++;
+        }
+        Check(racedWinners == 200, "Concurrent Begin calls for one command admit exactly one winner");
+        Parallel.ForEach(distinctIds, new ParallelOptions { MaxDegreeOfParallelism = 8 }, commandId => raced.Begin(commandId, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme));
+        Check(distinctIds.All(new DeviceCommandStore(raceRoot).Records.ContainsKey), "Concurrent Begin calls persist every distinct command");
         var outbox = new DeviceOutboxStore(root);
         var record = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = "home/s", Payload = new DeviceCommandPayload { Action = "submit", Text = "keep me" }, PayloadHash = "h", Epoch = 4 };
         outbox.Add(record);
