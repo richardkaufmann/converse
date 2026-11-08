@@ -289,6 +289,7 @@ struct SidebarSession: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     var showsModel = true
+    @ObservedObject private var starInvitation = StarInvitation.shared
     @StateObject private var hover = SidebarHoverState()
     var confirmingClose: Bool { state.closingSessionID == session.id }
     var closeBinding: Binding<Bool> {
@@ -302,6 +303,7 @@ struct SidebarSession: View {
                               device: ShownElsewhere.device(devices.remoteDisplayHolder(session.id), me: devices.identity?.deviceID) { devices.displayName(for: $0) })
     }
     var body: some View {
+        VStack(spacing: 0) {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
             VStack(alignment: .leading, spacing: 0) {
@@ -355,6 +357,8 @@ struct SidebarSession: View {
             } message: {
                 Text("This removes the conversation from every window and stops any active work. A recovery snapshot keeps its transcript and draft. Use File → Restore Closed Conversation to recover it.")
             }
+        if session.supportAssistant && starInvitation.visible { StarInvitationBanner().padding(.leading, 16).padding(.trailing, 4) }
+        }
     }
 }
 struct WindowTitle: View {

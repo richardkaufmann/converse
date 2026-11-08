@@ -720,6 +720,7 @@ final class Store: ObservableObject {
         let completedTurn = success && !s.interrupted, turnCompletion = s.turnCompletion
         s.turnCompletion = nil
         if Workspace.shared.flagsUnseenResponse(s, success: success, interrupted: s.interrupted) { s.unseenResponse = true }
+        StarInvitation.shared.completedTurn(success: success, interrupted: s.interrupted, humanDirected: s.agent == nil && s.switchboardHop == 0 && !s.supportAutonomous && !s.supportContinuation && s.supportProbeCompletion == nil)
         importResponseImages(s)
         finishSupportProbe(s, success: success)
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
@@ -2993,6 +2994,7 @@ struct Conversation: View {
             }
             Divider()
             SessionTeachingBanner(store: store, session: session)
+            if session.supportAssistant { StarInvitationBanner() }
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
@@ -3325,6 +3327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
         CharacterLatencyProbe.shared.start(app: self)
+        StarInvitation.shared.start(folder: Store.shared.folder)
         if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
             Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Store.shared.trimIdleTranscripts() }
         }
@@ -4394,6 +4397,7 @@ func selfTest() {
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     performanceCaptureSelfTests(check)
+    starInvitationSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)

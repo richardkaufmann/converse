@@ -443,3 +443,135 @@ extension Store {
         save()
     }
 }
+
+/// A local invitation, deliberately outside agent prompts and transcripts.
+final class StarInvitation: ObservableObject {
+    static let shared = StarInvitation()
+    @Published private(set) var visible = false
+    private var state = StarInvitationState(release: "")
+    private var file: URL?
+    private var timer: Timer?
+    private var eventMonitor: Any?
+    private var lastInput: TimeInterval = -.infinity
+    private var lastTick: TimeInterval = 0
+    private var lastSave: TimeInterval = 0
+    private var remaining = StarInvitationState.bannerSeconds
+    private var publishing = false
+    private let writes = DispatchQueue(label: "Converse.star-invitation.persistence", qos: .utility)
+
+    func start(folder: URL) {
+        guard timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
+        let target = folder.appendingPathComponent("star-invitation.json")
+        let release = ConverseAbout.version + "/" + ConverseAbout.build
+        if FileManager.default.fileExists(atPath: target.path) {
+            // Do not overwrite a damaged record and accidentally ask again.
+            guard let data = try? Data(contentsOf: target), let saved = try? JSONDecoder().decode(StarInvitationState.self, from: data) else { return }
+            state = saved; state.useRelease(release)
+        } else { state = StarInvitationState(release: release) }
+        file = target
+        lastTick = ProcessInfo.processInfo.systemUptime; lastSave = lastTick
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
+            self?.lastInput = ProcessInfo.processInfo.systemUptime
+            return event
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.tick() }
+    }
+    private func tick() {
+        let now = ProcessInfo.processInfo.systemUptime, elapsed = now - lastTick
+        lastTick = now
+        // Foreground with recent human input; sleeping or a stalled run loop adds no time.
+        let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
+        if active {
+            state.addActiveSeconds(elapsed)
+            if visible { remaining -= elapsed; if remaining <= 0 { dismiss() } }
+        }
+        if active && state.eligible && !publishing && Store.shared.sessions.contains(where: { $0.supportAssistant }) {
+            publishing = true
+            var consumed = state; consumed.markShown()
+            persist(consumed) { [weak self] ok in
+                guard let self else { return }
+                self.publishing = false
+                guard ok else { return }
+                self.state = consumed; self.remaining = StarInvitationState.bannerSeconds; self.visible = true
+            }
+        } else if !publishing && now - lastSave >= 30 {
+            lastSave = now; persist(state)
+        }
+    }
+    func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
+        guard file != nil, !publishing else { return }
+        state.completedTurn(success: success, interrupted: interrupted, humanDirected: humanDirected)
+        if success && !interrupted && humanDirected { persist(state) }
+    }
+    private func persist(_ value: StarInvitationState, completion: ((Bool) -> Void)? = nil) {
+        guard let file, let data = try? JSONEncoder().encode(value) else { completion?(false); return }
+        writes.async {
+            let ok: Bool
+            do { try data.write(to: file, options: [.atomic]); ok = true } catch { ok = false }
+            if let completion { DispatchQueue.main.async { completion(ok) } }
+        }
+    }
+    func dismiss() { visible = false }
+    func openInvitation() {
+        dismiss()
+        StarInvitationWindow.shared.show()
+    }
+}
+
+struct StarInvitationBanner: View {
+    @ObservedObject private var invitation = StarInvitation.shared
+    var body: some View {
+        if invitation.visible {
+            HStack(spacing: 8) {
+                Button("Happy With Converse?") { invitation.openInvitation() }
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+                Button { invitation.dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.plain).accessibilityLabel("Dismiss appreciation invitation")
+            }.foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color(red: 0.08, green: 0.32, blue: 0.65), in: RoundedRectangle(cornerRadius: 5))
+        }
+    }
+}
+
+struct StarInvitationPanel: View {
+    var star: () -> Void
+    var report: () -> Void
+    var close: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                ParkingLotShoe().frame(width: 52, height: 52).accessibilityHidden(true)
+                Text("Happy With Converse?").font(.title2.bold())
+            }
+            Text("Hi, if you like this app, please consider pressing the Star button below. It lets the developer know the app is appreciated. Converse doesn’t track whether you star it.")
+            Text("If you have issues, please use File a Bug below so we can help.")
+            HStack {
+                Button("Star on GitHub", action: star)
+                Button("File a Bug…", action: report)
+                Spacer()
+                Button("Not Now", action: close).keyboardShortcut(.cancelAction)
+            }
+        }.font(.body).padding(24).frame(width: 440).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+final class StarInvitationWindow: NSObject, NSWindowDelegate {
+    static let shared = StarInvitationWindow()
+    private var window: NSWindow?
+    func show() {
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Happy With Converse?"; window.isReleasedWhenClosed = false; window.delegate = self
+        let panel = StarInvitationPanel(star: { [weak self] in
+            NSWorkspace.shared.open(URL(string: "https://github.com/richardkaufmann/converse")!)
+            self?.window?.close()
+        }, report: { [weak self] in
+            self?.window?.close(); AppDelegate.shared.reportConverseBug()
+        }, close: { [weak self] in self?.window?.close() })
+        let host = NSHostingView(rootView: panel)
+        window.contentView = host; window.setContentSize(host.fittingSize)
+        self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) { window = nil }
+}
