@@ -244,6 +244,30 @@ struct ShownElsewhere: Equatable {
         return row.shownOnHome == true ? named(homeName, fallback: "another device") : nil
     }
 }
+/// A name reveals its existing display without taking, opening or moving it.
+struct SidebarRevealName<Content: View>: View {
+    let location: PaneLocation?
+    var windowName: String? = nil
+    var deviceName: String? = nil
+    @ViewBuilder let content: Content
+    @State private var showingLocation = false
+    private var help: String {
+        if location != nil { return "Show in " + (windowName ?? "its existing window") + "\nClicking will bring its window forward." }
+        if let deviceName { return "Displayed on " + deviceName }
+        return "Parked. Use 1, 2 or 3 to show it in a pane."
+    }
+    var body: some View {
+        Button {
+            if let location { AppDelegate.shared?.frontWindow(location.windowID) }
+            else if deviceName != nil { showingLocation = true }
+        } label: { content.contentShape(Rectangle()) }
+            .buttonStyle(.plain).help(help).accessibilityHint(help)
+            .popover(isPresented: $showingLocation) {
+                Text(deviceName.map { "Displayed on " + $0 } ?? "No longer displayed on another device.")
+                    .padding(12)
+            }
+    }
+}
 /// The P 1 2 3 X strip in a sidebar row. AppKit tracking sets hover.overButtons from the pointer;
 /// the row passes it to each PaneButton as stripHovered.
 struct PaneButtonGroup<Content: View>: View {
@@ -281,6 +305,7 @@ extension Session {
             if let at = agent.lastRunAt { lines.insert("Last agent check: " + at.formatted(date: .abbreviated, time: .shortened), at: 3) }
             if !agent.attention.isEmpty { lines.insert("ATTENTION REQUIRED\n" + agent.attention + "\n", at: 0) }
         }
+        if workspace.placements[id] != nil { lines.insert("Clicking will bring its window forward.", at: 1) }
         return lines.joined(separator: "\n")
     }
 }
@@ -306,6 +331,9 @@ struct SidebarSession: View {
         VStack(spacing: 0) {
         HStack(spacing: 6) {
             SessionActivity(session: session, showApproval: workspace.showsParkedApproval(session))
+            SidebarRevealName(location: workspace.placements[session.id],
+                              windowName: workspace.placements[session.id].flatMap { workspace.names[$0.windowID] },
+                              deviceName: elsewhere.device) {
             VStack(alignment: .leading, spacing: 0) {
                 SessionName(title: session.title, isAgent: session.isAgentSession, isPaused: session.agentLoopPaused, unread: !session.isAgentSession && session.unseenResponse).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).layoutPriority(-1)
                 if let reason = session.pausedLoopReason {
@@ -314,7 +342,7 @@ struct SidebarSession: View {
                         .help(reason).accessibilityLabel("Paused: " + reason)
                 }
             }
-                .help("Use 1, 2 or 3 to show this session in a pane. Clicking its name never moves panes.")
+            }.layoutPriority(-1)
             if showsModel {
                 SessionProviderLogo(session: session, guide: Store.shared.firstRun).frame(width: 24)
             }

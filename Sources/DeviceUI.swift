@@ -117,6 +117,8 @@ struct DeviceSidebarSection: View {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                                 location: workspace.placements[service.placementID(forGlobal: row.globalID)],
+                                                 windowName: workspace.placements[service.placementID(forGlobal: row.globalID)].flatMap { workspace.names[$0.windowID] },
                                                  freePanes: Set((1...3).filter { workspace.paneIsAvailable($0, for: service.placementID(forGlobal: row.globalID), in: state.id) }),
                                                  elsewhere: ShownElsewhere.resolve(localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id), window: ShownElsewhere.window(workspace.placements[service.placementID(forGlobal: row.globalID)], here: state.id, names: workspace.names),
                                                                            device: ShownElsewhere.remoteDevice(row, home: home.deviceID, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), me: service.identity?.deviceID) { service.displayName(for: $0) }),
@@ -153,6 +155,8 @@ struct RemoteSidebarRow: View {
     var showsModel = true
     var markers = RemoteRowMarkers()
     let localPane: Int?
+    var location: PaneLocation? = nil
+    var windowName: String? = nil
     // Panes in this window that taking the session would not evict anyone from.
     var freePanes: Set<Int> = []
     // Another window here or another device shows it; P and X turn red on hover.
@@ -167,6 +171,7 @@ struct RemoteSidebarRow: View {
     @State private var renameText = ""
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
+        if location != nil { text = row.title + "\nClicking will bring its window forward.\n" + text.dropFirst(row.title.count + 1) }
         if let account = row.accountName { text += "\nAccount: " + account }
         if let reason = markers.pausedReason { text = "LOOP PAUSED — " + reason + "\n" + text }
         if markers.unseen { text = "UNSEEN RESPONSE — take with 1, 2 or 3 to read it.\n" + text }
@@ -189,6 +194,7 @@ struct RemoteSidebarRow: View {
                 ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"), unread: markers.unseen)
                     .help(online ? (row.busy ? row.status : (markers.unseen ? "Unseen response: take with 1, 2 or 3 to read it." : "Idle")) : "Home offline")
             }
+            SidebarRevealName(location: location, windowName: windowName, deviceName: elsewhere.device) {
             VStack(alignment: .leading, spacing: 0) {
                 SessionName(title: row.title, isAgent: row.isAgentRow, isParkingLot: row.engine == "parking", isPaused: markers.paused, unread: markers.unseen).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 if let reason = markers.pausedReason {
@@ -197,6 +203,7 @@ struct RemoteSidebarRow: View {
                         .help(reason).accessibilityLabel("Paused: " + reason)
                 }
             }
+            }.layoutPriority(-1)
             if showsModel {
                 ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.engine == "parking" ? "Parking Lot" : row.model)
             }
