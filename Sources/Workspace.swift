@@ -429,10 +429,9 @@ struct SidebarSession: View {
                         .help("Shows this agent's portrait in its conversation. Reuses the current portrait when its assessment has not changed.")
                     Button("Run once") { Store.shared.queueAgentRun(session) }.disabled(session.needsAgentSetup)
                     Button("Clear attention banner") { Store.shared.clearAgentAttention(session) }
-                    Button("Change Assistant or Login…") { AppDelegate.shared.configureSession(session, focusPickers: true) }
+                    Button("Configure…") { AppDelegate.shared.configureSession(session) }
                 } else {
                     Button("Configure…") { AppDelegate.shared.configureSession(session) }.disabled(session.busy)
-                    Button("Change Assistant or Login…") { AppDelegate.shared.configureSession(session, focusPickers: true) }.disabled(session.busy)
                 }
                 if let location = workspace.placements[session.id], location.windowID != state.id {
                     Button("Show in " + (workspace.names[location.windowID] ?? "other window")) { AppDelegate.shared.frontWindow(location.windowID) }

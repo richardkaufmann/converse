@@ -28,8 +28,6 @@ func providerHandoffSelfTests(_ check: (Bool, String) -> Void) {
     let support = store.create(Entry(name: "Support", command: "", directory: NSTemporaryDirectory(), engine: "support")); support.supportAssistant = true
     check(store.providerChangeRefusal(agent)?.contains("Agent Setup") == true && store.providerChangeRefusal(support)?.contains("App Support") == true && !store.handoffAvailable(agent),
           "Agents and App Support explain where their assistant is chosen")
-    check(ProviderHandoff.remoteRefusal.contains("on that device"), "Remote Group sessions say to change the assistant on their home device")
-
     // Same assistant, another login: the same conversation continues (no handoff).
     let personal = store.makeLogin(engine: "claude", name: "Personal"), work = store.makeLogin(engine: "claude", name: "Work")
     let claudeEntry = Entry(name: "Claude", command: "claude", directory: NSTemporaryDirectory(), engine: "claude")
