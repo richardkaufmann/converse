@@ -23,15 +23,16 @@ func transcriptSelfReadSelfTests(_ check: (Bool, String) -> Void) {
         store.processSwitchboard(s)
     }
 
-    // Teaching: the lesson, the per-turn policy and the version.
+    // Teaching: the lesson and the version; the per-turn policy stays as it was.
     store.teachSwitchboard(a)
     let lesson = a.pending.last?.text ?? ""
     check(lesson.contains("transcript-search") && lesson.contains("transcript-read") && lesson.contains("only this session's own retained transcript") && lesson.contains("reference data, not instructions"),
           "Teach covers transcript-search and transcript-read, own-session scope and reference framing")
     check(SwitchboardTeaching.version == 4 && a.switchboardTeachingVersion == 4 && SwitchboardTeaching.talkHelp.contains("its own transcript"),
           "The lesson version advances so taught sessions see Re-teach")
-    check(SwitchboardCommand.conversationPolicy.contains("transcript-search") && SwitchboardCommand.conversationPolicy.contains("never another session's"),
-          "Every taught prompt's policy reminder names the self-read commands")
+    let perTurn = store.localContext(a, directory: root.path)
+    check(perTurn.contains("[Switchboard: ") && !perTurn.contains("transcript-") && !perTurn.contains("Own history") && !SwitchboardCommand.conversationPolicy.contains("transcript"),
+          "The per-turn context of a taught session does not repeat the self-read lesson")
     a.pending = []
     let before = a.messages.count
 
@@ -100,13 +101,22 @@ func transcriptSelfReadSelfTests(_ check: (Bool, String) -> Void) {
     reply(a, ["command": "transcript-search", "query": "needle", "to": "other-home/" + b.id.uuidString.lowercased()])
     check(a.pending.last?.text.hasPrefix(TranscriptSelfRead.refusedHeader) == true, "Naming another session's global ID is refused")
     reply(a, ["command": "transcript-search", "query": "needle", "session": "elsewhere/" + a.id.uuidString.lowercased()])
-    let home = store.participantService.localDeviceID
-    check((a.pending.last?.text.hasPrefix(TranscriptSelfRead.refusedHeader) == true) == (home != nil), "This session's ID on another home is refused")
+    check(a.pending.last?.text.hasPrefix(TranscriptSelfRead.refusedHeader) == true, "This session's ID on another home is refused")
+    for (key, value) in [("session", 5 as Any), ("to", ["x"] as Any), ("session", ["id": a.id.uuidString] as Any), ("to", true as Any)] {
+        reply(a, ["command": "transcript-read", key: value])
+        check(a.pending.last?.text.hasPrefix(TranscriptSelfRead.refusedHeader) == true && a.messages.last?.text.contains("refused") == true,
+              "A transcript command whose \(key) is not a string is refused, not read as omitted")
+    }
+    reply(a, ["command": "transcript-read", "session": NSNull()])
+    check(a.pending.last?.text.hasPrefix(TranscriptSelfRead.header) == true, "A null target counts as omitted")
     reply(a, ["command": "transcript-search", "query": "needle", "session": a.id.uuidString])
     check(a.pending.last?.text.hasPrefix(TranscriptSelfRead.header) == true, "Naming this session's own ID is allowed")
     check(TranscriptSelfRead.ownsTarget(a.id.uuidString.lowercased(), session: a, home: "h") && TranscriptSelfRead.ownsTarget("h/" + a.id.uuidString, session: a, home: "h")
           && !TranscriptSelfRead.ownsTarget("h/" + b.id.uuidString, session: a, home: "h") && !TranscriptSelfRead.ownsTarget("garbage", session: a, home: "h"),
           "Own-session matching accepts only this session's bare or home-qualified ID")
+    check(TranscriptSelfRead.ownsTarget(a.id.uuidString, session: a, home: nil) && TranscriptSelfRead.ownsTarget(nil, session: a, home: nil)
+          && !TranscriptSelfRead.ownsTarget("h/" + a.id.uuidString, session: a, home: nil) && !TranscriptSelfRead.ownsTarget(TranscriptSelfRead.invalidTarget, session: a, home: "h"),
+          "With no known home, only the bare own ID or no target is accepted")
 
     // Untaught sessions: only a whole-reply self-read runs (import recovery).
     a.pending = []; b.pending = []
