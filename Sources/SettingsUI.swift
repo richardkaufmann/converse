@@ -286,14 +286,7 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
     let suite = "Converse.PerformancePreview." + UUID().uuidString
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
-    let preferenceProbe = PerformanceDebugState()
-    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: [:], environment: [:])
-    guard !preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") == nil else { throw NSError(domain: "PerformancePreview", code: 2) }
-    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
-    guard preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") == nil else { throw NSError(domain: "PerformancePreview", code: 3) }
-    preferenceProbe.turnOff()
-    preferenceProbe.initialize(folder: store.folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
-    guard !preferenceProbe.automatic, defaults.object(forKey: "performanceRecordOnLaunch") as? Bool == false else { throw NSError(domain: "PerformancePreview", code: 4) }
+    diagnostics.initialize(folder: store.folder, defaults: defaults, info: [:], environment: [:])
     titlePreview("off")
     diagnostics.record(folder: store.folder)
     titlePreview("recording")
@@ -305,15 +298,6 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
         throw NSError(domain: "PerformancePreview", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pause did not freeze a capture"])
     }
     titlePreview("paused")
-    let savedFile = diagnostics.file!
-    let savedBytes = try Data(contentsOf: savedFile)
-    diagnostics.record(folder: store.folder)
-    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 500)
-    diagnostics.turnOff()
-    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-    guard !diagnostics.recording, !diagnostics.paused, diagnostics.file == savedFile,
-          try Data(contentsOf: savedFile) == savedBytes else { throw NSError(domain: "PerformancePreview", code: 5) }
-    print("PASS: computed recording defaults remain unset; explicit Off persists; Record then Off preserves paused export bytes")
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         let appearance = NSAppearance(named: appearanceName)!
         for (index, category) in SettingsCategory.allCases.enumerated() {
@@ -346,7 +330,7 @@ final class PerformanceDebugState: ObservableObject {
     @Published var exportError: String?
     @Published var history = 60.0 {
         didSet {
-            UserDefaults.standard.set(history, forKey: "performanceHistorySeconds")
+            if !loadingPreferences { preferences.set(history, forKey: "performanceHistorySeconds") }
             PerformanceCapture.shared.setHistory(seconds: history)
         }
     }
@@ -401,7 +385,6 @@ final class PerformanceDebugState: ObservableObject {
     func turnOff() {
         guard !busy else { return }
         automatic = false
-        request += 1
         if let folder, recording { PerformanceCapture.shared.configure(folder: folder, enabled: false) }
         recording = false; paused = false
         status = "Off. Last paused buffer remains available to export."
@@ -458,4 +441,36 @@ struct PerformanceDebugView: View {
             Spacer()
         }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+/// Run by the ordinary test.sh self-test, with isolated preferences and capture files.
+func performanceDebugSelfTests(_ check: (Bool, String) -> Void) {
+    let suite = "Converse.PerformanceTests." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let standardBefore = ["performanceRecordOnLaunch", "performanceHistorySeconds"].map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
+    defer {
+        defaults.removePersistentDomain(forName: suite)
+        try? FileManager.default.removeItem(at: folder)
+    }
+    let probe = PerformanceDebugState()
+    probe.initialize(folder: folder, defaults: defaults, info: [:], environment: [:])
+    check(!probe.automatic && defaults.object(forKey: "performanceRecordOnLaunch") == nil && defaults.object(forKey: "performanceHistorySeconds") == nil, "Production recording/history defaults do not become saved user choices")
+    probe.initialize(folder: folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    check(probe.automatic && defaults.object(forKey: "performanceRecordOnLaunch") == nil, "Development recording default remains computed")
+    probe.turnOff(); probe.history = 120
+    probe.initialize(folder: folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    check(!probe.automatic && probe.history == 120 && defaults.object(forKey: "performanceRecordOnLaunch") as? Bool == false, "Explicit Off and history survive initialization using injected preferences")
+    probe.record(folder: folder)
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 125)
+    probe.pause()
+    let deadline = Date().addingTimeInterval(5)
+    while probe.busy && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    guard let file = probe.file, let bytes = try? Data(contentsOf: file), !probe.busy else { check(false, "Controller pause writes isolated capture"); return }
+    probe.record(folder: folder)
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 500)
+    probe.turnOff()
+    check(!probe.recording && !probe.paused && probe.file == file && (try? Data(contentsOf: file)) == bytes, "Record then Off preserves the previous paused export bytes")
+    let standardAfter = ["performanceRecordOnLaunch", "performanceHistorySeconds"].map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
+    check(standardAfter == standardBefore, "Controller regression tests never alter standard recording or history preferences")
 }

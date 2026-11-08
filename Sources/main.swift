@@ -4394,6 +4394,7 @@ func selfTest() {
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
     performanceCaptureSelfTests(check)
+    performanceDebugSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
