@@ -322,6 +322,12 @@ import Foundation
     Task { @MainActor in outcomes.append(await service.request(agent, store: store, origin: .menu, force: true)) }
     spin { outcomes.count == 12 }
     check(calls == 7 && agent.agent?.portrait?.failures == nil && outcomes[11].image?.sourceRevision == 5, "Refresh retries immediately and a success clears the failure")
+    do {
+        // Card bodies re-evaluate on every tick and publish.
+        let latest = agent.agent?.portrait?.latest, before = PortraitImageCache.loads
+        let shown = PortraitImageCache.image(latest), again = PortraitImageCache.image(latest)
+        check(shown != nil && shown === again && PortraitImageCache.loads == before + 1, "A portrait card loads its image once however often it re-evaluates")
+    }
     // Window demand: subscribed windows request on turns (debounced); closing ends it.
     service.debounceSeconds = 0.05
     service.agentTurned(agent, store: store)

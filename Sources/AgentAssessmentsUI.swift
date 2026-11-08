@@ -186,6 +186,20 @@ struct AgentPortraitsView: View {
     }
 }
 
+// Stored portrait filenames carry their content hash, so a path names one image.
+enum PortraitImageCache {
+    private static let images: NSCache<NSString, NSImage> = { let cache = NSCache<NSString, NSImage>(); cache.countLimit = 64; return cache }()
+    private(set) static var loads = 0
+    static func image(_ latest: AgentPortraitRecord.Image?) -> NSImage? {
+        guard let latest else { return nil }
+        if let cached = images.object(forKey: latest.path as NSString) { return cached }
+        loads += 1
+        guard let image = NSImage(contentsOfFile: latest.path) else { return nil }
+        images.setObject(image, forKey: latest.path as NSString)
+        return image
+    }
+}
+
 struct AgentPortraitCard: View {
     @ObservedObject var session: Session
     @ObservedObject var portraits: PortraitService
@@ -194,7 +208,7 @@ struct AgentPortraitCard: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let config = session.agent ?? AgentConfig(), latest = config.portrait?.latest
-            let image = latest.flatMap { NSImage(contentsOfFile: $0.path) }
+            let image = PortraitImageCache.image(latest)
             let stale = latest.map { $0.cacheKey != PortraitService.cacheKey(agent: session.id, config: config) } ?? false
             let generating = portraits.isGenerating(session.id)
             VStack(alignment: .leading, spacing: 6) {
