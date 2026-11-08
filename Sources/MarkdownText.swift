@@ -6,6 +6,7 @@ struct MarkdownText {
     static let font = NSFont.systemFont(ofSize: 16)
     static func inline(_ source: String, bold: Bool = false) -> NSMutableAttributedString {
         let output = NSMutableAttributedString(string: "")
+        let localImages = Set(TranscriptStyle.localImageReferences(source).map(\.url))
         guard let parsed = try? AttributedString(markdown: TranscriptStyle.imageLinks(source), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSMutableAttributedString(string: source, attributes: [.font: font, .foregroundColor: NSColor.textColor])
         }
@@ -20,6 +21,11 @@ struct MarkdownText {
             if intent.contains(.code) { attributes[.backgroundColor] = NSColor.quaternaryLabelColor.withAlphaComponent(0.10) }
             if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             if let link = run.link, ["https", "http", "converse-help"].contains(link.scheme ?? "") { attributes[.link] = link; attributes[.toolTip] = link.absoluteString }
+            if let link = run.link, link.isFileURL, localImages.contains(link) {
+                attributes[.link] = link
+                attributes[LocalImageFallback.attribute] = link
+                attributes[.toolTip] = "Reveal image in Finder on this session's home Mac: " + link.path
+            }
             output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
         }
         return output

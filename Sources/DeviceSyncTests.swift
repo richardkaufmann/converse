@@ -1198,7 +1198,14 @@ func deviceFabricSelfTests(_ check: (Bool, String) -> Void) {
         while services.contains(where: { $0.homes.values.filter(\.online).count != 11 }) && Date() < until {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
-        check(services.allSatisfy { $0.homes.values.filter(\.online).count == 11 && $0.pairingPrompt == nil } && humanAdmissions == 22, "Twelve devices form one fabric with only eleven mutual admissions")
+        let complete = services.allSatisfy { $0.homes.values.filter(\.online).count == 11 && $0.pairingPrompt == nil } && humanAdmissions == 22
+        if !complete {
+            print("Fabric convergence diagnostics: approvals=\(humanAdmissions), expected=22")
+            for (index, service) in services.enumerated() {
+                print("Fabric fixture \(index): trusted=\(service.trusted.count), online=\(service.homes.values.filter(\.online).count), pairing=\(service.pairingPrompt != nil), status=\(service.serviceStatus), outcome=\(service.lastOutcome)")
+            }
+        }
+        check(complete, "Twelve devices form one fabric with only eleven mutual admissions")
         let versionEvidence = homes[0].installedVersionEvidence(localVersion: "9.9.9 (999)")
         let pairedVersions = versionEvidence["pairedDevices"] as? [[String: Any]] ?? []
         check((versionEvidence["thisDevice"] as? [String: Any])?["installedVersion"] as? String == "9.9.9 (999)" && pairedVersions.count == 11
