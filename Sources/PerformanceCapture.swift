@@ -12,6 +12,10 @@ final class PerformanceCapture {
         case lotKeyDelivery, lotKeyHandling, lotTextInsertion, lotScrollDelivery, lotScrollHandling
         case sessionScrollDelivery, sessionScrollHandling
         case lotRoundTrip, lotAckApply, lotLocalEdit, lotTextUpdate, lotTextLayout, lotInputToChange
+        // Mac Parking Lot typing substages, nested inside lotKeyHandling/lotTextInsertion.
+        case lotSubstitution, lotProjectionEdit, lotRowsCommit, lotValidate, lotNormalize, lotSnapshotCheck
+        case lotEncodeWrite, lotUndoRegister, lotPublish, lotSeenWrite, lotRender, lotProjectionBuild
+        case lotAttributes, lotStorageApply, lotSelection, lotCommentButtons, lotImageSpacing, lotScrollVisible, lotDraw
     }
     struct Span { let start: Double; let generation: Int; let mainThread: Bool }
     struct Event: Codable {
@@ -114,6 +118,10 @@ final class PerformanceCapture {
     func end(_ operation: Operation, _ span: Span?) {
         guard let span else { return }
         record(operation, since: span.start, generation: span.generation, mainThread: span.mainThread)
+    }
+    @discardableResult func measure<T>(_ operation: Operation, _ body: () throws -> T) rethrows -> T {
+        let span = begin(); defer { end(operation, span) }
+        return try body()
     }
     func startRoundTrip(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
@@ -257,6 +265,8 @@ final class PerformanceCapture {
         record(operation, milliseconds: milliseconds, uptime: span.start, generation: span.generation, mainThread: span.mainThread)
     }
     func flushForTesting() { queue.sync { writeSnapshot() } }
+    /// Retained events, for in-process profiles that need medians.
+    func eventsForTesting() -> [Event] { lock.lock(); defer { lock.unlock() }; return Array(events.dropFirst(eventHead)) }
 }
 
 func performanceCaptureSelfTests(_ check: (Bool, String) -> Void) {

@@ -1,5 +1,10 @@
 import AppKit
 import SwiftUI
+import Combine
+
+/// Signals the views around the editor. Typing changes only row text, which they
+/// never show, so a text-only user edit defers this signal until typing pauses.
+final class ParkingLotChrome: ObservableObject {}
 
 // Local notes, not a provider session. The stable ID uses the ordinary agent
 // watched-session scope and workspace placement, without starting a CLI.
@@ -13,6 +18,10 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
     let id: UUID
     let substitutionFeedback = SubstitutionFeedback()
+    let chrome = ParkingLotChrome()
+    private var chromeObserver: AnyCancellable?
+    private var deferChrome = false
+    private var pendingChrome: DispatchWorkItem?
     let undoManager: UndoManager = { let manager = UndoManager(); manager.groupsByEvent = false; manager.levelsOfUndo = 100; return manager }()
     @Published var name: String
     @Published private(set) var document = ParkingLotDocument()
@@ -49,18 +58,51 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         }
         lastSeenRevision = (try? JSONDecoder().decode(Int.self, from: Data(contentsOf: seenFile))) ?? document.revision
         if active { saveSeenRevision() }
+        chromeObserver = objectWillChange.sink { [weak self] _ in
+            guard let self, !self.deferChrome else { return }
+            self.pendingChrome?.cancel(); self.pendingChrome = nil
+            self.chrome.objectWillChange.send()
+        }
     }
+    private func refreshChromeSoon() {
+        pendingChrome?.cancel()
+        let task = DispatchWorkItem { [weak self] in self?.pendingChrome = nil; self?.chrome.objectWillChange.send() }
+        pendingChrome = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
+    }
+    private static func onlyTextDiffers(_ a: [ParkingLotRow], _ b: [ParkingLotRow]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy {
+            $0.id == $1.id && $0.heading == $1.heading && $0.parentID == $1.parentID && $0.tag == $1.tag && $0.done == $1.done && $0.images == $1.images && $0.notes == $1.notes
+        }
+    }
+    private var savedSeenRevision: Int?
+    private var pendingSeenSave: DispatchWorkItem?
     private func saveSeenRevision() {
+        pendingSeenSave?.cancel(); pendingSeenSave = nil
         do {
             try FileManager.default.createDirectory(at: seenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(lastSeenRevision).write(to: seenFile, options: .atomic)
+            savedSeenRevision = lastSeenRevision
         } catch { NSLog("Could not save Parking Lot reading position: %@", error.localizedDescription) }
+    }
+    /// The file only drives the unseen marker, and a lost beat of it just shows
+    /// the marker again, so a burst of edits to an open lot writes it once.
+    private func saveSeenRevisionSoon() {
+        guard lastSeenRevision != savedSeenRevision else { return }
+        guard savedSeenRevision != nil, !viewers.isEmpty, Thread.isMainThread else { saveSeenRevision(); return }
+        guard pendingSeenSave == nil else { return }
+        let task = DispatchWorkItem { [weak self] in self?.saveSeenRevision() }
+        pendingSeenSave = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: task)
     }
     func beginViewing(_ viewer: UUID) {
         viewers.insert(viewer)
         if lastSeenRevision != document.revision { lastSeenRevision = document.revision; saveSeenRevision() }
     }
-    func endViewing(_ viewer: UUID) { viewers.remove(viewer) }
+    func endViewing(_ viewer: UUID) {
+        viewers.remove(viewer)
+        if pendingSeenSave != nil { saveSeenRevision() }
+    }
     var authorityCheck: (() throws -> Void)?
     var snapshotCheck: ((ParkingLotDocument) throws -> Void)?
     private func requireWritable() throws {
@@ -121,24 +163,35 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     /// the Undo history; session, agent, device and Undo saves never do.
     private func persist(_ next: ParkingLotDocument, user: Bool = false, undoName: String? = nil) throws {
         try requireWritable()
+        let capture = PerformanceCapture.shared
         var next = next
-        next.rows = try ParkingLotTree.normalized(next.rows)
+        next.rows = try capture.measure(.lotNormalize) { try ParkingLotTree.normalized(next.rows) }
         next.schemaVersion = next.rows.contains(where: { $0.tag != nil }) ? 3 : 2
-        try snapshotCheck?(next)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(next).write(to: file, options: .atomic)
+        try capture.measure(.lotSnapshotCheck) { try snapshotCheck?(next) }
+        try capture.measure(.lotEncodeWrite) {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(next).write(to: file, options: .atomic)
+        }
         let before = document.rows, after = next.rows
         if user && active && before != after {
-            let name = undoName ?? ParkingLotUndo.actionName(before, after)
-            undoManager.beginUndoGrouping()
-            undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: after, to: before) }
-            undoManager.setActionName(name)
-            undoManager.endUndoGrouping()
+            capture.measure(.lotUndoRegister) {
+                let name = undoName ?? ParkingLotUndo.actionName(before, after)
+                undoManager.beginUndoGrouping()
+                undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: after, to: before) }
+                undoManager.setActionName(name)
+                undoManager.endUndoGrouping()
+            }
         }
-        document = next; active = true; error = ""
-        if user { notice = "" }
-        if !viewers.isEmpty { lastSeenRevision = next.revision }
-        saveSeenRevision()
+        capture.measure(.lotPublish) {
+            let textOnly = user && active && Thread.isMainThread && error.isEmpty && notice.isEmpty && Self.onlyTextDiffers(before, after)
+            deferChrome = textOnly
+            document = next; active = true; error = ""
+            if user { notice = "" }
+            if !viewers.isEmpty { lastSeenRevision = next.revision }
+            deferChrome = false
+            if textOnly { refreshChromeSoon() }
+        }
+        capture.measure(.lotSeenWrite) { saveSeenRevisionSoon() }
     }
     /// Undo or Redo one user edit against the current rows. A conflict drops
     /// the entry and explains why; it never restores an older document.
@@ -177,7 +230,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     func replaceUserRows(_ rows: [ParkingLotRow], revision: Int, undoName: String? = nil) throws {
         try requireWritable()
         guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
-        try Self.validate(rows)
+        try PerformanceCapture.shared.measure(.lotValidate) { try Self.validate(rows) }
         if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows), user: true, undoName: undoName) }
     }
     func setDone(_ id: UUID, _ done: Bool) {
@@ -349,10 +402,15 @@ final class ParkingLotStore: ObservableObject, Identifiable {
 struct ParkingLotSidebar: View {
     @State private var showingLinks = false
     @ObservedObject private var library = ParkingLotLibrary.shared
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     @StateObject private var paneHover = SidebarHoverState()
+    init(lot: ParkingLotStore, workspace: Workspace, state: WindowState) {
+        self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome)
+        _workspace = ObservedObject(wrappedValue: workspace); _state = ObservedObject(wrappedValue: state)
+    }
     private func show(_ pane: Int? = nil) {
         lot.open()
         workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
@@ -410,9 +468,14 @@ enum ParkingLotTransfer {
 
 struct ParkingLotView: View {
     @State private var viewerID = UUID()
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var workspace: Workspace
     let pane: Int
+    init(lot: ParkingLotStore, workspace: Workspace, pane: Int) {
+        self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome)
+        _workspace = ObservedObject(wrappedValue: workspace); self.pane = pane
+    }
     @State private var reordering = false
     @StateObject private var undoFocus = ParkingLotUndoFocus()
     @State private var talking = false
@@ -646,6 +709,7 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
     parkingOutlineSelfTests(check)
     parkingLinkEditorSelfTests(check)
     parkingUserUndoSelfTests(check)
+    parkingLotTypingSelfTests(check)
     parkingLibrarySelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -949,9 +1013,11 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
 /// Voice controls and the last stop/failure stay in the lot's own pane because
 /// the idle Talk helper is hidden from the sidebar.
 struct ParkingLotTalkBar: View {
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var conversation = AgentConversation.shared
     @ObservedObject var store = Store.shared
+    init(lot: ParkingLotStore) { self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome) }
     static func talkSession(for lot: UUID, sessionID: UUID?, sessions: [Session]) -> Session? {
         guard let sessionID else { return nil }
         return sessions.first { $0.id == sessionID && $0.agent?.parkingLotTalkID == lot }

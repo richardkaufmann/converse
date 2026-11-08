@@ -103,6 +103,16 @@ does not establish receipt or redraw on the iPad. The asynchronous turnaround sp
 are excluded from the summarizers' list of potentially blocking main-thread work.
 In-process transport fixtures complete at their mock sink, not a real network.
 
+On Mac, typing into a Parking Lot adds substages nested inside `lotKeyHandling` and
+`lotTextInsertion`: `lotProjectionEdit`, `lotRowsCommit` (containing `lotValidate`,
+`lotNormalize`, `lotSnapshotCheck`, `lotEncodeWrite`, `lotUndoRegister`, `lotPublish`
+and `lotSeenWrite`), `lotRender` (containing `lotProjectionBuild`, `lotAttributes`,
+`lotStorageApply`, `lotSelection`, `lotCommentButtons` and `lotScrollVisible`), plus
+`lotSubstitution`, `lotImageSpacing` and `lotDraw`. `Converse --lot-typing-profile`,
+with `CONVERSE_DATA_DIR` set, types into synthetic 130- and 500-row lots in the real
+pane and prints each stage's cost per keystroke; `CONVERSE_LOT_PROFILE_KEYS` and
+`CONVERSE_LOT_PROFILE_PAUSE` lengthen a run so a sampler can attach.
+
 To measure the delay a person sees on iPad, also instrument its local edit/queue,
 send-to-matching-ack interval, and acknowledgment-to-visible-update interval.
 Match acknowledgment IDs locally without recording lot contents. Calculate each

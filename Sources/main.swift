@@ -4615,6 +4615,20 @@ if CommandLine.arguments.contains("--lot-undo-self-test") {
     parkingUserUndoSelfTests(check); parkingDropSelfTests(check)
     exit(failures == 0 ? 0 : 1)
 }
+// Per-keystroke Parking Lot typing cost, by substage, on synthetic lots.
+if CommandLine.arguments.contains("--lot-typing-profile") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-typing-profile-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    for rows in [130, 500] {
+        let measurement = measureParkingLotTyping(rows: rows, keys: 120, folder: folder.appendingPathComponent("\(rows)"), check: check)
+        print(parkingLotTypingReport(measurement, label: "\(rows)-row lot"))
+    }
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--transcript-render-profile") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
           ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
