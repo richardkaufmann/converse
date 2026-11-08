@@ -51,6 +51,7 @@ extension Store {
     func handoffNoteURL(_ s: Session) -> URL { handoffFolder(s).appendingPathComponent("handoff.md") }
     func handoffTranscriptURL(_ s: Session) -> URL { handoffFolder(s).appendingPathComponent("transcript.md") }
     private func makeHandoffFolder(_ s: Session) throws {
+        imageReferenceFileWrites += 1
         try FileManager.default.createDirectory(at: handoffFolder(s), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     @discardableResult func writeHandoffTranscript(_ s: Session, pending: HandoffPending?) throws -> URL {

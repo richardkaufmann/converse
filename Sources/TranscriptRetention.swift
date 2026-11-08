@@ -156,48 +156,116 @@ extension Store {
         guard !candidates.isEmpty else { deleted?(0); return }
         ArchiveWriter.shared.flushThen(folder.path, atLeast: generation) { [weak self] durable in
             guard let self, durable else { deleted?(0); return }
-            deleted?(self.deleteUnreferencedImages(candidates))
+            self.deleteUnreferencedImages(candidates, deleted: deleted)
         }
     }
-    /// Every image path and text that may still use a file: live sessions'
-    /// messages, drafts, queued prompts and agent art, plus closed sessions
-    /// that File ▸ Restore Closed Conversation can bring back.
-    func imageReferences() -> (paths: Set<String>, texts: [String]) {
-        var paths = Set<String>(), texts: [String] = []
-        func prompt(_ p: PendingPrompt) { paths.formUnion(p.images); texts.append(p.text); p.components?.forEach(prompt) }
-        func add(_ s: SavedSession) {
-            for message in s.messages { paths.formUnion(message.images); texts.append(message.text) }
-            paths.formUnion(s.attachments); texts.append(s.draft); s.pending?.forEach(prompt)
-            if let art = s.agent?.artPath { paths.insert(art) }
+    /// Image paths and text in memory that may still use a file: live
+    /// sessions' messages, drafts, queued prompts and agent art. Values only,
+    /// so the snapshot can be checked off the main thread.
+    func liveImageReferences() -> ImageReferences {
+        var references = ImageReferences()
+        for s in sessions { references.add(messages: s.messages, attachments: s.attachments, draft: s.draft, pending: s.pending, art: s.agent?.artPath) }
+        return references
+    }
+    /// Deletes candidates nothing references, keeping the slow file work off
+    /// the main thread: memory is snapshotted here; closed sessions, handoff
+    /// files and the candidates are read in the background; the result is
+    /// checked again here against current memory (rescanning if a closed
+    /// session or handoff was written meanwhile), then deleted in the background.
+    func deleteUnreferencedImages(_ candidates: Set<String>, deleted: ((Int) -> Void)? = nil) {
+        let live = liveImageReferences(), writes = imageReferenceFileWrites, folder = folder
+        Self.imageCleanupQueue.async { [weak self] in
+            let references = live.merging(ImageReferences.onDisk(folder)).prepared()
+            let deletable = ImageReferences.deletable(candidates, folder: folder, references: references)
+            DispatchQueue.main.async {
+                guard let self, !deletable.isEmpty else { deleted?(0); return }
+                guard writes == self.imageReferenceFileWrites else { self.deleteUnreferencedImages(Set(deletable.map(\.path)), deleted: deleted); return }
+                let current = self.liveImageReferences().prepared(for: deletable)
+                let confirmed = deletable.filter { !current.uses($0) }.map(\.path)
+                Self.imageCleanupQueue.async {
+                    let count = ImageReferences.delete(confirmed, folder: folder)
+                    DispatchQueue.main.async { deleted?(count) }
+                }
+            }
         }
-        sessions.forEach { add($0.saved) }
+    }
+    static let imageCleanupQueue = DispatchQueue(label: "local.richard.Converse.image-cleanup", qos: .utility)
+}
+
+/// Every image path and text that may still use a file. Text matters
+/// because a message can name an image without attaching it.
+struct ImageReferences {
+    var paths = Set<String>(), texts: [String] = []
+    mutating func add(messages: [Message], attachments: [String], draft: String, pending: [PendingPrompt]?, art: String?) {
+        func prompt(_ p: PendingPrompt) { paths.formUnion(p.images); text(p.text); p.components?.forEach(prompt) }
+        for message in messages { paths.formUnion(message.images); text(message.text) }
+        paths.formUnion(attachments); text(draft); pending?.forEach(prompt)
+        if let art { paths.insert(art) }
+    }
+    mutating func text(_ value: String) { texts.append(value) }
+    func merging(_ other: ImageReferences) -> ImageReferences { ImageReferences(paths: paths.union(other.paths), texts: texts + other.texts) }
+    /// Ready for `uses`: adds the standardized form of each path that could
+    /// name a candidate (every path when there are no candidates given) and
+    /// keeps only text that mentions Attachments.
+    func prepared(for candidates: [Spellings]? = nil) -> ImageReferences {
+        let names = candidates.map { Set($0.map { ($0.path as NSString).lastPathComponent }) }
+        var result = ImageReferences(paths: paths, texts: texts.filter(Self.mentionsAttachments))
+        for path in paths where names?.contains((path as NSString).lastPathComponent) ?? true { result.paths.insert(URL(fileURLWithPath: path).standardizedFileURL.path) }
+        return result
+    }
+    /// A byte search, because the recheck covers every retained message on the
+    /// main thread. Only text that passes gets the slower exact matching.
+    static func mentionsAttachments(_ text: String) -> Bool {
+        var text = text, word = "Attachments"
+        return text.withUTF8 { body in word.withUTF8 { body.count > 0 && memmem(body.baseAddress!, body.count, $0.baseAddress!, $0.count) != nil } }
+    }
+    /// Closed sessions that File ▸ Restore Closed Conversation can bring back,
+    /// and the transcript and note a provider handoff reads. Background only.
+    static func onDisk(_ folder: URL) -> ImageReferences {
+        let fm = FileManager.default
+        var references = ImageReferences()
         let closed = folder.appendingPathComponent("Deleted Sessions")
-        for file in (try? FileManager.default.contentsOfDirectory(at: closed, includingPropertiesForKeys: nil)) ?? [] {
+        for file in (try? fm.contentsOfDirectory(at: closed, includingPropertiesForKeys: nil)) ?? [] {
             guard let data = try? Data(contentsOf: file) else { continue }
             // An unreadable snapshot still protects every path it mentions.
-            if let saved = try? JSONDecoder().decode(SavedSession.self, from: data) { add(saved) } else { texts.append(String(decoding: data, as: UTF8.self)) }
+            if let s = try? JSONDecoder().decode(SavedSession.self, from: data) { references.add(messages: s.messages, attachments: s.attachments, draft: s.draft, pending: s.pending, art: s.agent?.artPath) }
+            else { references.text(String(decoding: data, as: UTF8.self)) }
         }
-        paths.formUnion(paths.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
-        return (paths, texts.filter { $0.contains("Attachments") })
+        let handoffs = folder.appendingPathComponent("Handoffs")
+        for dir in (try? fm.contentsOfDirectory(at: handoffs, includingPropertiesForKeys: nil)) ?? [] {
+            for name in ["transcript.md", "handoff.md"] {
+                if let data = try? Data(contentsOf: dir.appendingPathComponent(name)) { references.text(String(decoding: data, as: UTF8.self)) }
+            }
+        }
+        return references
     }
-    /// Deletes regular files inside this profile's Attachments folder that
-    /// nothing references. Anything else, including symbolic links and
-    /// paths that resolve outside the folder, is left alone.
-    @discardableResult func deleteUnreferencedImages(_ candidates: Set<String>) -> Int {
-        let fm = FileManager.default
-        let root = folder.appendingPathComponent("Attachments").resolvingSymlinksInPath().standardizedFileURL.path + "/"
-        let references = imageReferences()
-        var deleted = 0
-        for path in candidates {
+    /// The ways a reference can name a file, resolved once off the main thread.
+    struct Spellings {
+        let path: String, paths: [String], texts: Set<String>
+        init(_ path: String) {
             let url = URL(fileURLWithPath: path)
             let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
-            guard resolved.hasPrefix(root), (try? fm.attributesOfItem(atPath: path))?[.type] as? FileAttributeType == .typeRegular,
-                  !references.paths.contains(path), !references.paths.contains(url.standardizedFileURL.path), !references.paths.contains(resolved) else { continue }
-            let forms = Set([path, resolved, url.absoluteString, path.replacingOccurrences(of: "/", with: "\\/")])
-            guard !references.texts.contains(where: { text in forms.contains { text.contains($0) } }) else { continue }
-            if (try? fm.removeItem(atPath: path)) != nil { deleted += 1 }
+            self.path = path
+            paths = [path, url.standardizedFileURL.path, resolved]
+            texts = [path, resolved, url.absoluteString, path.replacingOccurrences(of: "/", with: "\\/")]
         }
-        return deleted
+    }
+    /// After `prepared`.
+    func uses(_ file: Spellings) -> Bool {
+        file.paths.contains(where: paths.contains) || texts.contains { text in file.texts.contains { text.contains($0) } }
+    }
+    /// A regular file inside this profile's Attachments folder. Symbolic
+    /// links and paths that resolve outside the folder are never deleted.
+    static func owned(_ path: String, folder: URL) -> Bool {
+        let root = folder.appendingPathComponent("Attachments").resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root)
+            && (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType == .typeRegular
+    }
+    static func deletable(_ candidates: Set<String>, folder: URL, references: ImageReferences) -> [Spellings] {
+        candidates.sorted().filter { owned($0, folder: folder) }.map(Spellings.init).filter { !references.uses($0) }
+    }
+    static func delete(_ paths: [String], folder: URL) -> Int {
+        paths.filter { owned($0, folder: folder) && (try? FileManager.default.removeItem(atPath: $0)) != nil }.count
     }
 }
 

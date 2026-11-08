@@ -414,6 +414,9 @@ final class Store: ObservableObject {
     var agentCommandAvailable: (Entry) -> Bool = { ProviderCommand.resolve($0.command) != nil }
     let responseImageLoader = ResponseImageLoader()
     private(set) var applicationQuitting = false
+    /// Counts writes of closed-session snapshots and handoff files, so image
+    /// cleanup knows when a reference may have moved from memory to disk.
+    var imageReferenceFileWrites = 0
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
@@ -1340,6 +1343,7 @@ final class Store: ObservableObject {
         let deleted = folder.appendingPathComponent("Deleted Sessions")
         try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
         try JSONEncoder().encode(s.saved).write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
+        imageReferenceFileWrites += 1
         try closeIdentity(s)
         sessions.remove(at: index)
         if let receipt { participantReceipts.append(receipt) }
