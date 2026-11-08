@@ -219,3 +219,54 @@ struct HelpText: NSViewRepresentable {
     else { check(false, "A missing Help video reports a failure") }
     missing.close()
 }
+
+/// Larger than the standard About panel, with live links.
+struct ConverseAboutView: View {
+    static let bodySize: CGFloat = 14
+    var source = ConverseAbout.sourceLine((try? HelpBook.load())?.sourceCommit ?? "")
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96).accessibilityHidden(true)
+            Text("Converse").font(.system(size: 26, weight: .bold))
+            Text("Version " + ConverseAbout.versionBuild).font(.system(size: 15)).foregroundStyle(.secondary).textSelection(.enabled)
+            if let source { Text(source).font(.system(size: 12).monospaced()).foregroundStyle(.secondary).textSelection(.enabled) }
+            VStack(spacing: 4) {
+                Text(ConverseAbout.copyright)
+                Text(ConverseAbout.license).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }.padding(.top, 10)
+            VStack(spacing: 4) {
+                ForEach(ConverseAbout.links, id: \.title) { link in Link(link.title, destination: link.url).help(link.url.absoluteString) }
+            }.padding(.top, 8)
+        }.font(.system(size: Self.bodySize)).padding(.horizontal, 28).padding(.vertical, 24).frame(width: 420)
+    }
+}
+
+final class ConverseAboutWindow: NSObject, NSWindowDelegate {
+    static let shared = ConverseAboutWindow()
+    private var window: NSWindow?
+    func show() {
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        let host = NSHostingView(rootView: ConverseAboutView())
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "About Converse"; window.isReleasedWhenClosed = false; window.delegate = self
+        window.contentView = host; window.setContentSize(host.fittingSize)
+        self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) { window = nil }
+}
+
+func aboutSelfTests(_ check: (Bool, String) -> Void) {
+    let links = Dictionary(uniqueKeysWithValues: ConverseAbout.links.map { ($0.title, $0.url.absoluteString) })
+    check(links["richard@kaoslabs.app"] == "mailto:richard@kaoslabs.app", "About email is a mailto: link")
+    check(links["www.kaoslabs.app"] == "https://www.kaoslabs.app", "About links to www.kaoslabs.app")
+    check(links["https://github.com/richardkaufmann/converse"] == "https://github.com/richardkaufmann/converse", "About shows the repository URL as a link to itself")
+    check(ConverseAbout.sourceLine("d4e0b6e32b34cbf3f47401fb309575d95e1c9132") == "Source d4e0b6e32b34"
+          && ConverseAbout.sourceLine("d4e0b6e32b34cbf3f47401fb309575d95e1c9132-dirty") == "Source d4e0b6e32b34 (modified)",
+          "About shows the source commit, marking modified trees")
+    check(ConverseAbout.sourceLine("$Format:%H$") == nil && ConverseAbout.sourceLine("") == nil && ConverseAbout.sourceLine("unknown") == nil,
+          "An unrecorded source commit is left out of About")
+    let host = NSHostingView(rootView: ConverseAboutView(source: "Source d4e0b6e32b34"))
+    let size = host.fittingSize
+    check(ConverseAboutView.bodySize > NSFont.smallSystemFontSize && size.width == 420 && size.height > 300 && size.height < 700,
+          "About uses larger text and fits a compact window (\(Int(size.width))×\(Int(size.height)))")
+}

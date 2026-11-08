@@ -9,6 +9,18 @@ enum ConverseAbout {
     static let readme = URL(string: "https://github.com/richardkaufmann/converse#readme")!
     static let bugReports = URL(string: "https://github.com/richardkaufmann/converse/issues/new")!
     static let licenseURL = URL(string: "https://github.com/richardkaufmann/converse/blob/main/LICENSING.md")!
+    static let repository = URL(string: "https://github.com/richardkaufmann/converse")!
+    static let website = URL(string: "https://www.kaoslabs.app")!
+    static let email = URL(string: "mailto:richard@kaoslabs.app")!
+    /// The About box links, shown as the text Richard reads them.
+    static let links: [(title: String, url: URL)] = [("www.kaoslabs.app", website), (repository.absoluteString, repository), ("richard@kaoslabs.app", email)]
+    /// "Source 0123456789ab", with "(modified)" for a dirty tree; nil when the
+    /// build recorded no commit.
+    static func sourceLine(_ commit: String) -> String? {
+        let dirty = commit.hasSuffix("-dirty"), sha = dirty ? String(commit.dropLast(6)) : commit
+        guard (7...40).contains(sha.count), sha.allSatisfy(\.isHexDigit) else { return nil }
+        return "Source " + sha.prefix(12) + (dirty ? " (modified)" : "")
+    }
 }
 
 struct HelpTopic: Codable, Identifiable, Equatable {

@@ -3487,7 +3487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
+    @objc func about() { ConverseAboutWindow.shared.show() }
     @objc func newWindow() { makeWindow(WindowState()) }
     private func makeWindow(_ state: WindowState) {
         state.setup = !Store.shared.setupCompleted
@@ -4527,6 +4527,7 @@ func selfTest() {
     feedbackInvitationSelfTests(check)
     feedbackInvitationControllerSelfTests(check)
     sidebarSortSelfTests(check)
+    aboutSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
