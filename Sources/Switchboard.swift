@@ -27,7 +27,7 @@ struct SwitchboardCommand: Decodable {
     var count: Int?
     var fromCharacter: Int?
     var session: String?
-    private enum CodingKeys: String, CodingKey { case command, to, text, replyExpected, inReplyTo, parkingLotEdits, lotID, linkedOnly, query, limit, beforeMessage, fromMessage, count, fromCharacter, session }
+    private enum CodingKeys: String, CodingKey { case command, agent, to, text, replyExpected, inReplyTo, parkingLotEdits, lotID, linkedOnly, query, limit, beforeMessage, fromMessage, count, fromCharacter, session }
     init(command: String) { self.command = command }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -38,6 +38,7 @@ struct SwitchboardCommand: Decodable {
             guard TranscriptSelfRead.commands.contains(command), c.contains(key), try !c.decodeNil(forKey: key) else { return try c.decodeIfPresent(String.self, forKey: key) }
             return (try? c.decode(String.self, forKey: key)) ?? TranscriptSelfRead.invalidTarget
         }
+        agent = try c.decodeIfPresent(String.self, forKey: .agent)
         to = try target(.to); session = try target(.session)
         text = try c.decodeIfPresent(String.self, forKey: .text)
         replyExpected = try c.decodeIfPresent(Bool.self, forKey: .replyExpected)
