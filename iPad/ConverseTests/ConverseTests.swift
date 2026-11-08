@@ -1524,6 +1524,33 @@ final class ConverseTests: XCTestCase {
         XCTAssertFalse(book.search("pair").isEmpty)
         XCTAssertEqual(book.sourceSHA256.count, 64)
     }
+    func testHelpVideoLinksOpenThePlayerAndOtherLinksDoNot() async throws {
+        let book = try HelpBook.load()
+        let video = try XCTUnwrap(book.videos?.first { $0.id == "first-run" })
+        let media = try XCTUnwrap(URL(string: video.mediaURL))
+        XCTAssertTrue(book.topics.first { $0.id == "videos" }?.markdown.contains(video.mediaURL) == true)
+        XCTAssertEqual(HelpVideo.route(media, in: book.videos ?? []), video)
+        XCTAssertNil(HelpVideo.route(URL(string: video.mediaURL + "?X-Amz-Signature=abc")!, in: book.videos ?? []))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixture = folder.appendingPathComponent("fixture-v1.mp4")
+        try HelpVideoFixture.writeMP4(to: fixture)
+        // The same presenter backs PadHelp's openURL handler and its sheet.
+        let presenter = HelpVideoPresenter(videos: book.videos ?? []) { _ in fixture }
+        XCTAssertFalse(presenter.open(ConverseAbout.readme), "README links go to the system")
+        XCTAssertNil(presenter.playback, "No sheet for ordinary links")
+        XCTAssertTrue(presenter.open(media))
+        let playback = try XCTUnwrap(presenter.playback, "A manifest link presents the video sheet")
+        XCTAssertEqual(playback.video, video)
+        try await eventually("Local fixture plays") { playback.state == .ready && (playback.player?.rate ?? 0) > 0 }
+        let player = playback.player
+        presenter.close()
+        XCTAssertNil(presenter.playback, "Dismissing clears the sheet")
+        XCTAssertNil(playback.player, "Dismissing releases the player")
+        XCTAssertEqual(player?.rate, 0, "Dismissing stops playback")
+        XCTAssertNil(player?.currentItem)
+    }
     func eventually(_ description: String, timeout: TimeInterval = 10, _ predicate: @escaping () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !predicate() && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }

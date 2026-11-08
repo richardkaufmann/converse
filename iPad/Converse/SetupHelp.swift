@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -58,7 +59,13 @@ struct PadRequest: View {
 struct PadHelp: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
-    private let book = try? HelpBook.load()
+    private let book: HelpBook?
+    @StateObject private var videos: HelpVideoPresenter
+    init() {
+        let book = try? HelpBook.load()
+        self.book = book
+        _videos = StateObject(wrappedValue: HelpVideoPresenter(videos: book?.videos ?? []))
+    }
     var body: some View {
         NavigationStack {
             List {
@@ -81,6 +88,34 @@ struct PadHelp: View {
             }.searchable(text: $query, prompt: "Search Help").navigationTitle("Converse Help")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        // Manifest video links play here; every other Help link opens as usual.
+        .environment(\.openURL, OpenURLAction { videos.open($0) ? .handled : .systemAction })
+        .sheet(item: $videos.playback) { PadHelpVideo(playback: $0, close: videos.close) }
+        .onDisappear(perform: videos.close)
+    }
+}
+
+// Done, swipe-down and closing Help all clear the presenter's playback, which
+// stops it and releases the player.
+struct PadHelpVideo: View {
+    @ObservedObject var playback: HelpVideoPlayback
+    let close: () -> Void
+    var body: some View {
+        NavigationStack {
+            Group {
+                if case .failed(let message) = playback.state {
+                    VStack(spacing: 14) {
+                        Text(message).multilineTextAlignment(.center)
+                        Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
+                        // Opened directly: Help's openURL handler would route it back here.
+                        if let url = playback.video.browserURL { Button("Open link") { UIApplication.shared.open(url) } }
+                    }.padding()
+                } else {
+                    VideoPlayer(player: playback.player).overlay { if playback.state == .loading { ProgressView() } }
+                }
+            }.navigationTitle(playback.video.title + " · " + playback.video.durationLabel).navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done", action: close) } }
+        }.onDisappear(perform: close)
     }
 }
 

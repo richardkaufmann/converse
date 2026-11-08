@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "videos": [
+    {
+      "id": "first-run",
+      "title": "First launch",
+      "durationSeconds": 25.2,
+      "mediaURL": "https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4",
+      "posterURL": "https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.png",
+      "sha256": "c673b953a5ab9fe5849118a61101758cd24bc8b4abb7eabf83d429d1fae27ce5",
+      "description": "A brand-new Converse opens with App Support asking which provider should lead: Meta Muse, OpenAI Codex or Anthropic Claude. Pick one, sign in with that provider's own login in Terminal and the browser, and Converse is ready with App Support's greeting and starter sessions: a coding session, an agent and a Parking Lot.",
+      "helpTopic": "first-launch",
+      "recordedWith": "Converse Demo 0.7.10 (145)"
+    }
+  ]
+}

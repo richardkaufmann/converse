@@ -116,6 +116,89 @@ class HelpContentTests(unittest.TestCase):
             self.assertEqual(book['sourceCommit'], 'unknown')
             self.assertEqual([topic['id'] for topic in book['topics']], ['overview', 'sending'])
 
+    def video_manifest(self):
+        return json.loads((root / 'docs/videos.json').read_text())
+
+    def test_video_manifest_schema(self):
+        manifest = self.video_manifest()
+        self.assertEqual(generator.video_errors(manifest), [])
+        videos = manifest['videos']
+        self.assertTrue(videos)
+        self.assertEqual(len({video['id'] for video in videos}), len(videos))
+        for video in videos:
+            with self.subTest(video=video['id']):
+                self.assertGreater(video['durationSeconds'], 0)
+                self.assertRegex(video['sha256'], r'^[0-9a-f]{64}$')
+                for key in ('mediaURL', 'posterURL'):
+                    self.assertTrue(video[key].startswith(generator.VIDEO_PREFIX))
+                    self.assertRegex(video[key].rsplit('/', 1)[1], r'-v[0-9]+\.[a-z0-9]+$')
+
+    def test_video_manifest_rejects_unsafe_entries(self):
+        good = self.video_manifest()['videos'][0]
+        cases = {
+            'duplicate id': [good, dict(good, mediaURL=good['mediaURL'].replace('-v1', '-v2'))],
+            'unversioned file': [dict(good, mediaURL=generator.VIDEO_PREFIX + 'converse-first-run.mp4')],
+            'other release': [dict(good, mediaURL=good['mediaURL'].replace('/help-videos/', '/v0.7.10/'))],
+            'signed redirect': [dict(good, mediaURL='https://objects.githubusercontent.com/converse-first-run-v1.mp4')],
+            'short hash': [dict(good, sha256='abc')],
+            'no duration': [dict(good, durationSeconds=0)],
+            'boolean duration': [dict(good, durationSeconds=True)],
+            'missing title': [{k: v for k, v in good.items() if k != 'title'}],
+            'insecure watch page': [dict(good, watchURL='http://example.com/watch')],
+        }
+        for name, videos in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(generator.video_errors({'schemaVersion': 1, 'videos': videos}))
+        self.assertTrue(generator.video_errors({'schemaVersion': 2, 'videos': []}))
+
+    def test_help_json_carries_videos_and_a_videos_topic(self):
+        videos = self.video_manifest()['videos']
+        book = generator.build_book((root / 'README.md').read_text(), videos=videos)
+        self.assertEqual(book['schemaVersion'], 1)
+        self.assertEqual(book['videos'], videos)
+        topics = {topic['id']: topic for topic in book['topics']}
+        self.assertEqual(len(topics), len(book['topics']))
+        topic = topics['videos']
+        self.assertEqual(topic['title'], 'Videos')
+        for video in videos:
+            with self.subTest(video=video['id']):
+                link = '[' + generator.watch_label(video) + '](' + video['mediaURL'] + ')'
+                self.assertIn(link, topic['markdown'])
+                self.assertIn(video['description'], topic['plainText'])
+                self.assertIn(video['helpTopic'], topics)
+                # The inline README link stays in the topic it belongs beside.
+                self.assertIn(link, topics[video['helpTopic']]['markdown'])
+        self.assertIn('work offline', topic['markdown'])
+        self.assertEqual(book['topics'][:-1], generator.build_book((root / 'README.md').read_text())['topics'])
+        self.assertNotIn('videos', generator.build_book('# App\nIntro.\n'))
+
+    def test_video_help_topic_must_exist(self):
+        video = dict(self.video_manifest()['videos'][0], helpTopic='missing-topic')
+        with self.assertRaises(SystemExit):
+            generator.build_book('# App\nIntro.\n', videos=[video])
+
+    def test_readme_video_links_match_the_manifest(self):
+        source = (root / 'README.md').read_text()
+        videos = {video['mediaURL']: video for video in self.video_manifest()['videos']}
+        links = re.findall(r'\[([^\]]+)\]\((' + re.escape(generator.VIDEO_PREFIX) + r'[^)\s]+)\)', source)
+        self.assertTrue(links)
+        for label, url in links:
+            with self.subTest(url=url):
+                self.assertIn(url, videos)
+                self.assertEqual(label, generator.watch_label(videos[url]))
+        self.assertEqual(generator.watch_label(videos[links[0][1]]), '\u25b6 Watch: First launch (25 s)')
+        self.assertEqual(generator.duration_label(125.4), '2 min 5 s')
+
+    def test_build_reads_the_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'Content.json'
+            result = subprocess.run([sys.executable, str(root / 'scripts/build-help.py'), str(root / 'README.md'), '--out', str(output)],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            book = json.loads(output.read_text())
+            self.assertEqual([video['id'] for video in book['videos']], [video['id'] for video in self.video_manifest()['videos']])
+            self.assertEqual(book['topics'][-1]['id'], 'videos')
+
 
 if __name__ == '__main__':
     unittest.main()

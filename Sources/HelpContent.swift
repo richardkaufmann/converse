@@ -29,6 +29,8 @@ struct HelpBook: Codable {
     let sourceURL: String
     let sourceSHA256: String
     let topics: [HelpTopic]
+    // Optional within schema 1: older artifacts have no videos.
+    var videos: [HelpVideo]? = nil
 
     static func load(bundle: Bundle = .main) throws -> HelpBook {
         guard let url = bundle.url(forResource: "Content", withExtension: "json", subdirectory: "Help") else { throw CocoaError(.fileNoSuchFile) }

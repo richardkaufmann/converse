@@ -18,7 +18,7 @@ Converse is one app for multiple, simultaneous conversations with the providers 
 
 After sign-in, there’s a coding session, an agent, and a Parking Lot ready to go. [First launch](#first-launch) walks through it.
 
-[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4): picking a provider, signing in, and the ready screen. GitHub downloads the MP4 rather than playing it in the browser.
+[▶ Watch: First launch (25 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-first-run-v1.mp4): picking a provider, signing in, and the ready screen. GitHub downloads the MP4 rather than playing it in the browser; Converse Help on a Mac or iPad plays it in place.
 
 <!-- readme-only:start -->
 ![After Muse sign-in: App Support and Muse Coding appear side by side, with Muse Agent and Parking Lot in the sidebar](docs/nux-ready.png)
