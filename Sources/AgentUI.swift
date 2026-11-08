@@ -94,10 +94,10 @@ struct AgentSetupView: View {
                                 Stepper("no later than " + AgentPacing.durationText(minutes: settings.paceMaxMinutes), value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: settings.paceMaxMinutes >= 120 ? 60 : 5)
                             }.font(.caption)
                         }
-                        Stepper("Refresh scoreboard every \(settings.scoreboardCadence) loops", value: Binding(get: { settings.scoreboardCadence }, set: { settings.scoreboardEveryLoops = $0 }), in: 1...1000)
+                        Text("Every turn updates this agent's assessment against the objective above.").font(.caption).foregroundStyle(.secondary)
                         Text("Portrait art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
-                        Text("Portraits are made on demand with Muse Image" + (metaKeyAvailable ? "" : " (needs a Meta API key)") + ", from this agent's assessment, objective and this direction: View → Portraits, Get Portrait, a session, Jolly or Discord. Nothing is generated automatically. Factual numbers and scoreboards stay out of the art; ask here for stylistic lettering if you want it.").font(.caption).foregroundStyle(.secondary)
+                        Text("Portraits are made on demand with Muse Image" + (metaKeyAvailable ? "" : " (needs a Meta API key)") + ", from this agent's assessment, objective and this direction: View → Portraits, Get Portrait, a session, Jolly or Discord. Nothing is generated automatically. Factual numbers stay out of the art; ask here for stylistic lettering if you want it.").font(.caption).foregroundStyle(.secondary)
                         Stepper("New portrait at most every " + AgentPacing.minutesText(settings.portraitMinutes) + " min · Refresh always works", value: Binding(get: { settings.portraitMinutes }, set: { settings.portraitMinMinutes = $0 }), in: 1...1440, step: settings.portraitMinutes >= 30 ? 10 : 1).font(.caption)
                         Toggle("Allow web research for current facts and news", isOn: Binding(get: { settings.webSearch != false }, set: { settings.webSearch = $0 }))
                         Toggle("Allow Jolly to address this agent", isOn: Binding(get: { settings.jollyAllowed != false }, set: { settings.jollyAllowed = $0 }))
@@ -109,7 +109,7 @@ struct AgentSetupView: View {
                         Toggle("Anyone in this channel may @mention this agent", isOn: Binding(get: { settings.discordMentions == true }, set: { settings.discordMentions = $0 }))
                         if settings.discordMentions == true {
                             Toggle("Share session information", isOn: Binding(get: { settings.discordShareSessionInformation == true }, set: { settings.discordShareSessionInformation = $0 }))
-                                .help("Allows this agent’s recent conversation, working notes and scoreboard in Discord replies, only in a verified private channel.")
+                                .help("Allows this agent’s recent conversation, working notes and assessment in Discord replies, only in a verified private channel.")
                             Toggle("Share assessments and portraits on Discord requests", isOn: Binding(get: { settings.discordShareScoreboard == true }, set: { settings.discordShareScoreboard = $0 }))
                             Toggle("Default agent for this channel", isOn: Binding(get: { settings.discordDefault == true }, set: { settings.discordDefault = $0 }))
                             Text("Checks every 5 seconds while Converse is open. Use @Converse Agent Name: question, or just @Converse question for the default. Each request gets a fresh activation limit and queues while busy. Public answers have no private session history or working notes. DMs and unconfigured threads are not monitored.").font(.caption).foregroundStyle(.secondary)
@@ -303,10 +303,10 @@ struct AgentControls: View {
                     Button("Agent Setup / Loop…") { AgentWindows.shared.setup(session) }
                     Button("Run once") { Store.shared.queueAgentRun(session) }
                         .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
-                    Button("Refresh scoreboard now") { Store.shared.queueScoreboardRefresh(session) }
-                        .disabled(session.busy || (session.agent?.turnLimit ?? 0) == 0)
-                        .help("Ask the agent for a fresh scoreboard without a full progress-check turn")
-                    Button("Scoreboard") { AgentWindows.shared.widget(session) }
+                    Button("Refresh assessment now") { Store.shared.queueAssessmentRefresh(session) }
+                        .disabled((session.agent?.turnLimit ?? 0) == 0)
+                        .help("Ask the agent to reassess now without other actions; while it is busy, this runs as its next turn")
+                    Button("Assessment") { AgentWindows.shared.widget(session) }
                     Divider()
                     Button("Loop controls…") { loopSettings = true }
                     Button(conversation.owns(session) ? "Stop talking" : "Start talking!") {
@@ -316,7 +316,7 @@ struct AgentControls: View {
                     Button("Dictate…") { conversation.stop(); dictating = true }
                 } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                    .help("Agent actions: pause, resume or stop; setup, loop, run once, scoreboard and voice")
+                    .help("Agent actions: pause, resume or stop; setup, loop, run once, assessment and voice")
                     .accessibilityLabel("Agent actions")
                     .popover(isPresented: $loopSettings) { AgentLoopOptions(session: session, close: { loopSettings = false }) }
                     .popover(isPresented: $dictating) { AgentDictationView(voice: voice, session: session, close: { dictating = false }) }
@@ -411,7 +411,6 @@ struct AgentLoopOptions: View {
     @State private var enabled = false
     @State private var minutes: Double = 15
     @State private var turns = 20
-    @State private var scoreboardEvery = 1
     @State private var revision: UInt64 = 0
     @State private var error = ""
     @State private var modelOptions: [DeviceChoiceDTO] = []
@@ -426,8 +425,7 @@ struct AgentLoopOptions: View {
                 .help("Timing comes from the objective. Edit it in Agent Setup to change how often this agent runs.")
             Stepper("Maximum turns per loop: \(turns)", value: $turns, in: 1...1000)
             Text("A fresh ceiling for each activation. Checks currently use one model response; future scheduled checks are not spent.").font(.caption).foregroundStyle(.secondary)
-            Stepper("Refresh scoreboard every \(scoreboardEvery) loop\(scoreboardEvery == 1 ? "" : "s")", value: $scoreboardEvery, in: 1...1000)
-            Text("Run once refreshes the scoreboard immediately. Artwork keeps its objective or Setup limits. Loops run while Converse is open on this agent’s home. Hiccups retry with back-off and never pause the loop; only problems you must fix, such as a rejected key, pause it.").font(.caption).foregroundStyle(.secondary)
+            Text("Every turn, including Run once, updates the assessment. Loops run while Converse is open on this agent’s home. Hiccups retry with back-off and never pause the loop; only problems you must fix, such as a rejected key, pause it.").font(.caption).foregroundStyle(.secondary)
             if session.queuePaused && !session.pending.isEmpty { Text("Held messages require Resume queue before the loop can continue.").font(.caption).foregroundStyle(.orange) }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
@@ -440,92 +438,78 @@ struct AgentLoopOptions: View {
     }
     private func reload() {
         let config = session.agent ?? AgentConfig()
-        enabled = config.enabled; minutes = config.intervalSeconds / 60; turns = config.turnLimit; scoreboardEvery = config.scoreboardCadence; revision = config.settingsRevision ?? 0; error = ""
+        enabled = config.enabled; minutes = config.intervalSeconds / 60; turns = config.turnLimit; revision = config.settingsRevision ?? 0; error = ""
     }
     private func save() -> Bool {
-        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, scoreboardEvery: scoreboardEvery, expectedRevision: revision); return true }
+        do { try Store.shared.configureAgentLoop(session, enabled: enabled, interval: minutes * 60, turns: turns, expectedRevision: revision); return true }
         catch { self.error = error.localizedDescription; return false }
     }
 }
 
+// The widget window shows the agent's latest assessment, the same content
+// remote viewers, the HTML export and the Discord status image derive from.
 struct AgentWidgetView: View {
     @ObservedObject var session: Session
-    @State private var expandedReport = false
     private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
     private let card = Color(red: 0.12, green: 0.16, blue: 0.22)
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Background art must never contribute its intrinsic size to the document.
-                ZStack(alignment: .bottomLeading) {
-                    GeometryReader { geometry in
-                        if let path = session.agent?.portrait?.latest?.path ?? session.agent?.artPath, let image = NSImage(contentsOfFile: path) {
-                            Image(nsImage: image).resizable().scaledToFill()
-                                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                        } else {
-                            LinearGradient(colors: [.indigo, .teal], startPoint: .topLeading, endPoint: .bottomTrailing)
-                        }
-                    }
-                    LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(session.agent?.hasRepository == true ? "PROJECT SCOREBOARD" : "AGENT SCOREBOARD").font(.caption.bold()).tracking(2).foregroundStyle(.white.opacity(0.8))
-                        Text(session.title).font(.system(size: 28, weight: .bold)).lineLimit(2)
-                        Text(session.agent?.repository ?? "")
-                            .font(.callout).foregroundStyle(.white.opacity(0.85)).lineLimit(2)
-                    }.padding(24)
-                }.frame(height: 220).clipped()
-                VStack(alignment: .leading, spacing: 22) {
-                    ForEach(session.agent?.visibleLotScoreboards ?? [], id: \.id) { lot in
-                        AgentScoreboardCards(board: AgentScoreboard(title: lot.name + " · unfinished items", summary: "Revision \(lot.revision). Counts exclude headings and Done items; colors are explicit, not inherited.", metrics: lot.sections.map { .init(label: $0.title, value: $0.value) }, observedAt: lot.observedAt))
-                    }
-                    if let board = session.agent?.scoreboard {
-                        AgentScoreboardCards(board: board)
-                    }
-                    if let snapshot = session.agent?.repositorySnapshot, snapshot.hasMeasurements {
-                        LazyVGrid(columns: [GridItem(.flexible(minimum: 0)), GridItem(.flexible(minimum: 0))], spacing: 10) {
-                            ForEach(snapshot.metrics, id: \.0) { item in
-                                VStack(alignment: .leading, spacing: 7) {
-                                    Text(item.1 == "Unavailable" ? "—" : item.1).font(.system(size: 25, weight: .semibold, design: .rounded)).monospacedDigit()
-                                    Text(item.0).font(.caption).foregroundStyle(.white.opacity(0.7))
-                                }.frame(maxWidth: .infinity, minHeight: 65, alignment: .leading).padding(14)
-                                    .background(card, in: RoundedRectangle(cornerRadius: 12))
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let now = context.date, content = (session.agent ?? AgentConfig()).widgetContent(now: now)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Background art must never contribute its intrinsic size to the document.
+                    ZStack(alignment: .bottomLeading) {
+                        GeometryReader { geometry in
+                            if let path = session.agent?.portrait?.latest?.path ?? session.agent?.artPath, let image = NSImage(contentsOfFile: path) {
+                                Image(nsImage: image).resizable().scaledToFill()
+                                    .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                            } else {
+                                LinearGradient(colors: [.indigo, .teal], startPoint: .topLeading, endPoint: .bottomTrailing)
                             }
                         }
-                    } else if session.agent?.hasRepository == true {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("Repository data unavailable", systemImage: "chart.bar.xaxis").font(.headline)
-                            Text("Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.")
-                                .font(.callout).foregroundStyle(.white.opacity(0.75))
-                            Button("Set up GitHub…") { AgentWindows.shared.setup(session) }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(18).background(card, in: RoundedRectangle(cornerRadius: 12))
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Agent update").font(.headline)
-                        Text((try? AttributedString(markdown: session.agent?.widgetSummary ?? "Tell me what success looks like.", options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(session.agent?.widgetSummary ?? "Tell me what success looks like."))
-                            .font(.callout).lineSpacing(4).lineLimit(expandedReport ? nil : 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button(expandedReport ? "Show less" : "Read full update") { expandedReport.toggle() }.buttonStyle(.link)
-                    }
-                    if let attention = session.agent?.attention, !attention.isEmpty {
-                        Label(attention, systemImage: "exclamationmark.triangle.fill").font(.callout)
-                            .foregroundStyle(.black).frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                            .background(.yellow, in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let at = session.agent?.snapshot?.observedAt {
-                            Text("Checked " + at.formatted(date: .abbreviated, time: .shortened))
+                        LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("AGENT ASSESSMENT").font(.caption.bold()).tracking(2).foregroundStyle(.white.opacity(0.8))
+                            Text(session.title).font(.system(size: 28, weight: .bold)).lineLimit(2)
+                            Text(session.agent?.repository ?? "")
+                                .font(.callout).foregroundStyle(.white.opacity(0.85)).lineLimit(2)
+                        }.padding(24)
+                    }.frame(height: 220).clipped()
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack(spacing: 8) {
+                            if let status = content.status { AssessmentStatusPill(status: status) }
+                            Text(content.line(now: now)).font(.caption).foregroundStyle(.white.opacity(0.7))
                         }
-                        if session.agent?.repositorySnapshot?.hasMeasurements == true {
-                            ForEach(session.agent?.repositorySnapshot?.notes ?? [], id: \.self) { Text($0) }
+                        Text(content.summary).font(.title3).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        if let problem = content.problem {
+                            Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                         }
-                    }.font(.caption).foregroundStyle(.white.opacity(0.6))
-                    HStack {
-                        Button("Agent Setup…") { AgentWindows.shared.setup(session) }
-                        Spacer()
-                        Button("Export widget…") { AgentWindows.shared.export(session) }
-                    }
-                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxWidth: .infinity, alignment: .leading)
+                        if !content.facts.isEmpty {
+                            LazyVGrid(columns: [GridItem(.flexible(minimum: 0)), GridItem(.flexible(minimum: 0))], spacing: 10) {
+                                ForEach(content.facts) { fact in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(fact.value == AgentFact.unavailable ? "—" : fact.value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit().lineLimit(2).textSelection(.enabled)
+                                        Text(fact.label).font(.caption).foregroundStyle(.white.opacity(0.75)).lineLimit(2)
+                                        Text(fact.kind.label + " · " + AgentAge.short(fact.observedAt, now: now)).font(.caption2).foregroundStyle(.white.opacity(0.55)).help(fact.kind.help + " · " + fact.source)
+                                    }.frame(maxWidth: .infinity, minHeight: 65, alignment: .leading).padding(14)
+                                        .background(card, in: RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
+                        }
+                        if let attention = session.agent?.attention, !attention.isEmpty {
+                            Label(attention, systemImage: "exclamationmark.triangle.fill").font(.callout)
+                                .foregroundStyle(.black).frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                                .background(.yellow, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        HStack {
+                            Button("Agent Setup…") { AgentWindows.shared.setup(session) }
+                            Button("Refresh assessment now") { Store.shared.queueAssessmentRefresh(session) }.disabled((session.agent?.turnLimit ?? 0) == 0)
+                            Spacer()
+                            Button("Export…") { AgentWindows.shared.export(session) }
+                        }
+                    }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
         }.background(ink).foregroundStyle(.white).preferredColorScheme(.dark)
             .frame(minWidth: 420, minHeight: 500)
     }
@@ -552,11 +536,11 @@ struct AgentWidgetView: View {
         remoteSetups[globalID] = window; window.center(); window.makeKeyAndOrderFront(nil)
     }
     func widget(_ session: Session) {
-        // A scoreboard is a companion view, including when requested remotely.
+        // The assessment widget is a companion view, including when requested remotely.
         // Showing it must not move keyboard focus away from an active draft.
         if let window = widgets[session.id] { window.orderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = session.title + " · Scoreboard"; window.isReleasedWhenClosed = false
+        window.title = session.title + " · Assessment"; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: AgentWidgetView(session: session)); widgets[session.id] = window
         window.center(); window.orderFront(nil)
     }
@@ -568,29 +552,29 @@ struct AgentWidgetView: View {
         setups[session.id] = window; window.center(); window.makeKeyAndOrderFront(nil)
     }
     func export(_ session: Session) {
-        let panel = NSSavePanel(); panel.nameFieldStringValue = session.title + " Scoreboard.html"; panel.allowedContentTypes = [.html]
+        let panel = NSSavePanel(); panel.nameFieldStringValue = session.title + " Assessment.html"; panel.allowedContentTypes = [.html]
         if panel.runModal() == .OK, let url = panel.url {
             do { try AgentWidgetExport.html(session).write(to: url, atomically: true, encoding: .utf8) }
-            catch { let alert = NSAlert(); alert.messageText = "Could not export scoreboard"; alert.informativeText = error.localizedDescription; alert.runModal() }
+            catch { let alert = NSAlert(); alert.messageText = "Could not export assessment"; alert.informativeText = error.localizedDescription; alert.runModal() }
         }
     }
 }
 
 enum AgentWidgetExport {
     static func escape(_ text: String) -> String { text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;") }
-    static func html(_ session: Session) -> String {
-        let config = session.agent ?? AgentConfig()
+    static func html(_ session: Session, now: Date = Date()) -> String {
+        let config = session.agent ?? AgentConfig(), content = config.widgetContent(now: now)
         var art = ""
-        if let path = config.portrait?.latest?.path ?? config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Generated status art' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
-        let cells = (config.repositorySnapshot?.metrics ?? []).map { "<div class=metric><strong>" + escape($0.1 == "Unavailable" ? "—" : $0.1) + "</strong><span>" + escape($0.0) + "</span></div>" }.joined()
-        let lots = config.visibleLotScoreboards.map { lot in
-            AgentScoreboardCards.html(AgentScoreboard(title: lot.name + " · unfinished items", summary: "Revision \(lot.revision). Counts exclude headings and Done items; colors are explicit, not inherited.", metrics: lot.sections.map { .init(label: $0.title, value: $0.value) }, observedAt: lot.observedAt))
+        if let path = config.portrait?.latest?.path ?? config.artPath, let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count <= 8_000_000 { art = "<img class=art alt='Agent portrait' src='data:image/png;base64," + bytes.base64EncodedString() + "'>" }
+        let cells = content.facts.map { fact in
+            "<div class=metric><strong>" + escape(fact.value == AgentFact.unavailable ? "—" : fact.value) + "</strong><span>" + escape(fact.label) + "</span><small>" + escape(fact.kind.label + " · " + fact.source + (fact.observedAt.map { " · " + $0.formatted() } ?? "")) + "</small></div>"
         }.joined()
-        let metrics = lots + AgentScoreboardCards.html(config.scoreboard) + (!config.hasRepository ? "" : config.repositorySnapshot?.hasMeasurements == true ? "<div class=grid>" + cells + "</div>" : "<section class=empty><h2>Repository data unavailable</h2><p>Check the repository and GitHub access in Agent Setup, then run the agent again. Public repository counts can work without a token; visitor counts require traffic access.</p></section>")
+        let facts = cells.isEmpty ? "" : "<div class=grid>" + cells + "</div>"
+        let problem = content.problem.map { "<p class=problem>" + escape($0) + "</p>" } ?? ""
         return """
         <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=Content-Security-Policy content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><title>\(escape(session.title))</title><style>
-        *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}h2{font-size:17px;margin:0 0 10px}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric,.empty{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:28px;line-height:1.3}.metric span{font-size:12px;color:#bbc4d1}p{white-space:pre-wrap;margin:0}section{margin-bottom:24px}details{margin:24px 0}summary{cursor:pointer;font-weight:600;margin-bottom:10px}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}
-        </style><main><header>\(art)<div class=heading><div class=eyebrow>\(config.hasRepository ? "PROJECT SCOREBOARD" : "AGENT SCOREBOARD")</div><h1>\(escape(session.title))</h1><div class=repository>\(escape(config.repository))</div></div></header><div class=content>\(metrics)<details open><summary>Agent update</summary><p>\(escape(config.widgetSummary))</p></details>\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Snapshot · \(escape(config.snapshot?.observedAt.formatted() ?? "Not measured yet"))<br>\(escape((config.repositorySnapshot?.notes ?? []).joined(separator: " · ")))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></div></main></html>
+        *{box-sizing:border-box}body{margin:0;background:#121a26;color:#fff;font:15px/1.6 system-ui}main{max-width:780px;margin:auto}header{position:relative;isolation:isolate;min-height:240px;display:flex;align-items:flex-end;overflow:hidden;background:linear-gradient(135deg,#373064,#174e59)}.art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2}header:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent,#000e);z-index:-1}.heading{padding:28px;overflow-wrap:anywhere}.eyebrow{font-size:11px;letter-spacing:.18em;color:#ddd}h1{font-size:30px;line-height:1.2;margin:8px 0}.repository{color:#ddd}.content{padding:28px;overflow-wrap:anywhere}.status{font-size:13px;color:#bbc4d1;margin-bottom:10px}.summary{font-size:19px;margin-bottom:20px}.problem{color:#fdba74;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.metric{padding:18px;background:#1f2938;border-radius:12px}.metric strong{display:block;font-size:26px;line-height:1.3}.metric span{display:block;font-size:12px;color:#bbc4d1}.metric small{font-size:11px;color:#8b97a8}p{white-space:pre-wrap;margin:0}.attention{background:#facc15;color:#111;padding:16px;border-radius:10px;margin-top:20px}footer{font-size:12px;color:#a3afbf;margin-top:24px}@media(max-width:420px){.heading,.content{padding:18px}h1{font-size:25px}}
+        </style><main><header>\(art)<div class=heading><div class=eyebrow>AGENT ASSESSMENT</div><h1>\(escape(session.title))</h1><div class=repository>\(escape(config.repository))</div></div></header><div class=content><p class=status>\(escape(content.line(now: now)))</p><p class=summary>\(escape(content.summary))</p>\(problem)\(facts)\(config.attention.isEmpty ? "" : "<p class=attention>" + escape(config.attention) + "</p>")<footer>Assessment · \(escape(content.updatedAt.map { "updated " + $0.formatted() } ?? "none yet"))\(escape(content.checkedAt.map { " · checked " + $0.formatted() } ?? ""))<br>Richard Kaufmann · richard@kaoslabs.app · www.kaoslabs.app</footer></div></main></html>
         """
     }
 
@@ -699,7 +683,7 @@ struct RemoteAgentSetupView: View {
                 Button("Close", action: onClose)
                 Button("Reload") { perform("agent.settings") }.disabled(working)
                 Button("Run once") { perform("agent.run") }.disabled(!loaded || working)
-                Button("Show scoreboard on home") { perform("agent.widget") }.disabled(!loaded || working)
+                Button("Show assessment on home") { perform("agent.widget") }.disabled(!loaded || working)
                 Spacer(); Button("Save") { perform("agent.configure") }.disabled(!loaded || working)
             }
         }.textFieldStyle(.roundedBorder).padding(20).frame(minWidth: 540, minHeight: 580)
@@ -734,39 +718,3 @@ struct RemoteAgentSetupView: View {
     }
 }
 
-struct AgentScoreboardCards: View {
-    let board: AgentScoreboard
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let title = board.title { Text(title).font(.title2.bold()) }
-            Text(board.summary).font(.headline)
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                ForEach(Array(board.metrics.enumerated()), id: \.offset) { _, metric in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(metric.label).font(.caption)
-                        Text(metric.value).font(.title2.bold()).textSelection(.enabled)
-                        if let at = metric.asOf { Text("Source time: " + at).font(.caption) }
-                        if let link = metric.sourceURL.flatMap(AgentWebSource.safeURL) { Link(AgentWebSource.domainLabel(link.absoluteString) ?? "Source", destination: link).font(.caption) }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(14).background(Color(red: 0.12, green: 0.16, blue: 0.22), in: RoundedRectangle(cornerRadius: 12))
-                }
-            }
-            if let at = board.observedAt { Text("Retrieved " + at.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary) }
-            ForEach(board.sources ?? [], id: \.url) { source in
-                if let url = AgentWebSource.safeURL(source.url) { Link(AgentWebSource.shortLabel(title: source.title, url: source.url), destination: url).font(.caption) }
-            }
-        }
-    }
-    static func html(_ board: AgentScoreboard?) -> String {
-        guard let board else { return "" }
-        func e(_ s: String) -> String { AgentWidgetExport.escape(s) }
-        let cells = board.metrics.map { metric in
-            "<div class=metric><span>" + e(metric.label) + "</span><strong>" + e(metric.value) + "</strong><span>" + e(metric.asOf.map { "Source time: " + $0 } ?? "") + "</span>" +
-            (metric.sourceURL.flatMap(AgentWebSource.safeURL).map { "<br><a href=\"" + e($0.absoluteString) + "\" rel=\"noreferrer\">" + e(AgentWebSource.domainLabel($0.absoluteString) ?? "Source") + "</a>" } ?? "") + "</div>"
-        }.joined()
-        let sources = (board.sources ?? []).compactMap { source -> String? in
-            guard let url = AgentWebSource.safeURL(source.url) else { return nil }
-            return "<a href=\"" + e(url.absoluteString) + "\" rel=\"noreferrer\">" + e(AgentWebSource.shortLabel(title: source.title, url: source.url)) + "</a>"
-        }.joined(separator: " · ")
-        return "<section><h2>" + e(board.title ?? "Scoreboard") + "</h2><p>" + e(board.summary) + "</p><div class=grid>" + cells + "</div><p>Retrieved " + e(board.observedAt?.formatted() ?? "Unknown") + "</p><p>" + sources + "</p></section>"
-    }
-}

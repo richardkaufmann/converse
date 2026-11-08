@@ -291,10 +291,10 @@ struct RemotePane: View {
                     Menu {
                         Button("Agent Setup / Loop…") { AgentWindows.shared.remoteSetup(globalID) }
                         Button("Run once") { runAgentOnce() }.disabled(agentActionBusy || transcript?.busy == true)
-                        Button("Scoreboard") { scoreboardExpanded = true }.disabled(transcript?.agentWidget == nil)
+                        Button("Assessment") { scoreboardExpanded = true }.disabled(transcript?.agentWidget == nil)
                     } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                        .accessibilityLabel("Agent actions").help("Agent actions: setup, loop, run once and scoreboard")
+                        .accessibilityLabel("Agent actions").help("Agent actions: setup, loop, run once and assessment")
                         .disabled(offline)
                         .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
                             Button("OK", role: .cancel) { agentActionError = nil }
@@ -319,11 +319,12 @@ struct RemotePane: View {
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
             if let widget = transcript?.agentWidget {
-                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
+                DisclosureGroup("Agent assessment", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = NSImage(contentsOf: file) { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 160) }
-                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        if let line = widget.assessmentLine { Text(line).font(.caption.bold()) }
                         Text(widget.summary).font(.caption).textSelection(.enabled)
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
                     }
                 }.padding(8)
                 if let status = widget.loopStatus { Text(status).font(.caption).padding(6) }

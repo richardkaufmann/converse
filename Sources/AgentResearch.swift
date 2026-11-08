@@ -74,20 +74,6 @@ struct AgentScoreboard: Codable, Equatable {
     var sentiment: String?
     var observedAt: Date?
     var sources: [AgentWebSource]?
-    func validated(research: AgentResearch, at now: Date = Date()) -> Self {
-        var result = self
-        result.title = title.map { String($0.prefix(100)) }
-        result.summary = summary.split(whereSeparator: { $0.isWhitespace }).prefix(20).joined(separator: " ")
-        result.sentiment = ["up", "down", "mixed", "neutral", "urgent", "peaceful"].contains(sentiment ?? "") ? sentiment : "neutral"
-        result.observedAt = now
-        result.sources = research.sources
-        result.metrics = metrics.prefix(12).map { item in
-            let supported = research.searched && research.sources.contains { $0.url == item.sourceURL }
-            return Metric(label: String(item.label.prefix(60)), value: supported ? String(item.value.prefix(120)) : "Unavailable",
-                          sourceURL: supported ? item.sourceURL : nil, asOf: supported ? item.asOf.map { String($0.prefix(160)) } : nil)
-        }
-        return result
-    }
 }
 
 // Local counts are measured by the host, never inferred from generated prose or
@@ -121,11 +107,5 @@ struct AgentLotScoreboard: Codable, Equatable {
             if let tag = row.tag { sections[sections.count - 1].colors[tag.rawValue, default: 0] += 1 }
         }
         return Self(id: id, home: home, name: name, revision: document.revision, observedAt: now, sections: sections)
-    }
-}
-
-extension AgentConfig {
-    var visibleLotScoreboards: [AgentLotScoreboard] {
-        (lotScoreboards ?? []).filter { allows(local: $0.id, home: $0.home) }
     }
 }

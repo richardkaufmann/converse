@@ -26,6 +26,8 @@ struct AgentConfig: Codable, Equatable {
     var webSearch: Bool? = nil
     var jollyAllowed: Bool? = nil
     var jollyRequestID: String? = nil
+    // Retired before 152: the agent's last scoreboard and lot counts. Still
+    // decoded so an older archive seeds its first, stale-labelled assessment.
     var scoreboard: AgentScoreboard? = nil
     var lotScoreboards: [AgentLotScoreboard]? = nil
     var supportDefaultsVersion: Int? = nil
@@ -41,8 +43,6 @@ struct AgentConfig: Codable, Equatable {
         get { maxTurnsPerLoop ?? max(1, remainingRuns) }
         set { maxTurnsPerLoop = newValue }
     }
-    var scoreboardEveryLoops: Int? = nil
-    var loopsSinceScoreboard: Int? = nil
     var enabled = false
     // Auto pacing: on for new agents; older archives decode nil (off).
     var autoPace: Bool? = true
@@ -97,6 +97,7 @@ struct AgentConfig: Codable, Equatable {
     var lastArtMetricValues: [String: Double]? = nil
     var snapshot: AgentRepoSnapshot? = nil
     var workingMemory: String? = nil
+    // Retired report text: only a fallback when seeding from an old scoreboard.
     var widgetSummary = "Tell me what you’re building and how you’ll judge success."
     var artPath: String? = nil
     // Every turn's assessment, its recent revisions, and why the latest turn
@@ -109,10 +110,6 @@ struct AgentConfig: Codable, Equatable {
     var portraitMinMinutes: Double? = nil
     var lastRunAt: Date? = nil
     var lastOutcome = "Not run yet"
-    var scoreboardCadence: Int { min(1000, max(1, scoreboardEveryLoops ?? 1)) }
-    func shouldRefreshScoreboard(loopTick: Bool) -> Bool {
-        !loopTick || snapshot == nil || snapshot?.repository != repository || (loopsSinceScoreboard ?? 0) >= scoreboardCadence - 1
-    }
     var intervalLabel: String {
         let seconds = Int(min(31536000, max(60, effectiveIntervalSeconds.isFinite ? effectiveIntervalSeconds : 900)))
         if seconds % 3600 == 0 { return "\(seconds / 3600) hr" }
@@ -271,7 +268,6 @@ struct AgentReply: Decodable {
     var speechIntent: String?
     var discordImage: String?
     var notifyDiscord: String?
-    var scoreboard: AgentScoreboard?
     var nextRunInMinutes: AgentLenientNumber?
     var paceReason: AgentLenientText?
     static func decode(_ text: String) -> AgentReply? {
@@ -475,7 +471,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scoreboardEveryLoops: scoreboardCadence, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "", homeAssistantURL: homeAssistantURL, homeAssistantEntities: homeAssistantEntities, homeAssistantRead: homeAssistantRead)
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "", homeAssistantURL: homeAssistantURL, homeAssistantEntities: homeAssistantEntities, homeAssistantRead: homeAssistantRead)
     }
     // Returns the transcript notice when a text schedule moved into the objective.
     @discardableResult mutating func apply(_ wire: DeviceAgentSettings) throws -> String? {
@@ -485,7 +481,7 @@ extension AgentConfig {
         let repository = wire.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard repository.isEmpty || AgentRepoSnapshot.validRepository(repository), !wire.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, wire.model.utf8.count <= 200,
               wire.objective.utf8.count <= 16000, (wire.artDirection ?? "").utf8.count <= 4000, wire.watched.count <= 64, wire.watched.allSatisfy({ DeviceGlobalID($0) != nil }),
-              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (1...1000).contains(wire.turnLimit), wire.scoreboardEveryLoops.map({ (1...1000).contains($0) }) ?? true else {
+              wire.intervalSeconds.isFinite, (60...31536000).contains(wire.intervalSeconds), (1...1000).contains(wire.turnLimit) else {
             throw AgentFailure.message("Invalid agent settings. Check scope, interval and run budget.")
         }
         if !(scheduleText ?? "").isEmpty && wire.scheduleText == nil {
@@ -497,12 +493,12 @@ extension AgentConfig {
         var next = self
         if wire.enabled && !enabled { next.clearPause() }
         next.settingsChanged()
-        if next.repository != repository { next.snapshot = nil; next.loopsSinceScoreboard = 0 }
+        if next.repository != repository { next.snapshot = nil }
         next.objective = wire.objective; next.repository = repository; next.model = wire.model
         next.watchedParticipants = Array(Set(wire.watched)).sorted(); next.watchedSessions = []
         next.intervalSeconds = wire.intervalSeconds; next.scheduleText = wire.scheduleText; next.scheduleTimeZone = zoneID; next.turnLimit = wire.turnLimit; next.enabled = wire.enabled
         let notice = next.migrateScheduleText()
-        if let cadence = wire.scoreboardEveryLoops { next.scoreboardEveryLoops = cadence }
+        // wire.scoreboardEveryLoops from older editors is ignored: every turn assesses.
         if let share = wire.discordShareScoreboard { next.discordShareScoreboard = share }
         if let share = wire.discordShareSessionInformation { next.discordShareSessionInformation = share }
         if let direction = wire.artDirection { next.artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }

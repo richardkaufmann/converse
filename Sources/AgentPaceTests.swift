@@ -28,7 +28,7 @@ import Foundation
     let timeVarying = rules.range(of: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}:[0-9]{2}", options: .regularExpression)
     check(timeVarying == nil && !rules.contains("Objective: ") && !rules.contains("Web search is ") && !rules.contains(AgentInstructions.voiceTurn) && !rules.contains("Unavailable older attachments") && !rules.contains("Art direction from the owner"),
           "Static instruction prefix contains no IDs, dates, times, objective or per-activation lines")
-    check([AgentPolicy.objectiveGoverns, AgentPolicy.scoreboardScope, ParkingLotStore.placementGuidance, "Return ONE JSON object with:", AgentAssessments.teaching].allSatisfy(rules.contains) && !rules.contains("artPrompt") && !rules.contains("Make the art fit sentiment")
+    check([AgentPolicy.objectiveGoverns, AgentPolicy.assessmentScope, ParkingLotStore.placementGuidance, "Return ONE JSON object with:", AgentAssessments.teaching].allSatisfy(rules.contains) && !rules.contains("artPrompt") && !rules.contains("Make the art fit sentiment")
           && first.contains(AgentInstructions.voiceTurn) && first.contains("Web search is available.") && first.contains(attachmentID) && !first.contains(AgentInstructions.parkingLotReview)
           && second.contains("Web search is unavailable for this activation; use only supplied evidence.") && second.contains(AgentInstructions.parkingLotReview) && second.contains("Support teaching")
           && second.contains("Portrait art direction from the owner (art only, never a reporting instruction): Moonbase") && second.contains("Auto pacing is on") && second.contains("Unavailable older attachments: none."),

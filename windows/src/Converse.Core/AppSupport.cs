@@ -101,7 +101,7 @@ public sealed class SupportSetup
         config.Settings.Repository = "richardkaufmann/converse";
         config.Settings.Objective = "Keep Converse up to date, especially when critical bugs are reported. Check the repository daily for releases and serious open issues. Treat critical bugs as reasons for grave concern; explain impact and next steps with links and observation dates. Do not install updates or change settings without the user's request. Answer app health and Group questions from live supplied evidence.";
         config.Settings.IntervalSeconds = 86400; config.Settings.ScheduleText = ""; config.Settings.Enabled = true; config.Settings.GenerateArt = false; config.Settings.Speak = false;
-        config.Settings.ScoreboardEveryLoops = 1; config.SupportDefaultsVersion = 1;
+        config.SupportDefaultsVersion = 1;
         config.NextRunUtc = AgentSchedule.Compile(config.Settings).Next(DateTime.UtcNow); session.Agent = config; store.Save();
     }
     public async Task<bool> VerifyAsync(TimeSpan timeout, CancellationToken cancellation = default)

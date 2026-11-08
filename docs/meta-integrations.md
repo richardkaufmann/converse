@@ -1,6 +1,6 @@
 # Meta integration reference
 
-**Reach your coding workspace from Muse mobile through Jolly.** Ask for a Converse agent by name, get the current status of its selected sessions, and receive its response and available scoreboard art on your phone. The phone is Meta’s Muse client; Converse supplies the authenticated bridge to the agent on your Mac. This is the same multi-provider workspace: a Meta-powered agent can monitor authorized Muse, Claude Code, and Codex sessions together.
+**Reach your coding workspace from Muse mobile through Jolly.** Ask for a Converse agent by name, get the current status of its selected sessions, and receive its response and, when you ask, its portrait on your phone. The phone is Meta’s Muse client; Converse supplies the authenticated bridge to the agent on your Mac. This is the same multi-provider workspace: a Meta-powered agent can monitor authorized Muse, Claude Code, and Codex sessions together.
 
 Meta also powers work inside Converse itself. Muse coding sessions run through **Muse Code**, and agents selected to use the Meta API call **Meta Model API** directly. Other agents use their selected Muse, Claude or Codex CLI login, with native research tools disabled; there is no automatic Meta search fallback. These are distinct integration paths:
 

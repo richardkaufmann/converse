@@ -48,13 +48,12 @@ struct PadAgentPanel: View {
                         }
                         Stepper("Maximum turns per loop: \(settings?.turnLimit ?? 1)", value: field(\.turnLimit), in: 1...1000)
                         Text("The schedule repeats until paused. Each activation currently makes one model response, within this limit; it does not spend future loops.").font(.caption)
-                        Stepper("Scoreboard every \(settings?.scoreboardEveryLoops ?? 1) loops", value: Binding(get: { settings?.scoreboardEveryLoops ?? 1 }, set: { settings?.scoreboardEveryLoops = $0 }), in: 1...1000)
                         TextField("Portrait art direction", text: Binding(get: { settings?.artDirection ?? "" }, set: { settings?.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
                         Text("Subject, style, colors or humor for on-demand portraits. Separate from the objective and success criteria. Requires an updated home.").font(.caption)
                         Text("Scheduled runs are silent. Start talking is available on a Mac viewing the agent.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow Discord alerts", isOn: field(\.discord))
                         Toggle("Share session information", isOn: Binding(get: { settings?.discordShareSessionInformation == true }, set: { settings?.discordShareSessionInformation = $0 }))
-                        Text("Shares this agent’s recent conversation, working notes and scoreboard only in a verified private Discord channel.").font(.caption)
+                        Text("Shares this agent’s recent conversation, working notes and assessment only in a verified private Discord channel.").font(.caption)
                         Toggle("Share assessments and portraits on Discord requests", isOn: Binding(get: { settings?.discordShareScoreboard == true }, set: { settings?.discordShareScoreboard = $0 }))
                     }
                     Section("Sessions this agent may read and message") {
@@ -70,7 +69,7 @@ struct PadAgentPanel: View {
                     }
                     Button("Save settings") { perform("agent.configure") }.disabled(working)
                     Button("Save and run once on home") { perform("agent.configure", runAfterSave: true) }.disabled(working)
-                    Button("Open scoreboard on home") { perform("agent.widget") }.disabled(working)
+                    Button("Open assessment on home") { perform("agent.widget") }.disabled(working)
                     Button("Reload settings") { perform("agent.settings") }.disabled(working)
                 } else if !working { Button("Load Agent Setup") { perform("agent.settings") } }
                 if working { ProgressView("Waiting for home…") }

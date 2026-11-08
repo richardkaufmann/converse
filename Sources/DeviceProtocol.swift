@@ -269,6 +269,9 @@ struct DeviceRequestDTO: Codable, Equatable, Identifiable {
     var questionsJSON: Data? = nil
 }
 struct DeviceWidgetMetric: Codable { var label: String; var value: String }
+// Derived from the agent's latest assessment (AgentConfig.widgetContent).
+// Older homes still send a scoreboard-shaped widget without status or
+// freshness; viewers show whatever fields arrive.
 struct DeviceAgentWidget: Codable {
     var summary: String
     var metrics: [DeviceWidgetMetric]
@@ -276,6 +279,14 @@ struct DeviceAgentWidget: Codable {
     var attention: String
     var artHash: String?
     var loopStatus: String? = nil
+    var status: String? = nil
+    var freshness: String? = nil
+    var revision: Int? = nil
+    /// "On track · Fresh · rev 3", or nothing from an older home.
+    var assessmentLine: String? {
+        let parts = [status, freshness, revision.map { "rev \($0)" }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 }
 struct DeviceTranscriptPayload: Codable {
     var globalID: String
@@ -414,6 +425,8 @@ struct DeviceAgentSettings: Codable, Equatable {
     var discord: Bool
     var fileTriggers: Bool = false
     var revision: UInt64? = nil
+    // Retired scoreboard cadence: older editors still send it and current
+    // homes ignore it, because every agent turn assesses.
     var scoreboardEveryLoops: Int? = nil
     var scheduleText: String? = nil
     var scheduleTimeZone: String? = nil

@@ -80,25 +80,26 @@ import Foundation
             ParkingLotRow(heading: false, text: "Feature")]
         let lot = AgentLotScoreboard.measure(id: UUID(), home: nil, name: "Fixture lot", document: ParkingLotDocument(revision: 42, rows: rows), now: now)
         check(lot.sections[0].value == "2 (1 red, 1 green)" && lot.sections[1].value == "1", "Scoreboard counts unfinished nested items once, excludes headings and Done, and never inherits colors")
-        first.agent?.watchedSessions = [lot.id]; first.agent?.lotScoreboards = [lot]
-        first.agent?.repository = "fixture/project"
-        first.agent?.snapshot = AgentRepoSnapshot(repository: "fixture/project", observedAt: now, stars: 0, openPRs: 0, openIssues: 4, openBugs: 1, releaseDownloads: 106, uniqueClonersTodayUTC: 2, uniqueCloners14d: 9)
-        first.agent?.scoreboard = AgentScoreboard(summary: "Fixture measurements", metrics: [.init(label: "External metric", value: "Unavailable")], observedAt: now)
-        // The measured-text renderer remains only for the explicit preview mode.
-        let labels = AgentScoreboardImage.lines(session: first).map(\.text).joined(separator: "\n")
-        check(labels.contains("Bugs: 2 (1 red, 1 green)") && labels.contains("Stars: 0") && labels.contains("cumulative: 106") && labels.contains("Unique cloners · today UTC: 2") && labels.contains("14d: 9") && labels.contains("Revision 42"), "Preview scoreboard includes local counts AND repository data, timestamps and measured zeros")
-        first.agent?.snapshot?.uniqueClonersTodayUTC = nil
-        check(AgentScoreboardImage.lines(session: first).contains { $0.text == "Unique cloners · today UTC: Unavailable" }, "A missing current-day traffic bucket is explicitly unavailable")
+        first.agent?.watchedSessions = [lot.id]
+        let snapshot = AgentRepoSnapshot(repository: "fixture/project", observedAt: now, stars: 0, openPRs: 0, openIssues: 4, openBugs: 1, releaseDownloads: 106, uniqueClonersTodayUTC: nil, uniqueCloners14d: 9)
+        let measured = AgentAssessments.measured(lots: [lot], repository: "fixture/project", snapshot: snapshot, discord: nil, versions: nil, now: now)
+        let raw = AgentJSON.object(["summary": .string("Fixture measurements"), "status": .string("on-track"),
+            "facts": .array(measured.prefix(AgentAssessment.displayedFacts).map { .object(["id": .string($0.id), "kind": .string("measured")]) })])
+        first.agent?.recordAssessment(AgentAssessments.evaluate(raw, measured: measured, previous: nil, now: now), now: now)
+        // The text renderer remains only for the explicit preview mode, and draws the assessment.
+        let labels = AgentScoreboardImage.lines(session: first, now: now).map(\.text).joined(separator: "\n")
+        check(labels.contains("Fixture measurements") && labels.contains("Fixture lot · unfinished: 3") && labels.contains("On track · Fresh · rev 1") && labels.contains("Measured"),
+              "Preview image draws the latest assessment: summary, status, freshness and host-measured facts")
         let png = try AgentScoreboardImage.render(session: first, store: store)
         let preview = FileManager.default.temporaryDirectory.appendingPathComponent("converse-jolly-scoreboard-fixture.png")
         try png.write(to: preview)
-        print("Measured scoreboard preview fixture: " + preview.path)
+        print("Measured assessment preview fixture: " + preview.path)
         first.agent?.jollyRequestID = String(repeating: "9", count: 64)
         router.complete(first, text: "Measured status", success: true, store: store)
         let response = result(String(repeating: "9", count: 64))
         check(response["answer"] as? String == "Measured status" && response["imageID"] == nil, "Jolly answers are text; scoreboard composites are no longer attached")
         first.agent?.watchedSessions = []
-        check(!AgentScoreboardImage.lines(session: first).map(\.text).joined().contains("Fixture lot") && !AgentWidgetExport.html(first).contains("Fixture lot"), "Revoked lot access excludes stored counts from images and HTML")
+        check(!AgentScoreboardImage.lines(session: first, now: now).map(\.text).joined().contains("Fixture lot") && !AgentWidgetExport.html(first, now: now).contains("Fixture lot"), "Revoked lot access excludes stored counts from images and HTML")
     } catch { check(false, "Jolly measured scoreboard fixture: " + error.localizedDescription) }
     first.queuePaused = true
     let held = request("b"); enqueue(held); router.tick(store: store, now: now)

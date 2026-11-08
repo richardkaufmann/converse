@@ -107,7 +107,7 @@ On a brand-new Mac installation, Converse opens with four things in the left pan
 1. **Click a provider.** Converse sets everything up to use it and renames the sessions to match, for example **Claude Coding** and **Claude Agent**. The Parking Lot is already linked to both.
 2. **Press Return.** App Support has typed `/login` for you. Return opens that provider's normal login (`claude auth login`, `codex login` or `muse login`) in Terminal and your browser. Finish there and come back. Already signed in? Click **I’m already signed in** instead.
 3. **Wait for one short answer.** Converse asks the model for a single reply to prove the login works (this may use a little quota), then App Support opens your coding session beside it in a second pane and explains what it can help with, including the **1 2 3** icons that put any session in the first, second or third pane.
-4. **Start in your coding session.** It asks: *What shall we build today? You can also ask me to read the Parking Lot and react to it and update it.* The Parking Lot starts with **What Are We Building** and one idea to react to. Your agent has a greeting too; right-click its name for **Agent Setup**, **Run once**, **Show scoreboard** and more. It starts on, watching your coding session (*Monitor the health of the Claude Coding session.*), checks hourly with **Auto pacing** on, and makes its first check an hour after you sign in. With a saved Meta key it also draws mood art that matches how the project is going.
+4. **Start in your coding session.** It asks: *What shall we build today? You can also ask me to read the Parking Lot and react to it and update it.* The Parking Lot starts with **What Are We Building** and one idea to react to. Your agent has a greeting too; right-click its name for **Agent Setup**, **Run once**, **Show assessment** and more. It starts on, watching your coding session (*Monitor the health of the Claude Coding session.*), checks hourly with **Auto pacing** on, and makes its first check an hour after you sign in. With a saved Meta key it also draws mood art that matches how the project is going.
 
 Not ready to choose? Click **Decide later**. Everything else keeps working, and **Choose a provider…** brings the question back. If a provider's button is greyed out, its command-line tool isn't installed yet: use **How to install** ([Install a provider CLI](#install-a-provider-cli)), then **Check again**. Do not put passwords, API keys or login codes into a conversation.
 
@@ -240,7 +240,7 @@ Don't like a substitution? **⌘Z** restores exactly what you typed; **Backspace
 
 Create another session with **+** when you want an independent task or a second opinion. **1 / 2 / 3** place a session in a pane. **P** parks it: the pane closes but work continues. **X** closes the session after confirmation and stops its work; Mac **File → Restore Closed Conversation** can restore a saved recovery copy.
 
-Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show scoreboard**, **Run once**).
+Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show assessment**, **Run once**).
 
 To organize the sidebar, click **Reorder** at its top. Drag a device to move its whole section, or drag a session, agent or Parking Lot within its device. This changes display order, not where work runs. Click **Done** when finished; both levels of order survive a restart.
 
@@ -342,7 +342,7 @@ Say how often to run in the objective, in your own words. A stock tracker might 
 
 If the objective says nothing about timing, **Auto pacing** decides. It is on for new agents: each run suggests its next check with a short reason, sooner while a release is going out, hours later when nothing is moving, and the footer shows it, for example *Auto · next in 20 min (release in progress)*. It stays between 5 minutes and 72 hours by default, so a quiet agent can sleep through a three-day weekend; change both bounds in Agent Setup. A cadence you state in the objective always wins over the agent's suggestions. If Converse can't read the objective (for example, a Meta model without a Meta key), the summary says so and Auto pacing's defaults apply; save again to retry.
 
-Agents stay quiet when there is nothing to say: a scheduled check with nothing new or relevant adds no reply, though its assessment and scoreboard still update. Ask it for a status and it answers in one short line even when nothing has changed.
+Agents stay quiet when there is nothing to say: a scheduled check with nothing new or relevant adds no reply, though its assessment still updates. Ask it for a status and it answers in one short line even when nothing has changed.
 
 Use **Enable automatic loop** and **Maximum turns per loop**. That limit applies to each activation; it is not a lifetime allowance. A newly enabled loop waits one interval before its first check. **Run once** performs a check without enabling a paused loop or moving an already scheduled deadline.
 
@@ -388,13 +388,15 @@ Portraits don't run up a bill. An unchanged assessment reuses the cached portrai
 
 Scoreboard pictures already in your conversations stay where they are; agents simply stop adding new ones. Your art direction carries over to portraits. Agents from earlier releases start with an assessment seeded from their last scoreboard, marked stale until their next turn.
 
-### Show the scoreboard
+### Show the assessment
 
-**Show scoreboard** presents the agent's measurements in **cards** (small labeled panels). With a repository, these can include issues, bugs, pull requests, stars and release downloads. Repository visitors and clone traffic require authorized GitHub access. Unique cloners cover today (UTC) when available and the last 14 days; GitHub does not provide a lifetime unique-cloner total. Release downloads are cumulative across accessible releases. Missing data is **Unavailable**, not zero. None of these counts measures actual app users.
+**Show assessment** opens one agent's latest assessment: its status, how fresh it is, the summary and its facts. Remote iPads and Macs show the same assessment, and **Refresh assessment now** asks for a new one straight away, or as the agent's next turn if it's busy.
 
-Selected Parking Lots contribute unfinished-item counts by section and explicit color tag, excluding headings and Done items. Each lot shows its revision and measurement time.
+Repository facts can include issues, bugs, pull requests, stars and release downloads. Repository visitors and clone traffic require authorized GitHub access. Unique cloners cover today (UTC) when available and the last 14 days; GitHub does not provide a lifetime unique-cloner total. Release downloads are cumulative across accessible releases. Missing data is **Unavailable**, not zero. None of these counts measures actual app users.
 
-For search-backed cards, source links and **observation times** (when the source measured the value) matter: a delayed quote or prior close is not a live price. Unsupported values remain unavailable. **Export widget** saves a portable HTML snapshot with the agent's latest portrait; it is a snapshot, not a live dashboard.
+Selected Parking Lots contribute unfinished-item and red counts, excluding headings and Done items. Revoke the agent's access to a lot and its counts disappear from the widget and exports right away.
+
+For web facts, source links and **observation times** (when the source measured the value) matter: a delayed quote or prior close is not a live price. A fact citing a page that run didn't actually retrieve reads Unavailable. **Export…** saves a portable HTML snapshot with the agent's latest portrait; it is a snapshot, not a live dashboard.
 
 ### Voice on Mac
 
@@ -466,7 +468,7 @@ Ask App Support to walk through this with the person administering your Mac. Fir
 
    Keep the process running for the first test, then have the operator arrange a persistent service. **Always set `--public-base` to your address**: the script’s current default is the developer’s endpoint, used for returned image links. The existing `install-jolly-bridge.py` is a migration helper and does not pass a custom public address; it is not a complete new-user installer. Do not run it unchanged for someone else’s endpoint.
 4. In Muse’s connector configuration, load `https://your-bridge.example/openapi.json` and set its server/base URL to your HTTPS address. The schema does not supply a server URL. Configure bearer authentication using your private token in the connector’s secure credential field. The schema names the integration **Ask Converse**.
-5. Open Converse, allow the intended agents in **Converse → Settings → Jolly**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but images (the measured scoreboard or art) do not, check the public base address and tunnel image route.
+5. Open Converse, allow the intended agents in **Converse → Settings → Jolly**, then follow the test below. `/health` can verify the bridge and reports `appAvailable`; bridge health alone does not prove an agent can answer. Authenticated `/v1/agents` should list the agents you allowed. A `401` means authentication failed; an unavailable app requires the correct Mac/profile to be open. If text works but portraits do not, check the public base address and tunnel image route.
 
 Treat the bearer token as access to the enabled agents. Limit their scope before sharing the connector. Returned images use opaque URLs that can be retrieved without the bearer token; anyone with such a URL can view that image. To stop new agent requests, disable its Jolly access. To revoke the connector itself, stop the bridge or rotate the token and update the connector’s credential; disabling an agent does not erase saved replies or images.
 

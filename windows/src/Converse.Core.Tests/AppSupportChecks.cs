@@ -119,7 +119,7 @@ internal static class AppSupportChecks
                 session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 0 && instructions.Contains("optional appControl object"), "Native-agent teaching preserves JSON format and never executes prose commands");
                 check(instructions.Contains("Never search the web for bare") && instructions.Contains("site:github.com/richardkaufmann/converse") && instructions.Contains("no relevant result is found"), "Previously taught agents receive current scoped research policy on their next request");
-                check(instructions.Contains(AgentPolicy.ScoreboardScope), "Agent scoreboard instructions limit metrics to that agent's own objective and scope");
+                check(instructions.Contains(AgentPolicy.AssessmentScope) && !instructions.Contains("scoreboard"), "Agent assessment instructions limit facts to that agent's own objective and scope");
                 check(instructions.Contains(AgentPolicy.ObjectiveGoverns), "Agent instructions make the current objective govern supplied evidence and older notes");
                 explicitAction = true; session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 1, "Native agents dispatch only the explicit appControl operation");
@@ -157,7 +157,7 @@ internal static class AppSupportChecks
                     return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
                 };
                 bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.All(m => m.Images.Count == 0) && imageRequests == 0 && session.Agent!.AssessmentProblem == "No assessment returned this turn."
-                    && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget?.Summary == "Steady progress";
+                    && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget is null && AgentAssessments.WidgetFor(session.Agent, DateTime.UtcNow).Summary.StartsWith("No assessment yet");
                 session.Draft = "Check progress"; store.Submit(session); await WaitIdle(session);
                 check(KeptReply(), "Agent turns generate no art: the reply and loop are kept, a missing assessment is only marked stale");
                 keyReads = 0; devices.Agents.ReadSecret = name => name == "meta" ? "fixture-key" : null; session.Agent.Widget = null; session.Agent.ArtAtUtc = null; session.Agent.ArtMood = null;

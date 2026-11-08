@@ -56,7 +56,9 @@ public static class AgentAssessments
     }
     static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
-    public static (AgentAssessmentOutcome Kind, AgentAssessmentRecord? Record, string? Reason) Evaluate(JsonNode? raw, IReadOnlyList<AgentFactRecord> measured, AgentAssessmentRecord? previous, DateTime now)
+    /// sourceRetrieved says whether a cited web URL was really seen this run;
+    /// a fact citing any other URL keeps its row but reads Unavailable.
+    public static (AgentAssessmentOutcome Kind, AgentAssessmentRecord? Record, string? Reason) Evaluate(JsonNode? raw, IReadOnlyList<AgentFactRecord> measured, AgentAssessmentRecord? previous, DateTime now, Func<string, bool>? sourceRetrieved = null)
     {
         if (raw is null) return (AgentAssessmentOutcome.Rejected, null, "No assessment returned this turn.");
         if (raw is not JsonObject root) return (AgentAssessmentOutcome.Rejected, null, "Assessment was not a JSON object.");
@@ -86,6 +88,13 @@ public static class AgentAssessments
                 var stated = Text(item["observedAt"]) is { } stamp && DateTime.TryParse(stamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var at) && at.ToUniversalTime() <= now.AddMinutes(5) ? at.ToUniversalTime() : (DateTime?)null;
                 var key = id.Length > 0 ? id : label;
                 var earlier = previous?.Facts.FirstOrDefault(f => f.Id == key && f.Value == value)?.ObservedAtUtc;
+                var cited = Clip(Text(item["source"]), 300);
+                var isWeb = kind == "evidence" && Uri.TryCreate(cited, UriKind.Absolute, out var web) && web.Scheme is "http" or "https";
+                if (isWeb && sourceRetrieved is not null && !sourceRetrieved(cited) && previous?.Facts.Any(f => f.Id == key && f.Value == value && f.Source == cited) != true)
+                {
+                    if (facts.All(f => f.Id != key) && key.Length > 0) facts.Add(new AgentFactRecord { Id = key, Label = label.Length > 0 ? label : id, Value = Unavailable, Kind = kind, Source = "Source not retrieved this run" });
+                    continue;
+                }
                 fact = new AgentFactRecord { Id = key, Label = label.Length > 0 ? label : id, Value = value.Length > 0 ? value : Unavailable, Kind = kind,
                     Source = Clip(Text(item["source"]), 300) is { Length: > 0 } source ? source : kind == "judgment" ? "judgment" : "Unspecified",
                     ObservedAtUtc = stated ?? earlier ?? now, Detail = item["detail"]?.DeepClone() };
@@ -103,6 +112,37 @@ public static class AgentAssessments
         }
         next.Revision = (previous?.Revision ?? 0) + 1;
         return (AgentAssessmentOutcome.Revision, next, null);
+    }
+
+    public const int DisplayedFacts = 7;
+    public static string StatusLabel(string status) => status switch { "on-track" => "On track", "at-risk" => "At risk", "blocked" => "Blocked", "done" => "Done", _ => status };
+    /// Fresh under an hour, Aging under a day, then Old; Stale with a reason
+    /// when the latest turn's assessment was rejected or none exists yet.
+    public static string Freshness(AgentConfig agent, DateTime now)
+    {
+        if (agent.Assessment is not { } record) return agent.Widget is null ? "No assessment" : "Stale: seeded from the last scoreboard; the next turn replaces it.";
+        if (agent.AssessmentProblem is { } problem) return "Stale: " + problem;
+        var age = now - record.CheckedAtUtc;
+        return age < TimeSpan.FromHours(1) ? "Fresh" : age < TimeSpan.FromDays(1) ? "Aging" : "Old";
+    }
+    /// What every widget shows (remote viewers and this app's agent panel):
+    /// one source of truth, the latest assessment. A pre-assessment scoreboard
+    /// widget is shown as a stale seed until the first assessment arrives.
+    public static DeviceAgentWidget WidgetFor(AgentConfig agent, DateTime now)
+    {
+        if (agent.Assessment is not { } record)
+        {
+            var legacy = agent.Widget is null ? new DeviceAgentWidget { Summary = "No assessment yet. The agent's next turn adds one." } : DeviceJson.Decode<DeviceAgentWidget>(DeviceJson.Encode(agent.Widget));
+            legacy.Freshness = Freshness(agent, now); legacy.Attention = agent.Attention;
+            return legacy;
+        }
+        return new DeviceAgentWidget
+        {
+            Summary = record.Summary, Attention = agent.Attention,
+            Metrics = record.Facts.Take(DisplayedFacts).Select(f => new DeviceWidgetMetric { Label = f.Label, Value = f.Value }).ToList(),
+            ObservedAt = (record.CheckedAtUtc - new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds,
+            Status = StatusLabel(record.Status), Freshness = Freshness(agent, now), Revision = record.Revision,
+        };
     }
 
     /// Status, normalized summary, facts without observation times, and detail.

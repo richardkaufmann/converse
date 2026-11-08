@@ -106,6 +106,27 @@ import Foundation
     expansion.activate("card"); expansion.activate("fact.b")
     check(expansion.isExpanded("card") && expansion.isExpanded("fact.b"), "Several rows can be pinned for comparison")
 
+    // Web evidence must have been retrieved or supplied; the host never shows an invented source.
+    let webReply = AgentJSON.object(["summary": .string("Quotes"), "status": .string("on-track"), "facts": .array([
+        .object(["id": .string("price"), "label": .string("Price"), "value": .string("$123"), "kind": .string("evidence"), "source": .string("https://example.com/quote"), "observedAt": .string("2026-10-29T20:00:00Z")]),
+        .object(["id": .string("invented"), "label": .string("Invented"), "value": .string("999"), "kind": .string("evidence"), "source": .string("https://unseen.example/quote")]),
+        .object(["id": .string("notes"), "label": .string("Notes"), "value": .string("Fine"), "kind": .string("evidence"), "source": .string("Parking Lot Bugs")])])])
+    let webCheck: (String) -> Bool = { $0 == "https://example.com/quote" }
+    if case .revision(let web) = AgentAssessments.evaluate(webReply, measured: [], previous: nil, now: now, sourceRetrieved: webCheck) {
+        check(web.facts[0].value == "$123" && web.facts[0].source == "https://example.com/quote" && web.facts[0].observedAt != now,
+              "A retrieved web source keeps its value and the source-reported observation time, distinct from retrieval")
+        check(web.facts[1].value == AgentFact.unavailable && web.facts[1].source == "Source not retrieved this run" && !web.facts.map(\.value).contains("999"),
+              "A fact citing a web URL this run did not retrieve reads Unavailable; the invented value is not stored")
+        check(web.facts[2].value == "Fine", "Non-URL evidence sources (sessions, lots) are not treated as web claims")
+        if case .heartbeat(let later2) = AgentAssessments.evaluate(webReply, measured: [], previous: web, now: later, sourceRetrieved: webCheck) { check(later2.facts[0].value == "$123", "An unchanged cited fact stays on a later turn") }
+        else if case .revision(let later2) = AgentAssessments.evaluate(webReply, measured: [], previous: web, now: later, sourceRetrieved: webCheck) { check(later2.facts[0].value == "$123", "An unchanged cited fact stays on a later turn") }
+        else { check(false, "An unchanged cited fact stays on a later turn") }
+        let noSearch = AgentAssessments.evaluate(webReply, measured: [], previous: web, now: later, sourceRetrieved: { _ in false })
+        if case .heartbeat(let kept) = noSearch { check(kept.facts[0].value == "$123", "A previously checked fact is not blanked by a later turn with no search") }
+        else if case .revision(let kept) = noSearch { check(kept.facts[0].value == "$123", "A previously checked fact is not blanked by a later turn with no search") }
+        else { check(false, "A previously checked fact is not blanked by a later turn with no search") }
+    } else { check(false, "Web evidence fixture") }
+
     // 4. Migration: earlier scoreboards seed a labelled assessment; old archives decode.
     var legacy = AgentConfig(); legacy.artDirection = "Ink explorers"; legacy.generateArt = true; legacy.artPath = "/tmp/old.png"
     legacy.scoreboard = AgentScoreboard(summary: "Bugs climbing this week", metrics: [.init(label: "Open bugs", value: "7", sourceURL: "https://example.invalid/bugs", asOf: "Nov 6")], sentiment: "urgent", observedAt: now)
@@ -122,6 +143,21 @@ import Foundation
         for field in ["assessment", "assessmentHistory", "assessmentProblem", "portrait", "portraitMinMinutes"] { object.removeValue(forKey: field) }
         let decoded = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: object))
         check(decoded.assessment == nil && decoded.artDirection == "Ink explorers" && decoded.artPath == "/tmp/old.png" && decoded.generateArt, "Pre-152 agent archives decode unchanged, existing art path kept")
+        // A pre-152 archive with both owner texts, a scoreboard and its cadence.
+        let oldObjective = "Watch META.\nRun every five minutes and redraw art when any stock moves 0.5%. “Quotes” & emoji 📈 stay."
+        let oldDirection = "  Retro poster,\nbold lettering  "
+        var oldObject = object
+        oldObject["objective"] = oldObjective; oldObject["artDirection"] = oldDirection
+        oldObject["scoreboardEveryLoops"] = 4; oldObject["loopsSinceScoreboard"] = 2; oldObject["lastArtDirection"] = "model-written mood art"
+        var migrated = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: oldObject))
+        check(migrated.objective == oldObjective && migrated.artDirection == oldDirection, "Both owner texts migrate byte-for-byte from a pre-152 archive")
+        migrated.seedAssessmentFromScoreboard(now: later)
+        _ = migrated.widgetContent(now: later)
+        check(migrated.assessment?.seeded == true && migrated.objective == oldObjective && migrated.artDirection == oldDirection, "Seeding the first assessment from the old scoreboard leaves both texts intact")
+        var remote = migrated
+        try remote.apply(migrated.wire(home: String(repeating: "b", count: 64)))
+        check(remote.objective == oldObjective && remote.artDirection == oldDirection.trimmingCharacters(in: .whitespacesAndNewlines),
+              "Both texts round-trip through a remote Agent Setup save (the art direction is trimmed as the editor always did)")
         var stored = seeded; stored.recordAssessment(second, now: later)
         check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(stored)) == stored, "Assessments with nested detail survive persistence")
     } catch { check(false, "Assessment migration: " + error.localizedDescription) }
@@ -331,13 +367,18 @@ import Foundation
     defer { try? FileManager.default.removeItem(at: root) }
     let store = Store(folder: root)
     let agent = store.createAgent(title: "Assessor"); agent.agent?.generateArt = true; agent.agent?.webSearch = false
+    // The owner's two texts: the objective (what to assess) and the art direction (portraits only).
+    let ownerObjective = "Track the 152 release.\nSuccess: no red bugs left.", ownerDirection = "Ink-and-watercolor lighthouse keeper"
+    agent.agent?.objective = ownerObjective; agent.agent?.artDirection = ownerDirection
+    var instructionsSent: [String] = []
     agent.agent?.enabled = true; agent.agent?.turnLimit = 5; agent.queuePaused = true
     let runtime = AgentRuntime(); runtime.keyReader = { name in name == "meta" ? "isolated-test-key" : nil }
     var replies: [String] = [], paths: [String] = [], inputs: [String] = []
     runtime.api.request = { request in
         paths.append(request.url?.path ?? "")
         if request.url?.path == "/v1/responses" {
-            inputs.append((request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["input"] as? String) ?? "")
+            let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            inputs.append((body?["input"] as? String) ?? ""); instructionsSent.append((body?["instructions"] as? String) ?? "")
             let text = replies.isEmpty ? "{\"reply\":\"\"}" : replies.removeFirst()
             let object: [String: Any] = ["status": "completed", "output": [["type": "message", "content": [["type": "output_text", "text": text]]]]]
             return (try JSONSerialization.data(withJSONObject: object), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
@@ -360,7 +401,7 @@ import Foundation
     check(!paths.contains("/v1/images/generations") && agent.messages.allSatisfy { $0.images.isEmpty } && agent.agent?.portrait == nil,
           "Agent turns no longer generate art or attach scoreboard images, even with the retired art flag on")
     turn("{\"reply\":\"\",\"assessment\":{\"summary\":\"moving.\",\"status\":\"on-track\",\"facts\":[{\"id\":\"fleet.versions\",\"kind\":\"measured\"}]}}", loopTick: true)
-    check(agent.agent?.assessment?.revision == 1 && agent.agent?.assessment?.heartbeats == 1, "An unchanged scheduled turn heartbeats; every turn assesses regardless of the scoreboard cadence")
+    check(agent.agent?.assessment?.revision == 1 && agent.agent?.assessment?.heartbeats == 1, "An unchanged scheduled turn heartbeats; every turn assesses")
     turn("{\"reply\":\"Still working\",\"assessment\":[\"broken\"]}")
     let rejected = root.appendingPathComponent("Agents/" + agent.id.uuidString + "/assessment-rejected.json")
     check(agent.agent?.enabled == true && agent.agent?.lastOutcome == "Completed" && agent.messages.contains { $0.text == "Still working" } && agent.agent?.assessment?.revision == 1
@@ -368,6 +409,18 @@ import Foundation
           "A malformed assessment is logged raw, keeps the last record stale and never pauses the loop or drops the reply")
     turn("{\"reply\":\"No assessment this time\"}")
     check(agent.agent?.enabled == true && agent.agent?.assessmentProblem?.reason == "No assessment returned this turn." && agent.agent?.transientFailures == nil, "A missing assessment is a stale mark, not a failure")
+    let sent = instructionsSent.last ?? ""
+    check(sent.contains("Objective: " + ownerObjective) && sent.contains(AgentAssessments.teaching) && sent.contains(AgentPolicy.assessmentScope),
+          "The objective reaches every turn's instructions and guides the assessment")
+    check(sent.contains("Portrait art direction from the owner (art only, never a reporting instruction): " + ownerDirection),
+          "The art direction reaches the agent only as portrait direction, never as a reporting goal")
+    turn("{\"reply\":\"Rewriting things\",\"memory\":\"objective: something else\",\"assessment\":{\"summary\":\"Objective met; new art: neon.\",\"status\":\"done\",\"mood\":[\"neon\"],\"facts\":[]},\"objective\":\"Model-written objective\",\"artDirection\":\"Model-written direction\"}")
+    check(agent.agent?.assessment?.summary == "Objective met; new art: neon." && agent.agent?.objective == ownerObjective && agent.agent?.artDirection == ownerDirection,
+          "Generated summaries, notes and stray reply fields never overwrite the objective or the art direction")
+    let portraitPrompt = PortraitPrompt.build(name: agent.title, config: agent.agent!)
+    check(portraitPrompt.contains("Owner art direction (takes precedence for subject and style): " + ownerDirection) && portraitPrompt.contains("Its objective: Track the 152 release.") && !portraitPrompt.contains("Success: no red bugs"),
+          "The art direction reaches the portrait prompt; only the objective's first line does")
     ArchiveWriter.shared.flushAll()
-    check(Store(folder: root).sessions.first { $0.id == agent.id }?.agent?.assessment?.revision == 1, "Assessments persist with the agent")
+    let reloaded = Store(folder: root).sessions.first { $0.id == agent.id }?.agent
+    check(reloaded?.assessment?.revision == 2 && reloaded?.objective == ownerObjective && reloaded?.artDirection == ownerDirection, "Assessments persist with the agent, beside both owner texts")
 }

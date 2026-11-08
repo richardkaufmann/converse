@@ -152,7 +152,7 @@ static class AgentChecks
             home.Agents.Request = async (request, token) =>
             {
                 calls++; input = request.Content is null ? "" : await request.Content.ReadAsStringAsync(token);
-                return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Synthetic verified reply\\\",\\\"attention\\\":\\\"\\\",\\\"scoreboard\\\":{\\\"summary\\\":\\\"No live market data in this test\\\",\\\"metrics\\\":[{\\\"label\\\":\\\"Price\\\",\\\"value\\\":\\\"999\\\",\\\"sourceURL\\\":\\\"https://invented.invalid\\\"}]}}\"}]}]}");
+                return Encoding.UTF8.GetBytes("{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"reply\\\":\\\"Synthetic verified reply\\\",\\\"attention\\\":\\\"\\\",\\\"scoreboard\\\":{\\\"summary\\\":\\\"Old field\\\",\\\"metrics\\\":[]},\\\"assessment\\\":{\\\"summary\\\":\\\"Synthetic progress.\\\",\\\"status\\\":\\\"at-risk\\\",\\\"facts\\\":[{\\\"id\\\":\\\"github.openIssues\\\",\\\"kind\\\":\\\"measured\\\"}]}}\"}]}]}");
             };
             foreach (var service in new[] { home, viewer }) { service.PairingConfirmation = _ => Task.FromResult(true); await service.StartAsync(0, enableDiscovery: false, loopbackOnly: true); }
             check(await join(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Online == true), "Agent control peers join one group");
@@ -169,13 +169,17 @@ static class AgentChecks
             check(calls == 1 && agent.Messages.Any(m => m.Text == "Synthetic verified reply"), "Agent human turn runs through injected API and writes a reply");
             var sentBody = JsonNode.Parse(input) as JsonObject;
             check(sentBody?["prompt_cache_key"]?.GetValue<string>() == AgentRuntime.PromptCacheKey(agent.Id) && sentBody?["prompt_cache_retention"]?.GetValue<string>() == "24h", "Windows agent sends a per-agent prompt cache key and 24h retention");
-            check(agent.Agent.Widget?.Metrics.Single().Value == "Unavailable", "Agent scoreboard rejects metrics without an exact real search source");
+            var invented = AgentAssessments.Evaluate(JsonNode.Parse("{\"summary\":\"Quotes\",\"status\":\"on-track\",\"facts\":[{\"id\":\"price\",\"label\":\"Price\",\"value\":\"999\",\"kind\":\"evidence\",\"source\":\"https://invented.invalid/q\"},{\"id\":\"real\",\"label\":\"Real\",\"value\":\"$1\",\"kind\":\"evidence\",\"source\":\"https://example.com/q\"}]}"), [], null, DateTime.UtcNow, url => url == "https://example.com/q");
+            check(invented.Record!.Facts.Single(f => f.Id == "price").Value == AgentAssessments.Unavailable && invented.Record.Facts.Single(f => f.Id == "real").Value == "$1", "Assessment facts citing a web URL this run did not retrieve read Unavailable");
+            var widget = home.AgentWidgetFor(agent);
+            check(agent.Agent.Widget is null && widget?.Summary == "Synthetic progress." && widget.Status == "At risk" && widget.Freshness == "Fresh" && widget.Revision == 1 && widget.Metrics.Single().Label == "Open issues",
+                "The remote widget derives from the assessment (summary, status, freshness, facts); a scoreboard field from the model is ignored");
             var before = agent.Agent.Settings.RemainingRuns;
             agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.IntervalSeconds = 60; agent.Agent.Settings.Enabled = true; agent.Agent.NextRunUtc = DateTime.UtcNow.AddSeconds(-1);
             home.Agents.Tick(DateTime.UtcNow); home.Agents.Tick(DateTime.UtcNow);
             deadline = DateTime.UtcNow.AddSeconds(3); while (agent.Busy && DateTime.UtcNow < deadline) await Task.Delay(10);
             check(calls == 2 && agent.Agent.Settings.RemainingRuns == before, "Agent scheduler persists one activation without depleting the schedule and coalesces ticks");
-            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and scoreboard survive archive reload");
+            check(new SessionStore(roots[0], new FakeRunner()).Sessions.Single(s => s.Id == agent.Id).Agent!.Settings.RemainingRuns == before, "Agent budget and assessment survive archive reload");
             var created = await viewer.RequestParticipantAsync(home.DeviceId, "agent.create", title: "Created remotely");
             check(created.Outcome == "completed" && store.Sessions.Any(s => s.Title == "Created remotely" && s.Agent is not null), "Viewer creates a paused agent on the selected home");
             home.SetAcceptingWork(false);

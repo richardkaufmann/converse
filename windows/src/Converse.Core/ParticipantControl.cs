@@ -171,8 +171,8 @@ public sealed partial class DeviceSyncService
     public DeviceAgentWidget? AgentWidgetFor(ChatSession session)
     {
         if (session.Agent is not { } agent) return null;
-        var widget = agent.Widget is null ? new DeviceAgentWidget { Summary = "Tell me what success looks like." } : DeviceJson.Decode<DeviceAgentWidget>(DeviceJson.Encode(agent.Widget));
-        widget.Attention = agent.Attention; widget.LoopStatus = agent.LoopStatus;
+        var widget = AgentAssessments.WidgetFor(agent, DateTime.UtcNow);
+        widget.LoopStatus = agent.LoopStatus;
         if (agent.ArtPath is { } art && File.Exists(art)) widget.ArtHash = ImageHash(art);
         return widget;
     }
@@ -279,8 +279,8 @@ public sealed partial class DeviceSyncService
                 case "agent.run":
                     if (session?.Agent is not { } agent || agent.Settings.TurnLimit <= 0 || session.Pending.Count >= 100) throw new ArgumentException("Agent missing, budget exhausted, or queue full.");
                     agent.Settings.Revision = checked((agent.Settings.Revision ?? 0) + 1);
-                    session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and refresh the scoreboard.", Autonomous = true, AgentRunReserved = true, OriginGroupID = group, OriginHomeID = origin }); run = true; detail = "Run saved on home."; break;
-                case "agent.widget": if (session?.Agent is null) throw new ArgumentException("Target is not an agent."); widget = true; detail = "Scoreboard requested on home."; break;
+                    session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and update your assessment.", Autonomous = true, AgentRunReserved = true, OriginGroupID = group, OriginHomeID = origin }); run = true; detail = "Run saved on home."; break;
+                case "agent.widget": if (session?.Agent is null) throw new ArgumentException("Target is not an agent."); widget = true; detail = "Assessment requested on home."; break;
                 default: return Task.FromResult(Result("rejected", "Unsupported operation."));
             }
             var response = Result("completed", detail, session);

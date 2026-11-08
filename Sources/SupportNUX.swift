@@ -204,7 +204,7 @@ enum FirstRunText {
     static let loginCommand = "/login"
     static let codingWelcome = "What shall we build today? You can also ask me to read the Parking Lot and react to it and update it."
     static func agentWelcome(_ title: String) -> String {
-        "Welcome to your agent. You're good to go. It can read your Parking Lot and coding session. Try typing: What's in the Parking Lot, and what should I do first?\n\nRight-click \(title) in the left panel for Agent Setup, Run once, Show scoreboard and more."
+        "Welcome to your agent. You're good to go. It can read your Parking Lot and coding session. Try typing: What's in the Parking Lot, and what should I do first?\n\nRight-click \(title) in the left panel for Agent Setup, Run once, Show assessment and more."
     }
     static let placeholder = "Pick a provider in Converse App Support to finish setting up this session."
     static let cli = ["muse": "muse", "codex": "codex", "claude": "claude"]
@@ -587,10 +587,10 @@ struct FirstRunPanel: View {
     }
     @ViewBuilder private var metaKey: some View {
         if guide.metaKeySaved() {
-            Text("Meta Model API key already saved in Keychain · Muse Spark agents and Muse Image scoreboards are on.").font(.caption).foregroundStyle(.secondary)
+            Text("Meta Model API key already saved in Keychain · Muse Spark agents and Muse Image portraits are on.").font(.caption).foregroundStyle(.secondary)
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Optional: a Meta Model API key adds Muse Spark agents and Muse Image scoreboards. Coding sessions use your Muse login either way.").font(.caption)
+                Text("Optional: a Meta Model API key adds Muse Spark agents and Muse Image portraits. Coding sessions use your Muse login either way.").font(.caption)
                 HStack {
                     SecureField("Meta Model API key", text: $guide.metaKey).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
                     Button("Save key") { guide.saveMetaKey() }.disabled(guide.metaKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

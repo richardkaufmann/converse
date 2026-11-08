@@ -139,7 +139,7 @@ extension Store {
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
         // A daily check by default; Auto pacing may move it within its bounds.
         config.autoPace = true
-        config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
+        config.jollyAllowed = true; config.supportDefaultsVersion = 1
         config.nextRunAt = config.nextScheduledRun(after: Date())
         session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"
         session.supportTeachingVersion = AppSupport.version; session.switchboardEnabled = true

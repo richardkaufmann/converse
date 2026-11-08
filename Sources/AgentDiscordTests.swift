@@ -27,8 +27,10 @@ import Foundation
     check(AgentDiscord.format("```\n| a | b |\n|---|---|\n```") == "```\n| a | b |\n|---|---|\n```", "Discord table conversion preserves literal fenced code")
     do {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("discord-image-" + UUID().uuidString)
-        let store = Store(folder: root), session = store.createAgent(title: "Public scoreboard")
+        let store = Store(folder: root), session = store.createAgent(title: "Public assessment")
         session.agent?.scoreboard = AgentScoreboard(title: "Fixture", summary: "Synthetic test data", metrics: [.init(label: "Checks", value: "Passed")])
+        check(AgentScoreboardImage.lines(session: session).contains { $0.text == "Checks: Passed · Evidence" } && session.agent?.assessment == nil,
+              "An older scoreboard draws as a seeded, stale assessment without changing the stored record")
         let png = try AgentScoreboardImage.render(session: session, store: store)
         check(png.starts(with: [137, 80, 78, 71]) && png.count < 8_000_000, "The measured preview renderer produces a bounded PNG")
         let imageAPI = AgentAPI(); var imageRequest: URLRequest?

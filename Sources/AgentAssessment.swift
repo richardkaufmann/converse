@@ -247,7 +247,9 @@ enum AgentAssessments {
 
     /// Validates one turn's raw assessment against host measurements and the
     /// previous record. Pure: the caller stores the outcome.
-    static func evaluate(_ raw: AgentJSON?, measured: [AgentFact], previous: AgentAssessment?, now: Date) -> Outcome {
+    /// sourceRetrieved says whether a cited web URL was really seen this run;
+    /// a fact citing any other URL keeps its row but reads Unavailable.
+    static func evaluate(_ raw: AgentJSON?, measured: [AgentFact], previous: AgentAssessment?, now: Date, sourceRetrieved: (String) -> Bool = { _ in true }) -> Outcome {
         guard let raw, raw != .null else { return .rejected("No assessment returned this turn.") }
         guard case .object = raw else { return .rejected("Assessment was not a JSON object.") }
         let summary = clip(raw["summary"]?.string, 400)
@@ -258,7 +260,7 @@ enum AgentAssessments {
             guard case .array(let items) = value else { return .rejected("Assessment facts were not an array.") }
             for item in items.prefix(maxFacts) {
                 guard case .object = item else { continue }
-                if let fact = fact(item, measured: measured, previous: previous, now: now), !facts.contains(where: { $0.id == fact.id }) { facts.append(fact) }
+                if let fact = fact(item, measured: measured, previous: previous, now: now, sourceRetrieved: sourceRetrieved), !facts.contains(where: { $0.id == fact.id }) { facts.append(fact) }
             }
         }
         let mood = raw["mood"].flatMap { value -> [String]? in
@@ -281,7 +283,7 @@ enum AgentAssessments {
         return .revision(next)
     }
 
-    private static func fact(_ item: AgentJSON, measured: [AgentFact], previous: AgentAssessment?, now: Date) -> AgentFact? {
+    private static func fact(_ item: AgentJSON, measured: [AgentFact], previous: AgentAssessment?, now: Date, sourceRetrieved: (String) -> Bool) -> AgentFact? {
         let rawID = clip(item["id"]?.string, 120), rawLabel = clip(item["label"]?.string, 80)
         let byID = rawID.isEmpty ? nil : measured.first { $0.id == rawID }
         let kind = AgentFact.Kind(rawValue: clip(item["kind"]?.string, 20).lowercased()) ?? (byID != nil ? .measured : item["source"]?.string?.isEmpty == false ? .evidence : .judgment)
@@ -305,6 +307,13 @@ enum AgentAssessments {
         // A cited fact keeps its source time; an unchanged one keeps the time it was first seen.
         let stated = iso(item["observedAt"]?.string).flatMap { $0 <= now.addingTimeInterval(300) ? $0 : nil }
         let earlier = previous?.facts.first { $0.id == id && $0.value == value }?.observedAt
+        // An evidence fact citing a web URL needs that URL to have been really
+        // retrieved or supplied; an unchanged earlier fact was already checked.
+        let carried = previous?.facts.contains { $0.id == id && $0.value == value && $0.source == source } == true
+        if kind == .evidence, AgentWebSource.safeURL(source) != nil, !carried, !sourceRetrieved(source) {
+            return AgentFact(id: id, label: label, value: AgentFact.unavailable, kind: kind, source: "Source not retrieved this run", observedAt: nil,
+                             detail: .object(["note": .string("The cited URL was not returned by this run's research or supplied evidence, so the value is not shown.")]))
+        }
         return AgentFact(id: id, label: label, value: value.isEmpty ? AgentFact.unavailable : value, kind: kind,
                          source: source.isEmpty ? (kind == .judgment ? "judgment" : "Unspecified") : source,
                          observedAt: stated ?? earlier ?? now, detail: detail)
@@ -377,6 +386,60 @@ enum AgentAssessmentFreshness: Equatable {
     }
     var label: String {
         switch self { case .fresh: return "Fresh"; case .aging: return "Aging"; case .old: return "Old"; case .stale: return "Stale"; case .none: return "No assessment" }
+    }
+}
+
+/// What every agent widget shows: the Mac widget window, its HTML export,
+/// remote iPad/Mac viewers and the Discord status image. One source of
+/// truth, derived from the latest assessment; a legacy scoreboard maps into a
+/// seeded, stale-labelled assessment first.
+struct AgentWidgetContent: Equatable {
+    var summary: String
+    var status: AgentAssessment.Status?
+    var freshness: AgentAssessmentFreshness
+    var facts: [AgentFact]
+    var revision: Int?
+    var shortHash: String?
+    var updatedAt: Date?
+    var checkedAt: Date?
+    var problem: String?
+    static let empty = "No assessment yet. The agent's next turn adds one."
+    /// "On track · Fresh · rev 3 · #1a2b3c4d · checked 4m ago".
+    func line(now: Date = Date()) -> String {
+        var parts = [status?.label, freshness.label].compactMap { $0 }
+        if let revision { parts.append("rev \(revision)") }
+        if let shortHash, !shortHash.isEmpty { parts.append("#" + shortHash) }
+        if let checkedAt { parts.append("checked " + AgentAge.short(checkedAt, now: now) + (AgentAge.short(checkedAt, now: now) == "now" ? "" : " ago")) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+extension AgentConfig {
+    func widgetContent(now: Date = Date()) -> AgentWidgetContent {
+        var config = self
+        config.seedAssessmentFromScoreboard(now: now)
+        let freshness = AgentAssessmentFreshness.of(config.assessment, problem: config.assessmentProblem, now: now)
+        var problem: String?
+        if case .stale(let reason) = freshness { problem = reason }
+        guard let assessment = config.assessment else {
+            return AgentWidgetContent(summary: AgentWidgetContent.empty, status: nil, freshness: freshness, facts: [], revision: nil, shortHash: nil, updatedAt: nil, checkedAt: nil, problem: problem)
+        }
+        // Revoking a Parking Lot hides its stored counts at once, before the next turn re-measures.
+        let facts = assessment.facts.filter { fact in
+            let parts = fact.id.split(separator: ".")
+            guard fact.kind == .measured, parts.count == 3, parts[0] == "lot", let lot = UUID(uuidString: String(parts[1])) else { return true }
+            return watchedSessions.contains(lot) || (watchedParticipants ?? []).contains { DeviceGlobalID($0)?.session == lot }
+        }
+        return AgentWidgetContent(summary: assessment.summary, status: assessment.status, freshness: freshness,
+                                  facts: Array(facts.prefix(AgentAssessment.displayedFacts)), revision: assessment.revision,
+                                  shortHash: assessment.shortHash, updatedAt: assessment.updatedAt, checkedAt: assessment.checkedAt, problem: problem)
+    }
+    /// The remote widget: the same assessment content for iPad and Mac viewers.
+    func deviceWidget(artHash: String?, loopStatus: String?, now: Date = Date()) -> DeviceAgentWidget {
+        let content = widgetContent(now: now)
+        return DeviceAgentWidget(summary: content.summary, metrics: content.facts.map { DeviceWidgetMetric(label: $0.label, value: $0.value) },
+                                 observedAt: content.checkedAt, attention: attention, artHash: artHash, loopStatus: loopStatus,
+                                 status: content.status?.label, freshness: content.freshness.label + (content.problem.map { ": " + $0 } ?? ""), revision: content.revision)
     }
 }
 

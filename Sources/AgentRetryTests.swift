@@ -83,14 +83,14 @@ import Foundation
     let agent = store.createAgent(title: "Retry fixture agent")
     agent.agent?.enabled = true
     agent.agent?.pause("Meta rejected the API key (HTTP 401).", at: now)
-    do { try store.configureAgentLoop(agent, enabled: false, interval: 900, turns: 3, scoreboardEvery: 1) } catch { check(false, "Retry fixture setup save") }
+    do { try store.configureAgentLoop(agent, enabled: false, interval: 900, turns: 3) } catch { check(false, "Retry fixture setup save") }
     check(agent.agent?.pauseReason != nil && agent.pausedLoopReason == agent.agent?.pauseReason, "Saving other settings with the loop still off keeps the pause reason")
     store.clearAgentAttention(agent)
     check(agent.agent?.pauseReason == nil && agent.agent?.attention == "", "Clear attention banner ends the recorded pause")
     agent.agent?.recordSuccess("Completed", attention: nil)
     check(agent.agent?.lastOutcome == "Completed", "After clearing, later runs report normally")
     agent.agent?.enabled = true; agent.agent?.pause("Meta rejected the API key (HTTP 401).", at: now)
-    do { try store.configureAgentLoop(agent, enabled: true, interval: 900, turns: 3, scoreboardEvery: 1) } catch { check(false, "Retry fixture re-enable") }
+    do { try store.configureAgentLoop(agent, enabled: true, interval: 900, turns: 3) } catch { check(false, "Retry fixture re-enable") }
     check(agent.agent?.enabled == true && agent.agent?.pauseReason == nil && agent.agent?.transientFailures == nil, "Re-enabling the loop clears the pause reason and counter")
     agent.agent?.enabled = false; agent.agent?.pause("Meta rejected the API key (HTTP 401).", at: now)
     if var wire = agent.agent?.wire(home: "local") {
@@ -105,7 +105,7 @@ import Foundation
     // Pause loop / Resume loop from the … menu or footer status.
     let controls = store.createAgent(title: "Controls fixture agent")
     controls.agent?.autoPace = false
-    do { try store.configureAgentLoop(controls, enabled: true, interval: 900, turns: 3, scoreboardEvery: 1, now: now) } catch { check(false, "Controls fixture enable") }
+    do { try store.configureAgentLoop(controls, enabled: true, interval: 900, turns: 3, now: now) } catch { check(false, "Controls fixture enable") }
     store.pauseAgentLoop(controls)
     check(controls.agent?.enabled == false && controls.agent?.nextRunAt == nil && controls.agent?.pauseReason == nil && controls.agent?.attention == ""
           && controls.agent?.lastOutcome.hasPrefix("Loop paused") == true, "Pause loop turns automatic checks off without an alarm")
