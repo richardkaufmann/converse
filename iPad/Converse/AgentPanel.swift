@@ -28,6 +28,7 @@ struct PadAgentPanel: View {
                     Section("Objective and success criteria") { TextEditor(text: field(\.objective)).frame(minHeight: 110) }
                     Section("Loop") {
                         Toggle("Enable automatic loop", isOn: field(\.enabled))
+                        Toggle("Only run when I’ve been active since the last turn", isOn: Binding(get: { settings?.requiresEngagement == true }, set: { settings?.requiresEngagement = $0 }))
                         Picker("Frequency", selection: Binding(get: { !(settings?.scheduleText ?? "").isEmpty }, set: { settings?.scheduleText = $0 ? "every 20 minutes while the US stock market is open" : "" })) {
                             Text("Fixed interval").tag(false)
                             Text("Text schedule").tag(true)

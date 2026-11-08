@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import UIKit.UIGestureRecognizerSubclass
 import UniformTypeIdentifiers
 
 @main
@@ -8,7 +9,7 @@ struct ConversePadApp: App {
     @Environment(\.scenePhase) private var phase
     var body: some Scene {
         WindowGroup {
-            PadRoot(model: model).onAppear { model.foreground() }
+            PadRoot(model: model).background { PadTouchWatcher { model.service.noteHumanInput() } }.onAppear { model.foreground() }
                 .onChange(of: phase) { _, value in
                     if value == .background { model.background() }
                     else if value == .active { model.foreground() }
@@ -51,6 +52,30 @@ struct ConversePadApp: App {
             }
         }
     }
+}
+
+// Sees every touch in the window without taking part in gesture handling.
+// The keyboard is outside the window; PadModel.edit covers typing.
+struct PadTouchWatcher: UIViewRepresentable {
+    var touched: () -> Void
+    final class Recognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+        var touched: () -> Void = {}
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) { touched(); state = .failed }
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+    final class Host: UIView {
+        let recognizer = Recognizer(target: nil, action: nil)
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            recognizer.cancelsTouchesInView = false; recognizer.delaysTouchesBegan = false; recognizer.delaysTouchesEnded = false
+            recognizer.delegate = recognizer
+            recognizer.view?.removeGestureRecognizer(recognizer)
+            window?.addGestureRecognizer(recognizer)
+        }
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+    }
+    func makeUIView(context: Context) -> Host { let host = Host(); host.recognizer.touched = touched; return host }
+    func updateUIView(_ view: Host, context: Context) { view.recognizer.touched = touched }
 }
 
 struct PadAgentTarget: Identifiable { var id = UUID(); var home: String; var target: String? }

@@ -69,6 +69,8 @@ final class DevicePeer {
     var alive = true
     var leasedSessions: Set<UUID> = []
     var startedAt = Date()
+    var reportedEngagement: Date?
+    var engagementSentAt: Date?
     var lastSeen = Date()
     var testSink: ((Data) -> Void)?
     init(connection: NWConnection, isInitiator: Bool, displayName: String, manualHost: String? = nil, manualPort: Int? = nil) {
@@ -82,6 +84,7 @@ final class DeviceSyncService: ObservableObject {
     static let defaultPort: NWEndpoint.Port = 48721
     static let serviceType = "_converse._tcp"
     @Published var currentGroup: ConverseGroup?
+    private var engagement = DeviceEngagement()
     @Published var knownGroups: [ConverseGroup] = []
     @Published var groupRequests: [GroupJoinRequest] = [] {
         didSet {
@@ -400,7 +403,7 @@ final class DeviceSyncService: ObservableObject {
         #if os(macOS)
         hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "image-segments-v1", "transcript-export-v1", "agent-art-direction-v1"])
         #endif
-        hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
+        hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1", DeviceEngagement.capability])
         #if os(macOS)
         hello.capabilities.append("session-close-v1")
         hello.capabilities.append("session-rename-v1")
@@ -411,6 +414,24 @@ final class DeviceSyncService: ObservableObject {
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
+    }
+    /// Real keyboard, pointer or touch input on this device.
+    func noteHumanInput(now: Date = Date()) {
+        engagement.recordLocal(at: now)
+        reportEngagement(now: now)
+    }
+    var lastEngagedAt: Date? { engagement.latest }
+    func receiveEngagementForTesting(_ report: DeviceEngagement.Report, receivedAt: Date) { engagement.recordPeer(report, receivedAt: receivedAt) }
+    private func reportEngagement(now: Date) {
+        guard !locallyRemoved, !groupsEnabled || currentGroup != nil else { return }
+        for peer in Array(peers.values) where peer.trustedReady && !peer.controlOnly
+            && peer.hello?.capabilities.contains(DeviceEngagement.capability) == true
+            && peer.hello?.capabilities.contains("agent-host-v1") == true {
+            guard let report = engagement.report(lastReported: peer.reportedEngagement, lastSent: peer.engagementSentAt, now: now),
+                  let data = try? JSONEncoder().encode(report) else { continue }
+            peer.reportedEngagement = engagement.local; peer.engagementSentAt = now
+            sendEnvelope(peer, DeviceEnvelope(kind: DeviceEngagement.kind, payload: data))
+        }
     }
     func helloCapabilitiesForTesting(_ peer: DevicePeer) -> [String] { (try? JSONDecoder().decode(DeviceHello.self, from: helloPayload(peer)))?.capabilities ?? [] }
     private func sendHandshake(_ peer: DevicePeer) {
@@ -717,6 +738,7 @@ extension DeviceSyncService {
         tickCount += 1
         let now = Date()
         if pruneGroupRequests(at: now) { publishGroupRequests() }
+        reportEngagement(now: now)
         for peer in Array(peers.values) {
             if !peer.trustedReady && now.timeIntervalSince(peer.startedAt) > 180 { disconnect(peer); continue }
             if peer.trustedReady {
@@ -954,7 +976,7 @@ extension DeviceSyncService {
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
-                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in config.deviceWidget(artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
+                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in config.deviceWidget(artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count, lastEngaged: lastEngagedAt)) })
         payload.compaction = session.compactionState
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
@@ -1115,6 +1137,11 @@ extension DeviceSyncService {
         if handleLotEnvelope(peer, envelope) { return }
         if handleParticipantControl(peer, envelope) { return }
         switch envelope.kind {
+        case DeviceEngagement.kind:
+            guard peer.hello?.capabilities.contains(DeviceEngagement.capability) == true,
+                  !groupsEnabled || currentGroup.map({ acceptsParticipant(home: peerHome, groupID: $0.id) }) == true,
+                  let data = envelope.payload, let report = try? JSONDecoder().decode(DeviceEngagement.Report.self, from: data) else { return }
+            engagement.recordPeer(report, receivedAt: Date())
         case "fabric.members":
             guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
                   let members = try? JSONDecoder().decode([TrustedDevice].self, from: data),
@@ -2114,6 +2141,9 @@ extension DeviceSyncService {
         }
         if !(settings?.artDirection ?? "").isEmpty && peer.hello?.capabilities.contains("agent-art-direction-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving portrait art direction.")
+        }
+        if settings?.requiresEngagement == true && peer.hello?.capabilities.contains(DeviceEngagement.capability) != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before making this agent wait for you.")
         }
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")

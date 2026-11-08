@@ -19,6 +19,7 @@ enum AgentPolicy {
     // on their own runtime with a fixture transport.
     var readsObjectivePacing = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     private var timer: Timer?
+    private var inputMonitor: Any?
     private var shuttingDown = false
     func start() {
         guard !shuttingDown, timer == nil, ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil else { return }
@@ -38,6 +39,11 @@ enum AgentPolicy {
         for session in Store.shared.sessions where session.agent?.pacingPending == true { refreshPacing(session, store: .shared) }
         Store.shared.save()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in Task { @MainActor in self.tick(store: .shared) } }
+        // Keys, clicks and scrolling in this app. Pointer movement alone is not engagement.
+        inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { event in
+            Store.shared.participantService.noteHumanInput()
+            return event
+        }
     }
     func tick(store: Store, now: Date = Date()) {
         guard !shuttingDown else { return }
@@ -52,8 +58,10 @@ enum AgentPolicy {
                 store.save()
             }
         }
+        let lastEngaged = store.participantService.lastEngagedAt
         for session in store.sessions where !session.busy && !session.queuePaused && session.pending.isEmpty {
-            guard !AgentConversation.shared.owns(session), !store.firstRun.holdsAgent(session), var config = session.agent, config.reserveRun(at: now) else { continue }
+            guard !AgentConversation.shared.owns(session), !store.firstRun.holdsAgent(session), var config = session.agent,
+                  !config.awaitingEngagement(lastEngaged: lastEngaged), config.reserveRun(at: now) else { continue }
             session.agent = config
             do { try store.saveChecked() } catch { session.agent?.enabled = false; session.agent?.attention = "Could not save the run budget. Loop paused."; session.agent?.lastOutcome = "Paused: run budget could not be saved."; continue }
             store.enqueueSwitchboard(session, text: "[Agent loop tick] Work on your configured objective using current evidence and web research when needed. Report progress against our success criteria, update your assessment, and ask for attention only when needed.", reservedAgentRun: true, agentLoopTick: true)
@@ -90,6 +98,7 @@ enum AgentPolicy {
         discordRouter.stop()
         AgentConversation.shared.stop(resumeQueued: false)
         timer?.invalidate(); timer = nil
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
         for task in tasks.values { task.cancel() }
         tasks.removeAll()
         for task in pacingTasks.values { task.cancel() }

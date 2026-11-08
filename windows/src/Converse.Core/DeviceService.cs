@@ -330,6 +330,8 @@ internal sealed class Peer
     public DeviceFrameDecoder Decoder { get; } = new();
     public List<byte> Buffer { get; } = new();
     public bool TrustedReady { get; set; }
+    public DateTime? ReportedEngagement { get; set; }
+    public DateTime? EngagementSentAt { get; set; }
     public bool HumanConfirmed { get; set; }
     public bool LocalConfirmed { get; set; }
     public bool RemoteConfirmed { get; set; }
@@ -597,7 +599,7 @@ public sealed partial class DeviceSyncService : IDisposable
         DeviceKind.LeaseRelease, DeviceKind.TranscriptSnapshot, DeviceKind.TranscriptRequest,
         DeviceKind.DraftPatch, DeviceKind.Command, DeviceKind.CommandQuery, DeviceKind.CommandAck,
         DeviceKind.BlobOffer, DeviceKind.BlobChunk, DeviceKind.BlobAck,
-        DeviceKind.BlobRequest, DeviceKind.BlobData,
+        DeviceKind.BlobRequest, DeviceKind.BlobData, DeviceKind.Engagement,
     };
 
     // Creating a new group fences home leases held by the old group: only
@@ -771,7 +773,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = InstalledVersion.Version, ConverseBuild = InstalledVersion.Build,
-        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1", QueueRemoveCapability },
+        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1", QueueRemoveCapability, DeviceEngagement.Capability },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -791,6 +793,35 @@ public sealed partial class DeviceSyncService : IDisposable
         }
     }
 
+    private readonly object _engagementLock = new();
+    private readonly DeviceEngagement _engagement = new();
+    public DateTime? LastEngagedUtc { get { lock (_engagementLock) return _engagement.Latest; } }
+    // Real keyboard or pointer input in this app. Never called for agent,
+    // switchboard or automated traffic.
+    public void NoteHumanInput()
+    {
+        lock (_engagementLock) _engagement.RecordLocal(DateTime.UtcNow);
+        _ = ReportEngagementAsync();
+    }
+    internal void ReceiveEngagementForTesting(DeviceEngagementReport report, DateTime receivedUtc) { lock (_engagementLock) _engagement.RecordPeer(report, receivedUtc); }
+    private async Task ReportEngagementAsync()
+    {
+        if (LocallyRemoved || CurrentGroup is null) return;
+        var now = DateTime.UtcNow;
+        foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly && p.Hello is { } h
+            && h.Capabilities.Contains(DeviceEngagement.Capability) && h.Capabilities.Contains("agent-host-v1") && IsGroupMember(h.DeviceID)).ToArray())
+        {
+            DeviceEngagementReport? report; DateTime? local;
+            lock (_engagementLock)
+            {
+                report = _engagement.Report(peer.ReportedEngagement, peer.EngagementSentAt, now);
+                local = _engagement.Local;
+                if (report is not null) { peer.ReportedEngagement = local; peer.EngagementSentAt = now; }
+            }
+            if (report is not null) await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.Engagement, Payload = DeviceJson.Encode(report) });
+        }
+    }
+
     private async Task HeartbeatLoopAsync(CancellationToken token)
     {
         var ticks = 0;
@@ -800,6 +831,7 @@ public sealed partial class DeviceSyncService : IDisposable
             if (token.IsCancellationRequested) break;
             ticks++;
             if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
+            await ReportEngagementAsync();
             if (ticks % 6 == 0) await ReconnectFabricAsync();
             foreach (var expired in _leases.SweepExpired())
             {
@@ -1989,6 +2021,13 @@ public sealed partial class DeviceSyncService : IDisposable
         if (await HandleParticipantAsync(peer, envelope)) return;
         switch (envelope.Kind)
         {
+            case DeviceKind.Engagement:
+            {
+                if (!peer.Hello.Capabilities.Contains(DeviceEngagement.Capability) || envelope.Payload is null) break;
+                try { var report = DeviceJson.Decode<DeviceEngagementReport>(envelope.Payload); lock (_engagementLock) _engagement.RecordPeer(report, DateTime.UtcNow); }
+                catch (JsonException) { }
+                break;
+            }
             case DeviceKind.FabricMembers:
             {
                 // Leave can clear CurrentGroup on another thread while this frame is merging.

@@ -59,6 +59,9 @@ struct AgentConfig: Codable, Equatable {
     var autoPaceReason: String? = nil
     var nextRunAt: Date? = nil
     var lastLoopAt: Date? = nil
+    // Scheduled turns wait until the human has used a device in the Group
+    // since the last scheduled turn. Off unless the owner turns it on.
+    var requiresEngagement: Bool? = nil
     var attention = ""
     // Consecutive transient run failures (nil = none) and when the first of
     // them happened; a success resets both.
@@ -116,10 +119,11 @@ struct AgentConfig: Codable, Equatable {
         if seconds % 60 == 0 { return "\(seconds / 60) min" }
         return "\(seconds) sec"
     }
-    func loopStatus(at now: Date, busy: Bool, queuePaused: Bool, pendingCount: Int) -> String {
+    func loopStatus(at now: Date, busy: Bool, queuePaused: Bool, pendingCount: Int, lastEngaged: Date? = nil) -> String {
         guard enabled else { return "Loop paused · automatic checks off" }
         if queuePaused { return "Loop on · queue paused" }
         if pendingCount > 0 && !busy { return "Loop on · waiting for \(pendingCount) queued message\(pendingCount == 1 ? "" : "s")" }
+        if !busy, due(at: now), awaitingEngagement(lastEngaged: lastEngaged) { return "Waiting for you · runs when you’re back on any device" }
         guard let rule = try? scheduleRule(), let future = rule.next(after: now) else { return "Loop blocked · review schedule/calendar" }
         let schedule = scheduleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "Loop on · " + (scheduleText ?? "")
             : rule.kind == .interval ? "Loop on · every " + intervalLabel : "Loop on · " + pacingSummary().components(separatedBy: " · ")[0].replacingOccurrences(of: "Runs ", with: "runs ")
@@ -141,6 +145,13 @@ struct AgentConfig: Codable, Equatable {
         // The saved deadline already reflects the last reserved check. Keep it,
         // including an overdue deadline: the normal tick coalesces missed runs.
         if nextRunAt == nil { nextRunAt = rule.next(after: lastLoopAt ?? lastRunAt ?? now) }
+    }
+    // A masked turn stays due, so the first tick after the human returns runs
+    // it once and reserves the next deadline. A first turn has nothing to wait
+    // on, and a failed turn's retries are still the turn the human came back for.
+    func awaitingEngagement(lastEngaged: Date?) -> Bool {
+        guard requiresEngagement == true, let lastLoopAt, (transientFailures ?? 0) == 0 else { return false }
+        return (lastEngaged ?? .distantPast) <= lastLoopAt
     }
     func due(at now: Date) -> Bool { canSchedule && (nextRunAt ?? now) <= now && (try? scheduleRule().permits(now)) == true }
     mutating func reserveRun(at now: Date) -> Bool {
@@ -471,7 +482,7 @@ extension AgentConfig {
         DeviceAgentSettings(objective: objective, repository: repository, model: model,
             watched: Array(Set((watchedParticipants ?? []) + watchedSessions.map { DeviceGlobalID(home: home, session: $0).string })).sorted(),
             intervalSeconds: intervalSeconds, remainingRuns: remainingRuns, maxTurnsPerLoop: turnLimit, enabled: enabled,
-            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "", homeAssistantURL: homeAssistantURL, homeAssistantEntities: homeAssistantEntities, homeAssistantRead: homeAssistantRead)
+            generateArt: generateArt, speak: speak, discord: discord, fileTriggers: fileTriggers == true, revision: settingsRevision ?? 0, scheduleText: scheduleText ?? "", scheduleTimeZone: scheduleTimeZone ?? TimeZone.current.identifier, discordShareScoreboard: discordShareScoreboard == true, discordShareSessionInformation: discordShareSessionInformation == true, artDirection: artDirection ?? "", requiresEngagement: requiresEngagement == true, homeAssistantURL: homeAssistantURL, homeAssistantEntities: homeAssistantEntities, homeAssistantRead: homeAssistantRead)
     }
     // Returns the transcript notice when a text schedule moved into the objective.
     @discardableResult mutating func apply(_ wire: DeviceAgentSettings) throws -> String? {
@@ -501,6 +512,7 @@ extension AgentConfig {
         // wire.scoreboardEveryLoops from older editors is ignored: every turn assesses.
         if let share = wire.discordShareScoreboard { next.discordShareScoreboard = share }
         if let share = wire.discordShareSessionInformation { next.discordShareSessionInformation = share }
+        if let waits = wire.requiresEngagement { next.requiresEngagement = waits }
         if let direction = wire.artDirection { next.artDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines) }
         if let address = wire.homeAssistantURL {
             if !address.isEmpty { _ = try AgentHomeAssistant.base(address) }

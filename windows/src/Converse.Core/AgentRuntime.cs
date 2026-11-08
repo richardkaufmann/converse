@@ -95,7 +95,13 @@ public sealed class AgentConfig
         // replaying all missed intervals or resetting the clock on each launch.
         NextRunUtc ??= rule.Next(LastLoopUtc ?? now);
     }
-    public string LoopStatus => !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.TurnLimit} maximum turns per loop";
+    // Set by each scheduler pass so every status surface reads the same answer.
+    [System.Text.Json.Serialization.JsonIgnore] public bool WaitingForEngagement { get; set; }
+    // A masked turn stays due, so the first tick after the human returns runs it
+    // once. A first turn has nothing to wait on; retries belong to the failed turn.
+    public bool AwaitingEngagement(DateTime? lastEngagedUtc) =>
+        Settings.RequiresEngagement == true && LastLoopUtc is { } last && (TransientFailures ?? 0) == 0 && (lastEngagedUtc ?? DateTime.MinValue) <= last;
+    public string LoopStatus => WaitingForEngagement && CanSchedule ? "Waiting for you · runs when you’re back on any device" : !CanSchedule ? "Loop paused · automatic checks off" : "Loop on · next " + (NextRunUtc?.ToLocalTime().ToString("g") ?? "not scheduled") + $" · {Settings.TurnLimit} maximum turns per loop";
     public void Apply(DeviceAgentSettings proposed)
     {
         if ((proposed.Revision ?? 0) != (Settings.Revision ?? 0)) throw new ArgumentException("Settings changed. Reload before saving.");
@@ -255,7 +261,10 @@ public sealed class AgentRuntime
             {
                 var rule = AgentSchedule.Compile(config.Settings);
                 if (rule.Next(now) is null) throw new InvalidOperationException("Supported calendar exhausted. Update the schedule.");
+                config.WaitingForEngagement = false;
                 if (config.NextRunUtc > now || !rule.Permits(now)) continue;
+                config.WaitingForEngagement = config.AwaitingEngagement(_devices.LastEngagedUtc);
+                if (config.WaitingForEngagement) continue;
                 config.LastLoopUtc = now;
                 config.NextRunUtc = rule.Next(now);
                 session.Pending.Add(new PendingPrompt { Text = "[Agent loop tick] Check progress using current evidence and update your assessment.", Autonomous = true, AgentLoopTick = true });

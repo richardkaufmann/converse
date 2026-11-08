@@ -94,6 +94,8 @@ struct AgentSetupView: View {
                                 Stepper("no later than " + AgentPacing.durationText(minutes: settings.paceMaxMinutes), value: Binding(get: { settings.paceMaxMinutes }, set: { settings.autoPaceMaxMinutes = max($0, settings.paceMinMinutes) }), in: 1...10080, step: settings.paceMaxMinutes >= 120 ? 60 : 5)
                             }.font(.caption)
                         }
+                        Toggle("Only run when I’ve been active since the last turn", isOn: Binding(get: { settings.requiresEngagement == true }, set: { settings.requiresEngagement = $0 }))
+                            .help("Saves tokens while you’re away. A scheduled turn waits, with no model call or assessment, until you type, click or touch Converse on any device in your Group. Having the app open doesn’t count. When you come back it runs once right away and normal timing resumes. Run once, Jolly, Discord and other direct requests still run.")
                         Text("Every turn updates this agent's assessment against the objective above.").font(.caption).foregroundStyle(.secondary)
                         Text("Portrait art direction").font(.headline)
                         TextEditor(text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 })).frame(height: 80).border(Color.secondary.opacity(0.3))
@@ -262,7 +264,7 @@ struct AgentControls: View {
             TimelineView(.periodic(from: .now, by: 5)) { context in
                 HStack(spacing: 8) {
                     ConversationActivity(busy: session.busy, status: "Agent thinking", waiting: false)
-                    let loop = session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count) ?? "Loop off"
+                    let loop = session.agent?.loopStatus(at: context.date, busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count, lastEngaged: DeviceSyncService.shared.lastEngagedAt) ?? "Loop off"
                     StatusMenu(help: loop + (session.agent.map { "\n" + $0.pacingSummary(extracting: AgentRuntime.shared.readingPacing(session)) } ?? "")
                                + "\nClick to pause or resume the loop, stop this run or run once.") {
                         AgentRunControls(session: session, runOnce: true)
@@ -659,6 +661,7 @@ struct RemoteAgentSetupView: View {
                 Text("Homes that read timing from the objective use it instead; describe how often to run there.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Maximum turns per loop: \(settings.turnLimit)", value: $settings.turnLimit, in: 1...1000)
                 Toggle("Enable scheduled loop", isOn: $settings.enabled)
+                Toggle("Only run when I’ve been active since the last turn", isOn: Binding(get: { settings.requiresEngagement == true }, set: { settings.requiresEngagement = $0 }))
                 TextField("Portrait art direction", text: Binding(get: { settings.artDirection ?? "" }, set: { settings.artDirection = $0 }), axis: .vertical).lineLimit(3...6)
                 Text("Speech requires Start talking on the viewing Mac.").font(.caption).foregroundStyle(.secondary)
                 Toggle("Allow configured Discord alerts", isOn: $settings.discord)
