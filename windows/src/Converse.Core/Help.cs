@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Converse.Core;
 
@@ -59,6 +60,22 @@ public sealed class HelpDocument
     }
 
     public HelpTopic? Topic(string id) => Topics.FirstOrDefault(t => t.Id == id);
+
+    // "unknown" means the build had no git and no archive stamp; say nothing rather than print it.
+    [JsonIgnore] public string SourceCommitSuffix => SourceCommit.Length > 0 && SourceCommit != "unknown" ? " @" + SourceCommit : "";
+
+    // Plain-text adapter for the shared markdown subset: keep paragraph
+    // structure, drop emphasis/code markers, links become labels. Images go
+    // first because a link pattern also matches the bracket half of an image.
+    public static string RenderPlain(string markdown)
+    {
+        const string target = @"\((?:[^()]|\([^()]*\))*\)";
+        var text = Regex.Replace(markdown, @"!\[[^\]]*\]" + target, "");
+        text = Regex.Replace(text, @"\[([^\]]+)\]" + target, "$1");
+        text = Regex.Replace(text, @"^#{1,6}\s*", "", RegexOptions.Multiline);
+        text = text.Replace("**", "").Replace("`", "");
+        return Regex.Replace(text, @"(?<![\w*])\*(?![\s*])([^*\r\n]+?)(?<!\s)\*(?![\w*])", "$1").Trim();
+    }
 }
 
 public sealed class HelpTopic

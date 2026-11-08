@@ -1113,6 +1113,9 @@ MdnsChecks.RunGroupDevices(Check);
         "Help search ranks title hits before body-only hits");
     var rejected = false;
     try { HelpDocument.Load("{\"schemaVersion\":99,\"topics\":[]}"); } catch (InvalidDataException) { rejected = true; }
+    Check(HelpDocument.RenderPlain("![pic](a.png)See [docs](https://x.example/a(1)) now.") == "See docs now.", "Help plain text removes images before link labels, with parentheses");
+    Check(HelpDocument.RenderPlain("# Title\n**bold** and *italic* and `code`\n* item\n2*3*4") == "Title\nbold and italic and code\n* item\n2*3*4", "Help plain text removes single-star emphasis but keeps list bullets and arithmetic");
+    Check(new HelpDocument { SourceCommit = "abc123" }.SourceCommitSuffix == " @abc123" && new HelpDocument { SourceCommit = "unknown" }.SourceCommitSuffix == "" && new HelpDocument { SourceCommit = "" }.SourceCommitSuffix == "", "Help hides a source revision the build could not determine");
     Check(rejected, "Help loader rejects unsupported schema versions");
     // Generated artifact, when present next to the test runner or in the app Assets, must load.
     var candidates = new[]
