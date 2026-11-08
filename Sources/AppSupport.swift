@@ -135,7 +135,7 @@ extension Store {
             config.model = AgentModels.reference(engine: session.entry.engine, account: account, model: session.choices.model ?? "")
         }
         config.objective = "Keep Converse up to date, especially when critical bugs are reported. Check richardkaufmann/converse daily for releases and serious open issues. Treat critical bugs as reasons for grave concern: explain their impact and the recommended next step with links and observed dates. Do not install updates or change settings without the user's request. Answer questions about this app's current health, Group and hosts from supplied live evidence."
-        config.repository = "richardkaufmann/converse"; config.intervalSeconds = 86400
+        config.repository = AgentConfig.converseRepository; config.feedbackBanner = true; config.intervalSeconds = 86400
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
         // A daily check by default; Auto pacing may move it within its bounds.
         config.autoPace = true
@@ -451,6 +451,9 @@ extension Store {
 final class FeedbackInvitation: ObservableObject {
     static let shared = FeedbackInvitation()
     @Published private(set) var visible = false
+    /// A Setup → Debug test show: looks real, touches no saved state.
+    private(set) var previewing = false
+    var bannerAgentExists: () -> Bool = { Store.shared.sessions.contains { $0.feedbackRepository != nil } }
     private(set) var consumed = false
     private var state = FeedbackInvitationState(release: "")
     /// App Support's sidebar row and pane: where the banner would appear.
@@ -500,12 +503,13 @@ final class FeedbackInvitation: ObservableObject {
     private func tick() {
         let now = ProcessInfo.processInfo.systemUptime, elapsed = now - lastTick
         lastTick = now
+        guard !previewing else { return }
         // Foreground with recent human input; sleeping or a stalled run loop adds no time.
         let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
         if active && consumed { remaining -= elapsed; if remaining <= 0 { dismiss(); return } }
         guard active, !publishing, !state.suppressed else { return }
         if !visible {
-            if state.eligible && exposed(surfaces.allObjects, minimumFraction: 0) { visible = true }
+            if state.eligible && bannerAgentExists() && exposed(surfaces.allObjects, minimumFraction: 0) { visible = true }
         } else if !consumed && state.eligible && exposed(banners.allObjects, minimumFraction: FeedbackInvitationVisibility.minimumBannerFraction) {
             publishing = true
             var shown = state; shown.markShown()
@@ -532,6 +536,7 @@ final class FeedbackInvitation: ObservableObject {
     }
     /// Clicking the banner or its X means it was seen, so either consumes it.
     func dismiss() {
+        if previewing { previewing = false; visible = false; return }
         if visible && !consumed && state.eligible { var shown = state; shown.markShown(); state = shown; persist(shown); consumed = true }
         visible = false; timer?.invalidate(); timer = nil
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
@@ -542,10 +547,21 @@ final class FeedbackInvitation: ObservableObject {
         dismiss()
         persist(state)
     }
-    func openInvitation() {
+    func openInvitation(repository: String) {
+        let preview = previewing
         dismiss()
-        FeedbackInvitationWindow.shared.show()
+        FeedbackInvitationWindow.shared.show(repository: repository, preview: preview)
     }
+    /// Shows the banner now, skipping the turn count and this release's
+    /// consumed state. Nothing is written, so the real invitation still comes.
+    @discardableResult func triggerTestBanner() -> Bool {
+        guard !visible, bannerAgentExists() else { return false }
+        previewing = true; visible = true
+        return true
+    }
+    func feedbackGivenInWindow(preview: Bool) { if !preview { feedbackWasGiven() } }
+    var stateForTesting: FeedbackInvitationState { state }
+    func flushWritesForTesting() { writes.sync {} }
 }
 
 /// A non-interactive view measures actual clipping/window visibility, including a scrolled-away sidebar row.
@@ -559,12 +575,19 @@ struct FeedbackInvitationSurface: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {}
 }
 
+extension Session {
+    var feedbackRepository: String? { agent?.feedbackRepository }
+}
+
 struct FeedbackInvitationBanner: View {
     @ObservedObject private var invitation = FeedbackInvitation.shared
+    /// The agent whose repository the banner opens; nil means App Support.
+    var session: Session? = nil
+    private var repository: String? { (session ?? Store.shared.sessions.first(where: \.supportAssistant))?.feedbackRepository }
     var body: some View {
-        if invitation.visible {
+        if invitation.visible, let repository {
             HStack(spacing: 8) {
-                Button("Thoughts About Converse?") { invitation.openInvitation() }
+                Button("Thoughts About Converse?") { invitation.openInvitation(repository: repository) }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
                 Spacer(minLength: 0)
                 Button { invitation.dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
@@ -580,9 +603,10 @@ struct FeedbackInvitationPanel: View {
     static let message = "Hi, we appreciate feedback on GitHub. This isn’t tracked. The button below brings up the GitHub repo in your browser. If you like what you see, please consider pressing the star icon at the top of that page. In addition, you can press the other buttons to file an issue or bug. THANK YOU!"
     var repository: () -> Void
     var issue: () -> Void
-    var report: () -> Void
+    var report: (() -> Void)?
     var close: () -> Void
     var feedbackGiven: () -> Void = {}
+    var repositoryName = AgentConfig.converseRepository
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
@@ -593,9 +617,10 @@ struct FeedbackInvitationPanel: View {
             HStack {
                 // Only opens the repository in the browser; starring stays on GitHub.
                 Button(action: repository) { Label("Star on GitHub", systemImage: "star") }
-                    .help("Opens github.com/richardkaufmann/converse in your browser")
+                    .help("Opens github.com/" + repositoryName + " in your browser")
                 Button("File an Issue…", action: issue)
-                Button("File a Bug…", action: report)
+                // The bug form files against Converse, so other repositories omit it.
+                if let report { Button("File a Bug…", action: report) }
             }
             Text("Already given feedback? Tell us below and this app will remember locally, even after upgrades.").font(.callout)
             HStack {
@@ -610,25 +635,28 @@ struct FeedbackInvitationPanel: View {
 final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
     static let shared = FeedbackInvitationWindow()
     private var window: NSWindow?
-    func show() {
-        if let window { window.makeKeyAndOrderFront(nil); return }
+    private var shown: (repository: String, preview: Bool)?
+    func show(repository: String, preview: Bool) {
+        if let window, let shown, shown.repository == repository, shown.preview == preview { window.makeKeyAndOrderFront(nil); return }
+        window?.close()
+        shown = (repository, preview)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Thoughts About Converse"; window.isReleasedWhenClosed = false; window.delegate = self
         let panel = FeedbackInvitationPanel(repository: {
-            NSWorkspace.shared.open(URL(string: "https://github.com/richardkaufmann/converse")!)
+            if let url = FeedbackLinks.repository(repository) { NSWorkspace.shared.open(url) }
         }, issue: {
-            NSWorkspace.shared.open(ConverseAbout.bugReports)
-        }, report: {
+            if let url = FeedbackLinks.issue(repository) { NSWorkspace.shared.open(url) }
+        }, report: repository.lowercased() == AgentConfig.converseRepository ? {
             AppDelegate.shared.reportConverseBug()
-        }, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
-            FeedbackInvitation.shared.feedbackWasGiven()
+        } : nil, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
+            FeedbackInvitation.shared.feedbackGivenInWindow(preview: preview)
             self?.window?.close()
-        })
+        }, repositoryName: repository)
         let host = NSHostingView(rootView: panel)
         window.contentView = host; window.setContentSize(host.fittingSize)
         self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
     }
-    func windowWillClose(_ notification: Notification) { window = nil }
+    func windowWillClose(_ notification: Notification) { window = nil; shown = nil }
 }
 
 /// Window-level visibility alone is insufficient: clip to the displays, then
@@ -714,4 +742,32 @@ func feedbackInvitationControllerSelfTests(_ check: (Bool, String) -> Void) {
     check(controller.isMonitoring, "Normal controller starts its visibility and activity monitor")
     controller.dismiss()
     check(!controller.isMonitoring && !controller.visible, "Dismissing the invitation removes timer and input monitor")
+    let testFolder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? FileManager.default.createDirectory(at: testFolder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: testFolder) }
+    let tested = FeedbackInvitation(); var agentEnabled = false
+    tested.bannerAgentExists = { agentEnabled }
+    tested.start(folder: testFolder, info: [:], environment: [:], arguments: [])
+    for _ in 0..<20 { tested.completedTurn(success: true, interrupted: false, humanDirected: true) }
+    tested.flushWritesForTesting()
+    let stateFile = testFolder.appendingPathComponent("feedback-invitation.json")
+    let saved = try? Data(contentsOf: stateFile)
+    check(saved != nil && tested.stateForTesting.eligible, "The real invitation is earned before the test show")
+    check(!tested.triggerTestBanner() && !tested.visible, "Trigger GitHub banner does nothing when no agent enables the banner")
+    agentEnabled = true
+    check(tested.triggerTestBanner() && tested.visible && tested.previewing, "Trigger GitHub banner shows the banner now")
+    check(!tested.triggerTestBanner(), "A second trigger does not stack on the banner already showing")
+    tested.feedbackGivenInWindow(preview: true)
+    tested.dismiss(); tested.flushWritesForTesting()
+    check(!tested.visible && !tested.previewing && tested.isMonitoring, "Closing a test show keeps the real invitation's timer running")
+    check((try? Data(contentsOf: stateFile)) == saved && !tested.stateForTesting.feedbackAsk && !tested.stateForTesting.suppressed && tested.stateForTesting.eligible && !tested.consumed,
+          "A test show leaves the saved state untouched: not consumed, feedbackGiven not set, still eligible")
+    let spent = FeedbackInvitation(); spent.bannerAgentExists = { true }
+    var consumedState = FeedbackInvitationState(release: ConverseAbout.version + "/" + ConverseAbout.build, completedTurns: 20)
+    consumedState.markShown(); consumedState.markFeedbackGiven()
+    let spentFolder = testFolder.appendingPathComponent("spent"); try? FileManager.default.createDirectory(at: spentFolder, withIntermediateDirectories: true)
+    try? JSONEncoder().encode(consumedState).write(to: spentFolder.appendingPathComponent("feedback-invitation.json"))
+    spent.start(folder: spentFolder, info: [:], environment: [:], arguments: [])
+    check(spent.triggerTestBanner() && spent.visible, "Trigger GitHub banner bypasses a consumed release and feedbackGiven")
+    tested.dismiss(); spent.dismiss()
 }

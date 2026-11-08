@@ -78,6 +78,9 @@ struct AgentSetupView: View {
                         }
                         Text("CLI models use the selected login. Meta API models, portraits and voice use the Meta key. Catalog visibility does not guarantee access. CLI agents use supplied evidence; hosted web research currently requires a Meta API model.").font(.caption).foregroundStyle(.secondary)
                         HStack { Text("Repository").frame(width: 90, alignment: .leading); TextField("Optional · owner/name or leave blank", text: $settings.repository).disabled(testingServices.contains("github")) }
+                        Toggle("Show the feedback banner for this repository", isOn: Binding(get: { settings.feedbackBanner == true }, set: { settings.feedbackBanner = $0 }))
+                            .disabled(settings.repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .help("A blue banner on this agent invites people to open this repository, star it or file an issue. It appears once per installed release, after twenty completed conversation turns.")
                         Text("What should this agent do? How will you judge success?").font(.headline)
                         TextEditor(text: $settings.objective).frame(height: 85).border(Color.secondary.opacity(0.3))
                         Text(settings.objective != session.agent?.objective ? "Timing is read from the objective when you save. Say how often to run, e.g. “run every five minutes while the US market is open”."
@@ -238,7 +241,7 @@ struct AgentSetupView: View {
             try AgentSecrets.update("github", value: githubKey, remove: removeSecrets.contains("github"))
             try AgentSecrets.update("discordBot", value: discordToken, remove: removeSecrets.contains("discordBot"))
             try AgentSecrets.update("homeAssistant", value: homeAssistantToken, remove: removeSecrets.contains("homeAssistant"))
-            current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed
+            current.webSearch = settings.webSearch; current.jollyAllowed = settings.jollyAllowed; current.feedbackBanner = settings.feedbackBanner
             let notice = migrationNotice
             try current.setAutoPace(settings.autoPaceOn, minMinutes: settings.paceMinMinutes, maxMinutes: settings.paceMaxMinutes, now: Date())
             try current.setPortraitInterval(minutes: settings.portraitMinutes)

@@ -1,5 +1,26 @@
 import Foundation
 
+extension AgentConfig {
+    static let converseRepository = "richardkaufmann/converse"
+    var feedbackRepository: String? {
+        let name = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        return feedbackBanner == true && AgentRepoSnapshot.validRepository(name) ? name : nil
+    }
+    /// One decision for agents saved before the setting existed. Only the
+    /// Converse repository starts on; afterwards the owner's choice stands.
+    mutating func migrateFeedbackBanner() {
+        guard feedbackBanner == nil else { return }
+        feedbackBanner = repository.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == Self.converseRepository
+    }
+}
+
+enum FeedbackLinks {
+    static func repository(_ name: String) -> URL? {
+        AgentRepoSnapshot.validRepository(name) ? URL(string: "https://github.com/" + name) : nil
+    }
+    static func issue(_ name: String) -> URL? { repository(name)?.appendingPathComponent("issues/new") }
+}
+
 /// Local, per-profile state. Never sent to a provider, GitHub, or another device.
 /// A shown release stays consumed even if the app quits before the banner expires.
 struct FeedbackInvitationState: Codable {
@@ -93,4 +114,23 @@ func feedbackInvitationSelfTests(_ check: (Bool, String) -> Void) {
           && !PendingPrompt(components: [typed, PendingPrompt(switchboardHop: 1, text: "relay", images: [])], text: "x", images: []).humanTyped,
           "Inject all counts only when every combined part was typed")
 
+    check(AgentConfig().feedbackBanner == false && AgentConfig().feedbackRepository == nil, "The feedback banner is off by default for new agents")
+    func bannerAfterMigration(_ repository: String, from value: Bool? = nil) -> Bool? {
+        var config = AgentConfig(); config.repository = repository; config.feedbackBanner = value; config.migrateFeedbackBanner(); return config.feedbackBanner
+    }
+    check(bannerAfterMigration("richardkaufmann/converse") == true && bannerAfterMigration(" RichardKaufmann/Converse ") == true, "Migration enables the banner for the Converse repository")
+    check(bannerAfterMigration("acme/widgets") == false && bannerAfterMigration("") == false && bannerAfterMigration("richardkaufmann/converse-dev") == false, "Migration leaves every other repository off")
+    check(bannerAfterMigration("richardkaufmann/converse", from: false) == false && bannerAfterMigration("acme/widgets", from: true) == true, "Migration never overrides an owner's choice")
+    var legacyAgent = try! JSONDecoder().decode(AgentConfig.self, from: Data(#"{"repository":"richardkaufmann/converse","objective":"x","model":"m","intervalSeconds":900,"remainingRuns":1,"enabled":false,"watchedSessions":[],"generateArt":false,"speak":false,"discord":false,"lastOutcome":"","attention":"","widgetSummary":""}"#.utf8))
+    check(legacyAgent.feedbackBanner == nil, "An agent saved before the setting has no decision yet")
+    legacyAgent.migrateFeedbackBanner()
+    check(legacyAgent.feedbackRepository == "richardkaufmann/converse", "A migrated Converse agent resolves to its repository")
+    var customer = AgentConfig(); customer.repository = "acme/widgets"; customer.feedbackBanner = true
+    check(customer.feedbackRepository == "acme/widgets", "A customer's opt-in resolves to the customer's repository")
+    customer.repository = "not a repository"
+    check(customer.feedbackRepository == nil, "An invalid repository shows no banner")
+    check(FeedbackLinks.repository("acme/widgets")?.absoluteString == "https://github.com/acme/widgets" && FeedbackLinks.issue("acme/widgets")?.absoluteString == "https://github.com/acme/widgets/issues/new",
+          "Open GitHub and File an Issue use the agent's repository")
+    check(FeedbackLinks.issue(AgentConfig.converseRepository) == ConverseAbout.bugReports, "The Converse repository keeps its existing issue link")
+    check(FeedbackLinks.repository("https://evil.example/x") == nil, "Links are built only from a valid owner/name")
 }

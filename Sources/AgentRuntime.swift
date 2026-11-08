@@ -26,6 +26,7 @@ enum AgentPolicy {
         let namedSupport = Store.shared.sessions.filter { $0.title == AppSupport.title && $0.agent != nil }
         if namedSupport.count == 1 { namedSupport[0].supportAssistant = true }
         for session in Store.shared.sessions where session.supportAssistant { Store.shared.configureSupportAgent(session) }
+        for session in Store.shared.sessions { session.agent?.migrateFeedbackBanner() }
         // Resume persisted deadlines; the normal tick runs overdue work once,
         // respecting paused queues, busy sessions and calendar windows.
         for session in Store.shared.sessions where session.agent?.enabled == true {

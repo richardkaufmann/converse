@@ -12,6 +12,9 @@ struct AgentConfig: Codable, Equatable {
     var homeAssistantRead: Bool? = nil
     var hasRepository: Bool { !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var repositorySnapshot: AgentRepoSnapshot? { hasRepository && snapshot?.repository == repository ? snapshot : nil }
+    // Whether this agent's repository gets the feedback banner. New agents
+    // are off; archives from before the setting decode nil until migrated.
+    var feedbackBanner: Bool? = false
     var parkingLotTalkID: UUID? = nil
     var parkingLotRequiresReview: Bool? = nil
     var watchedSessions: [UUID] = []

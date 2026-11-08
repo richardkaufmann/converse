@@ -330,7 +330,7 @@ struct SidebarSession: View {
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
             .foregroundStyle(workspace.showsParkedApproval(session) ? Color.black : Color.primary)
             .contentShape(Rectangle())
-            .background { if session.supportAssistant { FeedbackInvitationSurface() } }
+            .background { if session.feedbackRepository != nil { FeedbackInvitationSurface() } }
             .background(SidebarHoverDetails(text: session.sidebarSummary(workspace: workspace, windowID: state.id), state: hover).frame(maxWidth: .infinity, maxHeight: .infinity))
             .onAppear { if session.accountStatus.isEmpty { Store.shared.refreshSidebarStatus(session) } }
             .onHover { if $0 { Store.shared.refreshSidebarStatus(session) } }
@@ -363,7 +363,7 @@ struct SidebarSession: View {
             } message: {
                 Text("This removes the conversation from every window and stops any active work. A recovery snapshot keeps its transcript and draft. Use File → Restore Closed Conversation to recover it.")
             }
-        if session.supportAssistant && feedbackInvitation.visible { FeedbackInvitationBanner().padding(.leading, 16).padding(.trailing, 4) }
+        if session.feedbackRepository != nil && feedbackInvitation.visible { FeedbackInvitationBanner(session: session).padding(.leading, 16).padding(.trailing, 4) }
         }
     }
 }
