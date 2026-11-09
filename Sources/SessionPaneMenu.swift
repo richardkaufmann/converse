@@ -65,7 +65,7 @@ extension SessionPaneMenuModel {
         self.init(isAgent: session.isAgentSession, busy: session.busy,
                   needsAgentSetup: session.needsAgentSetup,
                   noAgentTurns: (session.agent?.turnLimit ?? 0) == 0,
-                  talking: AgentConversation.shared.owns(session),
+                  talking: MainActor.assumeIsolated { AgentConversation.shared.owns(session) },
                   switchboardEnabled: session.switchboardEnabled,
                   hasPending: !session.pending.isEmpty, queuePaused: session.queuePaused,
                   canStop: session.busy || session.claudeLive != nil,
