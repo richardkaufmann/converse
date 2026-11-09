@@ -6,7 +6,7 @@
 
 Converse is one app for multiple, simultaneous conversations with the providers **Muse, Claude Code, and Codex**. From one pane of glass you can orchestrate projects across multiple systems (Mac, Linux, Windows) with a set of agents overseeing progress.
 
-**Watch the 3-minute demo:** [on YouTube](https://youtu.be/bSWs7vsioNI) (or [download the MP4](https://github.com/richardkaufmann/converse/releases/download/v0.6.3/Converse-hackathon-demo.mp4))
+[▶ Watch: Converse in action (5 min 38 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-overview-v1.mp4) — from your first conversation to a team building a project. The full walkthrough includes the new assessments and portraits. The [original three-minute hackathon demo](https://youtu.be/bSWs7vsioNI) is still available.
 
 **Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and your first “app control” session—**Converse App Support**—will ask you to pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** as your first provider.
 
@@ -182,6 +182,10 @@ On Mac, agent responses use the same message numbers and timestamp hovers as ses
 
 ### Parking Lots
 
+[▶ Watch: Hello World (1 min 24 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-hello-world-v1.mp4) shows a small program driven by an editable plan. [▶ Watch: A real project (37 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-real-project-v1.mp4) shows the same approach applied to Converse’s own bug list.
+
+[▶ Watch: Building a video (46 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-building-a-video-v1.mp4) shows a session using a Parking Lot as its script and asking another agent for a portrait. These recordings use earlier layouts; the written steps below describe the current controls.
+
 Parking Lots are great ways to work on ideas or save (park) them for later injection. They're persistent, and letting agents and sessions see and edit them is a great way to track and direct development. Integration with Jira and other tracking systems is an idea for future work, not something the app does yet.
 
 Keep ideas, prompts and bugs in named **Parking Lots**, alongside the sessions under their home device. Open the **🚗 Parking Lots** sidebar control to manage lots. Create another with **+ → New Parking Lot…** or **File → New → Parking Lot…** on Mac. Right-click a lot in the sidebar to rename or delete it. **P**, **1**, **2** and **3** work just as they do for conversations. **X** deletes the lot after confirmation; a recovery copy stays on its home device.
@@ -230,6 +234,10 @@ Taught sessions can also search and read their own retained transcript (`transcr
 
 **New User Experience / Reset** opens the welcome walkthrough and provides **Reset on Quit**. The reset requires typing **YES** and can be cancelled before quitting. Quitting schedules the reset; the next launch backs up and clears this edition’s local profile and setup; ordinary updates preserve them. Production, Demo and TEST editions use separate profiles. Opening Converse Demo in TestFlight will not show your normal Converse Group.
 
+### Performance recording on Mac
+
+When performance monitoring is enabled, click the red **PERF MONITORING** label to pause the capture. It becomes grey and reads **PERF MONITORING PAUSED**. Click it again to resume recording. Pausing after a slow operation preserves the recent capture for investigation; it does not pause your sessions or agents.
+
 ### Text substitutions
 
 On Mac, type a smiley or arrow followed by a space: `:-)` becomes 🙂, `--` becomes an em dash (—), `-->` becomes →, `<--` becomes ←, and `==>` becomes ⇒. Other supported forms include `:)`, `:(`, `;-)`, `:D`, `:P`, `<-->`, `<==`, `<==>`, `<->`, `...`, `(c)`, `(r)` and `(tm)`. These work in conversation drafts and Parking Lots, including drafts for remote sessions displayed on this Mac. Pasted text, Markdown code blocks, inline code, indented code, and lines beginning with `/` or `$` stay literal.
@@ -238,7 +246,7 @@ Don't like a substitution? **⌘Z** restores exactly what you typed; **Backspace
 
 ### Keep several sessions visible
 
-Create another session with **+** when you want an independent task or a second opinion. **1 / 2 / 3** place a session in a pane. **P** parks it: the pane closes but work continues. **X** closes the session after confirmation and stops its work; Mac **File → Restore Closed Conversation** can restore a saved recovery copy.
+Create another session with **+** when you want an independent task or a second opinion. **1 / 2 / 3** place a session in a pane. **P** parks it: the pane closes but work continues. **X** closes the session after confirmation and stops its work; Mac **File → Restore Closed Conversation** can restore a saved recovery copy. Converse App Support’s **X** is disabled so it stays available; **P** can still park its pane.
 
 Drag the dividers to resize panes. Changing the number of visible session panes redistributes their widths equally without changing the sidebar width. Creating a session, agent or lot never takes over a pane, and clicking a name never moves panes: use 1, 2 or 3 beside a row to show it, P to park it. The pin beside **Conversation** hides or restores the sidebar. Hover a session name for its provider, login, project folder and status; right-click it to rename or configure it (for an agent: **Agent Setup…**, **Show assessment**, **Run once**). The **…** at the top of a session's pane offers those same options, plus the footer's account and model settings; the originals stay where they are.
 
@@ -317,6 +325,14 @@ An agent can assess evidence and ask a coding session to act; selecting a CLI-ba
 
 ## Agents, assessments and portraits
 
+[▶ Watch: Assessments and portraits (48 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-assessments-and-portraits-v1.mp4) shows the two views and the agent settings behind them.
+
+### Choose a gallery on Mac
+
+Open **View → Galleries…**, select the agents whose assessments or portraits you want, optionally select **System Monitor**, then choose **Show Gallery**. Each gallery has its own window. Resize it to rearrange the grid, drag a card’s handle to reorder it, or use the handle’s **Move earlier / Move later** menu. Expand a card to fill the window; **Gallery** or Escape brings back the grid. **Refresh** requests fresh information for the selected cards. Missing measurements say **Unavailable**.
+
+Portraits refresh on demand while a gallery displaying them is open. Closing that window removes its demand; another open portrait window or an explicit request can still ask for an image.
+
 ### Give the agent evidence for its objective
 
 **GitHub:** enter `owner/repository` in **Repository**, or leave it blank if the job has nothing to do with a repository. Converse fetches repository evidence and supplies it to the selected model. This works with CLI-backed agents as well as Meta API agents. On Mac, **Test GitHub** checks access without changing the repository. On Windows, enter **GitHub owner/name**, save, and use **Run once** to check access. Public polling has limits; private repositories need a GitHub token with appropriate access in the masked field.
@@ -384,7 +400,7 @@ You can ask from anywhere:
 
 Portraits use Muse Image and need a Meta key. They're painted from the agent's name, its objective, its assessment summary and mood, a shared fleet style so the grid looks like one family, and your **Portrait art direction** in Agent Setup. Numbers stay out of the art (the facts live in the Assessments table). If you want stylistic lettering, such as a movie-poster title, say so in the art direction.
 
-Portraits don't run up a bill. An unchanged assessment reuses the cached portrait, however often you ask. A changed one is repainted at most every 10 minutes per agent (change it in Agent Setup), and **Refresh** always tries right away. If several people ask at once, they share one painting. If the image service refuses or fails, the last portrait stays with a “couldn't refresh” note, Converse waits longer before trying again, and the agent's own work is never held up.
+Portrait generation uses the configured image service and may incur charges. An unchanged assessment reuses the cached portrait, however often you ask. A changed one is repainted at most every 10 minutes per agent (change it in Agent Setup), and **Refresh** always tries right away. If several people ask at once, they share one painting. If the image service refuses or fails, the last portrait stays with a “couldn't refresh” note, Converse waits longer before trying again, and the agent's own work is never held up.
 
 Scoreboard pictures already in your conversations stay where they are; agents simply stop adding new ones. Your art direction carries over to portraits. Agents from earlier releases start with an assessment seeded from their last scoreboard, marked stale until their next turn.
 
@@ -485,6 +501,8 @@ Converse must remain open to do new work. The bridge can report that it is offli
 
 ## Messaging between sessions
 
+[▶ Watch: How Converse builds Converse (1 min 23 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-development-team-v1.mp4) follows Converse’s development team across devices, sessions, agents and Parking Lots. The diagram is a November 6, 2026 snapshot.
+
 The **switchboard** lets conversations send messages to each other. Use it when, for example, one coding session should ask another to review a change.
 
 Right-click a session and choose **Teach Session To Talk To Other Sessions**. That enables messaging and gives the model the current rules. Teach each participating coding session. Teaching a Windows- or Linux-hosted session from a Mac or iPad requires build **146 or later on the home computer**; earlier homes reject that remote command. Then type naturally: “Ask Code Review to review this change and report any blockers.”
@@ -513,6 +531,10 @@ A **Group** connects your Converse installations. You can display and control a 
 Only one device displays a given session at a time. Taking it on another device moves its display there; it does not duplicate the work. Drafts and attached images travel with it. After reconnecting, **Check home** resolves an uncertain send without blindly sending it again. A conflicting draft asks you to choose which copy to keep.
 
 Repeat pairing for additional computers, phones or tablets; multiple iPhones and iPads are supported. Any member may review a new join. Each installation belongs to one Group at a time. Pair only devices you trust: membership grants access to conversation history and control under the home computers' logins.
+
+### Watch your Group on Mac
+
+Open **View → Group** to see sessions, agents and Parking Lots grouped by device, with messages moving between them. Hover a node or connection for details, or click to keep its details open. Use **Permissions** to show or hide the connection mesh and **Fit** to bring the whole diagram into view. With this window focused, **View → Bigger / Smaller / Actual Size** changes its text without resizing your conversation text.
 
 ### Use a remote computer
 
@@ -784,6 +806,10 @@ Features depend on both the viewing device and the computer doing the work. Matc
 Agents support multiple provider logins, but hosted web research currently requires the Meta Model API route. A provider model appearing in a catalog does not guarantee that your account has access to it. These previews do not include full Claude/Codex interactive terminal approval dialogs.
 
 ## Feedback
+
+The Mac feedback invitation offers **I’ve given feedback**, **Not now**, and **Never!**. The first and last choices stop future invitations, including after upgrades; **Not now** dismisses the current invitation.
+
+The in-app report draft includes an editable **Information about the size of your configuration** section: anonymous entries for sessions, agents and Parking Lots, with retained text bytes, image counts and image file sizes. It omits names, paths, identifiers and contents; missing image sizes are counted separately. You can remove the section before sending. Review anything you type or paste into the report yourself.
 
 Questions and ideas are welcome in [Discussions](https://github.com/richardkaufmann/converse/discussions). Please use the [bug-report form](https://github.com/richardkaufmann/converse/issues/new/choose) for problems. Pull requests are by invitation; see [contribution guidelines](CONTRIBUTING.md).
 

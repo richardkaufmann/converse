@@ -236,7 +236,7 @@ class HelpContentTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIn(url, videos)
                 self.assertEqual(label, generator.watch_label(videos[url]))
-        self.assertEqual(generator.watch_label(videos[links[0][1]]), '\u25b6 Watch: First launch (25 s)')
+        self.assertIn(('\u25b6 Watch: First launch (25 s)', next(url for url, video in videos.items() if video['id'] == 'first-run')), links)
         self.assertEqual(generator.duration_label(125.4), '2 min 5 s')
 
     def test_build_reads_the_manifest(self):
