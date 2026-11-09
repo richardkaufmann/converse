@@ -3333,7 +3333,6 @@ struct RootView: View {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(width: 24, height: 12).accessibilityHidden(true)
-                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.toggleReordering() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -4212,6 +4211,7 @@ func selfTest() {
     transcriptSelfReadSelfTests(check)
     transcriptRetentionSelfTests(check)
     sessionSettingsMenuSelfTests(check)
+    sessionPaneMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
     let r = UUID(); s.messages.append(Message(id: r, role: "assistant", text: ""))
