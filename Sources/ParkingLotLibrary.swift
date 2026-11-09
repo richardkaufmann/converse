@@ -109,10 +109,17 @@ final class SidebarOrder: ObservableObject {
     static let shared = SidebarOrder(folder: Store.shared.folder)
     // sort is a raw name so an unknown future choice falls back to manual
     // instead of discarding the saved drag order.
-    struct Saved: Codable { var sections: [String: [String]] = [:]; var sort: String? = nil }
+    struct Layout: Codable { var sections: [String: [String]] = [:]; var sort: String? = nil }
+    // The top-level fields are the shared starting order (older files and
+    // first-run seeding). A window copies them the first time it changes, so
+    // its choices never move another window's rows.
+    struct Saved: Codable { var sections: [String: [String]] = [:]; var sort: String? = nil; var windows: [String: Layout]? = nil }
     @Published var reordering = false
     @Published private(set) var saved = Saved()
-    var sort: SidebarSort { saved.sort.flatMap(SidebarSort.init(rawValue:)) ?? .manual }
+    private func layout(_ window: String) -> Layout { saved.windows?[window] ?? Layout(sections: saved.sections, sort: saved.sort) }
+    func sort(window: String = "") -> SidebarSort { layout(window).sort.flatMap(SidebarSort.init(rawValue:)) ?? .manual }
+    // What each window last drew per row list, so a drag can keep it.
+    private var visible: [String: [String: [String]]] = [:]
     @Published var dragging: (scope: String, id: String)?
     @Published var dropTarget: String?
     var frames: [String: CGRect] = [:]
@@ -128,34 +135,55 @@ final class SidebarOrder: ObservableObject {
         file = folder.appendingPathComponent("sidebar-order.json")
         if let data = try? Data(contentsOf: file), let value = try? JSONDecoder().decode(Saved.self, from: data) { saved = value }
     }
-    func ordered(_ ids: [String], scope: String) -> [String] {
-        let known = (saved.sections[scope] ?? []).filter { ids.contains($0) }
+    func ordered(_ ids: [String], scope: String, window: String = "") -> [String] {
+        Self.ordered(ids, saved: layout(window).sections[scope])
+    }
+    private static func ordered(_ ids: [String], saved: [String]?) -> [String] {
+        let known = (saved ?? []).filter { ids.contains($0) }
         return known + ids.filter { !known.contains($0) }
     }
     /// The rows of one device list in the chosen sort. Manual starts from
     /// the titles and applies the saved drag order on top.
-    func arranged(_ rows: [(id: String, title: String, changedAt: Date?)], scope: String) -> [String] {
+    func arranged(_ rows: [(id: String, title: String, changedAt: Date?)], scope: String, window: String = "") -> [String] {
         let alphabetical = SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id)
-        switch sort {
-        case .manual: return ordered(alphabetical, scope: scope)
-        case .alphabetical: return alphabetical
-        case .recent: return SidebarSort.arranged(rows, by: .recent, title: \.title, changedAt: \.changedAt).map(\.id)
+        let result: [String]
+        switch sort(window: window) {
+        case .manual: result = ordered(alphabetical, scope: scope, window: window)
+        case .alphabetical: result = alphabetical
+        case .recent: result = SidebarSort.arranged(rows, by: .recent, title: \.title, changedAt: \.changedAt).map(\.id)
+        }
+        visible[window, default: [:]][scope] = result
+        return result
+    }
+    func setSort(_ value: SidebarSort, window: String = "") {
+        if value != .manual { reordering = false }
+        update(window) { $0.sort = value.rawValue }
+    }
+    /// Reorder leaves the chosen sort showing; the first row drag replaces it.
+    func toggleReordering() { reordering.toggle() }
+    func move(_ id: String, before target: String?, scope: String, available: [String], window: String = "") {
+        guard available.contains(id), target != id, target == nil || available.contains(target!) else { return }
+        let keepVisible = scope != "devices" && sort(window: window) != .manual
+        update(window) { layout in
+            // A row drag makes the sorted rows on screen the manual order for
+            // every list. Device headers are never sorted, so they leave it.
+            if keepVisible { layout.sections.merge(visible[window] ?? [:]) { _, new in new }; layout.sort = SidebarSort.manual.rawValue }
+            var next = Self.ordered(available, saved: layout.sections[scope]).filter { $0 != id }
+            next.insert(id, at: target.flatMap { next.firstIndex(of: $0) } ?? next.count)
+            layout.sections[scope] = next
         }
     }
-    func setSort(_ value: SidebarSort) {
-        if value != .manual { reordering = false }
-        var state = saved; state.sort = value.rawValue; persist(state)
+    func forget(window: String) {
+        visible[window] = nil
+        guard saved.windows?[window] != nil else { return }
+        var state = saved; state.windows?[window] = nil; persist(state)
     }
-    /// Reorder drags the manual order, so starting it shows that order again.
-    func toggleReordering() {
-        if !reordering && sort != .manual { setSort(.manual) }
-        reordering.toggle()
-    }
-    func move(_ id: String, before target: String?, scope: String, available: [String]) {
-        guard available.contains(id), target != id, target == nil || available.contains(target!) else { return }
-        var next = ordered(available, scope: scope).filter { $0 != id }
-        next.insert(id, at: target.flatMap { next.firstIndex(of: $0) } ?? next.count)
-        var state = saved; state.sections[scope] = next; persist(state)
+    private func update(_ window: String, _ change: (inout Layout) -> Void) {
+        var state = saved, next = layout(window)
+        change(&next)
+        if window.isEmpty { state.sections = next.sections; state.sort = next.sort }
+        else { state.windows = (state.windows ?? [:]).merging([window: next]) { _, new in new } }
+        persist(state)
     }
     private func persist(_ state: Saved) {
         do {
@@ -165,17 +193,18 @@ final class SidebarOrder: ObservableObject {
     }
 }
 struct SidebarSortMenu: View {
+    @Environment(\.sidebarWindowID) private var windowID
     @ObservedObject var order = SidebarOrder.shared
     var body: some View {
         Menu {
-            Picker("Sort sessions", selection: Binding(get: { order.sort }, set: { order.setSort($0) })) {
+            Picker("Sort sessions", selection: Binding(get: { order.sort(window: windowID) }, set: { order.setSort($0, window: windowID) })) {
                 ForEach(SidebarSort.allCases, id: \.self) { Text($0.title).tag($0) }
             }.pickerStyle(.inline)
             Divider()
             Button(order.reordering ? "Done Reordering" : "Reorder") { order.toggleReordering() }
         } label: { Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("Sort or reorder sessions: " + order.sort.title).accessibilityLabel("Sort or reorder sessions")
+            .help("Sort or reorder sessions: " + order.sort(window: windowID).title).accessibilityLabel("Sort or reorder sessions")
     }
 }
 private struct SidebarWindowKey: EnvironmentKey { static let defaultValue = "" }
@@ -208,7 +237,7 @@ struct SidebarReorderRow<Content: View>: View {
                         }
                         .onEnded { value in
                             if order.containsDrop(scope: frameScope, location: value.location) {
-                                order.move(id, before: order.destination(scope: frameScope, location: value.location, available: available), scope: scope, available: available)
+                                order.move(id, before: order.destination(scope: frameScope, location: value.location, available: available), scope: scope, available: available, window: windowID)
                             }
                             order.dragging = nil; order.dropTarget = nil
                         })
@@ -226,15 +255,16 @@ struct OrderedDeviceSidebar: View {
     @ObservedObject var devices = DeviceSyncService.shared
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
+    var window: String { state.id.uuidString }
     var deviceIDs: [String] { ["local"] + (devices.currentGroup == nil ? [] : devices.homes.keys.sorted()) }
     var localRows: [(id: String, title: String, changedAt: Date?)] {
         store.sessions.filter { !$0.isIdleTalkSession }.map { ($0.id.uuidString, $0.title, $0.lastChangedAt) }
-            + library.records.map { ($0.id.uuidString, $0.name, order.sort == .recent ? library.modifiedAt($0.id) : nil) }
+            + library.records.map { ($0.id.uuidString, $0.name, order.sort(window: window) == .recent ? library.modifiedAt($0.id) : nil) }
     }
     var localIDs: [String] { SidebarSort.arranged(localRows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id) }
     var body: some View {
         VStack(spacing: 0) {
-        ForEach(order.ordered(deviceIDs, scope: "devices"), id: \.self) { device in
+        ForEach(order.ordered(deviceIDs, scope: "devices", window: window), id: \.self) { device in
             VStack(spacing: 0) {
                 if device == "local" {
                     SidebarReorderRow(scope: "devices", id: device, available: deviceIDs) {
@@ -253,7 +283,7 @@ struct OrderedDeviceSidebar: View {
                             SidebarSortMenu()
                         }.padding(.horizontal, 4).frame(height: 28)
                     }
-                    ForEach(order.arranged(localRows, scope: "local"), id: \.self) { id in
+                    ForEach(order.arranged(localRows, scope: "local", window: window), id: \.self) { id in
                         SidebarReorderRow(scope: "local", id: id, available: localIDs) {
                             if let uuid = UUID(uuidString: id), let lot = library.lot(uuid) { ParkingLotSidebar(lot: lot, workspace: workspace, state: state) }
                             else if let session = store.sessions.first(where: { $0.id.uuidString == id }) { SidebarSession(session: session, workspace: workspace, state: state) }
@@ -610,24 +640,68 @@ func sidebarSortSelfTests(_ check: (Bool, String) -> Void) {
           "Recently changed puts the latest change first, then titles for ties and undated rows")
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sidebar-sort-" + UUID().uuidString)
     let order = SidebarOrder(folder: folder)
-    check(order.sort == .manual, "A new profile keeps the manual sidebar order")
+    check(order.sort() == .manual, "A new profile keeps the manual sidebar order")
     order.move("c", before: "a", scope: "local", available: ["a", "b", "c", "d", "e"])
     check(order.arranged(rows, scope: "local") == ["c", "a", "b", "d", "e"], "Manual sort applies the saved drag order over titles")
     order.setSort(.recent)
-    check(order.arranged(rows, scope: "local") == ["c", "b", "d", "a", "e"] && SidebarOrder(folder: folder).sort == .recent, "The chosen sidebar sort persists across launches")
+    check(order.arranged(rows, scope: "local") == ["c", "b", "d", "a", "e"] && SidebarOrder(folder: folder).sort() == .recent, "The chosen sidebar sort persists across launches")
     order.setSort(.alphabetical)
     check(order.arranged(rows, scope: "local") == ["a", "b", "e", "d", "c"], "Alphabetical sort overrides the drag order without discarding it")
     order.toggleReordering()
-    check(order.reordering && order.sort == .manual && order.arranged(rows, scope: "local").first == "c", "Reorder returns to the saved manual order")
+    check(order.reordering && order.sort() == .alphabetical && order.arranged(rows, scope: "local") == ["a", "b", "e", "d", "c"], "Reorder keeps the sorted rows instead of reverting to an earlier drag order")
     order.toggleReordering(); order.setSort(.recent); order.reordering = true; order.setSort(.alphabetical)
     check(!order.reordering, "Choosing a sort ends a manual reorder")
     try? JSONSerialization.data(withJSONObject: ["sections": ["local": ["b"]], "sort": "future"]).write(to: folder.appendingPathComponent("sidebar-order.json"))
     let future = SidebarOrder(folder: folder)
-    check(future.sort == .manual && future.ordered(["a", "b"], scope: "local") == ["b", "a"], "An unknown sort falls back to manual and keeps the drag order")
+    check(future.sort() == .manual && future.ordered(["a", "b"], scope: "local") == ["b", "a"], "An unknown sort falls back to manual and keeps the drag order")
     try? JSONSerialization.data(withJSONObject: ["sections": ["local": ["b"]]]).write(to: folder.appendingPathComponent("sidebar-order.json"))
     check(SidebarOrder(folder: folder).ordered(["a", "b"], scope: "local") == ["b", "a"], "Older sidebar order files without a sort still load")
+    sidebarWindowOrderSelfTests(rows, check)
     let session = Session(entry: Entry(name: "Sort", command: "", directory: "", engine: "muse"))
     session.messages = [Message(id: UUID(), role: "user", text: "hi", createdAt: old), Message(id: UUID(), role: "assistant", text: "", createdAt: nil)]
     check(session.lastChangedAt == old, "A session's last change is its newest dated message")
     try? FileManager.default.removeItem(at: folder)
+}
+
+private func sidebarWindowOrderSelfTests(_ rows: [(id: String, title: String, changedAt: Date?)], _ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sidebar-window-order-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let ids = rows.map(\.id), window = "window-a", other = "window-b"
+    let file = folder.appendingPathComponent("sidebar-order.json")
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try? JSONSerialization.data(withJSONObject: ["sections": ["local": ["e"]]]).write(to: file)
+    let order = SidebarOrder(folder: folder)
+    check(order.ordered(ids, scope: "local", window: window).first == "e" && order.sort(window: window) == .manual, "A window with no saved order starts from an older sidebar-order.json")
+
+    order.move("d", before: "e", scope: "local", available: ids, window: window)
+    check(order.ordered(ids, scope: "local", window: window).prefix(2) == ["d", "e"] && order.ordered(ids, scope: "local", window: other).first == "e" && order.ordered(ids, scope: "local").first == "e", "A manual reorder sticks to its window and leaves others alone")
+    order.setSort(.alphabetical, window: window)
+    check(order.sort(window: window) == .alphabetical && order.sort(window: other) == .manual && order.arranged(rows, scope: "local", window: other).first == "e", "A chosen sort sticks to its window and leaves others alone")
+    let reopened = SidebarOrder(folder: folder)
+    check(reopened.sort(window: window) == .alphabetical && reopened.arranged(rows, scope: "local", window: window) == ["a", "b", "e", "d", "c"], "A window's chosen sort survives relaunch instead of reverting to its drag order")
+
+    // Reorder shows the sort, and backing out changes nothing.
+    order.setSort(.recent, window: window)
+    order.toggleReordering()
+    check(order.sort(window: window) == .recent && order.arranged(rows, scope: "local", window: window) == ["c", "b", "d", "a", "e"], "Starting Reorder keeps the chosen sort on screen")
+    order.toggleReordering()
+    check(!order.reordering && order.sort(window: window) == .recent, "Reorder with no drag leaves the chosen sort in place")
+
+    // A drag keeps what was visible, in every list, and the sort stops applying.
+    let remote: [(id: String, title: String, changedAt: Date?)] = [("r1", "One", Date(timeIntervalSince1970: 100)), ("r2", "Two", Date(timeIntervalSince1970: 200))]
+    _ = order.arranged(remote, scope: "home", window: window)
+    order.move("a", before: "c", scope: "local", available: ids, window: window)
+    check(order.sort(window: window) == .manual && order.arranged(rows, scope: "local", window: window) == ["a", "c", "b", "d", "e"], "A drag builds on the sorted rows, not an earlier manual order")
+    check(order.arranged(remote, scope: "home", window: window) == ["r2", "r1"], "A drag keeps other device lists in the order they were showing")
+    let relaunched = SidebarOrder(folder: folder)
+    check(relaunched.sort(window: window) == .manual && relaunched.arranged(rows, scope: "local", window: window) == ["a", "c", "b", "d", "e"] && relaunched.arranged(rows, scope: "local", window: other).first == "e", "A reorder survives relaunch, is not undone by the earlier sort, and leaves other windows alone")
+
+    order.setSort(.alphabetical, window: window)
+    order.move("remote", before: "local", scope: "devices", available: ["local", "remote"], window: window)
+    check(order.sort(window: window) == .alphabetical && order.ordered(["local", "remote"], scope: "devices", window: window) == ["remote", "local"], "Reordering device headers keeps the chosen row sort")
+    order.setSort(.manual, window: window)
+    check(order.arranged(rows, scope: "local", window: window) == ["a", "c", "b", "d", "e"], "Manual order is still available from the sort menu")
+
+    order.forget(window: window)
+    check(order.saved.windows?[window] == nil && SidebarOrder(folder: folder).ordered(ids, scope: "local", window: window).first == "e", "Closing a window removes only that window's saved order")
 }

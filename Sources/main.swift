@@ -3755,7 +3755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
         paneLayouts.removeValue(forKey: state.id)
         DeviceSyncService.shared.releaseWindow(placements: Workspace.shared.placements, windowID: state.id)
-        Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
+        Workspace.shared.close(state.id); SidebarOrder.shared.forget(window: state.id.uuidString); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
     @objc func resetDemo() {
