@@ -112,7 +112,7 @@ struct DeviceSidebarSection: View {
                         if home.online {
                             let rows = home.rows.map { (id: $0.globalID, title: $0.title, changedAt: $0.lastResponseAt) }
                             let rowIDs = SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id)
-                            ForEach(order.arranged(rows, scope: home.deviceID), id: \.self) { id in
+                            ForEach(order.arranged(rows, scope: home.deviceID, window: state.id.uuidString), id: \.self) { id in
                               if let row = home.rows.first(where: { $0.globalID == id }) {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
