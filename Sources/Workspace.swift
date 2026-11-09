@@ -410,7 +410,12 @@ struct SidebarSession: View {
                     PaneButton(label: String(pane), look: shown.look(.pane(pane), stripHovered: hover.overButtons)) { AppDelegate.shared.assign(session, to: state, pane: pane) }
                         .accessibilityLabel("Move \(session.title) to pane \(pane) in \(state.title)").accessibilityValue(shown.paneValue(pane)).help(shown.paneHelp(pane, item: "this session"))
                 }
-                PaneButton(label: "X", look: shown.look(.close, stripHovered: hover.overButtons, rowHovered: hover.inside)) { state.closingSessionID = session.id }.accessibilityLabel("Close \(session.title)").help(shown.elsewhere.help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored."))
+                PaneButton(label: "X", look: session.supportAssistant ? .greyed : shown.look(.close, stripHovered: hover.overButtons, rowHovered: hover.inside)) {
+                    guard !session.supportAssistant else { return }
+                    state.closingSessionID = session.id
+                }.disabled(session.supportAssistant)
+                    .accessibilityLabel("Close \(session.title)")
+                    .help(session.supportAssistant ? "Converse App Support stays available. Use P to park its pane." : shown.elsewhere.help("Close this session and stop its work. Asks for confirmation; closed sessions can be restored."))
             }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
             .background(workspace.showsParkedApproval(session) ? Color.yellow : (localPane == nil ? Color.clear : Color.accentColor.opacity(0.05)))
@@ -465,7 +470,7 @@ struct WindowTitle: View {
                     if capture.recording { capture.pause() }
                     else { capture.record(folder: Store.shared.folder) }
                 } label: {
-                    Text("PERF MONITORING")
+                    Text(capture.recording ? "PERF MONITORING" : "PERF MONITORING PAUSED")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white).padding(.horizontal, 6).frame(height: 16)
                         .background(capture.recording ? Color.red : Color(red: 0.38, green: 0.38, blue: 0.40), in: Capsule())

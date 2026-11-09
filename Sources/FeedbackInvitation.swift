@@ -38,7 +38,8 @@ struct FeedbackInvitationState: Codable {
     var askedReleases: Set<String> = []
     // Optional for archives written before permanent suppression was added.
     var feedbackGiven: Bool? = nil
-    var suppressed: Bool { feedbackGiven == true }
+    var neverAsk: Bool? = nil
+    var suppressed: Bool { feedbackGiven == true || neverAsk == true }
     mutating func markFeedbackGiven() { feedbackGiven = true }
 
     mutating func useRelease(_ value: String) {
@@ -91,6 +92,12 @@ func feedbackInvitationSelfTests(_ check: (Bool, String) -> Void) {
     check(state.suppressed && !state.eligible && state.completedTurns == 0 && !state.markShown(), "Feedback acknowledgement survives relaunch and upgrade and stops counting")
     state.useRelease("0.7.16/151")
     check(state.suppressed && !state.eligible, "Feedback acknowledgement also survives downgrades")
+    var optedOut = FeedbackInvitationState(release: "153")
+    optedOut.neverAsk = true
+    optedOut = try! JSONDecoder().decode(FeedbackInvitationState.self, from: JSONEncoder().encode(optedOut))
+    optedOut.useRelease("154")
+    for _ in 0..<25 { optedOut.completedTurn(success: true, interrupted: false, humanDirected: true) }
+    check(optedOut.suppressed && !optedOut.eligible && optedOut.feedbackGiven != true, "Never persists across upgrades without claiming feedback was given")
     let legacy = Data(#"{"release":"0.7.16/151","completedTurns":19,"askedReleases":[]}"#.utf8)
     var migrated = try! JSONDecoder().decode(FeedbackInvitationState.self, from: legacy)
     migrated.completedTurn(success: true, interrupted: false, humanDirected: true)

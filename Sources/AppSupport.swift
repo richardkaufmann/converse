@@ -559,6 +559,11 @@ final class FeedbackInvitation: ObservableObject {
         previewing = true; visible = true
         return true
     }
+    func neverAskInWindow(preview: Bool) {
+        guard !preview, file != nil else { return }
+        state.neverAsk = true
+        dismiss(); persist(state)
+    }
     func feedbackGivenInWindow(preview: Bool) { if !preview { feedbackWasGiven() } }
     var stateForTesting: FeedbackInvitationState { state }
     func flushWritesForTesting() { writes.sync {} }
@@ -606,6 +611,7 @@ struct FeedbackInvitationPanel: View {
     var report: (() -> Void)?
     var close: () -> Void
     var feedbackGiven: () -> Void = {}
+    var neverAsk: () -> Void = {}
     var repositoryName = AgentConfig.converseRepository
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -626,7 +632,8 @@ struct FeedbackInvitationPanel: View {
             HStack {
                 Button("I’ve given feedback", action: feedbackGiven)
                 Spacer()
-                Button("Not Now", action: close).keyboardShortcut(.cancelAction)
+                Button("Not now", action: close).keyboardShortcut(.cancelAction)
+                Button("Never!", action: neverAsk)
             }
         }.font(.body).padding(24).frame(width: 440).fixedSize(horizontal: false, vertical: true)
     }
@@ -650,6 +657,9 @@ final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
             AppDelegate.shared.reportConverseBug()
         } : nil, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
             FeedbackInvitation.shared.feedbackGivenInWindow(preview: preview)
+            self?.window?.close()
+        }, neverAsk: { [weak self] in
+            FeedbackInvitation.shared.neverAskInWindow(preview: preview)
             self?.window?.close()
         }, repositoryName: repository)
         let host = NSHostingView(rootView: panel)

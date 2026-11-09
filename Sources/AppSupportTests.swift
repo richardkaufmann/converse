@@ -10,6 +10,8 @@ import SwiftUI
     let scrubbed = BugReportPrivacy.scrub(privateReport)
     check(scrubbed.contains("Bug 123") && !scrubbed.contains("alice") && !scrubbed.contains("fixture") && !scrubbed.contains("example.com") && !scrubbed.contains("192.168"), "Bug report scrubber removes common credentials and identifiers locally while preserving symptoms")
     check(BugReportPrivacy.summary(version: "test", os: "macOS", grouped: true, peers: 2, online: 1, sessions: 3, busy: 1).contains("Known peers: 2; online: 1"), "Diagnostics consist of allowlisted versions and counts")
+    let configuration = BugReportPrivacy.configurationSummary([.init(kind: "agent", textBytes: 1234, imageCount: 2, imageBytes: 5678, unavailableImageCount: 1)])
+    check(configuration.contains("Information about the size of your configuration") && configuration.contains("1234") && configuration.contains("unavailableImageCount") && !configuration.contains("token"), "Configuration size summary contains only typed counts and anonymous item labels")
     let resetRoot = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("demo-reset-" + UUID().uuidString)
     let demoFolder = resetRoot.appendingPathComponent("Converse Demo")
     let realFolder = resetRoot.appendingPathComponent("Converse")

@@ -8,6 +8,7 @@ private let gutterLog = Logger(subsystem: "local.richard.Converse", category: "g
 // transcript space. Keep SwiftUI's split-view delegates and constraints intact.
 final class PaneDividerHandle: NSView {
     static let hitWidth: CGFloat = 14
+    static var setCursor: (NSCursor) -> Void = { $0.set() }
     weak var split: NSSplitView?
     let dividerIndex: Int
     private var tracking: NSTrackingArea?
@@ -47,9 +48,9 @@ final class PaneDividerHandle: NSView {
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area); tracking = area
     }
-    override func cursorUpdate(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
-    override func mouseEntered(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
-    override func mouseExited(with event: NSEvent) { if dragStart == nil { NSCursor.arrow.set() } }
+    override func cursorUpdate(with event: NSEvent) { Self.setCursor(.resizeLeftRight) }
+    override func mouseEntered(with event: NSEvent) { Self.setCursor(.resizeLeftRight) }
+    override func mouseExited(with event: NSEvent) { if dragStart == nil { Self.setCursor(.arrow) } }
     override func mouseDown(with event: NSEvent) {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
@@ -64,7 +65,7 @@ final class PaneDividerHandle: NSView {
         dragBegan?()
         startReleaseMonitor()
         scheduleIdleCheck()
-        NSCursor.resizeLeftRight.set()
+        Self.setCursor(.resizeLeftRight)
     }
     override func mouseDragged(with event: NSEvent) {
         PerformanceCapture.shared.delivery(since: event.timestamp, operation: .dragDelivery)
@@ -90,7 +91,7 @@ final class PaneDividerHandle: NSView {
             dragFrame = frame
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60, execute: frame)
         }
-        NSCursor.resizeLeftRight.set()
+        Self.setCursor(.resizeLeftRight)
     }
     private func applyDragFrame() {
         PerformanceCapture.shared.end(.dragFrameWait, pendingFrameMeasurement)
@@ -566,6 +567,11 @@ final class WindowPaneLayout {
 }
 
 func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
+    let originalCursorSetter = PaneDividerHandle.setCursor
+    var requestedCursor: NSCursor?
+    PaneDividerHandle.setCursor = { requestedCursor = $0 }
+    defer { PaneDividerHandle.setCursor = originalCursorSetter }
+
     _ = NSApplication.shared
     do {
         let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
@@ -614,8 +620,8 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         settle()
         check(abs(inner.arrangedSubviews[0].frame.width - before - 45) < 2, "Dragging the wider gutter moves its native divider by the pointer delta")
         handle.cursorUpdate(with: event(.mouseMoved, start))
-        check(NSCursor.current == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
-        NSCursor.arrow.set()
+        check(requestedCursor == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
+        PaneDividerHandle.setCursor(.arrow)
     } else { check(false, "Session gutter handle is installed") }
     let longText = NSTextView(frame: inner.arrangedSubviews[0].bounds)
     longText.autoresizingMask = [.width, .height]
