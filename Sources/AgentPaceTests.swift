@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 // Prompt caching, auto loop pacing, art throttle and API-key footer label.
 // Fixtures only: no network, no credentials.
@@ -28,10 +29,10 @@ import Foundation
     let timeVarying = rules.range(of: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}:[0-9]{2}", options: .regularExpression)
     check(timeVarying == nil && !rules.contains("Objective: ") && !rules.contains("Web search is ") && !rules.contains(AgentInstructions.voiceTurn) && !rules.contains("Unavailable older attachments") && !rules.contains("Art direction from the owner"),
           "Static instruction prefix contains no IDs, dates, times, objective or per-activation lines")
-    check([AgentPolicy.objectiveGoverns, AgentPolicy.scoreboardScope, ParkingLotStore.placementGuidance, "Return ONE JSON object with:", "Make the art fit sentiment"].allSatisfy(rules.contains)
+    check([AgentPolicy.objectiveGoverns, AgentPolicy.assessmentScope, ParkingLotStore.placementGuidance, "Return ONE JSON object with:", AgentAssessments.teaching].allSatisfy(rules.contains) && !rules.contains("artPrompt") && !rules.contains("Make the art fit sentiment")
           && first.contains(AgentInstructions.voiceTurn) && first.contains("Web search is available.") && first.contains(attachmentID) && !first.contains(AgentInstructions.parkingLotReview)
           && second.contains("Web search is unavailable for this activation; use only supplied evidence.") && second.contains(AgentInstructions.parkingLotReview) && second.contains("Support teaching")
-          && second.contains("Art direction from the owner (apply to artwork only): Moonbase") && second.contains("Auto pacing is on") && second.contains("Unavailable older attachments: none."),
+          && second.contains("Portrait art direction from the owner (art only, never a reporting instruction): Moonbase") && second.contains("Auto pacing is on") && second.contains("Unavailable older attachments: none."),
           "Reordered instructions keep every rule and variable line")
     if let objective = second.range(of: "Objective: "), let teaching = second.range(of: "Support teaching"), let voice = first.range(of: AgentInstructions.voiceTurn), let objectiveFirst = first.range(of: "Objective: ") {
         check(objective.lowerBound < teaching.lowerBound && objectiveFirst.lowerBound < voice.lowerBound, "Per-agent settings precede per-activation lines")
@@ -136,54 +137,29 @@ import Foundation
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentConfig())) as! [String: Any]
         for field in ["autoPace", "pacingDefaults", "autoPaceMinMinutes", "autoPaceMaxMinutes", "autoPaceReason", "artMinIntervalMinutes", "artMaxStaleHours", "lastArtScoreboard"] { legacy.removeValue(forKey: field) }
         let decoded = try JSONDecoder().decode(AgentConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
-        check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240 && decoded.artMinMinutes == 30 && decoded.artStaleHours == 6, "Older agent archives decode with auto pacing off and default art throttle")
-        var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90; saved.artMinIntervalMinutes = 60; saved.lastArtScoreboard = AgentScoreboard(summary: "", metrics: [], sentiment: "up")
-        check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(saved)) == saved, "Auto pacing and art throttle settings survive persistence")
+        check(!decoded.autoPaceOn && decoded.paceMinMinutes == 5 && decoded.paceMaxMinutes == 240 && decoded.portraitMinutes == 10 && decoded.assessment == nil, "Older agent archives decode with auto pacing off, no assessment and the default portrait interval")
+        var saved = paced; saved.autoPaceReason = "watching CI"; saved.autoPaceMaxMinutes = 90; saved.artMinIntervalMinutes = 60; saved.lastArtScoreboard = AgentScoreboard(summary: "", metrics: [], sentiment: "up"); saved.portraitMinMinutes = 30
+        check(try JSONDecoder().decode(AgentConfig.self, from: JSONEncoder().encode(saved)) == saved, "Auto pacing, portrait interval and retired art fields survive persistence")
         var remote = saved.wire(home: "local"); remote.objective = "Edited elsewhere"
         try saved.apply(remote)
-        check(saved.autoPaceOn && saved.paceMaxMinutes == 90 && saved.artMinMinutes == 60, "Older remote editors preserve auto pacing and art throttle settings")
+        check(saved.autoPaceOn && saved.paceMaxMinutes == 90 && saved.portraitMinutes == 30, "Older remote editors preserve auto pacing and portrait interval settings")
     } catch { check(false, "Auto pacing settings: " + error.localizedDescription) }
     let lenient = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"soon\",\"paceReason\":7}")
     let numeric = AgentReply.decode("{\"reply\":\"r\",\"nextRunInMinutes\":\"45\",\"paceReason\":\"CI running\"}")
     check(lenient?.reply == "r" && lenient?.nextRunInMinutes?.value == nil && lenient?.paceReason?.value == nil && numeric?.nextRunInMinutes?.value == 45 && numeric?.paceReason?.value == "CI running"
           && AgentReply.decode("{\"reply\":\"r\"}")?.nextRunInMinutes == nil, "Malformed pacing fields never invalidate an agent reply")
 
-    // 3. Art throttle.
-    func board(_ metrics: [(String, String)], sentiment: String = "up", asOf: String = "10:00 ET", url: String = "https://example.invalid/a") -> AgentScoreboard {
-        AgentScoreboard(title: "T", summary: "s", metrics: metrics.map { .init(label: $0.0, value: $0.1, sourceURL: url, asOf: asOf) }, sentiment: sentiment)
-    }
-    let base = board([("Price", "$10"), ("Bugs", "3")])
-    check(!AgentArtPolicy.scoreboardChanged(from: AgentArtPolicy.signature(base), to: board([("Price", "$10"), ("Bugs", "3")], asOf: "11:00 ET", url: "https://example.invalid/b")),
-          "Art ignores asOf and source URL changes")
-    check(AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$11"), ("Bugs", "3")])) && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10")]))
-          && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10"), ("Bugs", "3"), ("Stars", "4")])) && AgentArtPolicy.scoreboardChanged(from: base, to: board([("Price", "$10"), ("Bugs", "3")], sentiment: "down"))
-          && AgentArtPolicy.scoreboardChanged(from: nil, to: base) && !AgentArtPolicy.scoreboardChanged(from: nil, to: nil) && !AgentArtPolicy.scoreboardChanged(from: base, to: board([("Bugs", "3"), ("Price", "$10")])),
-          "Art treats changed values, added/removed metrics and sentiment as meaningful; metric order is not")
-    let last = now.addingTimeInterval(-600)
-    func decide(age: TimeInterval, direction: Bool = false, mood: Bool = false, board: Bool = false, lastArt: Date?? = nil) -> Bool {
-        AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArt ?? now.addingTimeInterval(-age), directionChanged: direction, moodChanged: mood, scoreboardChanged: board, minInterval: 1800, maxStale: 21600)
-    }
-    check(decide(age: 0, lastArt: .some(nil)), "First art is generated immediately")
-    check(decide(age: 60, direction: true), "Edited art direction regenerates immediately")
-    check(!decide(age: 600, mood: true) && !decide(age: 600, board: true) && decide(age: 1800, mood: true) && decide(age: 1800, board: true), "Mood or scoreboard changes wait for the minimum interval")
-    check(!decide(age: 1800) && !decide(age: 21599) && decide(age: 21600), "Unchanged art refreshes only at the maximum staleness")
-    var activity = AgentConfig()
-    activity.artDirection = "Only generate this if there has been significant activity"
-    activity.lastArtAt = now.addingTimeInterval(-86400); activity.lastArtDirection = activity.artDirection
-    activity.lastArtMood = "up"; activity.lastArtScoreboard = AgentArtPolicy.signature(base)
-    check(!activity.shouldRegenerateArt(mood: "up", board: base, now: now), "Explicit activity-only art does not regenerate merely because its age limit elapsed")
-    check(activity.shouldRegenerateArt(mood: "up", board: board([("Price", "$11"), ("Bugs", "3")]), now: now), "Measured activity still regenerates art after the minimum interval")
-    var throttled = AgentConfig(); throttled.lastArtAt = last; throttled.lastArtMood = "up"; throttled.lastArtScoreboard = AgentArtPolicy.signature(base)
-    check(!throttled.shouldRegenerateArt(mood: "down", board: base, now: now) && throttled.shouldRegenerateArt(mood: "down", board: base, now: now.addingTimeInterval(1200)), "Agent art uses the default 30 minute minimum")
-    throttled.artDirection = "Moonbase"
-    check(throttled.shouldRegenerateArt(mood: "up", board: base, now: now), "Agent art regenerates for an art direction edit inside the minimum")
+    // 3. Portrait interval (portraits are on demand; Refresh bypasses it).
     do {
-        try throttled.setArtThrottle(minMinutes: 60, maxStaleHours: 12)
-        check(throttled.artMinMinutes == 60 && throttled.artStaleHours == 12, "Art throttle settings are configurable")
-        for (low, high) in [(1.0, 6.0), (60, 0.5), (600, 2), (30, 500)] {
-            do { try throttled.setArtThrottle(minMinutes: low, maxStaleHours: high); check(false, "Invalid art throttle rejected") } catch { check(true, "Invalid art throttle rejected: \(low) min / \(high) hr") }
+        var portrait = AgentConfig()
+        try portrait.setPortraitInterval(minutes: 45)
+        check(portrait.portraitMinutes == 45 && portrait.portraitMinMinutes == 45, "Portrait minimum interval is configurable per agent")
+        try portrait.setPortraitInterval(minutes: 10)
+        check(portrait.portraitMinMinutes == nil, "The default portrait interval is stored as the default")
+        for bad in [0.0, 2000, Double.nan] {
+            do { try portrait.setPortraitInterval(minutes: bad); check(false, "Invalid portrait interval rejected") } catch { check(true, "Invalid portrait interval rejected: \(bad)") }
         }
-    } catch { check(false, "Art throttle settings: " + error.localizedDescription) }
+    } catch { check(false, "Portrait interval: " + error.localizedDescription) }
 
     // 4. API-key footer label.
     check(AgentModels.apiKeyAccount("muse-spark-1.3")?.label == "API Key" && AgentModels.apiKeyAccount("muse-spark-1.3")?.help == "API key — no account info available"
@@ -192,4 +168,81 @@ import Foundation
     let footerStore = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-footer-" + UUID().uuidString))
     let footerAgent = footerStore.createAgent(title: "Footer fixture", persist: false)
     check(footerStore.sessionLoginLabel(footerAgent) == "API Key", "Session login label names the API key for Meta API agents")
+    agentEngagementSelfTests(check)
+}
+
+// Dormant agents: a masked turn spends nothing and runs once on return.
+@MainActor func agentEngagementSelfTests(_ check: (Bool, String) -> Void) {
+    let t = Date(timeIntervalSince1970: 2_000_000_000)
+    check(AgentConfig().requiresEngagement == nil && !AgentConfig().awaitingEngagement(lastEngaged: nil), "Waiting for the human is off by default")
+    var never = AgentConfig(); never.requiresEngagement = true
+    check(!never.awaitingEngagement(lastEngaged: nil), "An agent's first scheduled turn has no earlier turn to wait on")
+    var retrying = AgentConfig(); retrying.requiresEngagement = true; retrying.lastLoopAt = t; retrying.transientFailures = 2
+    check(!retrying.awaitingEngagement(lastEngaged: nil), "Retries of a failed turn are not masked")
+    let legacy = try! JSONDecoder().decode(DeviceAgentSettings.self, from: JSONEncoder().encode(AgentConfig().wire(home: "h")))
+    check(legacy.requiresEngagement == false, "Agent settings carry the option to other devices")
+
+    let store = Store(folder: FileManager.default.temporaryDirectory.appendingPathComponent("converse-engage-" + UUID().uuidString))
+    let service = DeviceSyncService(); store.switchboardService = service
+    let news = store.createAgent(title: "News checker", persist: false)
+    news.agent?.enabled = true; news.agent?.autoPace = false; news.agent?.requiresEngagement = true
+    news.agent?.lastLoopAt = t.addingTimeInterval(-900); news.agent?.nextRunAt = t
+    let assessedAt = t.addingTimeInterval(-7200)
+    news.agent?.assessment = AgentAssessment(summary: "Quiet", status: .onTrack, facts: [], revision: 1, contentHash: "abc", updatedAt: assessedAt, checkedAt: assessedAt)
+    var starts = 0
+    store.startAgentRun = { session, _ in starts += 1; session.busy = true }
+    let runtime = AgentRuntime()
+    func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    func status(_ now: Date) -> String { news.agent!.loopStatus(at: now, busy: news.busy, queuePaused: false, pendingCount: 0, lastEngaged: service.lastEngagedAt) }
+
+    for offset in [0.0, 5, 3600] { runtime.tick(store: store, now: t.addingTimeInterval(offset)); settle() }
+    check(starts == 0 && news.pending.isEmpty && news.agent?.nextRunAt == t && news.agent?.lastLoopAt == t.addingTimeInterval(-900),
+          "A due turn with no engagement makes no provider call, queues nothing and keeps its deadline")
+    check(status(t.addingTimeInterval(3600)).hasPrefix("Waiting for you") && !status(t.addingTimeInterval(3600)).contains("check due"), "A dormant agent says it is waiting for you")
+    let dormant = news.agent!.widgetContent(now: t.addingTimeInterval(3600))
+    check(dormant.freshness == .aging && dormant.problem == nil && news.agent?.assessmentProblem == nil && news.agent?.attention.isEmpty == true,
+          "A dormant assessment ages by time and is not marked as an error")
+
+    store.enqueueSwitchboard(news, text: "Another agent asks for work", hop: 1); settle()
+    check(service.lastEngagedAt == nil && starts == 1 && news.agent?.lastLoopAt == t.addingTimeInterval(-900), "Switchboard traffic runs its own turn but is not engagement")
+    news.busy = false; news.pending = []
+    store.queueAgentRun(news); settle()
+    check(service.lastEngagedAt == nil && starts == 2, "Run once still runs while dormant, and queueing it is not engagement")
+    news.busy = false; news.pending = []; starts = 0
+
+    let older = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp), isInitiator: false, displayName: "Older")
+    older.trustedReady = true; older.hello = DeviceHello(deviceID: String(repeating: "a", count: 64), deviceName: "Older", converseVersion: "test")
+    let report = try! JSONEncoder().encode(DeviceEngagement.Report(ageSeconds: 1))
+    service.handleEnvelope(older, DeviceEnvelope(kind: DeviceEngagement.kind, payload: report))
+    check(service.lastEngagedAt == nil, "A peer that does not advertise engagement cannot wake an agent")
+
+    // The iPhone's clock is irrelevant: the home stamps the report on receipt.
+    service.receiveEngagementForTesting(DeviceEngagement.Report(ageSeconds: 5), receivedAt: t.addingTimeInterval(3700))
+    check(service.lastEngagedAt == t.addingTimeInterval(3695), "A report's age is measured against the receiving device's clock")
+    let returned = t.addingTimeInterval(3705)
+    for offset in [0.0, 1, 2] { runtime.tick(store: store, now: returned.addingTimeInterval(offset)); settle(); news.busy = offset == 0 ? true : news.busy }
+    check(starts == 1 && news.agent?.lastLoopAt == returned && (news.agent?.nextRunAt ?? t) > returned, "Coming back runs the masked turn once, never several, and resumes normal pacing")
+
+    news.busy = false; news.pending = []
+    let nextDue = news.agent!.nextRunAt!
+    runtime.tick(store: store, now: nextDue); settle()
+    check(starts == 1 && status(nextDue).hasPrefix("Waiting for you"), "Without new engagement the following due turn is masked again")
+    service.noteHumanInput(now: nextDue.addingTimeInterval(10))
+    runtime.tick(store: store, now: nextDue.addingTimeInterval(11)); settle()
+    check(starts == 2, "Real local input releases the next masked turn")
+
+    var engagement = DeviceEngagement()
+    check(engagement.report(lastReported: nil, lastSent: nil, now: t) == nil, "A device with no input reports nothing")
+    engagement.recordLocal(at: t)
+    let sent = engagement.report(lastReported: nil, lastSent: nil, now: t.addingTimeInterval(4))
+    check(sent?.ageSeconds == 4, "A device reconnecting after input reports that input's age")
+    check(engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(100)) == nil, "An input already reported is not sent again")
+    engagement.recordLocal(at: t.addingTimeInterval(1))
+    check(engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(10)) == nil && engagement.report(lastReported: t, lastSent: t, now: t.addingTimeInterval(31)) != nil,
+          "Reports are throttled, with a trailing report for the last input")
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: -1), receivedAt: t.addingTimeInterval(500))
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: .infinity), receivedAt: t.addingTimeInterval(500))
+    check(engagement.latest == t.addingTimeInterval(1), "Malformed report ages are ignored")
+    engagement.recordPeer(DeviceEngagement.Report(ageSeconds: 10), receivedAt: t.addingTimeInterval(100))
+    check(engagement.latest == t.addingTimeInterval(90) && engagement.local == t.addingTimeInterval(1), "Peer input moves the Group's latest time but is never reported onward")
 }

@@ -69,6 +69,8 @@ final class DevicePeer {
     var alive = true
     var leasedSessions: Set<UUID> = []
     var startedAt = Date()
+    var reportedEngagement: Date?
+    var engagementSentAt: Date?
     var lastSeen = Date()
     var testSink: ((Data) -> Void)?
     init(connection: NWConnection, isInitiator: Bool, displayName: String, manualHost: String? = nil, manualPort: Int? = nil) {
@@ -82,6 +84,7 @@ final class DeviceSyncService: ObservableObject {
     static let defaultPort: NWEndpoint.Port = 48721
     static let serviceType = "_converse._tcp"
     @Published var currentGroup: ConverseGroup?
+    private var engagement = DeviceEngagement()
     @Published var knownGroups: [ConverseGroup] = []
     @Published var groupRequests: [GroupJoinRequest] = [] {
         didSet {
@@ -148,6 +151,9 @@ final class DeviceSyncService: ObservableObject {
     #if os(macOS)
     var participantStore: Store { storeOverride ?? .shared }
     var storeOverride: Store?
+    // Set only while View → Group is visible.
+    var groupMapTellObserver: ((SwitchboardTellEvent) -> Void)?
+    var participantTellConfirmationSeconds: TimeInterval = 20
     var parkingLibraryOverride: ParkingLotLibrary?
     var parkingLibrary: ParkingLotLibrary { parkingLibraryOverride ?? .shared }
     #endif
@@ -192,6 +198,7 @@ final class DeviceSyncService: ObservableObject {
     private var pendingTakes: [String: Date] = [:]
     private var resumeEpochs: [String: UInt64] = [:]
     private var leaseBoots: [String: UInt64] = [:]
+    // Status-query replies report a record; they never revoke the display lease.
     private var pendingUploads: Set<String> = []
     private var recoveredUploads: [String: [String: UInt64]] = [:]
     private var pendingDownloads: Set<String> = []
@@ -222,7 +229,7 @@ final class DeviceSyncService: ObservableObject {
         commandStore = try DeviceCommandStore(folder: folder)
         stateStore = try DeviceSyncStateStore(folder: folder)
         draftStore = try DeviceDraftStore(folder: folder)
-        outboxStore = try DeviceOutboxStore(folder: folder)
+        outboxStore = try DeviceOutboxStore(folder: folder); outbox = outboxStore?.records ?? []
         try loadParticipantIntents()
         boot = stateStore?.beginBoot() ?? 0
         let store = stateStore
@@ -230,6 +237,13 @@ final class DeviceSyncService: ObservableObject {
         started = true
     }
     func adoptPeerForTesting(_ peer: DevicePeer) { peers[peer.id] = peer }
+    var commandStoreForTesting: DeviceCommandStore? { commandStore }
+    var commandAckObserverForTesting: ((UUID, DeviceAckPayload) -> Void)?
+    // Sends hand-built bytes under an existing command ID (binding interop).
+    func sendRawCommandForTesting(globalID: String, commandID: UUID, payload: Data) -> Bool {
+        guard isTestEnvironment, let global = DeviceGlobalID(globalID), let epoch = remoteLeases[globalID], let peer = peerForHome(global.home) else { return false }
+        sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalID, commandID: commandID, epoch: epoch, payload: payload)); return true
+    }
     var testingPort: UInt16? { listener?.port.flatMap { $0.rawValue > 0 ? $0.rawValue : nil } }
     private var testingDiscoveryPrefix: String?
     func startNetworkForTesting(discoveryPrefix: String? = nil) throws {
@@ -392,17 +406,37 @@ final class DeviceSyncService: ObservableObject {
         #if os(macOS)
         hello.capabilities.append(contentsOf: ["agent-host-v1", "switchboard-supervision-v1", "image-assist-v1", "image-segments-v1", "transcript-export-v1", "agent-art-direction-v1"])
         #endif
-        hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1"])
+        hello.capabilities.append(contentsOf: ["participant-control-v1", "agent-schedule-v1", DeviceEngagement.capability])
         #if os(macOS)
         hello.capabilities.append("session-close-v1")
         hello.capabilities.append("session-rename-v1")
         hello.capabilities.append("session-create-v1")
+        hello.capabilities.append(Self.queueRemoveCapability)
         #endif
         if editableLotsEnabled { hello.capabilities.append(LotEditing.capability) }
         hello.group = currentGroup
         hello.joinGroupID = peer.wantsJoin ? peer.joiningGroupID : nil
         return (try? JSONEncoder().encode(hello)) ?? Data()
     }
+    /// Real keyboard, pointer or touch input on this device.
+    func noteHumanInput(now: Date = Date()) {
+        engagement.recordLocal(at: now)
+        reportEngagement(now: now)
+    }
+    var lastEngagedAt: Date? { engagement.latest }
+    func receiveEngagementForTesting(_ report: DeviceEngagement.Report, receivedAt: Date) { engagement.recordPeer(report, receivedAt: receivedAt) }
+    private func reportEngagement(now: Date) {
+        guard !locallyRemoved, !groupsEnabled || currentGroup != nil else { return }
+        for peer in Array(peers.values) where peer.trustedReady && !peer.controlOnly
+            && peer.hello?.capabilities.contains(DeviceEngagement.capability) == true
+            && peer.hello?.capabilities.contains("agent-host-v1") == true {
+            guard let report = engagement.report(lastReported: peer.reportedEngagement, lastSent: peer.engagementSentAt, now: now),
+                  let data = try? JSONEncoder().encode(report) else { continue }
+            peer.reportedEngagement = engagement.local; peer.engagementSentAt = now
+            sendEnvelope(peer, DeviceEnvelope(kind: DeviceEngagement.kind, payload: data))
+        }
+    }
+    func helloCapabilitiesForTesting(_ peer: DevicePeer) -> [String] { (try? JSONDecoder().decode(DeviceHello.self, from: helloPayload(peer)))?.capabilities ?? [] }
     private func sendHandshake(_ peer: DevicePeer) {
         do {
             guard var handshake = peer.handshake else { return }
@@ -410,11 +444,12 @@ final class DeviceSyncService: ObservableObject {
             peer.handshake = handshake; sendRaw(peer, message)
         } catch { disconnect(peer) }
     }
-    private func sendRaw(_ peer: DevicePeer, _ message: Data) {
-        guard message.count <= 65535 else { disconnect(peer); return }
-        if let testSink = peer.testSink { testSink(message); return }
+    private func sendRaw(_ peer: DevicePeer, _ message: Data, completion: ((Bool) -> Void)? = nil) {
+        guard message.count <= 65535 else { completion?(false); disconnect(peer); return }
+        if let testSink = peer.testSink { testSink(message); completion?(true); return }
         let framed = Data([UInt8((message.count >> 8) & 255), UInt8(message.count & 255)])
         peer.connection.send(content: framed + message, completion: .contentProcessed { [weak self, weak peer] error in
+            completion?(error == nil)
             if error != nil, let peer { self?.disconnect(peer) }
         })
     }
@@ -647,17 +682,28 @@ extension DeviceSyncService {
         return displayName(for: id, fallback: reported) + "\nReported name: " + reported + "\n" + status +
             "\nGroup: " + (currentGroup?.name ?? "None") + "\nDevice ID: " + id + endpoint
     }
-    private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
-        guard peer.alive, var keys = peer.keys else { return }
+    private func sendEnvelope(_ peer: DevicePeer, _ envelope: DeviceEnvelope, completion: ((Bool) -> Void)? = nil) {
+        guard peer.alive, var keys = peer.keys else { completion?(false); return }
+        // Network callbacks use the connection's main queue. Count every chunk
+        // so a large acknowledgment produces one completion, including failure.
+        var remaining = 0
+        var completed = false
+        func finish(_ success: Bool) {
+            guard !completed else { return }
+            if !success { completed = true; completion?(false); return }
+            remaining -= 1
+            if remaining == 0 { completed = true; completion?(true) }
+        }
         do {
             let framed = try DeviceFrame.encode(envelope)
+            remaining = (framed.count + 59_999) / 60_000
             var offset = 0
             while offset < framed.count {
                 let chunk = Data(framed.dropFirst(offset).prefix(60_000)); offset += chunk.count
-                sendRaw(peer, try keys.sender.encrypt(chunk))
+                sendRaw(peer, try keys.sender.encrypt(chunk), completion: completion == nil ? nil : finish)
             }
             peer.keys = keys
-        } catch { disconnect(peer) }
+        } catch { finish(false); disconnect(peer) }
     }
     private func disconnect(_ peer: DevicePeer, preserveDeviceState: Bool = false) {
         if let home = peer.hello?.deviceID { switchboardQueueReports.removeValue(forKey: home) }
@@ -695,6 +741,7 @@ extension DeviceSyncService {
         tickCount += 1
         let now = Date()
         if pruneGroupRequests(at: now) { publishGroupRequests() }
+        reportEngagement(now: now)
         for peer in Array(peers.values) {
             if !peer.trustedReady && now.timeIntervalSince(peer.startedAt) > 180 { disconnect(peer); continue }
             if peer.trustedReady {
@@ -789,7 +836,7 @@ extension DeviceSyncService {
     }
     #if os(macOS)
     private func wireMessage(_ message: Message) -> DeviceWireMessage {
-        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) }, createdAtUnixSeconds: message.createdAt?.timeIntervalSince1970)
+        DeviceWireMessage(id: message.id, role: message.role, text: message.text, imageHashes: message.images.compactMap { imageHash(path: $0) }, createdAtUnixSeconds: message.createdAt?.timeIntervalSince1970, components: message.components)
     }
     private func requestDTOs(_ session: Session) -> [DeviceRequestDTO] {
         session.requests.map { request in
@@ -865,6 +912,10 @@ extension DeviceSyncService {
     func sidebarPayloadForTesting() -> DeviceSidebarPayload { sidebarPayload() }
     func publishSidebarForTesting() { publishSidebarIfChanged() }
     private func publishSidebarIfChanged() {
+        #if os(macOS)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.sidebarPublish, measurement) }
+        #endif
         guard started, peers.values.contains(where: { $0.trustedReady }) else { return }
         // Compare content, not a transport counter. Sending a snapshot itself
         // advances homeSeq; including it caused another send on every idle poll.
@@ -922,13 +973,13 @@ extension DeviceSyncService {
                                               homeSeq: stateStore?.nextSeq() ?? 0, epoch: holder.epoch, boot: boot,
                                               messages: slice, offset: start, total: total, prepend: beforeOffset != nil,
                                               draft: session.draft, draftVersion: drafts.version(session: sessionID.uuidString), draftImageHashes: imageHashes,
-                                              pending: session.pending.map { DevicePendingDTO(id: $0.id, text: $0.text) },
+                                              pending: session.pending.map { DevicePendingDTO(id: $0.id, text: $0.text, components: $0.messageComponents) },
                                               busy: session.busy, status: session.status, title: session.title, engine: session.entry.engine,
                                               accountName: session.entry.accountName, model: session.toolStatus.model, effort: session.toolStatus.effort, access: session.toolStatus.access,
                                               modelOptions: session.modelChoices.map { DeviceChoiceDTO(id: $0.id, label: $0.label, provider: $0.provider, profile: $0.profile) },
                                               effortOptions: session.availableEfforts,
                                               accessOptions: session.accessChoices.filter(\.available).map { DeviceChoiceDTO(id: $0.id, label: $0.label) },
-                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in DeviceAgentWidget(summary: config.widgetSummary, metrics: config.scoreboard?.metrics.map { DeviceWidgetMetric(label: $0.label, value: $0.value) } ?? (config.repositorySnapshot?.metrics ?? []).map { DeviceWidgetMetric(label: $0.0, value: $0.1) }, observedAt: config.scoreboard?.observedAt ?? config.repositorySnapshot?.observedAt, attention: config.attention, artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count)) })
+                                              requests: requestDTOs(session), queuePaused: session.queuePaused, agentWidget: session.agent.map { config in config.deviceWidget(artHash: config.artPath.flatMap { imageHash(path: $0) }, loopStatus: config.loopStatus(at: Date(), busy: session.busy, queuePaused: session.queuePaused, pendingCount: session.pending.count, lastEngaged: lastEngagedAt)) })
         payload.compaction = session.compactionState
         if let data = try? JSONEncoder().encode(payload) {
             sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.transcriptSnapshot.rawValue, homeSeq: payload.homeSeq, boot: boot, sessionID: payload.globalID, epoch: holder.epoch, payload: data))
@@ -951,8 +1002,8 @@ extension DeviceSyncService {
         }
         return true
     }
-    private func sendAck(_ peer: DevicePeer, commandID: UUID, sessionID: String?, outcome: String, detail: String? = nil, epoch: UInt64? = nil) {
-        let payload = try? JSONEncoder().encode(DeviceAckPayload(outcome: outcome, detail: detail, epoch: epoch))
+    private func sendAck(_ peer: DevicePeer, commandID: UUID, sessionID: String?, outcome: String, detail: String? = nil, epoch: UInt64? = nil, query: Bool? = nil) {
+        let payload = try? JSONEncoder().encode(DeviceAckPayload(outcome: outcome, detail: detail, epoch: epoch, query: query))
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.commandAck.rawValue, sessionID: sessionID, commandID: commandID, epoch: epoch, payload: payload))
     }
     private func executeHomeCommand(_ peer: DevicePeer, _ envelope: DeviceEnvelope) {
@@ -965,12 +1016,22 @@ extension DeviceSyncService {
         let teaching = command.action == "teachSwitchboard" && envelope.epoch == 0 && peer.hello?.capabilities.contains("switchboard-teach-v1") == true
         guard teaching || requireLease(peer, envelope, session) else { return }
         guard let origin = peer.hello?.deviceID, let commandStore else { return }
-        let payloadHash = DeviceBlob.sha256Hex(data)
-        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
+        // New records bind the canonical form; existing records compare
+        // under their own scheme, so a legacy raw record never silently
+        // accepts a re-encoded retry.
+        let payloadHash = DeviceCommandBinding.hash(data, scheme: DeviceCommandBinding.canonicalScheme)
+        let known = ["submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard", "compact", "cancelCompact"]
         do {
-            guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) else {
-                if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash) {
+            // Content that cannot be canonicalized faithfully is refused, never trimmed.
+            guard commandStore.records[commandID] != nil || payloadHash != nil else {
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command content is not unambiguous JSON. Nothing was applied.", epoch: envelope.epoch)
+                return
+            }
+            guard try commandStore.begin(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payloadHash: payloadHash ?? "", hashScheme: DeviceCommandBinding.canonicalScheme) else {
+                if commandStore.bindingMatches(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "", payload: data) {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Already recorded on home.", epoch: envelope.epoch)
+                } else if commandStore.rawBindingUnconfirmed(id: commandID, origin: origin, sessionID: envelope.sessionID ?? "") {
+                    sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: DeviceCommandBinding.rawMismatchDetail, epoch: envelope.epoch)
                 } else {
                     sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "rejected", detail: "Command ID reused with different content.", epoch: envelope.epoch)
                 }
@@ -987,6 +1048,7 @@ extension DeviceSyncService {
         let store = Store.shared
         var asyncSetting = false
         var failure: String?
+        var completion = "Applied once on home."
         switch command.action {
         case "teachSwitchboard": store.teachSwitchboard(session)
         case "submit" where session.isUnboundImport:
@@ -1012,6 +1074,9 @@ extension DeviceSyncService {
         case "resumeQueue": session.queuePaused = false; store.save(); store.runNext(session)
         case "pauseQueue": session.queuePaused = true; store.save()
         case "clearQueue": session.pending = []; store.save()
+        case "removeQueued":
+            if let id = command.pendingID { failure = store.removePending(session, id: id) }
+            else { failure = "Remove not applied: no queued item was specified. Nothing was removed." }
         case "rename":
             // Same path as local rename: title didSet updates identity sidecar.
             if let text = command.text, !text.isEmpty { session.title = text; store.save() }
@@ -1035,6 +1100,8 @@ extension DeviceSyncService {
             }
         default: break
         }
+        // Automatic dequeue won the race: the inject completes as a no-op.
+        if Store.injectIsNoOp(failure), let detail = failure { completion = detail; failure = nil }
         if let failure {
             do { try commandStore.markFailed(id: commandID) }
             catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Nothing was injected, but home could not record the failure. Check home before retrying.", epoch: envelope.epoch); return }
@@ -1049,7 +1116,7 @@ extension DeviceSyncService {
         do { try commandStore.markCompleted(id: commandID) }
         catch { sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "uncertain", detail: "Applied on home but completion was not recorded. Check home; do not resend.", epoch: envelope.epoch); return }
         sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: "completed",
-                detail: "Applied once on home.", epoch: envelope.epoch)
+                detail: completion, epoch: envelope.epoch)
         sendTranscript(to: peer, sessionID: session.id); publishSidebarIfChanged()
     }
     #endif
@@ -1073,6 +1140,11 @@ extension DeviceSyncService {
         if handleLotEnvelope(peer, envelope) { return }
         if handleParticipantControl(peer, envelope) { return }
         switch envelope.kind {
+        case DeviceEngagement.kind:
+            guard peer.hello?.capabilities.contains(DeviceEngagement.capability) == true,
+                  !groupsEnabled || currentGroup.map({ acceptsParticipant(home: peerHome, groupID: $0.id) }) == true,
+                  let data = envelope.payload, let report = try? JSONDecoder().decode(DeviceEngagement.Report.self, from: data) else { return }
+            engagement.recordPeer(report, receivedAt: Date())
         case "fabric.members":
             guard peer.hello?.capabilities.contains("fabric-membership-v1") == true, let data = envelope.payload,
                   let members = try? JSONDecoder().decode([TrustedDevice].self, from: data),
@@ -1268,10 +1340,13 @@ extension DeviceSyncService {
         case DeviceMessageKind.commandQuery.rawValue:
             if let commandID = envelope.commandID, let commandStore {
                 if let record = commandStore.records[commandID], record.origin != peerHome || record.sessionID != envelope.sessionID { return }
-                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue, detail: "Home record lookup.", epoch: envelope.epoch)
+                sendAck(peer, commandID: commandID, sessionID: envelope.sessionID, outcome: (commandStore.outcome(id: commandID) ?? .rejected).rawValue,
+                        detail: commandStore.records[commandID] == nil ? DeviceCommandBinding.unrecordedDetail : "Home record lookup.", epoch: envelope.epoch, query: true)
             }
         #endif
         case DeviceMessageKind.commandAck.rawValue:
+            if let observe = commandAckObserverForTesting, let commandID = envelope.commandID, let idString = envelope.sessionID, DeviceGlobalID(idString)?.home == peerHome,
+               let ack = envelope.payload.flatMap({ try? JSONDecoder().decode(DeviceAckPayload.self, from: $0) }) { observe(commandID, ack) }
             // Bind to authenticated home + exact outbox session. A different
             // paired peer that somehow knows an ID cannot complete it.
             if let commandID = envelope.commandID, let idString = envelope.sessionID, let global = DeviceGlobalID(idString), global.home == peerHome,
@@ -1282,7 +1357,10 @@ extension DeviceSyncService {
                 try? outboxStore?.resolve(commandID: commandID, outcome: ack.outcome, detail: ack.detail)
                 outbox = outboxStore?.records ?? outbox
                 if ack.outcome == "completed" { completedCommands.insert(commandID) }
-                if ack.outcome == "rejected" { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
+                // A query answer never costs the lease, however many are in
+                // flight. Older homes don't mark answers; they keep the old
+                // behaviour.
+                if ack.outcome == "rejected" && ack.query != true { remoteLeases.removeValue(forKey: idString); leaseBoots.removeValue(forKey: idString) }
             }
         #if os(macOS)
         case DeviceMessageKind.blobChunk.rawValue, DeviceMessageKind.blobComplete.rawValue, DeviceMessageKind.blobOffer.rawValue:
@@ -1507,6 +1585,8 @@ extension DeviceSyncService {
     @discardableResult
     func sendRemoteCommand(globalID: String, command: DeviceCommandPayload) -> UUID? {
         guard remoteRow(globalID: globalID)?.engine != "parking", remoteTranscripts[globalID]?.engine != "parking" else { lastOutcome = "Parking Lots are read only on Group viewers."; return nil }
+        // Older homes only know Clear queue; never send them a single removal.
+        guard command.action != "removeQueued" || canRemoveQueuedRemote(globalID) else { lastOutcome = "Update the home device to remove one queued message."; return nil }
         // A double click is the same outstanding queue intent, not a second
         // interrupt. Uncertain requests require a home query before retrying.
         if Self.queueActions.contains(command.action), let active = queueCommand(globalID: globalID),
@@ -1518,16 +1598,22 @@ extension DeviceSyncService {
         guard let global = DeviceGlobalID(globalID), let epoch, let peer = peerForHome(global.home) else {
             lastOutcome = "Take the session again before sending."; return nil
         }
-        guard let payloadData = try? JSONEncoder().encode(command) else { return nil }
-        let record = DeviceOutboxRecord(commandID: UUID(), sessionID: globalID, payload: command, payloadHash: DeviceBlob.sha256Hex(payloadData), epoch: epoch)
+        // Canonical bytes, stored and resent verbatim: JSONEncoder key order
+        // is not stable, even within one process.
+        guard let payloadData = try? DeviceCommandBinding.encode(command) else { return nil }
+        let record = DeviceOutboxRecord(commandID: UUID(), sessionID: globalID, payload: command, payloadHash: DeviceBlob.sha256Hex(payloadData), epoch: epoch, payloadData: payloadData)
         do { try outboxStore?.add(record); outbox = outboxStore?.records ?? outbox } catch { lastOutcome = "Could not save outgoing message. Nothing sent."; return nil }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: globalID, commandID: record.commandID, epoch: epoch, payload: payloadData))
         return record.commandID
     }
     func retryOutbox(_ record: DeviceOutboxRecord) {
+        // Never re-encode a legacy record or give it a new ID: ask home.
+        guard let payloadData = record.payloadData else {
+            try? outboxStore?.markLegacyUncertain(commandID: record.commandID); outbox = outboxStore?.records ?? outbox
+            lastOutcome = DeviceOutboxRecord.legacyDetail; queryOutbox(record); return
+        }
         let epoch = record.payload.action == "teachSwitchboard" && canTeachRemote(record.sessionID) ? 0 : remoteLeases[record.sessionID]
-        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch, let peer = peerForHome(global.home),
-              let payloadData = try? JSONEncoder().encode(record.payload) else { lastOutcome = "Take the session again before retrying."; return }
+        guard record.outcome == "pending", let global = DeviceGlobalID(record.sessionID), let epoch, let peer = peerForHome(global.home) else { lastOutcome = "Take the session again before retrying."; return }
         sendEnvelope(peer, DeviceEnvelope(kind: DeviceMessageKind.command.rawValue, sessionID: record.sessionID, commandID: record.commandID, epoch: epoch, payload: payloadData))
     }
     func queryOutbox(_ record: DeviceOutboxRecord) {
@@ -1536,7 +1622,11 @@ extension DeviceSyncService {
     }
     func discardOutbox(_ record: DeviceOutboxRecord) { try? outboxStore?.remove(commandID: record.commandID); outbox = outboxStore?.records ?? outbox }
     func unresolved(globalID: String) -> [DeviceOutboxRecord] { outbox.filter { $0.sessionID == globalID } }
-    static let queueActions: Set<String> = ["inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue"]
+    static let queueActions: Set<String> = ["inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue", "removeQueued"]
+    static let queueRemoveCapability = "queue-remove-v1"
+    func canRemoveQueuedRemote(_ globalID: String) -> Bool {
+        DeviceGlobalID(globalID).flatMap { peerForHome($0.home) }?.hello?.capabilities.contains(Self.queueRemoveCapability) == true
+    }
     func queueCommand(globalID: String) -> DeviceOutboxRecord? {
         let records = unresolved(globalID: globalID).filter { Self.queueActions.contains($0.payload.action) }
         return records.first { ["pending", "accepted", "uncertain"].contains($0.outcome) } ?? records.last
@@ -1682,7 +1772,10 @@ extension DeviceSyncService {
         knownGroups = groupStore?.state.groups ?? []
         trusted = trustStore?.devices.filter { $0.deviceID != identity?.deviceID && (!groupsEnabled || (currentGroup != nil && $0.groupID == currentGroup?.id)) } ?? []
     }
-    private func groupAdvertisement() -> NWListener.Service {
+    private func groupAdvertisement() -> NWListener.Service? {
+        // Loopback transport fixtures must not publish onto the real LAN or
+        // depend on Bonjour availability. Discovery fixtures opt in by name.
+        guard !isTestEnvironment || testingDiscoveryPrefix != nil else { return nil }
         var hints: [String: String] = ["device": identity?.deviceID ?? ""]
         if let group = currentGroup { hints.merge(["group": group.id, "name": group.name, "creator": group.creator]) { _, new in new } }
         return NWListener.Service(name: (testingDiscoveryPrefix ?? "") + deviceName + " [" + String((identity?.deviceID ?? "").prefix(8)) + "]", type: Self.serviceType, txtRecord: NWTXTRecord(hints))
@@ -1918,6 +2011,7 @@ extension DeviceSyncService {
               report.entries.allSatisfy({ DeviceGlobalID($0.target)?.home == home && DeviceGlobalID($0.source)?.home == localDeviceID }) else { return true }
         switchboardQueueReports[home] = (report, Date()); return true
     }
+    var groupMapPendingTellIDs: Set<UUID> { Set(pendingTells.keys) }
     func sendParticipantTell(source: Session, target: String, text: String, id: UUID, hop: Int, urgent: Bool, replyExpected: Bool = false, inReplyTo: UUID? = nil) -> String? {
         guard let global = DeviceGlobalID(target), let home = identity?.deviceID, let group = currentGroup?.id,
               acceptsParticipant(home: global.home, groupID: group), let peer = peerForHome(global.home),
@@ -1942,8 +2036,11 @@ extension DeviceSyncService {
         source.messages.append(Message(role: "notice", text: "Switchboard: awaiting home acceptance → " + row.title + " [" + target + "] · " + id.uuidString + (replyExpected ? " [ask]" : " [tell]") + "\n" + text))
         participantStore.save()
         sendEnvelope(peer, DeviceEnvelope(kind: "participant.tell", commandID: id, payload: try? JSONEncoder().encode(payload)))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-            guard let self, let pending = self.pendingTells.removeValue(forKey: id), let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
+        groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: .sent, source: payload.source, target: global.string, kind: replyExpected ? .ask : inReplyTo != nil ? .reply : .tell))
+        DispatchQueue.main.asyncAfter(deadline: .now() + participantTellConfirmationSeconds) { [weak self] in
+            guard let self, let pending = self.pendingTells.removeValue(forKey: id) else { return }
+            self.groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: .unconfirmed))
+            guard let source = self.participantStore.sessions.first(where: { $0.id == pending.source }) else { return }
             if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {
                 source.messages[at].text = source.messages[at].text.replacingOccurrences(of: "awaiting home acceptance →", with: "delivery unconfirmed →")
             }
@@ -1961,6 +2058,7 @@ extension DeviceSyncService {
             guard let pending = pendingTells[id], pending.home == origin, pending.group == group,
                   let bytes = envelope.payload, let ack = try? JSONDecoder().decode(DeviceAckPayload.self, from: bytes) else { return true }
             pendingTells.removeValue(forKey: id)
+            groupMapTellObserver?(SwitchboardTellEvent(id: id, phase: ack.outcome == "queued" ? .accepted : ack.outcome == "rejected" ? .rejected : .unconfirmed))
             if let source = store.sessions.first(where: { $0.id == pending.source }) {
                 store.switchboardReceipt(source, delivery: id, accepted: ack.outcome == "queued")
                 if let at = source.messages.lastIndex(where: { $0.text.hasPrefix("Switchboard: awaiting home acceptance → ") && $0.text.contains(id.uuidString) }) {
@@ -2050,7 +2148,10 @@ extension DeviceSyncService {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the Mac home to use multi-object segmentation.")
         }
         if !(settings?.artDirection ?? "").isEmpty && peer.hello?.capabilities.contains("agent-art-direction-v1") != true {
-            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving scoreboard art direction.")
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before saving portrait art direction.")
+        }
+        if settings?.requiresEngagement == true && peer.hello?.capabilities.contains(DeviceEngagement.capability) != true {
+            return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before making this agent wait for you.")
         }
         if !(settings?.scheduleText ?? "").isEmpty && peer.hello?.capabilities.contains("agent-schedule-v1") != true {
             return DeviceParticipantResponse(groupID: group, outcome: "rejected", detail: "Update the home app before using text schedules; it currently supports numeric intervals only.")
@@ -2248,13 +2349,13 @@ extension DeviceSyncService {
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Agent created paused. Configure API credentials on its home.", target: DeviceGlobalID(home: identity!.deviceID, session: agent.id).string)
             case "agent.run":
                 guard let session, let config = session.agent, config.turnLimit > 0, session.pending.count < 100 else { reject("Agent missing, budget exhausted, or queue full."); return true }
-                session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and refresh the scoreboard.", images: []))
+                session.pending.append(PendingPrompt(originGroupID: group, originHomeID: origin, agentRunReserved: true, autonomous: true, text: "[Human-requested agent run from group device] Check progress and update your assessment.", images: []))
                 runAfterCommit = true
                 result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: session.queuePaused ? "Run saved in paused queue. Resume the queue to run it." : "Agent run queued on home.", target: request.target)
             case "agent.widget":
                 guard session?.agent != nil else { reject("Target is not an agent."); return true }
                 widgetAfterCommit = true
-                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Scoreboard opened on home.", target: request.target)
+                result = DeviceParticipantResponse(groupID: group, outcome: "completed", detail: "Assessment opened on home.", target: request.target)
             case "agent.configure":
                 guard let session, session.agent != nil, let settings = request.settings else { reject("Agent or settings missing."); return true }
                 guard (settings.homeAssistantURL == nil || settings.homeAssistantURL == session.agent?.homeAssistantURL),
@@ -2353,6 +2454,10 @@ extension DeviceSyncService {
         return lotProposals[id] == nil
     }
     func editLot(_ id: String, operation: LotOperation) throws {
+        #if os(iOS)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotLocalEdit, measurement) }
+        #endif
         guard lotCanEdit(id), var editor = lotEditors[id] else { throw ParkingLotError.message("This lot is not currently editable. Take it again when its home is connected.") }
         if editor.unconfirmedCount >= LotEditing.maximumPending { freezeLot(id, reason: "Too many edits are awaiting confirmation. Copy unsaved text before taking the lot again."); throw ParkingLotError.message("Save queue is full.") }
         try editor.enqueue(operation); lotEditors[id] = editor; sendNextLotEdit(id)
@@ -2362,6 +2467,9 @@ extension DeviceSyncService {
         do {
             if let edit = try editor.beginNext() {
                 lotEditors[id] = editor; lotSent[id] = Date(); lotStarted[id] = Date()
+                #if os(iOS)
+                PerformanceCapture.shared.startRoundTrip(edit.mutationID)
+                #endif
                 sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit", boot: edit.homeBoot, sessionID: id, epoch: edit.leaseEpoch, payload: try LotEditing.encoded(edit)))
             } else if editor.unconfirmedCount == 0 {
                 if lotHandoffs.remove(id) != nil {
@@ -2377,6 +2485,9 @@ extension DeviceSyncService {
     }
     private func freezeLot(_ id: String, reason: String, cleanReason: String? = nil) {
         guard var editor = lotEditors[id] else { return }
+        #if os(iOS)
+        if let edit = editor.inFlight { PerformanceCapture.shared.abandonRoundTrip(edit.mutationID) }
+        #endif
         if editor.unconfirmedCount > 0 { lotRecovery[id] = editor.projected }
         editor.frozenReason = editor.unconfirmedCount == 0 ? (cleanReason ?? reason) : reason; lotEditors[id] = editor
         lotProposals.removeValue(forKey: id)
@@ -2502,6 +2613,9 @@ extension DeviceSyncService {
                     editor.frozenReason = nil; lotEditors[id] = editor
                 } else {
                     if let previous = lotEditors[id], previous.unconfirmedCount > 0 { lotRecovery[id] = previous.projected }
+                    #if os(iOS)
+                    if let previous = lotEditors[id]?.inFlight { PerformanceCapture.shared.abandonRoundTrip(previous.mutationID) }
+                    #endif
                     lotEditors[id] = try LotEditQueue(snapshot: snapshot, author: deviceName)
                     lotSent.removeValue(forKey: id); lotStarted.removeValue(forKey: id)
                     lotHandoffs.remove(id); lotReleases.remove(id); lotProposals.removeValue(forKey: id)
@@ -2511,10 +2625,17 @@ extension DeviceSyncService {
                 lotRenewed[id] = Date()
                 for hash in snapshot.document.rows.flatMap({ $0.images ?? [] }) { fetchBlob(globalID: id, hash: hash) }
             case "lot.edit.ack":
+                #if os(iOS)
+                let measurement = PerformanceCapture.shared.begin()
+                defer { PerformanceCapture.shared.end(.lotAckApply, measurement) }
+                #endif
                 guard let data = envelope.payload, var editor = lotEditors[id] else { return true }
                 let ack = try JSONDecoder().decode(LotEditAck.self, from: data)
                 if editor.inFlight?.mutationID != ack.mutationID { return true }
                 try editor.acknowledge(ack); lotEditors[id] = editor; lotSent.removeValue(forKey: id); lotStarted.removeValue(forKey: id)
+                #if os(iOS)
+                PerformanceCapture.shared.finishRoundTrip(ack.mutationID)
+                #endif
                 for hash in editor.saved.document.rows.flatMap({ $0.images ?? [] }) { fetchBlob(globalID: id, hash: hash) }
                 sendNextLotEdit(id)
             case "lot.lease.renewed": lotRenewed[id] = Date()
@@ -2541,7 +2662,7 @@ extension DeviceSyncService {
         sendEnvelope(peer, DeviceEnvelope(kind: kind, boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: Data(reason.utf8)))
     }
     private func lotSnapshot(_ lot: ParkingLotStore, epoch: UInt64, document: ParkingLotDocument? = nil) throws -> LotSnapshot {
-        var wire = document ?? lot.document; wire.schemaVersion = ParkingLotDocument.currentSchemaVersion
+        var wire = document ?? lot.document; wire.schemaVersion = max(3, ParkingLotDocument.schemaVersion(for: wire.rows))
         for index in wire.rows.indices {
             wire.rows[index].images = try wire.rows[index].images.map { paths in try paths.map { path in
                 guard let hash = imageHash(path: path) else { throw ParkingLotError.message("A lot image is unavailable on home. Restore or remove it there before taking this lot.") }
@@ -2638,12 +2759,22 @@ extension DeviceSyncService {
         return true
     }
     private func receiveLotEdit(_ peer: DevicePeer, _ envelope: DeviceEnvelope, lot: ParkingLotStore) throws {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotEditHandling, measurement) }
+        func acknowledge(_ ack: LotEditAck) throws {
+            let encoding = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.lotAckEncodeQueue, encoding) }
+            sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID,
+                epoch: envelope.epoch, payload: try LotEditing.encoded(ack)), completion: measurement == nil ? nil : { success in
+                    PerformanceCapture.shared.end(success ? .lotEditToAckProcessed : .lotAckSendFailed, measurement)
+                })
+        }
         guard let data = envelope.payload, let stream = lotStreams[lot.id], !stream.barrier else { throw ParkingLotError.message("This lot is paused for review.") }
         let edit = try JSONDecoder().decode(LotEdit.self, from: data)
         let exactHash = try LotEditing.digest(edit)
         if let receipt = stream.receipts[edit.mutationID] {
             guard receipt.0 == exactHash else { throw ParkingLotError.message("A mutation ID was reused with different contents.") }
-            sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: try LotEditing.encoded(receipt.1))); return
+            try acknowledge(receipt.1); return
         }
         let snapshot = try lotSnapshot(lot, epoch: envelope.epoch!)
         try edit.validate(against: snapshot, sequence: stream.sequence)
@@ -2659,14 +2790,18 @@ extension DeviceSyncService {
                 guard let path = lotImagePaths[lot.id]?[hash], FileManager.default.fileExists(atPath: path) else { throw ParkingLotError.message("Image has not been stored for this lot.") }; return path
             } }
         }
-        try withLotPermit(lot.id) { try lot.commitRemote(local) }
+        let commit = PerformanceCapture.shared.begin()
+        do {
+            defer { PerformanceCapture.shared.end(.lotEditCommit, commit) }
+            try withLotPermit(lot.id) { try lot.commitRemote(local) }
+        }
         let ack = LotEditAck(mutationID: edit.mutationID, sequence: edit.sequence, snapshot: next)
         stream.receipts[edit.mutationID] = (exactHash, ack); stream.order.append(edit.mutationID)
         if stream.order.count > 32 { stream.receipts.removeValue(forKey: stream.order.removeFirst()) }
         stream.history.append(try LotEditing.digest(snapshot.document.rows)); stream.history.append(try LotEditing.digest(result.rows))
         if stream.history.count > 202 { stream.history.removeFirst(stream.history.count - 202) }
         stream.sequence += 1; stream.lastSnapshot = next.digest
-        sendEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: boot, sessionID: envelope.sessionID, epoch: envelope.epoch, payload: try LotEditing.encoded(ack)))
+        try acknowledge(ack)
     }
     #endif
 }

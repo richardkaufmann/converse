@@ -1,11 +1,16 @@
 import XCTest
 import SwiftUI
+import AVKit
 import Network
+import CryptoKit
 import UniformTypeIdentifiers
 @testable import Converse
 
 @MainActor
 final class ConverseTests: XCTestCase {
+    func testPerformanceCaptureMatchesReceiptsAndKeepsTimingsPrivate() {
+        performanceCaptureSelfTests { passed, description in XCTAssertTrue(passed, description) }
+    }
     func testCopySelectionPreservesLinkDestinations() {
         let view = TailTextView()
         let text = NSMutableAttributedString(string: "References: Café 🐈 and https://example.com")
@@ -76,13 +81,21 @@ final class ConverseTests: XCTestCase {
         let host = UIHostingController(rootView: PadRoot(model: model))
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { model.phoneKeyboard.hide(); window.isHidden = true; scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) }
-        try await Task.sleep(for: .milliseconds(300))
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in XCTFail("Initial portrait request failed: \(error)") }
+        try await eventually("Rotation fixture starts in portrait") {
+            window.bounds.height > window.bounds.width && scene.interfaceOrientation.isPortrait
+        }
+        try await eventually("Rotation fixture mounts its draft editor") {
+            Self.views(host.view).compactMap { $0 as? TailTextView }.contains { $0.text.contains("Rotation draft 0") }
+        }
         let editor = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? TailTextView }.first { $0.text.contains("Rotation draft 0") })
         model.phoneKeyboard.show(ids[0])
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertTrue(editor.isFirstResponder)
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeLeft)) { error in XCTFail("Rotation request failed: \(error)") }
-        try await Task.sleep(for: .seconds(1))
+        try await eventually("Rotation fixture reaches landscape") {
+            window.bounds.width > window.bounds.height && scene.interfaceOrientation.isLandscape
+        }
         host.view.layoutIfNeeded()
         XCTAssertGreaterThan(window.bounds.width, window.bounds.height, "The fixture must actually rotate")
         XCTAssertEqual(host.view.bounds.width, window.bounds.width, accuracy: 1)
@@ -90,7 +103,9 @@ final class ConverseTests: XCTestCase {
         XCTAssertTrue(editor.isFirstResponder)
         XCTAssertEqual(model.draft(ids[0]).text, "Rotation draft 0")
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
-        try await Task.sleep(for: .seconds(1))
+        try await eventually("Rotation fixture returns to portrait") {
+            window.bounds.height > window.bounds.width && scene.interfaceOrientation.isPortrait
+        }
         XCTAssertLessThan(window.bounds.width, window.bounds.height)
         XCTAssertTrue(editor.isFirstResponder)
     }
@@ -507,6 +522,126 @@ final class ConverseTests: XCTestCase {
             window.isHidden = true
         }
     }
+    // Inject all merged a reply with typed input (941BAB1E): the typed part
+    // stays visible whether the home sent components or not.
+    func testMergedTrafficKeepsTypedPromptVisible() throws {
+        let reply = "[Converse message from ClaudeConverse · session abc · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+        let typed = "OK, propose: make 148 on Mac have a Debug pane."
+        let text = reply + "\n\n" + typed
+        let wireJSON = #"{"id":"941BAB1E-4268-4C06-AFF5-0457C32E123D","role":"user","text":"#
+            + String(data: try JSONEncoder().encode(text), encoding: .utf8)!
+            + #","imageHashes":[],"components":[{"offset":0,"length":"# + String((reply as NSString).length) + #","kind":"traffic"},{"offset":"#
+            + String((reply as NSString).length + 2) + #","length":"# + String((typed as NSString).length) + #","kind":"human"}]}"#
+        let recorded = try JSONDecoder().decode(DeviceWireMessage.self, from: Data(wireJSON.utf8))
+        XCTAssertEqual(recorded.components?.map(\.kind), ["traffic", "human"], "The snapshot DTO decodes components from the home")
+        let legacy = DeviceWireMessage(id: UUID(), role: "user", text: text)
+        for message in [recorded, legacy] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "Received reply from ClaudeConverse · Read-only diagnosis").location, 0, "The reply collapses to its own summary")
+            XCTAssertFalse(view.text.contains("[Reply to request"))
+            let typedColor = try XCTUnwrap(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor)
+            XCTAssertNotEqual(typedColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic)
+            XCTAssertNotNil(view.textStorage.attribute(.link, at: 0, effectiveRange: nil), "Tapping the summary still opens its full message")
+            XCTAssertEqual(coordinator.trafficDetails.values.sorted(), [reply], "Details hold only the switchboard part")
+            XCTAssertFalse(view.trafficBlocks.contains { NSIntersectionRange($0, typedRange).length > 0 }, "Typed text keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+    }
+    // A plain tell has no delivery block: invalid recorded parts from the
+    // home must show the whole merged message expanded, never collapse it.
+    func testInvalidMergedPartsShowWholeMessageExpanded() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let tellLength = (tell as NSString).length, textLength = (text as NSString).length
+        let invalid = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: textLength + 1, length: 1, kind: "human")])
+        let overlapping = DeviceWireMessage(id: UUID(), role: "user", text: text, components: [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: tellLength - 3, length: textLength - tellLength + 3, kind: "human")])
+        for message in [invalid, overlapping] {
+            let parent = PadTranscript(messages: [message], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent)
+            parent.update(view, coordinator: coordinator)
+            let shown = view.text as NSString
+            let typedRange = shown.range(of: typed)
+            XCTAssertNotEqual(typedRange.location, NSNotFound, "The typed prompt is visible")
+            XCTAssertEqual(shown.range(of: "[Converse message from Fixture").location, 0, "The whole message is shown expanded, not summarized")
+            XCTAssertFalse(view.text.contains("Received tell"))
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: typedRange.location, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Typed text is not traffic-colored")
+            XCTAssertNotEqual(view.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, PadPalette.traffic, "Nothing in the expanded message is orange")
+            XCTAssertTrue(coordinator.trafficDetails.isEmpty, "No collapsed summary to tap")
+            XCTAssertTrue(view.trafficBlocks.isEmpty, "The message keeps prompt shading")
+            XCTAssertEqual(view.promptBlocks.count, 1)
+        }
+        XCTAssertNil(TranscriptStyle.queueSummary(text, components: invalid.components), "Queue rows never summarize over invalid parts")
+        XCTAssertNotNil(TranscriptStyle.queueSummary(text), "Without parts the ambiguous old merge still summarizes as before")
+    }
+    // The same message text with different recorded parts renders
+    // differently: the transcript's content signature must change with them.
+    func testComponentsOnlyChangeRerendersTranscript() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        let valid = try XCTUnwrap(TranscriptStyle.components(joining: [(tell, "traffic"), (typed, "human")], into: text))
+        let asHuman = [MessageComponent(offset: valid[0].offset, length: valid[0].length, kind: "human"), valid[1]]
+        let id = UUID(), later = DeviceWireMessage(id: UUID(), role: "assistant", text: "Later reply")
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+        var coordinator: PadTranscript.Coordinator?
+        func render(_ parts: [MessageComponent]?) -> [String] {
+            let parent = PadTranscript(messages: [DeviceWireMessage(id: id, role: "user", text: text, components: parts), later], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+            if coordinator == nil { coordinator = PadTranscript.Coordinator(parent) }
+            parent.update(view, coordinator: coordinator!)
+            return view.text.components(separatedBy: "\n")
+        }
+        func typedInFull(_ lines: [String]) -> Bool { lines.contains(typed) }
+        func summarized(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("Received tell from Fixture") } }
+        func wholeTell(_ lines: [String]) -> Bool { lines.contains { $0.hasPrefix("[Converse message from Fixture") } }
+        var lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "Without parts the merge collapses as before")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines) && !wholeTell(lines), "absent→valid re-renders: typed visible, tell summarized")
+        lines = render([valid[0]])
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "valid→invalid re-renders the whole message expanded")
+        lines = render(valid)
+        XCTAssertTrue(typedInFull(lines) && summarized(lines), "invalid→valid re-renders")
+        lines = render(asHuman)
+        XCTAssertTrue(typedInFull(lines) && !summarized(lines) && wholeTell(lines), "traffic→human re-renders the tell in full")
+        lines = render(nil)
+        XCTAssertTrue(!typedInFull(lines) && summarized(lines) && lines.contains("Later reply"), "→absent re-renders the legacy collapse")
+    }
+    // A snapshot whose parts include a null entry still decodes: the message
+    // keeps its text and shows whole instead of failing the whole page.
+    func testNullComponentEntriesDecodeAndRenderWhole() throws {
+        let tell = "[Converse message from Fixture · session abc · delivery test · hop 1/100]\nStatus message"
+        let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+        let text = tell + "\n\n" + typed
+        func wire(_ components: String) throws -> DeviceWireMessage {
+            let object: [String: Any] = ["id": UUID().uuidString, "role": "user", "text": text, "imageHashes": [String]()]
+            var json = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            json.removeLast(); json += ",\"components\":" + components + "}"
+            return try JSONDecoder().decode(DeviceWireMessage.self, from: Data(json.utf8))
+        }
+        let tellLength = (tell as NSString).length
+        let damaged = try ["[null]", "[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},null]", "{\"offset\":0}", "5",
+                           "[{\"offset\":0,\"length\":\(tellLength),\"kind\":5}]", "[{\"offset\":\"bad\",\"length\":\(tellLength),\"kind\":\"human\"}]"].map(wire)
+        let nullKind = try wire("[{\"offset\":0,\"length\":\(tellLength),\"kind\":\"traffic\"},{\"offset\":\(tellLength + 2),\"length\":\((typed as NSString).length),\"kind\":null}]")
+        XCTAssertTrue(damaged.allSatisfy { $0.text == text && $0.components == MessageComponent.undecodable }, "Null entries, a mistyped list and mistyped kind or offset decode as invalid parts with the text intact")
+        XCTAssertEqual(nullKind.components?.map(\.kind), ["traffic", "text"], "A null kind is an ordinary visible part")
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
+        let parent = PadTranscript(messages: damaged + [nullKind], draft: "", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: {}, attach: { _ in })
+        let coordinator = PadTranscript.Coordinator(parent)
+        parent.update(view, coordinator: coordinator)
+        let lines = view.text.components(separatedBy: "\n")
+        XCTAssertEqual(lines.filter { $0 == typed }.count, damaged.count + 1, "Typed text stays visible in every message")
+        XCTAssertEqual(lines.filter { $0.hasPrefix("[Converse message from Fixture") }.count, damaged.count, "Invalid parts show the whole message expanded")
+        XCTAssertEqual(lines.filter { $0.hasPrefix("Received tell from Fixture") }.count, 1, "Valid parts with a null kind still summarize the tell")
+    }
     func service() throws -> DeviceSyncService {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-tests-" + UUID().uuidString)
         let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
@@ -895,6 +1030,94 @@ final class ConverseTests: XCTestCase {
             XCTAssertEqual(messages[0].text, "Prompt" + tail)
         }
     }
+    func testMessageNumbersIgnoreDraftNewlinesAndPreserveHomeOrdinals() async throws {
+        var first = DeviceWireMessage(id: UUID(), role: "user", text: "First paragraph\n\nSecond paragraph", messageNumber: 41)
+        var second = DeviceWireMessage(id: UUID(), role: "assistant", text: "Reply\nwith another line", messageNumber: 42)
+        let hidden = DeviceWireMessage(id: UUID(), role: "activity", text: "Working")
+        let empty = DeviceWireMessage(id: UUID(), role: "assistant", text: "")
+        var parent = PadTranscript(messages: [first, hidden, empty, second], draft: "Draft\n\nmore draft", images: [:], editable: true, lineNumbers: true, edit: { _ in }, send: { XCTFail("Newline must not send") }, attach: { _ in })
+        let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 500, height: 500)
+        let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+        parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [41, 42])
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 500, height: 500)
+        let controller = UIViewController(); controller.view = view; window.rootViewController = controller
+        window.makeKeyAndVisible(); defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(250)); view.layoutIfNeeded()
+        let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+        screenshot.name = "Message numbers leave multiline drafts unnumbered"; screenshot.lifetime = .keepAlways; add(screenshot)
+        let locations = view.messageLabels.map(\.location)
+        view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+        view.hardwareReturn(modifiers: .shift); view.hardwareReturn(modifiers: .command)
+        XCTAssertEqual(view.messageLabels.map(\.number), [41, 42], "Draft newlines do not create new message numbers")
+        XCTAssertEqual(view.messageLabels.map(\.location), locations)
+        XCTAssertTrue(view.textStorage.string.hasSuffix("\n\n"))
+        let older = DeviceWireMessage(id: UUID(), role: "assistant", text: "Older message", messageNumber: 40)
+        parent.messages = [older, first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [40, 41, 42], "Loading earlier history preserves existing numbers")
+        first.messageNumber = 51; second.messageNumber = 52
+        parent.messages = [first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [51, 52], "Number-only home updates invalidate the display cache")
+        first.messageNumber = nil; second.messageNumber = nil
+        parent.messages = [first, hidden, empty, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [1, 2], "Older homes still number visible messages, not lines")
+        let notice = DeviceWireMessage(id: UUID(), role: "notice", text: "Switchboard: queued")
+        let receipt = DeviceWireMessage(id: UUID(), role: "notice", text: "Switchboard: message queued from test")
+        parent.messages = [first, notice, receipt, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [1, 2, 3], "Like the Mac, visible notices consume one number; hidden queue receipts consume none")
+        first.messageNumber = Int.max
+        parent.messages = [first, second]; parent.update(view, coordinator: coordinator)
+        XCTAssertEqual(view.messageLabels.map(\.number), [Int.max, Int.max], "An extreme home ordinal cannot overflow")
+        parent.messages = []; parent.update(view, coordinator: coordinator)
+        XCTAssertTrue(view.messageLabels.isEmpty, "An unsent draft has no message number")
+    }
+
+    func testDraftImageKeyboardDeletionAndMenusProtectHistory() throws {
+        let service = try service(), model = PadModel(service: service)
+        let id = DeviceGlobalID(home: "test-home", session: UUID()).string
+        service.remoteLeases[id] = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 160, height: 100)).image { context in
+            UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 160, height: 100))
+        }
+        let file = service.storageFolder.appendingPathComponent("keyboard-draft-preview.png")
+        try XCTUnwrap(image.pngData()).write(to: file)
+        let historical = DeviceWireMessage(id: UUID(), role: "assistant", text: "Keep history", imageHashes: ["one"])
+        for scenario in ["tail", "delegate", "attachment", "selected", "mixed", "text", "history", "read-only"] {
+            model.state.drafts[id] = PadDraft(text: "Keep text", hashes: ["one", "two"], dirty: true)
+            var parent = PadTranscript(messages: [historical], draft: model.draft(id).text, images: ["one": file, "two": file], draftImageHashes: model.draft(id).hashes, editable: true, lineNumbers: true, edit: { model.edit(id, text: $0) }, send: { XCTFail("Deleting never sends") }, attach: { _ in }, removeImage: { model.removeImage(id, hash: $0) })
+            let view = TailTextView.native(); view.frame = CGRect(x: 0, y: 0, width: 700, height: 500)
+            let coordinator = PadTranscript.Coordinator(parent); view.delegate = coordinator
+            parent.update(view, coordinator: coordinator)
+            let first = try XCTUnwrap(view.draftImages.first), last = try XCTUnwrap(view.draftImages.last)
+            let history = view.textStorage.attributedSubstring(from: NSRange(location: 0, length: first.location)).string
+            XCTAssertEqual(coordinator.imageMenuActions(view, range: NSRange(location: last.location, length: 1)).map(\.title), ["Remove image from draft"])
+            XCTAssertTrue(coordinator.imageMenuActions(view, range: NSRange(location: first.location - 2, length: 1)).isEmpty)
+            switch scenario {
+            case "text": view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+            case "tail", "delegate": view.selectedRange = NSRange(location: view.historyLength, length: 0)
+            case "attachment": view.selectedRange = NSRange(location: last.location + 1, length: 0)
+            case "selected": view.selectedRange = NSRange(location: last.location, length: 1)
+            case "mixed": view.selectedRange = NSRange(location: last.location, length: view.historyLength + 4 - last.location)
+            case "history": view.selectedRange = NSRange(location: first.location - 1, length: view.historyLength - first.location + 1)
+            default:
+                parent.editable = false; parent.update(view, coordinator: coordinator)
+                XCTAssertTrue(coordinator.imageMenuActions(view, range: NSRange(location: last.location, length: 1)).isEmpty)
+                view.selectedRange = NSRange(location: view.historyLength, length: 0)
+            }
+            if scenario == "delegate" {
+                XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: view.historyLength - 1, length: 1), replacementText: ""))
+            } else { view.deleteBackward() }
+            let expected = ["text", "history", "read-only"].contains(scenario) ? ["one", "two"] : ["one"]
+            XCTAssertEqual(model.draft(id).hashes, expected, scenario)
+            XCTAssertEqual(model.draft(id).text, scenario == "mixed" ? " text" : scenario == "text" ? "Keep tex" : "Keep text", scenario)
+            parent.draft = model.draft(id).text; parent.draftImageHashes = model.draft(id).hashes
+            parent.update(view, coordinator: coordinator)
+            XCTAssertEqual(view.textStorage.attributedSubstring(from: NSRange(location: 0, length: first.location)).string, history, scenario)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Never delete the image file used by history")
+        }
+    }
+
     func testDraftImageRemoveButtonPreservesHistoryAndText() throws {
         let service = try service(), model = PadModel(service: service)
         let id = DeviceGlobalID(home: "test-home", session: UUID()).string
@@ -932,6 +1155,8 @@ final class ConverseTests: XCTestCase {
         XCTAssertEqual(rendered.string, "Grasshopper: " + url.absoluteString)
         XCTAssertEqual(rendered.attribute(.link, at: ("Grasshopper: " as NSString).length, effectiveRange: nil) as? URL, url)
         XCTAssertEqual(TranscriptStyle.imageLinks("`![example](https://example.com/a.png)`"), "`![example](https://example.com/a.png)`")
+        XCTAssertEqual(TranscriptStyle.imageReferences("![w](https://example.com/w_(1).png)").first?.url.absoluteString, "https://example.com/w_(1).png", "Balanced parentheses stay in the image URL")
+        XCTAssertEqual(TranscriptStyle.localImageReferences("![x](/tmp/shot(1).png)").first?.url.path, "/tmp/shot(1).png")
     }
     func testUnalignedCoalescedFrames() throws {
         var first = DeviceEnvelope(kind: "odd")
@@ -1302,6 +1527,99 @@ final class ConverseTests: XCTestCase {
         XCTAssertFalse(book.search("pair").isEmpty)
         XCTAssertEqual(book.sourceSHA256.count, 64)
     }
+    func testHelpVideoLinksOpenThePlayerAndOtherLinksDoNot() async throws {
+        let book = try HelpBook.load()
+        let video = try XCTUnwrap(book.videos?.first { $0.id == "first-run" })
+        let media = try XCTUnwrap(URL(string: video.mediaURL))
+        XCTAssertTrue(book.topics.first { $0.id == "videos" }?.markdown.contains(video.mediaURL) == true)
+        XCTAssertEqual(HelpVideo.route(media, in: book.videos ?? []), video)
+        XCTAssertNil(HelpVideo.route(URL(string: video.mediaURL + "?X-Amz-Signature=abc")!, in: book.videos ?? []))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixture = folder.appendingPathComponent("fixture-v1.mp4")
+        try HelpVideoFixture.writeMP4(to: fixture)
+        // The same presenter backs PadHelp's openURL handler and its sheet.
+        let presenter = HelpVideoPresenter(videos: book.videos ?? []) { _ in fixture }
+        XCTAssertFalse(presenter.open(ConverseAbout.readme), "README links go to the system")
+        XCTAssertNil(presenter.playback, "No sheet for ordinary links")
+        XCTAssertTrue(presenter.open(media))
+        let playback = try XCTUnwrap(presenter.playback, "A manifest link presents the video sheet")
+        XCTAssertEqual(playback.video, video)
+        try await eventually("Local fixture plays") { playback.state == .ready && (playback.player?.rate ?? 0) > 0 }
+        let player = playback.player
+        presenter.close()
+        XCTAssertNil(presenter.playback, "Dismissing clears the sheet")
+        XCTAssertNil(playback.player, "Dismissing releases the player")
+        XCTAssertEqual(player?.rate, 0, "Dismissing stops playback")
+        XCTAssertNil(player?.currentItem)
+    }
+    func testHelpVideoPlaysFullScreenAspectFitAcrossRotation() async throws {
+        let book = try HelpBook.load()
+        let video = try XCTUnwrap(book.videos?.first { $0.id == "first-run" })
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixture = folder.appendingPathComponent("fixture-v1.mp4")
+        try HelpVideoFixture.writeMP4(to: fixture, seconds: 8)
+        let presenter = HelpVideoPresenter(videos: book.videos ?? []) { _ in fixture }
+        XCTAssertTrue(presenter.open(try XCTUnwrap(URL(string: video.mediaURL))))
+        let playback = try XCTUnwrap(presenter.playback)
+        try await eventually("Local fixture plays") { playback.state == .ready && (playback.player?.rate ?? 0) > 0 }
+        let player = try XCTUnwrap(playback.player)
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: PadHelpVideo(playback: playback, close: presenter.close))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { presenter.close(); window.isHidden = true; if phone { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) } }
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in XCTFail("Initial portrait request failed: \(error)") }
+            try await eventually("Video starts in portrait") { window.bounds.height > window.bounds.width }
+        }
+        func controllers(_ root: UIViewController) -> [UIViewController] { [root] + root.children.flatMap(controllers) }
+        try await eventually("AVKit hosts the player") { controllers(host).contains { $0 is AVPlayerViewController } }
+        let avkit = try XCTUnwrap(controllers(host).compactMap { $0 as? AVPlayerViewController }.first)
+        XCTAssertEqual(avkit.videoGravity, .resizeAspect, "The whole frame shows, letterboxed, never cropped")
+        XCTAssertFalse(avkit.allowsPictureInPicturePlayback, "Picture in Picture would outlive Done")
+        XCTAssertTrue(avkit.player === player)
+        func frame() -> CGRect { avkit.view.convert(avkit.view.bounds, to: window) }
+        let safe = { window.safeAreaLayoutGuide.layoutFrame }
+        host.view.layoutIfNeeded()
+        XCTAssertEqual(frame().width, safe().width, accuracy: 1, "Upright, the player spans the full safe width")
+        XCTAssertGreaterThan(frame().height, safe().height * 0.8, "Only the Done bar sits above the player")
+        player.pause()
+        let paused = player.currentTime()
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeLeft)) { error in XCTFail("Rotation request failed: \(error)") }
+            try await eventually("Video reaches landscape") { window.bounds.width > window.bounds.height && host.traitCollection.verticalSizeClass == .compact }
+        } else {
+            host.traitOverrides.verticalSizeClass = .compact
+        }
+        try await eventually("Done moves to a side rail") { host.view.layoutIfNeeded(); return abs(frame().height - safe().height) < 1 }
+        XCTAssertGreaterThan(frame().width, safe().width * 0.8, "Landscape keeps nearly all of the width")
+        XCTAssertTrue(controllers(host).compactMap { $0 as? AVPlayerViewController }.first === avkit, "Rotation keeps the AVKit controller")
+        XCTAssertEqual(avkit.videoGravity, .resizeAspect)
+        XCTAssertTrue(avkit.player === player && playback.player === player, "Rotation keeps the same AVPlayer; no asset reload")
+        XCTAssertEqual(player.rate, 0, "A paused video stays paused across rotation")
+        XCTAssertEqual(player.currentTime(), paused, "Rotation keeps the playback position")
+        player.play()
+        if phone {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            try await eventually("Video returns to portrait") { window.bounds.height > window.bounds.width && host.traitCollection.verticalSizeClass == .regular }
+        } else {
+            host.traitOverrides.verticalSizeClass = .regular
+        }
+        try await eventually("Done returns above the player") { host.view.layoutIfNeeded(); return frame().height < safe().height - 20 }
+        XCTAssertTrue(avkit.player === player)
+        XCTAssertGreaterThan(player.rate, 0, "A playing video keeps playing across rotation")
+        XCTAssertGreaterThanOrEqual(player.currentTime().seconds, paused.seconds)
+        presenter.close()
+        XCTAssertNil(playback.player, "Done releases the player")
+        XCTAssertEqual(player.rate, 0, "Done stops playback")
+        XCTAssertNil(player.currentItem)
+        try await eventually("AVKit lets go of the player") { avkit.player == nil }
+    }
     func eventually(_ description: String, timeout: TimeInterval = 10, _ predicate: @escaping () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !predicate() && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
@@ -1505,16 +1823,37 @@ extension ConverseTests {
         let selectionImage = XCTAttachment(image: UIGraphicsImageRenderer(bounds: selectionWindow.bounds).image { _ in selectionWindow.drawHierarchy(in: selectionWindow.bounds, afterScreenUpdates: true) })
         selectionImage.name = "Selected lot entries at 24pt"; selectionImage.lifetime = .keepAlways; add(selectionImage)
         selectionWindow.isHidden = true
+        let timingFolder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-timing-" + UUID().uuidString)
+        let capture = PerformanceCapture.shared
+        capture.configure(folder: timingFolder, enabled: true, sampleMainQueue: false)
+        defer {
+            capture.configure(folder: timingFolder, enabled: false, sampleMainQueue: false)
+            capture.flushForTesting(); try? FileManager.default.removeItem(at: timingFolder)
+        }
+        func timings() throws -> PerformanceCapture.Snapshot {
+            capture.flushForTesting()
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: XCTUnwrap(capture.file)))
+        }
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Typed on phone"))
         let flight = try XCTUnwrap(service.lotEditors[id]?.inFlight)
+        XCTAssertEqual(try timings().pendingRoundTrips, 1, "Actual edit dispatch starts the round-trip clock")
         XCTAssertEqual(service.lotEditors[id]?.saved.document.revision, 12, "Optimistic typing does not claim a saved revision")
         let result = try flight.operation.applying(to: snapshot.document, author: "iPhone")
         let saved = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: snapshot.name, document: result)
         let ack = LotEditAck(mutationID: flight.mutationID, sequence: flight.sequence, snapshot: saved)
+        let unrelatedAck = LotEditAck(mutationID: UUID(), sequence: flight.sequence, snapshot: saved)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(unrelatedAck)))
+        XCTAssertEqual(try timings().pendingRoundTrips, 1, "An unrelated acknowledgment cannot finish the measurement")
         service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lot.edit.ack", boot: 9, sessionID: id, epoch: 4, payload: try LotEditing.encoded(ack)))
+        XCTAssertEqual(try timings().summaries["lotRoundTrip"]?.count, 1, "Actual acknowledgment handling measures a mutation once")
+        XCTAssertEqual(try timings().pendingRoundTrips, 0)
         XCTAssertEqual(service.lotEditors[id]?.unconfirmedCount, 0); XCTAssertEqual(service.lotEditors[id]?.saved.document.rows[1].text, "Typed on phone")
         try service.editLot(id, operation: LotOperation(kind: .setText, rowID: item.id, text: "Unconfirmed words to recover"))
         service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.stolen", boot: 9, sessionID: id, epoch: 5))
+        XCTAssertEqual(try timings().pendingRoundTrips, 0, "Displacement removes the abandoned in-flight timer")
+        XCTAssertEqual(try timings().droppedRoundTrips, 1, "Displacement is reported as abandoned, not a fast acknowledgment")
         XCTAssertFalse(service.lotCanEdit(id)); XCTAssertFalse(model.state.placements.contains(id))
         XCTAssertEqual(service.lotRecovery[id]?.rows[1].text, "Unconfirmed words to recover", "Displacement retains an explicit manual recovery copy")
         model.assign(id, pane: 0)
@@ -1766,7 +2105,12 @@ extension ConverseTests {
         let sibling = ParkingLotRow(heading: false, text: "Second", parentID: heading.id)
         let nextHeading = ParkingLotRow(heading: true, text: "Later")
         let rows = [heading, parent, child, sibling, nextHeading]
-        XCTAssertNil(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: false), "The Video lot's first item is already at the outermost item level")
+        let converted = try XCTUnwrap(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: false))
+        XCTAssertTrue(converted[1].heading, "Outdenting a top-level item makes it a heading")
+        XCTAssertEqual(try LotOperation(kind: .outdent, rowIDs: [parent.id]).applying(to: ParkingLotDocument(rows: rows), author: "iPhone").rows.map(\.heading), converted.map(\.heading))
+        let deeper = try XCTUnwrap(ParkingLotTree.changingIndent([parent.id], in: rows, deeper: true))
+        XCTAssertEqual(deeper[1].indent, 1, "A first item can sit deeper than its heading")
+        XCTAssertEqual(try LotEntryEditing.splitting(parent.id, at: NSRange(location: 0, length: 0), in: deeper).rows[1].indent, 1, "Return before an indented item keeps its level")
         let outdented = try LotOperation(kind: .outdent, rowIDs: [child.id]).applying(to: ParkingLotDocument(rows: rows), author: "iPhone")
         XCTAssertEqual(outdented.rows[2].parentID, heading.id)
         XCTAssertEqual(outdented.rows.map(\.id), rows.map(\.id))
@@ -1929,5 +2273,200 @@ extension ConverseTests {
             try await Task.sleep(for: .milliseconds(100)); host.view.layoutIfNeeded()
         }
         XCTAssertEqual(service.lotEditors[id]?.projected.rows.first { $0.id == item.id }?.text.filter { $0 == "x" }.count, 60)
+    }
+}
+
+extension ConverseTests {
+    func testQueueRemoveNeedsHomeCapabilityAndSendsExactID() throws {
+        let service = try service()
+        let home = String(repeating: "c", count: 64)
+        let sid = UUID(), id = DeviceGlobalID(home: home, session: sid).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        service.homes[home] = RemoteHomeState(deviceID: home, deviceName: "Home", online: true, rows: [
+            DeviceSidebarRow(globalID: id, sessionID: sid, title: "Queued", assistant: "Muse", engine: "muse", model: "m", effort: "", access: "", status: "Working", busy: true, queued: 3, queuePaused: false)
+        ], lastSeen: Date())
+        service.remoteLeases[id] = 3
+        XCTAssertNotNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "rename", text: "Reachable")), "The fixture home is reachable for ordinary commands")
+        let items = ["first", "second", "third"].map { DevicePendingDTO(id: UUID(), text: $0) }
+        var sent: [DeviceCommandPayload] = []
+        func queue() -> PadQueue { PadQueue(pending: items, paused: false, canRemove: service.canRemoveQueuedRemote(id)) { sent.append($0); service.sendRemoteCommand(globalID: id, command: $0) } }
+        let older = queue()
+        XCTAssertEqual(older.bulkActions.map(\.label), ["Pause", "Inject all", PadQueue.clearAll])
+        XCTAssertEqual(PadQueue.clearAll, "Clear all")
+        XCTAssertEqual(older.itemActions(items[1]).map(\.label), ["Inject now"], "An older home keeps only Clear all")
+        XCTAssertNil(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "removeQueued", pendingID: items[1].id)), "An older home is never sent a single removal")
+        XCTAssertFalse(service.outbox.contains { $0.payload.action == "removeQueued" })
+        peer.hello!.capabilities.append(DeviceSyncService.queueRemoveCapability)
+        let current = queue()
+        XCTAssertEqual(current.itemActions(items[1]).map(\.label), ["Inject now", "Remove"])
+        let remove = try XCTUnwrap(current.itemActions(items[1]).first { $0.label == "Remove" })
+        current.send(remove.command)
+        XCTAssertEqual(sent, [DeviceCommandPayload(action: "removeQueued", pendingID: items[1].id)])
+        let record = try XCTUnwrap(service.outbox.first { $0.payload.action == "removeQueued" })
+        XCTAssertEqual(record.payload.pendingID, items[1].id, "Remove names the exact queued message")
+        XCTAssertEqual(record.epoch, 3, "Remove travels with the display lease through the durable outbox")
+        current.send(remove.command)
+        XCTAssertEqual(service.outbox.filter { $0.payload.action == "removeQueued" }.map(\.commandID), [record.commandID], "A second tap reuses the outstanding command ID")
+    }
+}
+
+extension ConverseTests {
+    func testLotBacklogCountsUnacknowledgedCharacters() {
+        let row = ParkingLotRow(heading: false, text: "prefix suffix")
+        var edited = row
+        edited.text = "prefix 12345678901suffix"
+        XCTAssertEqual(LotTextBacklog.count(saved: [row], projected: [edited]), 11)
+        XCTAssertEqual(LotTextBacklog.count(saved: [edited], projected: [edited]), 0, "Acknowledgement drains the text backlog")
+        XCTAssertEqual(LotTextBacklog.difference("12345678901", ""), 11, "Deletions also await acknowledgement")
+        XCTAssertEqual(LotTextBacklog.difference("abc", "xyz"), 3, "Equal-length replacements must not disappear")
+        XCTAssertEqual(LotTextBacklog.difference("a👨‍👩‍👧‍👦b", "ab"), 1, "Count graphemes, not UTF-16 units")
+        XCTAssertEqual(LotTextBacklog.count(saved: [], projected: [row]), row.text.count)
+        XCTAssertEqual(LotTextBacklog.count(saved: [row], projected: []), row.text.count)
+    }
+    func testLotSaveGaugeWaitsForPauseAndDoesNotMoveLayout() async throws {
+        let row = ParkingLotRow(heading: false, text: "")
+        var edited = row; edited.text = "12345678901"
+        let host = UIHostingController(rootView: LotSaveGauge(saved: [row], projected: [edited], activity: 0, pending: true))
+        // This fixture renders only the six-point rail, not a whole screen.
+        // An iPhone's status/home safe areas can consume its 50-point window.
+        host.safeAreaRegions = []
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 200, height: 50)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func pixels() -> Data? {
+            host.view.layoutIfNeeded()
+            return UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true) }.pngData()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let hidden = pixels(), size = host.view.intrinsicContentSize
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNotEqual(pixels(), hidden, "Eleven unacknowledged characters appear after the pause")
+        host.rootView = LotSaveGauge(saved: [row], projected: [edited], activity: 1, pending: true)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(pixels(), hidden, "Resuming input immediately hides the gauge")
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNotEqual(pixels(), hidden)
+        host.rootView = LotSaveGauge(saved: [edited], projected: [edited], activity: 1, pending: false)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(pixels(), hidden, "An acknowledgement hides it without any Saved text")
+        edited.text = "1234567890"
+        host.rootView = LotSaveGauge(saved: [row], projected: [edited], activity: 2, pending: true)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(pixels(), hidden, "Ten characters never show a gauge")
+        XCTAssertEqual(host.view.intrinsicContentSize, size, "The status rail never changes layout size")
+    }
+    func testLotReturnFocusAndCaretLayout() async throws {
+        let service = try service(); service.editableLotsEnabled = true
+        let model = PadModel(service: service)
+        let home = String(repeating: "e", count: 64), lot = UUID()
+        let id = DeviceGlobalID(home: home, session: lot).string
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test")
+        peer.hello!.capabilities.append(LotEditing.capability); peer.trustedReady = true
+        service.adoptPeerForTesting(peer)
+        let sidebar = DeviceSidebarRow(globalID: id, sessionID: lot, title: "Return check", assistant: "Parking Lot", engine: "parking", model: "", effort: "", access: "edit", status: "Parking Lot", busy: false, queued: 0, queuePaused: false)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "sidebar.snapshot", homeSeq: 1, payload: try JSONEncoder().encode(DeviceSidebarPayload(homeDeviceID: home, homeDeviceName: "Home", homeSeq: 1, rows: [sidebar]))))
+        model.assign(id, pane: 0)
+        service.handleEnvelope(peer, DeviceEnvelope(kind: "lease.granted", boot: 9, sessionID: id, epoch: 4))
+        let heading = ParkingLotRow(heading: true, text: "Return and save feedback")
+        let item = ParkingLotRow(heading: false, text: "Press Return here", parentID: heading.id)
+        let snapshot = try LotSnapshot(globalID: id, homeBoot: 9, leaseEpoch: 4, name: "Return check", document: ParkingLotDocument(revision: 1, rows: [heading, item]))
+        service.handleEnvelope(peer, try snapshot.envelope())
+        let host = UIHostingController(rootView: EditableLotPane(id: id, pane: 0, model: model))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 600, height: 700)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; service.suspendViewer() }
+        try await Task.sleep(for: .milliseconds(250)); host.view.layoutIfNeeded()
+        let entry = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotEntryTextView }.first { $0.text == item.text })
+        XCTAssertTrue(entry.becomeFirstResponder())
+        try await Task.sleep(for: .milliseconds(150))
+        entry.selectedRange = NSRange(location: (entry.text as NSString).length, length: 0)
+        // Programmatic insertText bypasses shouldChangeTextIn. Deliver the
+        // keyboard delegate callback, which rejects the newline and splits.
+        XCTAssertEqual(entry.delegate?.textView?(entry, shouldChangeTextIn: entry.selectedRange, replacementText: "\n"), false)
+        try await Task.sleep(for: .milliseconds(500)); host.view.layoutIfNeeded()
+        let preAttachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
+        preAttachment.name = "Return layout before assertions"; preAttachment.lifetime = .keepAlways; add(preAttachment)
+        let blank = try XCTUnwrap(Self.views(host.view).compactMap { $0 as? LotEntryTextView }.first { $0.text.isEmpty && $0.isFirstResponder })
+        XCTAssertEqual(blank.selectedRange, NSRange(location: 0, length: 0))
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows.count, 3)
+        let caret = blank.caretRect(for: blank.beginningOfDocument)
+        XCTAssertLessThan(caret.minY, blank.font!.lineHeight / 2, "Caret belongs to the first line of the empty editor")
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { window.layer.render(in: $0.cgContext) })
+        attachment.name = "Return creates an aligned empty item"; attachment.lifetime = .keepAlways; add(attachment)
+        blank.insertText("Next item")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(service.lotEditors[id]?.projected.rows.last?.text, "Next item")
+        XCTAssertTrue(blank.isFirstResponder)
+    }
+}
+
+extension ConverseTests {
+    // Exact command bytes: an iPad send is stored, survives relaunch and is
+    // resent byte-for-byte; an earlier version's record asks home instead.
+    func testOutboxResendsExactCommandBytesAfterRelaunch() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("converse-ipad-command-bytes-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let service = DeviceSyncService(); try service.configureForTesting(folder: folder)
+        let homeStatic = Curve25519.KeyAgreement.PrivateKey()
+        let home = DeviceBlob.sha256Hex(homeStatic.publicKey.rawRepresentation), id = DeviceGlobalID(home: home, session: UUID()).string
+        var viewerHandshake = DeviceHandshake(isInitiator: true, staticKey: Curve25519.KeyAgreement.PrivateKey(), ephemeralKey: Curve25519.KeyAgreement.PrivateKey())
+        var homeHandshake = DeviceHandshake(isInitiator: false, staticKey: homeStatic, ephemeralKey: Curve25519.KeyAgreement.PrivateKey())
+        _ = try homeHandshake.readMessage(try viewerHandshake.writeMessage(payload: Data("v".utf8)))
+        _ = try viewerHandshake.readMessage(try homeHandshake.writeMessage(payload: Data("h".utf8)))
+        _ = try homeHandshake.readMessage(try viewerHandshake.writeMessage(payload: Data("v".utf8)))
+        var homeKeys = try homeHandshake.finish()
+        let peer = DevicePeer(connection: NWConnection(host: "127.0.0.1", port: 1, using: .tcp), isInitiator: true, displayName: "Home")
+        peer.hello = DeviceHello(deviceID: home, deviceName: "Home", converseVersion: "test"); peer.keys = try viewerHandshake.finish(); peer.trustedReady = true
+        var wire: [Data] = []; peer.testSink = { wire.append($0) }
+        service.adoptPeerForTesting(peer)
+        service.homes[home] = RemoteHomeState(deviceID: home, deviceName: "Home", online: true, rows: [], lastSeen: Date())
+        var decoder = DeviceFrameDecoder()
+        func sent() throws -> [DeviceEnvelope] {
+            var frames: [DeviceEnvelope] = []
+            for frame in wire { frames += try decoder.append(homeKeys.receiver.decrypt(frame)) }
+            wire = []; return frames
+        }
+        service.remoteLeases[id] = 3
+        let command = try XCTUnwrap(service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "submit", text: "From iPad")))
+        let first = try XCTUnwrap(try sent().first { $0.commandID == command && $0.kind == DeviceMessageKind.command.rawValue }?.payload)
+        XCTAssertEqual(String(decoding: first, as: UTF8.self), #"{"action":"submit","blobHashes":[],"text":"From iPad"}"#, "iPad sends canonical command bytes")
+        XCTAssertEqual(service.outbox.first { $0.commandID == command }?.payloadData, first, "The outbox stores the bytes it sent")
+        try service.configureForTesting(folder: folder) // Relaunch: stores reload from disk.
+        service.remoteLeases[id] = 3
+        XCTAssertNotNil(service.homes[home], "The fixture home stays reachable across the simulated relaunch")
+        let reloaded = try XCTUnwrap(service.outbox.first { $0.commandID == command })
+        XCTAssertEqual(reloaded.payloadData, first)
+        service.retryOutbox(reloaded)
+        XCTAssertEqual(try sent().first { $0.commandID == command && $0.kind == DeviceMessageKind.command.rawValue }?.payload, first, "Resend same ID after relaunch is byte-identical")
+        let legacyID = UUID()
+        let legacy = #"[{"commandID":""# + legacyID.uuidString + #"","sessionID":""# + id + #"","payload":{"action":"submit","text":"Old","blobHashes":[]},"payloadHash":"h","epoch":3,"outcome":"pending"}]"#
+        try Data(legacy.utf8).write(to: folder.appendingPathComponent("device-outbox.json"))
+        try service.configureForTesting(folder: folder)
+        service.remoteLeases[id] = 3
+        var record = try XCTUnwrap(service.outbox.first { $0.commandID == legacyID })
+        XCTAssertEqual(record.outcome, "uncertain", "An earlier version's pending send surfaces as Check home")
+        XCTAssertEqual(record.detail, DeviceOutboxRecord.legacyDetail)
+        record.outcome = "pending"; service.retryOutbox(record)
+        let frames = try sent()
+        XCTAssertTrue(frames.contains { $0.kind == DeviceMessageKind.commandQuery.rawValue && $0.commandID == legacyID }, "Resending a legacy record queries home under its original ID")
+        XCTAssertFalse(frames.contains { $0.kind == DeviceMessageKind.command.rawValue }, "A legacy record is never re-encoded and resent")
+    }
+}
+
+extension ConverseTests {
+    func testSidebarSortOrdersRemoteRowsByTitleOrLatestResponse() {
+        func row(_ title: String, _ seconds: Double?) -> DeviceSidebarRow {
+            var value = DeviceSidebarRow(globalID: title, sessionID: UUID(), title: title, assistant: "Claude", engine: "claude", model: "", effort: "", access: "", status: "Ready", busy: false, queued: 0, queuePaused: false)
+            value.lastResponseAt = seconds.map(Date.init(timeIntervalSince1970:)); return value
+        }
+        let rows = [row("beta", 100), row("Alpha", nil), row("Gamma", 300), row("Delta", 100)]
+        XCTAssertEqual(SidebarSort.rows(rows, by: .alphabetical).map(\.title), ["Alpha", "beta", "Delta", "Gamma"])
+        XCTAssertEqual(SidebarSort.rows(rows, by: .recent).map(\.title), ["Gamma", "beta", "Delta", "Alpha"], "Latest response first; ties and undated rows by title")
+        XCTAssertEqual(SidebarSort.rows(rows, by: .manual).map(\.title), ["Alpha", "beta", "Delta", "Gamma"], "iPad has no drag order, so manual reads as alphabetical")
     }
 }

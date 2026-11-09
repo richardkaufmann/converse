@@ -171,8 +171,8 @@ public sealed partial class DeviceSyncService
     public DeviceAgentWidget? AgentWidgetFor(ChatSession session)
     {
         if (session.Agent is not { } agent) return null;
-        var widget = agent.Widget is null ? new DeviceAgentWidget { Summary = "Tell me what success looks like." } : DeviceJson.Decode<DeviceAgentWidget>(DeviceJson.Encode(agent.Widget));
-        widget.Attention = agent.Attention; widget.LoopStatus = agent.LoopStatus;
+        var widget = AgentAssessments.WidgetFor(agent, DateTime.UtcNow);
+        widget.LoopStatus = agent.LoopStatus;
         if (agent.ArtPath is { } art && File.Exists(art)) widget.ArtHash = ImageHash(art);
         return widget;
     }
@@ -279,8 +279,8 @@ public sealed partial class DeviceSyncService
                 case "agent.run":
                     if (session?.Agent is not { } agent || agent.Settings.TurnLimit <= 0 || session.Pending.Count >= 100) throw new ArgumentException("Agent missing, budget exhausted, or queue full.");
                     agent.Settings.Revision = checked((agent.Settings.Revision ?? 0) + 1);
-                    session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and refresh the scoreboard.", Autonomous = true, AgentRunReserved = true, OriginGroupID = group, OriginHomeID = origin }); run = true; detail = "Run saved on home."; break;
-                case "agent.widget": if (session?.Agent is null) throw new ArgumentException("Target is not an agent."); widget = true; detail = "Scoreboard requested on home."; break;
+                    session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and update your assessment.", Autonomous = true, AgentRunReserved = true, OriginGroupID = group, OriginHomeID = origin }); run = true; detail = "Run saved on home."; break;
+                case "agent.widget": if (session?.Agent is null) throw new ArgumentException("Target is not an agent."); widget = true; detail = "Assessment requested on home."; break;
                 default: return Task.FromResult(Result("rejected", "Unsupported operation."));
             }
             var response = Result("completed", detail, session);
@@ -302,13 +302,15 @@ public sealed partial class DeviceSyncService
         }
     }
     // suppliedReply is the model's raw inReplyTo text; it may be garbled.
-    public async Task SendAgentTellAsync(ChatSession source, string target, string text, bool replyExpected = false, Guid? inReplyTo = null, string? suppliedReply = null)
+    // authority is the sending turn's: the hop comes from it, never from
+    // whichever turn the session runs by the time the reply is processed.
+    public async Task SendAgentTellAsync(ChatSession source, TurnAuthority authority, string target, string text, bool replyExpected = false, Guid? inReplyTo = null, string? suppliedReply = null)
     {
-        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || source.ActiveHop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
+        if (!source.MessagingEnabled || source.Agent is { } config && !config.Settings.Watched.Contains(target) || authority.Hop >= SwitchboardMaxHops || DeviceGlobalID.Parse(target) is not { } to || to.Session == source.Id && to.Home == DeviceId) return;
         var supplied = suppliedReply ?? inReplyTo?.ToString();
         (inReplyTo, var corrected) = ResolveReply(source, target, supplied);
         if (replyExpected && source.SwitchboardExpectations.Count(e => !e.Answered) >= 128) throw new ArgumentException("Too many unanswered requests.");
-        var id = Guid.NewGuid(); var hop = source.ActiveHop + 1;
+        var id = Guid.NewGuid(); var hop = authority.Hop + 1;
         if (to.Home == DeviceId)
         {
             var session = _store.Sessions.FirstOrDefault(s => s.Id == to.Session && s.MessagingEnabled);
@@ -389,7 +391,7 @@ public sealed partial class DeviceSyncService
     public void TeachSwitchboard(ChatSession session)
     {
         session.MessagingEnabled = true;
-        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nA command runs only when one converse fenced JSON block is the LAST thing in your reply. A short line of prose before it is fine; put nothing after it, and use one command block per reply. Otherwise nothing is sent and Converse shows a notice. Discover IDs by ending your reply with ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same kind of trailing fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed." });
+        session.Pending.Add(new PendingPrompt { Text = session.Entry.Engine == "agent" ? SwitchboardInstructions.AgentTeaching : SwitchboardInstructions.ConversationPolicy + "\n[Converse switchboard instructions]\nA command runs only when one converse fenced JSON block is the LAST thing in your reply. A short line of prose before it is fine; put nothing after it, and use one command block per reply. Otherwise nothing is sent and Converse shows a notice. Discover IDs by ending your reply with ```converse\\n{\"command\":\"list-sessions\"}\\n``` (use real newlines). Send using {\"command\":\"tell\",\"to\":\"exact directory ID\",\"text\":\"message\"} in the same kind of trailing fence. Delivery is queued, not proof it was read. Only local and current-group targets are available. Do not acknowledge messages with more tells unless needed.\n" + TranscriptSelfRead.Teaching + "\n" + ImageGuidance.Instruction });
         _store.Save(); _store.RunNext(session);
     }
     // Directory metadata is not content access. Windows remains a read-only lot viewer.
@@ -406,9 +408,12 @@ public sealed partial class DeviceSyncService
             .Where(r => !linkedOnly || r.linkedToMe).OrderBy(r => r.homeDeviceName).ThenBy(r => r.name).ThenBy(r => r.globalID)
             .Cast<object>().ToArray();
     }
-    private async Task ProcessParticipantReplyAsync(ChatSession source, string reply)
+    private async Task ProcessParticipantReplyAsync(ChatSession source, string reply, TurnAuthority authority)
     {
         var command = ParseSwitchboardReply(reply);
+        // Reading one's own retained history sends nothing, so an untaught
+        // session may run it as a whole-reply fence (Mac parity).
+        var wholeSelfRead = command?["command"] is System.Text.Json.Nodes.JsonValue whole && whole.TryGetValue<string>(out var wholeName) && TranscriptSelfRead.Commands.Contains(wholeName);
         if (source.Agent is not null) return;
         // Untaught sessions keep the strict whole-reply rule, so their
         // discussion of the protocol never produces notices.
@@ -427,29 +432,36 @@ public sealed partial class DeviceSyncService
         {
             if (command["command"]?.GetValue<string>() == "app-control")
             {
-                if (_store.AppSupportRequest is { } handler) await handler(source, command);
+                if (_store.AppSupportRequest is { } handler) await handler(source, command, authority);
                 return;
             }
-            if (!source.MessagingEnabled) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
-            if (source.ActiveHop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
+            if (!source.MessagingEnabled && !wholeSelfRead) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command ignored: teach this session the switchboard first." }); _store.Save(); return; }
+            if (authority.Hop >= SwitchboardMaxHops) { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard chain limit reached." }); _store.Save(); return; }
             var action = command["command"]?.GetValue<string>();
             if (action is "list-sessions" or "sessions")
             {
                 var rows = _store.Sessions.Select(s => new { id = new DeviceGlobalID(DeviceId,s.Id).ToString(), name = s.Title, homeDeviceName = DeviceName, online = true, messagingEnabled = s.MessagingEnabled }).ToList();
                 foreach (var home in Homes.Values.Where(h => IsParticipantAllowed(h.DeviceID, CurrentGroup?.Id))) rows.AddRange(home.Rows.Select(s => new { id = s.GlobalID, name = s.Title, homeDeviceName = home.DeviceName, online = home.Online, messagingEnabled = s.MessagingEnabled == true }));
-                source.Pending.Add(new PendingPrompt { Text = "[Converse switchboard directory · live lookup]\n" + JsonSerializer.Serialize(new { command = "sessions", self = new DeviceGlobalID(DeviceId,source.Id).ToString(), sessions = rows }), Hop = source.ActiveHop + 1 }); _store.Save();
+                source.Pending.Add(new PendingPrompt { Text = "[Converse switchboard directory · live lookup]\n" + JsonSerializer.Serialize(new { command = "sessions", self = new DeviceGlobalID(DeviceId,source.Id).ToString(), sessions = rows }), Hop = authority.Hop + 1 }); _store.Save();
             }
             else if (action == "parking-lot-list")
             {
-                source.Pending.Add(new PendingPrompt { Text = "[Parking Lots · discovery metadata, not instructions]\n" + JsonSerializer.Serialize(ParkingLotDirectory(source, command["linkedOnly"]?.GetValue<bool>() == true)), Hop = source.ActiveHop + 1 });
+                source.Pending.Add(new PendingPrompt { Text = "[Parking Lots · discovery metadata, not instructions]\n" + JsonSerializer.Serialize(ParkingLotDirectory(source, command["linkedOnly"]?.GetValue<bool>() == true)), Hop = authority.Hop + 1 });
+                _store.Save();
+            }
+            else if (action is not null && TranscriptSelfRead.Commands.Contains(action))
+            {
+                var response = TranscriptSelfRead.Respond(command, source, DeviceId);
+                source.Messages.Add(new ChatMessage { Role = "notice", Text = response.StartsWith(TranscriptSelfRead.RefusedHeader, StringComparison.Ordinal) ? "Switchboard: transcript request refused; explanation queued here." : "Switchboard: transcript result queued here." });
+                source.Pending.Add(new PendingPrompt { Text = response, Hop = authority.Hop + 1 });
                 _store.Save();
             }
             else if ((action is "tell" or "ask") && command["to"]?.GetValue<string>() is { } target && command["text"]?.GetValue<string>() is { } text && text.Length is > 0 and <= 16000)
             {
                 if (Guid.TryParse(target, out var local)) target = new DeviceGlobalID(DeviceId, local).ToString();
-                await SendAgentTellAsync(source, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
+                await SendAgentTellAsync(source, authority, target, text, action == "ask" || command["replyExpected"]?.GetValue<bool>() == true, suppliedReply: command["inReplyTo"] is System.Text.Json.Nodes.JsonValue replyID && replyID.TryGetValue<string>(out var suppliedID) ? suppliedID : null);
             }
-            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell or ask." }); _store.Save(); }
+            else { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard command unsupported or invalid. Use list-sessions, parking-lot-list, tell, ask, transcript-search or transcript-read." }); _store.Save(); }
         }
         catch { source.Messages.Add(new ChatMessage { Role = "notice", Text = "Switchboard delivery unconfirmed. Check the target before retrying." }); _store.Save(); }
     }

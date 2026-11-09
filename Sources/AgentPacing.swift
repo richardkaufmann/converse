@@ -69,68 +69,12 @@ extension AgentConfig {
     }
 }
 
-// Mood art costs an image generation. Regenerate only for a meaningful change,
-// never more often than the minimum interval unless the owner edited the art
-// direction, and refresh unchanged art at most once per maximum staleness.
-enum AgentArtPolicy {
-    static let defaultMinMinutes = 30.0
-    static let defaultMaxStaleHours = 6.0
-    // Labels, values and sentiment matter; title, summary, asOf and source URLs do not.
-    static func signature(_ board: AgentScoreboard?) -> AgentScoreboard? {
-        board.map { AgentScoreboard(title: nil, summary: "", metrics: $0.metrics.map { .init(label: $0.label, value: $0.value) }, sentiment: $0.sentiment) }
-    }
-    static func scoreboardChanged(from old: AgentScoreboard?, to new: AgentScoreboard?) -> Bool {
-        let before = old?.metrics ?? [], after = new?.metrics ?? []
-        if old?.sentiment != new?.sentiment { return true }
-        func values(_ metrics: [AgentScoreboard.Metric]) -> [String: [String]] { Dictionary(grouping: metrics, by: \.label).mapValues { $0.map(\.value) } }
-        return values(before) != values(after)
-    }
-    static func shouldRegenerate(now: Date, lastArtAt: Date?, directionChanged: Bool, moodChanged: Bool, scoreboardChanged: Bool,
-                                 minInterval: TimeInterval, maxStale: TimeInterval) -> Bool {
-        guard let lastArtAt else { return true }
-        if directionChanged { return true }
-        let age = now.timeIntervalSince(lastArtAt)
-        guard age >= minInterval else { return false }
-        return moodChanged || scoreboardChanged || age >= maxStale
-    }
-}
-
+// Portraits are on demand. The owner may raise or lower how often one agent's
+// portrait can regenerate; Refresh always bypasses it.
 extension AgentConfig {
-    var artMinMinutes: Double { artMinIntervalMinutes ?? AgentArtPolicy.defaultMinMinutes }
-    var artStaleHours: Double { max(artMinMinutes / 60, artMaxStaleHours ?? AgentArtPolicy.defaultMaxStaleHours) }
-    // Objective timing wins over the saved throttle, which wins over defaults.
-    var effectiveArtMinMinutes: Double { objectivePacing?.artMinIntervalMinutes ?? artMinMinutes }
-    var effectiveArtStaleHours: Double { max(effectiveArtMinMinutes / 60, objectivePacing?.artMaxAgeHours ?? artStaleHours) }
-    mutating func setArtThrottle(minMinutes: Double, maxStaleHours: Double) throws {
-        guard minMinutes.isFinite, maxStaleHours.isFinite, (5...1440).contains(minMinutes), (1...168).contains(maxStaleHours), maxStaleHours * 60 >= minMinutes else {
-            throw AgentFailure.message("Art refresh needs a minimum of 5–1440 minutes and a maximum of 1–168 hours, no shorter than the minimum.")
-        }
-        artMinIntervalMinutes = minMinutes == AgentArtPolicy.defaultMinMinutes ? nil : minMinutes
-        artMaxStaleHours = maxStaleHours == AgentArtPolicy.defaultMaxStaleHours ? nil : maxStaleHours
-    }
-    // With an objective percent trigger, only numeric metrics that moved by
-    // more than that percent since the last art count, and the mood counts
-    // only when the objective asks for it.
-    func shouldRegenerateArt(mood: String, board: AgentScoreboard?, now: Date) -> Bool {
-        let spec = objectivePacing
-        let moodChanged: Bool, scoreboardChanged: Bool
-        if let percent = spec?.artChangePercent {
-            let before = lastArtMetricValues ?? AgentMetricNumber.values(lastArtScoreboard)
-            scoreboardChanged = AgentMetricNumber.moved(from: before, to: AgentMetricNumber.values(board), percent: percent)
-            moodChanged = spec?.artOnSentimentChange == true && lastArtMood != mood
-        } else {
-            let sentiment = spec?.artOnSentimentChange ?? true
-            func strip(_ board: AgentScoreboard?) -> AgentScoreboard? { board.map { var copy = $0; if !sentiment { copy.sentiment = nil }; return copy } }
-            scoreboardChanged = AgentArtPolicy.scoreboardChanged(from: strip(lastArtScoreboard), to: strip(AgentArtPolicy.signature(board)))
-            moodChanged = sentiment && lastArtMood != mood
-        }
-        // An explicit activity-only instruction disables the age-based refresh.
-        // Check art direction as well as objective: owners put art timing there.
-        let directionAndObjective = (artDirection ?? "") + "\n" + objective
-        let activityOnly = directionAndObjective.range(of: #"(?is)only\s+(?:generate|regenerate|refresh)(?:\s+new)?(?:\s+(?:this|artwork|art|image|the image))?.{0,60}(?:significant activity|meaningful.{0,20}chang|significant.{0,20}chang)"#, options: .regularExpression) != nil
-        if activityOnly && lastArtAt != nil && !moodChanged && !scoreboardChanged { return false }
-        return AgentArtPolicy.shouldRegenerate(now: now, lastArtAt: lastArtAt, directionChanged: (lastArtDirection ?? "") != (artDirection ?? ""),
-            moodChanged: moodChanged, scoreboardChanged: scoreboardChanged, minInterval: effectiveArtMinMinutes * 60, maxStale: effectiveArtStaleHours * 3600)
+    mutating func setPortraitInterval(minutes: Double) throws {
+        guard minutes.isFinite, (1...1440).contains(minutes) else { throw AgentFailure.message("Portrait refresh needs a minimum of 1–1440 minutes.") }
+        portraitMinMinutes = minutes == PortraitService.defaultMinMinutes ? nil : minutes
     }
 }
 

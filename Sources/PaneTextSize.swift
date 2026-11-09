@@ -78,6 +78,7 @@ extension AppDelegate {
             if let scalable = current as? PaneTextScalable { scalable.applyPaneText(change); return }
             view = current.superview
         }
+        if let scalable = window?.contentView as? PaneTextScalable { scalable.applyPaneText(change); return }
         if let session = focusedTextSession(in: window) { store.changeTextSize(change, focused: session); return }
         store.changeTextSize(change, focused: nil)
         PaneTextScaling.allLots?(change)

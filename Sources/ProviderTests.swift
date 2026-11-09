@@ -8,9 +8,11 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     accountUsageSelfTests(check)
     responseImageSelfTests(check)
     helpSelfTests(check)
+    MainActor.assumeIsolated { helpVideoSelfTests(check) }
     workspaceSelfTests(check)
     switchboardSelfTests(check)
     switchboardSupervisionSelfTests(check)
+    groupMapSelfTests(check)
     switchboardReplyToleranceSelfTests(check)
     switchboardTrailingFenceSelfTests(check)
     groupSwitchboardSelfTests(check)
@@ -186,11 +188,54 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: second", "answer: first"] && session.draft == "untouched", engine + " Inject now promotes selected row, interrupts, and preserves draft")
         check(session.injectionNotice.isEmpty && session.injectionTargetID == nil, engine + " injection confirmation clears once the promoted prompt receives a response")
+        session.draft = "slow"; store.submit(session)
+        pump { session.messages.last?.text == "partial" }
+        let keepOne = PendingPrompt(text: "keep one", images: []), dropTwo = PendingPrompt(text: "drop two", images: []), keepThree = PendingPrompt(text: "keep three", images: [])
+        session.pending = [keepOne, dropTwo, keepThree]
+        session.draft = "untouched"
+        check(store.removePending(session, id: dropTwo.id) == nil && session.pending.map(\.id) == [keepOne.id, keepThree.id] && session.busy && !session.interrupted, engine + " Remove takes exactly one queued message and leaves the running turn alone")
+        check(store.removePending(session, id: dropTwo.id) == Store.queuedMessageGone && store.removePending(session, id: UUID()) == Store.queuedMessageGone && session.pending.map(\.id) == [keepOne.id, keepThree.id] && session.busy && !session.interrupted, engine + " Removing an absent or already-started message fails without side effects")
+        store.stop(session); pump { !session.busy }
+        session.queuePaused = false; store.runNext(session)
+        pump { !session.busy && session.pending.isEmpty }
+        check(session.messages.filter { $0.role == "assistant" }.suffix(2).map(\.text) == ["answer: keep one", "answer: keep three"] && !session.messages.contains { $0.text.contains("drop two") } && session.draft == "untouched", engine + " the remaining queue drains in order after one removal")
         session.pending = [PendingPrompt(text: "one", images: []), PendingPrompt(text: "two", images: [])]
         session.queuePaused = true
         store.injectPending(session)
         pump { !session.busy && session.pending.isEmpty }
         check(session.messages.last?.text == "answer: one\n\ntwo" && session.draft == "untouched", engine + " Inject all resumes paused queue as one ordered turn without changing draft")
+        let plainMerge = session.messages.last { $0.role == "user" }
+        check(plainMerge?.components?.map(\.kind) == ["text", "text"] && TranscriptStyle.segments(plainMerge?.text ?? "", components: plainMerge?.components) == nil,
+              engine + " Inject all of plain prompts records its parts and still renders whole as before")
+        // A queued tell merged with a prompt typed while busy (941BAB1E).
+        let tell = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nDiagnosis\n[Reply to request " + UUID().uuidString + "]"
+        session.draft = "slow"; store.submit(session)
+        pump { session.messages.last?.text == "partial" }
+        let tellPrompt = PendingPrompt(switchboardHop: 2, autonomous: true, text: tell, images: [])
+        session.pending.append(tellPrompt)
+        let tellObligation = SwitchboardObligation(id: UUID(), source: "peer/one", sourceName: "ClaudeConverse", promptID: tellPrompt.id)
+        session.switchboardObligations.append(tellObligation)
+        session.draft = "OK, propose: make 148"; store.submit(session)
+        let typedQueued = session.pending.last
+        check(typedQueued?.typed == true && session.pending.first?.typed == nil, engine + " composer input is marked typed in the queue; delivered traffic is not")
+        session.draft = "untouched"
+        store.injectPending(session)
+        let mergedPending = session.pending.first
+        check(mergedPending?.durabilityIDs == Set([mergedPending?.id, tellPrompt.id, typedQueued?.id].compactMap { $0 }) && mergedPending?.text == tell + "\n\nOK, propose: make 148",
+              engine + " Inject all keeps the merged text and every part's durability ID")
+        pump { !session.busy && session.pending.isEmpty }
+        let mergedUser = session.messages.last { $0.role == "user" }
+        let tellLength = (tell as NSString).length
+        check(mergedUser?.text == tell + "\n\nOK, propose: make 148" && session.messages.last?.text == "answer: " + tell + "\n\nOK, propose: make 148",
+              engine + " the stored message and the provider input are byte-identical to the plain merge")
+        check(mergedUser?.components == [MessageComponent(offset: 0, length: tellLength, kind: "traffic"), MessageComponent(offset: tellLength + 2, length: 21, kind: "human")],
+              engine + " the merged message records where the tell and the typed prompt sit")
+        let reloaded = Session(try! JSONDecoder().decode(SavedSession.self, from: JSONEncoder().encode(session.saved)))
+        check(reloaded.messages.last { $0.role == "user" }?.components == mergedUser?.components && reloaded.messages.last { $0.role == "user" }?.text == mergedUser?.text,
+              engine + " merged components survive archive save and load")
+        check(session.switchboardObligations.first { $0.id == tellObligation.id }.map { $0.state == "submitted" && $0.promptID == tellPrompt.id } == true,
+              engine + " the merged tell's request obligation is submitted exactly as before")
+        session.switchboardObligations.removeAll { $0.id == tellObligation.id }
         session.switchboardEnabled = true
         session.draft = "switchboard-output:```converse\n{\"command\":\"list-sessions\"}\n```"
         store.submit(session)
@@ -335,6 +380,27 @@ func providerSelfTests(_ check: (Bool, String) -> Void) {
     store.injectPending(lifecycle, id: lifecycle.pending.first?.id)
     pump { !lifecycle.busy && lifecycle.pending.isEmpty }
     check(lifecycle.messages.filter { $0.role == "user" && $0.text == "blocked input" }.count == 1 && lifecycle.messages.filter { $0.text == "answer: blocked input" }.count == 1 && lifecycle.draft == "keep typing" && lifecycle.attachments == ["new-attachment.png"], "Inject after a Muse lock clears delivers held input exactly once and preserves the draft")
+    // An Inject all merge held by the lock keeps its parts and typed flags,
+    // so the retried message still shows the typed prompt beside the tell.
+    try! FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
+    let heldTell = "[Converse message from Fixture · session peer/one · delivery test · hop 1/100]\nStatus message"
+    let heldTyped = "MY TYPED PROMPT MUST STAY VISIBLE", heldText = heldTell + "\n\n" + heldTyped
+    let heldParts = [PendingPrompt(switchboardHop: 1, text: heldTell, images: []), PendingPrompt(typed: true, text: heldTyped, images: [])]
+    lifecycle.queuePaused = true; lifecycle.pending = heldParts
+    store.injectPending(lifecycle)
+    pump { !lifecycle.busy }
+    let held = lifecycle.pending.first
+    check(lifecycle.status == "Session in use · input held" && lifecycle.pending.count == 1 && held?.text == heldText && held?.components?.map(\.text) == [heldTell, heldTyped]
+          && held?.components?.map { $0.typed == true } == [false, true] && held?.messageComponents?.map(\.kind) == ["traffic", "human"]
+          && held.map { $0.durabilityIDs.isDisjoint(with: heldParts.map(\.id)) } == true && !lifecycle.messages.contains { $0.role == "user" && $0.text == heldText },
+          "Muse lock conflict re-queues an Inject all merge with its parts and typed flags under fresh identities")
+    try! FileManager.default.removeItem(at: lock)
+    store.injectPending(lifecycle, id: held?.id)
+    pump { !lifecycle.busy && lifecycle.pending.isEmpty }
+    let redelivered = lifecycle.messages.last { $0.role == "user" }
+    check(redelivered?.text == heldText && lifecycle.messages.last?.text == "answer: " + heldText
+          && TranscriptStyle.segments(heldText, components: redelivered?.components) == [TranscriptSegment(text: heldTell, summary: "Received tell from Fixture · Status message"), TranscriptSegment(text: heldTyped, summary: nil)],
+          "The re-injected message is byte-identical and renders the typed prompt visibly")
     let quittingStore = Store(folder: store.folder.appendingPathComponent("muse-quit"))
     let quittingSession = quittingStore.create(lifecycleEntry)
     let quitHost = MuseConnection(sessionID: UUID().uuidString)

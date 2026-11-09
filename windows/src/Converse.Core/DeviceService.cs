@@ -330,6 +330,8 @@ internal sealed class Peer
     public DeviceFrameDecoder Decoder { get; } = new();
     public List<byte> Buffer { get; } = new();
     public bool TrustedReady { get; set; }
+    public DateTime? ReportedEngagement { get; set; }
+    public DateTime? EngagementSentAt { get; set; }
     public bool HumanConfirmed { get; set; }
     public bool LocalConfirmed { get; set; }
     public bool RemoteConfirmed { get; set; }
@@ -443,7 +445,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private readonly DeviceLeaseManager _leases;
     private readonly DeviceDraftTracker _drafts = new();
     private readonly Dictionary<Guid, Peer> _peers = new();
-    private readonly Dictionary<string, string> _blobPaths = new();
+    private readonly ConcurrentDictionary<string, string> _blobPaths = new();
     private readonly Dictionary<string, List<byte>> _staged = new();
     private readonly Dictionary<string, TaskCompletionSource<bool>> _blobAcks = new();
     private readonly Dictionary<string, TaskCompletionSource<string?>> _blobDownloads = new();
@@ -487,7 +489,7 @@ public sealed partial class DeviceSyncService : IDisposable
         _store.TranscriptAdvanced += PushTranscriptToHolder;
         _store.SessionClosed += HomeSessionClosed;
         LoadParticipants();
-        _store.FinalParticipantReply = (session, reply) => { _ = ProcessParticipantReplyAsync(session, reply); };
+        _store.FinalParticipantReply = (session, reply, authority) => { _ = ProcessParticipantReplyAsync(session, reply, authority); };
         _store.AcceptGroupPrompt = p => IsParticipantAllowed(p.OriginHomeID ?? "", p.OriginGroupID);
         Agents = new AgentRuntime(_store, this);
     }
@@ -597,7 +599,7 @@ public sealed partial class DeviceSyncService : IDisposable
         DeviceKind.LeaseRelease, DeviceKind.TranscriptSnapshot, DeviceKind.TranscriptRequest,
         DeviceKind.DraftPatch, DeviceKind.Command, DeviceKind.CommandQuery, DeviceKind.CommandAck,
         DeviceKind.BlobOffer, DeviceKind.BlobChunk, DeviceKind.BlobAck,
-        DeviceKind.BlobRequest, DeviceKind.BlobData,
+        DeviceKind.BlobRequest, DeviceKind.BlobData, DeviceKind.Engagement,
     };
 
     // Creating a new group fences home leases held by the old group: only
@@ -771,7 +773,7 @@ public sealed partial class DeviceSyncService : IDisposable
     private DeviceHello Hello(string? joinGroupID = null) => new()
     {
         DeviceID = DeviceId, DeviceName = DeviceName, ConverseVersion = InstalledVersion.Version, ConverseBuild = InstalledVersion.Build,
-        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1" },
+        Capabilities = new[] { "lot-read-v1", "sidebar", "lease", "lease-resume-v1", "transcript", "commands", "blobs", "fabric-membership-v1", "converse-groups-v1", "participant-control-v1", "session-close-v1", "session-rename-v1", "session-create-v1", "agent-host-v1", "transcript-export-v1", "agent-art-direction-v1", "agent-schedule-v1", "switchboard-teach-v1", "switchboard-supervision-v1", QueueRemoveCapability, DeviceEngagement.Capability },
         ListenPort = ListeningPort > 0 ? ListeningPort : null,
         Group = CurrentGroup, JoinGroupID = joinGroupID,
     };
@@ -791,36 +793,78 @@ public sealed partial class DeviceSyncService : IDisposable
         }
     }
 
+    private readonly object _engagementLock = new();
+    private readonly DeviceEngagement _engagement = new();
+    public DateTime? LastEngagedUtc { get { lock (_engagementLock) return _engagement.Latest; } }
+    // Real keyboard or pointer input in this app. Never called for agent,
+    // switchboard or automated traffic.
+    public void NoteHumanInput()
+    {
+        lock (_engagementLock) _engagement.RecordLocal(DateTime.UtcNow);
+        _ = ReportEngagementAsync();
+    }
+    internal void ReceiveEngagementForTesting(DeviceEngagementReport report, DateTime receivedUtc) { lock (_engagementLock) _engagement.RecordPeer(report, receivedUtc); }
+    private async Task ReportEngagementAsync()
+    {
+        if (LocallyRemoved || CurrentGroup is null) return;
+        var now = DateTime.UtcNow;
+        foreach (var peer in _peers.Values.Where(p => p.TrustedReady && !p.ControlOnly && p.Hello is { } h
+            && h.Capabilities.Contains(DeviceEngagement.Capability) && h.Capabilities.Contains("agent-host-v1") && IsGroupMember(h.DeviceID)).ToArray())
+        {
+            DeviceEngagementReport? report; DateTime? local;
+            lock (_engagementLock)
+            {
+                report = _engagement.Report(peer.ReportedEngagement, peer.EngagementSentAt, now);
+                local = _engagement.Local;
+                if (report is not null) { peer.ReportedEngagement = local; peer.EngagementSentAt = now; }
+            }
+            if (report is not null) await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.Engagement, Payload = DeviceJson.Encode(report) });
+        }
+    }
+
+    internal TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
+    internal Func<Task>? HeartbeatPassStartingForTest { get; set; }
+
     private async Task HeartbeatLoopAsync(CancellationToken token)
     {
         var ticks = 0;
         while (!token.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(5), token).ContinueWith(_ => { });
+            await Task.Delay(HeartbeatInterval, token).ContinueWith(_ => { });
             if (token.IsCancellationRequested) break;
             ticks++;
-            if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
-            if (ticks % 6 == 0) await ReconnectFabricAsync();
-            foreach (var expired in _leases.SweepExpired())
+            // Nothing observes this loop: an escaped exception would end lease
+            // sweeps, heartbeats and fabric reconnects until restart.
+            try { await HeartbeatPassAsync(ticks); }
+            catch (Exception e) { if (!token.IsCancellationRequested) System.Diagnostics.Trace.WriteLine("Device heartbeat pass failed: " + e.Message); }
+        }
+    }
+
+    internal async Task HeartbeatPassAsync(int ticks)
+    {
+        if (HeartbeatPassStartingForTest is { } starting) await starting();
+        if (SweepExpiredSponsors()) await PublishGroupRequestsAsync();
+        await ReportEngagementAsync();
+        if (ticks % 6 == 0) await ReconnectFabricAsync();
+        foreach (var expired in _leases.SweepExpired())
+        {
+            foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == expired.Device).ToList())
             {
-                foreach (var peer in _peers.Values.Where(p => p.Hello?.DeviceID == expired.Device))
+                peer.LeasedSessions.Remove(expired.Session);
+                await SendEnvelopeAsync(peer, new DeviceEnvelope
                 {
-                    peer.LeasedSessions.Remove(expired.Session);
-                    await SendEnvelopeAsync(peer, new DeviceEnvelope
-                    {
-                        Kind = peer.Hello?.Capabilities.Contains("lease-resume-v1") == true ? DeviceKind.LeaseExpired : DeviceKind.LeaseStolen, Boot = _boot,
-                        SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(), Epoch = expired.Epoch,
-                    });
-                }
+                    Kind = peer.Hello?.Capabilities.Contains("lease-resume-v1") == true ? DeviceKind.LeaseExpired : DeviceKind.LeaseStolen, Boot = _boot,
+                    SessionID = new DeviceGlobalID(DeviceId, expired.Session).ToString(), Epoch = expired.Epoch,
+                });
             }
-            await RestoreAvailableDisplaysAsync();
-            foreach (var (globalId, epoch) in RemoteLeases.ToList())
-            {
-                var parsed = DeviceGlobalID.Parse(globalId);
-                var peer = parsed is null ? null : PeerForHome(parsed.Value.Home);
-                if (peer is not null)
-                    await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseHeartbeat, SessionID = globalId, Epoch = epoch });
-            }
+        }
+        await RestoreAvailableDisplaysAsync();
+        foreach (var (globalId, epoch) in RemoteLeases.ToList())
+        {
+            var parsed = DeviceGlobalID.Parse(globalId);
+            var peer = parsed is null ? null : PeerForHome(parsed.Value.Home);
+            if (peer is not null)
+                await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.LeaseHeartbeat, SessionID = globalId, Epoch = epoch });
         }
     }
 
@@ -1384,6 +1428,19 @@ public sealed partial class DeviceSyncService : IDisposable
         return expired.Count > 0;
     }
 
+    // Completed acks leave the outbox; tests read their receipt detail here.
+    internal event Action<Guid, DeviceAckPayload>? AckReceivedForTest;
+    internal event Action<DeviceEnvelope>? EnvelopeSentForTest;
+    internal DeviceOutboxStore OutboxStoreForTest => _outbox;
+    internal DeviceLeaseManager LeasesForTest => _leases;
+    internal DeviceCommandStore CommandStoreForTest => _commands;
+    // Sends hand-built bytes under an existing command ID (binding interop).
+    internal async Task<bool> SendRawCommandForTestAsync(string globalId, Guid commandId, byte[] payload)
+    {
+        if (DeviceGlobalID.Parse(globalId) is not { } parsed || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Home) is not { } peer) return false;
+        await SendEnvelopeAsync(peer, new DeviceEnvelope { Kind = DeviceKind.Command, SessionID = globalId, CommandID = commandId, Epoch = epoch, Payload = payload });
+        return true;
+    }
     internal void ExpireJoinForTest(Guid requestId)
     {
         if (_sponsoredRequests.TryGetValue(requestId, out var live))
@@ -1605,6 +1662,7 @@ public sealed partial class DeviceSyncService : IDisposable
     internal async Task SendEnvelopeAsync(Peer peer, DeviceEnvelope envelope)
     {
         if (peer.Keys is null) return;
+        EnvelopeSentForTest?.Invoke(envelope);
         var framed = DeviceFrame.Encode(envelope);
         // Encrypt under the send lock: each Encrypt advances the Noise nonce,
         // so concurrent sends that encrypted first and then raced for the
@@ -1729,21 +1787,20 @@ public sealed partial class DeviceSyncService : IDisposable
         var end = Math.Clamp(beforeOffset ?? total, 0, total);
         var start = Math.Max(0, end - 200);
         var draftKey = session.Id.ToString("D");
-        if (_drafts.Text(draftKey) is null) _drafts.Adopt(draftKey, Math.Max(1UL, _drafts.Version(draftKey)), session.Draft);
-        else if (_drafts.Text(draftKey) != session.Draft) _drafts.Bump(draftKey, session.Draft);
+        _drafts.Reconcile(draftKey, session.Draft);
         var payload = new DeviceTranscriptPayload
         {
             GlobalID = new DeviceGlobalID(DeviceId, session.Id).ToString(),
             HomeSeq = _syncCounters.NextSequence(), Epoch = holder.Value.Epoch, Boot = _boot,
             Messages = session.Messages.Skip(start).Take(end - start).Select(m => new DeviceWireMessage
             {
-                Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt,
+                Id = m.Id, Role = m.Role, Text = m.Text, CreatedAt = m.CreatedAt, Components = m.Components,
                 ImageHashes = m.Images.Where(File.Exists).Select(ImageHash).ToArray(),
             }).ToList(),
             Offset = start, Total = total, Prepend = beforeOffset is not null,
             Draft = session.Draft, DraftVersion = _drafts.Version(draftKey),
             DraftImageHashes = session.Attachments.Where(File.Exists).Select(ImageHash).ToArray(),
-            Pending = session.Pending.Select(p => new DevicePendingDto { Id = p.Id, Text = p.Text }).ToList(),
+            Pending = session.Pending.Select(p => new DevicePendingDto { Id = p.Id, Text = p.Text, Components = p.Components }).ToList(),
             Requests = session.Requests.Select(request => new DeviceRequestDto
             {
                 Id = request.Id, Kind = request.Kind,
@@ -1792,11 +1849,11 @@ public sealed partial class DeviceSyncService : IDisposable
         return false;
     }
 
-    private async Task SendAckAsync(Peer peer, Guid commandId, string? sessionId, string outcome, string? detail = null, ulong? epoch = null) =>
+    private async Task SendAckAsync(Peer peer, Guid commandId, string? sessionId, string outcome, string? detail = null, ulong? epoch = null, bool? query = null) =>
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         {
             Kind = DeviceKind.CommandAck, SessionID = sessionId, CommandID = commandId, Epoch = epoch,
-            Payload = DeviceJson.Encode(new DeviceAckPayload { Outcome = outcome, Detail = detail, Epoch = epoch }),
+            Payload = DeviceJson.Encode(new DeviceAckPayload { Outcome = outcome, Detail = detail, Epoch = epoch, Query = query }),
         });
 
     private async Task ExecuteHomeCommandAsync(Peer peer, DeviceEnvelope envelope)
@@ -1808,15 +1865,27 @@ public sealed partial class DeviceSyncService : IDisposable
         // advertises switchboard-teach-v1 sends it with epoch 0.
         var teaching = command.Action == "teachSwitchboard" && envelope.Epoch == 0 && peer.Hello.Capabilities.Contains("switchboard-teach-v1");
         if (!teaching && !await RequireLeaseAsync(peer, envelope, session)) return;
-        var payloadHash = DeviceBlob.Sha256Hex(envelope.Payload);
-        if (!_commands.Begin(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash))
+        // New records bind the canonical form; existing records compare under
+        // their own scheme, so a legacy raw record never silently accepts a
+        // re-encoded retry. Content that cannot be canonicalized faithfully
+        // is refused, never trimmed.
+        var payloadHash = DeviceCommandBinding.Hash(envelope.Payload, DeviceCommandBinding.CanonicalScheme);
+        if (payloadHash is null && !_commands.Records.ContainsKey(commandId))
         {
-            await SendAckAsync(peer, commandId, envelope.SessionID,
-                _commands.BindingMatches(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash) ? _commands.Outcome(commandId) ?? "rejected" : "rejected",
-                "Already recorded on home.", envelope.Epoch);
+            await SendAckAsync(peer, commandId, envelope.SessionID, "rejected", "Command content is not unambiguous JSON. Nothing was applied.", envelope.Epoch);
             return;
         }
-        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
+        if (!_commands.Begin(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", payloadHash ?? "", DeviceCommandBinding.CanonicalScheme))
+        {
+            if (_commands.BindingMatches(commandId, peer.Hello.DeviceID, envelope.SessionID ?? "", envelope.Payload))
+                await SendAckAsync(peer, commandId, envelope.SessionID, _commands.Outcome(commandId) ?? "rejected", "Already recorded on home.", envelope.Epoch);
+            else if (_commands.RawBindingUnconfirmed(commandId, peer.Hello.DeviceID, envelope.SessionID ?? ""))
+                await SendAckAsync(peer, commandId, envelope.SessionID, "uncertain", DeviceCommandBinding.RawMismatchDetail, envelope.Epoch);
+            else
+                await SendAckAsync(peer, commandId, envelope.SessionID, "rejected", "Command ID reused with different content.", envelope.Epoch);
+            return;
+        }
+        string[] known = { "submit", "inject", "injectAll", "stop", "resumeQueue", "pauseQueue", "clearQueue", "removeQueued", "rename", "model", "effort", "access", "answer", "teachSwitchboard" };
         if (!known.Contains(command.Action))
         {
             _commands.MarkFailed(commandId);
@@ -1912,11 +1981,18 @@ public sealed partial class DeviceSyncService : IDisposable
             case "resumeQueue": session.QueuePaused = false; _store.Save(); _store.RunNext(session); break;
             case "pauseQueue": session.QueuePaused = true; _store.Save(); break;
             case "clearQueue": session.Pending.Clear(); _store.Save(); break;
+            case "removeQueued":
+                failure = command.PendingID is { } pendingId ? _store.RemovePending(session, pendingId)
+                    : "Remove not applied: no queued item was specified. Nothing was removed.";
+                break;
             case "rename": if (!string.IsNullOrEmpty(command.Text)) { session.Title = command.Text; _store.Save(); } break;
             case "model": session.Choices.Model = command.Model; session.Choices.ModelProvider = command.ModelProvider; session.Choices.ModelProfile = command.ModelProfile; _store.Save(); break;
             case "effort": session.Choices.Effort = command.Effort; _store.Save(); break;
             case "access": session.Choices.Access = command.Access; _store.Save(); break;
         }
+        // Automatic dequeue won the race: the inject completes as a no-op.
+        var completion = "Applied once on home.";
+        if (SessionStore.InjectIsNoOp(failure)) { completion = failure!; failure = null; }
         if (failure is not null)
         {
             _commands.MarkFailed(commandId);
@@ -1925,7 +2001,7 @@ public sealed partial class DeviceSyncService : IDisposable
             return;
         }
         _commands.MarkCompleted(commandId);
-        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", "Applied once on home.", envelope.Epoch);
+        await SendAckAsync(peer, commandId, envelope.SessionID, "completed", completion, envelope.Epoch);
         await SendTranscriptAsync(peer, session);
         }
         finally { if (startsWork) EndExternalWork(); }
@@ -1957,6 +2033,13 @@ public sealed partial class DeviceSyncService : IDisposable
         if (await HandleParticipantAsync(peer, envelope)) return;
         switch (envelope.Kind)
         {
+            case DeviceKind.Engagement:
+            {
+                if (!peer.Hello.Capabilities.Contains(DeviceEngagement.Capability) || envelope.Payload is null) break;
+                try { var report = DeviceJson.Decode<DeviceEngagementReport>(envelope.Payload); lock (_engagementLock) _engagement.RecordPeer(report, DateTime.UtcNow); }
+                catch (JsonException) { }
+                break;
+            }
             case DeviceKind.FabricMembers:
             {
                 // Leave can clear CurrentGroup on another thread while this frame is merging.
@@ -2028,7 +2111,7 @@ public sealed partial class DeviceSyncService : IDisposable
                     // local pane parks in the UI refresh below via
                     // DisplayHolder; remote holders get lease.stolen here.
                     if (result.Displaced is { } displaced && displaced != peerHome)
-                        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == displaced))
+                        foreach (var old in _peers.Values.Where(p => p.Hello?.DeviceID == displaced).ToList())
                         {
                             old.LeasedSessions.Remove(leased.Id);
                             await SendEnvelopeAsync(old, new DeviceEnvelope
@@ -2095,9 +2178,10 @@ public sealed partial class DeviceSyncService : IDisposable
                 if (DeviceGlobalID.Parse(transcript.GlobalID)?.Home != peerHome) break;
                 if (transcript.Epoch is null || RemoteLeases.GetValueOrDefault(transcript.GlobalID) != transcript.Epoch) break;
                 if (RemoteTranscripts.TryGetValue(transcript.GlobalID, out var existing) && transcript.HomeSeq <= existing.HomeSeq) break;
+                // Adopt first: typing that follows this snapshot must not reuse its version.
+                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteTranscripts[transcript.GlobalID] = existing is not null && transcript.Prepend
                     ? MergePrepend(existing, transcript) : transcript;
-                _drafts.AdoptIfNewer(transcript.GlobalID, transcript.DraftVersion, transcript.Draft);
                 RemoteOffline.Remove(transcript.GlobalID);
                 Changed?.Invoke();
                 break;
@@ -2128,13 +2212,15 @@ public sealed partial class DeviceSyncService : IDisposable
                 {
                     if (_commands.Records.TryGetValue(queryId, out var record) &&
                         (record.Origin != peerHome || record.SessionID != envelope.SessionID)) break;
-                    await SendAckAsync(peer, queryId, envelope.SessionID, _commands.Outcome(queryId) ?? "rejected", "Home record lookup.", envelope.Epoch);
+                    await SendAckAsync(peer, queryId, envelope.SessionID, _commands.Outcome(queryId) ?? "rejected",
+                        _commands.Records.ContainsKey(queryId) ? "Home record lookup." : DeviceCommandBinding.UnrecordedDetail, envelope.Epoch, query: true);
                 }
                 break;
             case DeviceKind.CommandAck:
                 if (envelope.CommandID is { } ackId && envelope.SessionID is { } ackSession &&
                     DeviceGlobalID.Parse(ackSession)?.Home == peerHome && envelope.Payload is not null)
                 {
+                    if (AckReceivedForTest is { } observe) observe(ackId, DeviceJson.Decode<DeviceAckPayload>(envelope.Payload));
                     var record = _outbox.Records.FirstOrDefault(r => r.CommandID == ackId);
                     if (record is null || record.SessionID != ackSession) break;
                     if (envelope.Epoch is null || (envelope.Epoch != record.Epoch && RemoteLeases.GetValueOrDefault(ackSession) != envelope.Epoch)) break;
@@ -2329,7 +2415,10 @@ public sealed partial class DeviceSyncService : IDisposable
         RemoteLeases.Remove(globalId);
     }
 
-    private static readonly HashSet<string> QueueActions = new() { "inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue" };
+    private static readonly HashSet<string> QueueActions = new() { "inject", "injectAll", "pauseQueue", "resumeQueue", "clearQueue", "removeQueued" };
+    public const string QueueRemoveCapability = "queue-remove-v1";
+    public bool CanRemoveQueuedRemote(string globalId) =>
+        DeviceGlobalID.Parse(globalId) is { } id && PeerForHome(id.Home)?.Hello?.Capabilities.Contains(QueueRemoveCapability) == true;
 
     // Mac parity: the outstanding queue intent feeds the Injecting label and
     // the double-press guard below. Falls back to the newest queue record so
@@ -2346,6 +2435,9 @@ public sealed partial class DeviceSyncService : IDisposable
     {
         if (RemoteTranscripts.GetValueOrDefault(globalId)?.Engine == "parking" || Homes.Values.SelectMany(h => h.Rows).Any(r => r.GlobalID == globalId && r.Engine == "parking"))
         { LastOutcome = "Parking Lots are read only on Group viewers."; return null; }
+        // Older homes only know Clear queue; never send them a single removal.
+        if (command.Action == "removeQueued" && !CanRemoveQueuedRemote(globalId))
+        { LastOutcome = "Update the home device to remove one queued message."; return null; }
         var parsed = DeviceGlobalID.Parse(globalId);
         if (parsed is null || !RemoteLeases.TryGetValue(globalId, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before sending."; return null; }
@@ -2358,9 +2450,11 @@ public sealed partial class DeviceSyncService : IDisposable
             return active.Payload.Action == command.Action && active.Payload.PendingID == command.PendingID
                 ? active.CommandID : null;
         }
-        var payloadData = DeviceJson.Encode(command);
+        // Canonical bytes, stored and resent verbatim, the same form the Mac
+        // and iPad clients send.
+        var payloadData = DeviceCommandBinding.Encode(command);
         var record = new DeviceOutboxRecord
-        { CommandID = Guid.NewGuid(), SessionID = globalId, Payload = command, PayloadHash = DeviceBlob.Sha256Hex(payloadData), Epoch = epoch };
+        { CommandID = Guid.NewGuid(), SessionID = globalId, Payload = command, PayloadHash = DeviceBlob.Sha256Hex(payloadData), Epoch = epoch, PayloadBytes = payloadData };
         _outbox.Add(record);
         Changed?.Invoke();
         await SendEnvelopeAsync(peer, new DeviceEnvelope
@@ -2457,6 +2551,15 @@ public sealed partial class DeviceSyncService : IDisposable
 
     public async Task<bool> RetryOutboxAsync(DeviceOutboxRecord record)
     {
+        // Never re-encode a legacy record or give it a new ID: ask home.
+        if (record.PayloadBytes is not { } payload)
+        {
+            _outbox.MarkLegacyUncertain(record.CommandID);
+            LastOutcome = DeviceOutboxRecord.LegacyDetail;
+            Changed?.Invoke();
+            await QueryOutboxAsync(record);
+            return false;
+        }
         var parsed = DeviceGlobalID.Parse(record.SessionID);
         if (parsed is null || !RemoteLeases.TryGetValue(record.SessionID, out var epoch) || PeerForHome(parsed.Value.Home) is not { } peer)
         { LastOutcome = "Take the session again before resending."; return false; }
@@ -2465,7 +2568,7 @@ public sealed partial class DeviceSyncService : IDisposable
         await SendEnvelopeAsync(peer, new DeviceEnvelope
         {
             Kind = DeviceKind.Command, SessionID = record.SessionID, CommandID = record.CommandID,
-            Epoch = epoch, Payload = DeviceJson.Encode(record.Payload),
+            Epoch = epoch, Payload = payload,
         });
         return true;
     }

@@ -74,6 +74,19 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
         check(first.messages[0].images.count == 1 && first.messages[0].images[0].hasPrefix(target.folder.appendingPathComponent("Attachments/" + first.id.uuidString).path) && FileManager.default.contents(atPath: first.messages[0].images[0]) != nil, "Imported images are stored with the new session")
         check(first.messages[1].text.contains("[chart](file:///tmp/private.png)") && !first.messages[1].text.contains("![chart]"), "Imported local image embeds become plain links, so no local file is captured")
         check(target.importResponseImages(first) == false, "Imported text cannot pull files from this Mac into the transcript")
+        // Defense in depth: even text that slipped past neutralization never captures.
+        check(imported.allSatisfy { $0.messages.allSatisfy { $0.imported == true } }, "Every imported message is marked as imported")
+        let planted = root.appendingPathComponent("planted.png"); try? png.write(to: planted)
+        let bypass = "![x](" + planted.path + ")", original = first.messages[1].text
+        let control = target.create(entry); control.messages = [Message(role: "assistant", text: bypass)]
+        check(target.importResponseImages(control) && control.messages[0].images.count == 1, "The planted local image is otherwise capturable")
+        target.sessions.removeAll { $0 === control }
+        first.messages[1].text = bypass
+        check(!target.importResponseImages(first) && first.messages[1].images.isEmpty && first.messages[1].text == bypass, "An imported reply never captures a local file, even past neutralization")
+        target.save()
+        let replanted = Store(folder: target.folder).sessions.first { $0.id == first.id }?.messages[1]
+        check(replanted?.imported == true && replanted?.images.isEmpty == true && replanted?.text == bypass, "Loading an imported session never captures local files")
+        first.messages[1].text = original; target.save()
         let reloaded = Store(folder: target.folder)
         check(reloaded.sessions.contains { $0.id == first.id && $0.isUnboundImport && $0.importedTranscriptPending && $0.messages.count == 2 }, "Unbound imported sessions survive relaunch")
         let newLot = result.lots.first
@@ -213,6 +226,56 @@ func converseExchangeSelfTests(_ check: (Bool, String) -> Void) {
     var lotSession = ExportSession(timed); lotSession.isParkingLot = true
     ranged.endDate = base.addingTimeInterval(1)
     check(ranged.windowed(lotSession).messages.count == 4, "Parking Lots are exported whole, whatever the date range")
+
+    // Inject all parts travel in the file and come back on import, so a
+    // typed prompt merged with a plain tell stays visible (941BAB1E follow-up).
+    let partsTell = "[Converse message from Fixture · session peer/one · delivery test · hop 1/100]\nStatus from /Users/casey/notes"
+    let partsTyped = "MY TYPED PROMPT for casey.example@example.com", partsText = partsTell + "\n\n" + partsTyped
+    let partsValid = TranscriptStyle.components(joining: [(partsTell, "traffic"), (partsTyped, "human")], into: partsText)
+    let partsInvalid = [MessageComponent(offset: 0, length: (partsTell as NSString).length, kind: "traffic"), MessageComponent(offset: (partsText as NSString).length + 1, length: 1, kind: "human")]
+    chat.messages = [Message(role: "user", text: partsText, createdAt: when, components: partsValid), Message(role: "assistant", text: "ok"),
+                     Message(role: "user", text: partsText, components: partsInvalid), Message(role: "user", text: "plain")]
+    var unscrubbed: ExportScrubber? = nil, partsScrubber: ExportScrubber? = ExportScrubber(context: context)
+    if let plainParts = try? ConverseExchange.decode(ConverseExchange.export([ExportSession(chat)], content: .both, scrubber: &unscrubbed, includeImages: false, imageData: images)),
+       let scrubbedParts = try? ConverseExchange.decode(ConverseExchange.export([ExportSession(chat)], content: .both, scrubber: &partsScrubber, includeImages: false, imageData: images)) {
+        let records = plainParts.document.sessions[0].messages
+        check(records.map(\.text) == [partsText, "ok", partsText, "plain"] && records[0].components == partsValid && records[2].components == TranscriptStyle.expandedComponents(partsText)
+              && records[1].components == nil && records[3].components == nil && plainParts.document.version == 1,
+              "Converse exports carry Inject all parts as an optional field; invalid parts travel as one visible part; other messages carry none")
+        let scrubbedRecord = scrubbedParts.document.sessions[0].messages[0]
+        var expectedScrub = ExportScrubber(context: context)
+        for text in [ExportSession(chat).title, ExportSession(chat).provider, partsText, "ok", partsText, "plain"] { _ = expectedScrub.scrub(text) }
+        let expectedCounts = expectedScrub.counts
+        check(scrubbedRecord.text.hasSuffix("MY TYPED PROMPT for [email 1]") && scrubbedRecord.text.contains("~/notes") && scrubbedParts.document.scrub.counts == expectedCounts
+              && TranscriptStyle.segments(scrubbedRecord.text, components: scrubbedRecord.components)?.last == TranscriptSegment(text: "MY TYPED PROMPT for [email 1]", summary: nil),
+              "Scrubbing moves the parts with the text, and the scratch pass leaves the scrub counts unchanged")
+        let partsTarget = Store(folder: root.appendingPathComponent("parts-target"))
+        let importedParts = try? partsTarget.importConverse(plainParts, sessions: Set(plainParts.document.sessions.map(\.exportID)), lots: [], library: ParkingLotLibrary(folder: partsTarget.folder)).sessions.first?.messages
+        check(importedParts?.map(\.text) == [partsText, "ok", partsText, "plain"] && importedParts?[0].components == partsValid
+              && TranscriptStyle.segments(partsText, components: importedParts?[0].components)?.last == TranscriptSegment(text: partsTyped, summary: nil),
+              "Import restores the parts, text byte-identical, and the typed prompt stays visible")
+        check(TranscriptStyle.segments(partsText, components: importedParts?[2].components) == [TranscriptSegment(text: partsText, summary: nil)], "A message exported with invalid parts imports expanded")
+    } else { check(false, "Converse export with Inject all parts must encode and decode") }
+    // Hand-edited or damaged files are untrusted: invalid parts import
+    // expanded, parts follow local-image neutralization, and older files
+    // without parts import as before.
+    let embedTyped = "see ![shot](/tmp/private.png)", embedText = partsTell + "\n\n" + embedTyped
+    let forgedParts = [MessageComponent(offset: 0, length: (partsText as NSString).length - 4, kind: "traffic"), MessageComponent(offset: 99_999, length: 3, kind: "human")]
+    let forgedFile = limited([ConverseExchange.SessionRecord(exportID: UUID(), title: "Parts", provider: "P", engine: "claude", kind: "session", messages: [
+        .init(role: "user", text: partsText, createdAt: nil, images: [], components: forgedParts),
+        .init(role: "user", text: embedText, createdAt: nil, images: [], components: TranscriptStyle.components(joining: [(partsTell, "traffic"), (embedTyped, "human")], into: embedText)),
+        .init(role: "user", text: partsText, createdAt: nil, images: [])])])
+    let forgedTarget = Store(folder: root.appendingPathComponent("forged-target"))
+    if let forgedPackage = try? ConverseExchange.decode(forgedFile),
+       let forgedImported = try? forgedTarget.importConverse(forgedPackage, sessions: Set(forgedPackage.document.sessions.map(\.exportID)), lots: [], library: ParkingLotLibrary(folder: forgedTarget.folder)).sessions.first?.messages,
+       forgedImported.count == 3 {
+        check(TranscriptStyle.segments(forgedImported[0].text, components: forgedImported[0].components) == [TranscriptSegment(text: partsText, summary: nil)] && forgedImported[0].components == TranscriptStyle.expandedComponents(partsText),
+              "An imported message with invalid parts renders the whole text expanded")
+        check(forgedImported[1].text == partsTell + "\n\nsee [shot](/tmp/private.png)" && TranscriptStyle.segments(forgedImported[1].text, components: forgedImported[1].components)?.last == TranscriptSegment(text: "see [shot](/tmp/private.png)", summary: nil),
+              "Parts follow local-image neutralization on import")
+        check(forgedPackage.document.sessions[0].messages[2].components == nil && forgedImported[2].components == nil && TranscriptStyle.segments(partsText, components: nil) == nil,
+              "Older files without parts still import; their ambiguous plain-tell merges collapse as before")
+    } else { check(false, "A Converse file with invalid parts must still decode and import") }
 }
 
 func exportScrubberSelfTests(_ check: (Bool, String) -> Void) {

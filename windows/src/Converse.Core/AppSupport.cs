@@ -13,7 +13,7 @@ public static class AppSupportTeaching
     {
         ["readme"] = "overview", ["security"] = "security-and-privacy", ["first-session"] = "set-up-your-first-coding-session",
         ["first-agent"] = "set-up-your-first-agent", ["first-group"] = "connect-your-devices-into-a-group",
-        ["agents"] = "agents-and-project-scoreboards", ["discord"] = "agents-and-project-scoreboards",
+        ["agents"] = "agents-assessments-and-portraits", ["discord"] = "agents-assessments-and-portraits",
         ["muse-iphone"] = "jolly-mac", ["devices"] = "connect-your-devices-into-a-group"
     };
     public const string Links = "[README](converse-help://readme) · [Security and privacy](converse-help://security) · [Discord](converse-help://discord) · [Connect the Meta Muse iPhone app](converse-help://muse-iphone)\n[First coding session](converse-help://first-session) · [First agent](converse-help://first-agent) · [Create a Group](converse-help://first-group)";
@@ -101,7 +101,7 @@ public sealed class SupportSetup
         config.Settings.Repository = "richardkaufmann/converse";
         config.Settings.Objective = "Keep Converse up to date, especially when critical bugs are reported. Check the repository daily for releases and serious open issues. Treat critical bugs as reasons for grave concern; explain impact and next steps with links and observation dates. Do not install updates or change settings without the user's request. Answer app health and Group questions from live supplied evidence.";
         config.Settings.IntervalSeconds = 86400; config.Settings.ScheduleText = ""; config.Settings.Enabled = true; config.Settings.GenerateArt = false; config.Settings.Speak = false;
-        config.Settings.ScoreboardEveryLoops = 1; config.SupportDefaultsVersion = 1;
+        config.SupportDefaultsVersion = 1;
         config.NextRunUtc = AgentSchedule.Compile(config.Settings).Next(DateTime.UtcNow); session.Agent = config; store.Save();
     }
     public async Task<bool> VerifyAsync(TimeSpan timeout, CancellationToken cancellation = default)
@@ -129,15 +129,31 @@ public sealed class SupportSetup
 
 public static class AppSupportActions
 {
-    public static void ValidateSource(ChatSession source)
+    public const int MaxDepth = 8;
+    // Provenance and depth come from the requesting turn's captured
+    // authority; teaching is checked live so revocation applies at once.
+    public static void ValidateSource(SessionStore store, ChatSession source, TurnAuthority authority)
     {
+        if (!store.Sessions.Contains(source)) throw new ArgumentException("This session was closed.");
         if (source.SupportTeachingVersion is null) throw new ArgumentException("Teach Converse Setup & Control first.");
-        if (source.ActiveBackground || source.ActiveHop > 0) throw new ArgumentException("Background or forwarded turns cannot configure the app.");
-        if (source.ActiveAppControlDepth >= 8) throw new ArgumentException("Setup action limit reached. Ask the human before continuing.");
+        if (authority.Background || authority.Hop > 0) throw new ArgumentException("Background or forwarded turns cannot configure the app.");
+        if (authority.AppControlDepth >= MaxDepth) throw new ArgumentException("Setup action limit reached. Ask the human before continuing.");
     }
-    public static string Execute(SessionStore store, ChatSession source, JsonObject command, HelpDocument? help)
+    // Only human-initiated, taught chains get another turn, one level deeper
+    // than the turn that asked. No auto-replies to background/forwarded
+    // requests, revoked teaching, closed sessions or chain overflow.
+    public static void Continue(SessionStore store, ChatSession source, TurnAuthority authority, string result)
     {
-        ValidateSource(source);
+        if (store.Sessions.Contains(source) && source.SupportTeachingVersion is not null && !authority.Background && authority.Hop == 0 && authority.AppControlDepth < MaxDepth)
+        {
+            source.Pending.Add(new PendingPrompt { Text = "[Converse app operation result]\n" + result, AppControlDepth = authority.AppControlDepth + 1 });
+            store.Save(); store.RunNext(source);
+        }
+        else { source.Messages.Add(new ChatMessage { Role = "notice", Text = result }); store.Save(); }
+    }
+    public static string Execute(SessionStore store, ChatSession source, TurnAuthority authority, JsonObject command, HelpDocument? help)
+    {
+        ValidateSource(store, source, authority);
         if (command["command"]?.GetValue<string>() != "app-control") throw new ArgumentException("Invalid app command.");
         var action = command["action"]?.GetValue<string>();
         var allowed = new[] { "command", "action", "target", "title", "objective", "repository", "query", "body", "provider", "directory" };

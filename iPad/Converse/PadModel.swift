@@ -69,6 +69,10 @@ final class PadModel: ObservableObject {
     var file: URL { service.storageFolder.appendingPathComponent("ipad-scene.json") }
     init(service: DeviceSyncService = .shared) {
         self.service = service
+        if !service.isTestEnvironment {
+            PerformanceCapture.shared.configure(folder: service.storageFolder,
+                enabled: UserDefaults.standard.bool(forKey: "performanceCapture") || ProcessInfo.processInfo.environment["CONVERSE_PERFORMANCE_DIAGNOSTICS"] == "1")
+        }
         if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(PadState.self, from: data), saved.placements.count == 3 { state = saved }
         if state.defaultDeviceName == nil {
             state.defaultDeviceName = Self.mobileDeviceName(phone: UIDevice.current.userInterfaceIdiom == .phone, identifier: service.identity?.deviceID ?? UUID().uuidString)
@@ -125,6 +129,7 @@ final class PadModel: ObservableObject {
     func park(_ id: String) { flush(id); service.releaseRemote(globalID: id); removePlacement(id); lotViews.removeValue(forKey: id) }
     func draft(_ id: String) -> PadDraft { state.drafts[id] ?? PadDraft() }
     func edit(_ id: String, text: String) {
+        service.noteHumanInput()
         var draft = draft(id); draft.text = text; draft.dirty = true; state.drafts[id] = draft
         persist() // Always durable locally, including unacknowledged/offline text.
         edits[id]?.cancel()
@@ -234,6 +239,7 @@ final class PadModel: ObservableObject {
         return true
     }
     func clearImages(_ id: String) {
+        guard canControl(id) else { return }
         var draft = draft(id); draft.hashes = []; draft.dirty = true; state.drafts[id] = draft; persist(); flush(id)
     }
     func removeImage(_ id: String, hash: String) {

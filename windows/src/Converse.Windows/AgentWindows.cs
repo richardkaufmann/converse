@@ -102,6 +102,7 @@ public sealed partial class MainWindow
             panel.Children.Add(new TextBlock { Text = local is null ? "Home Assistant access is set on the agent's home computer." : "Read only. Choose up to 32 entities; their states, names and observation times go to the selected model, never the token. Use HTTPS outside a trusted local network. Tokens stay on this computer.", TextWrapping = TextWrapping.Wrap });
             var objective = new TextBox { Header = "Objective and success criteria", Text = settings.Objective, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 90 }; panel.Children.Add(objective);
             var enabled = new CheckBox { Content = "Enable automatic loop", IsChecked = settings.Enabled }; panel.Children.Add(enabled);
+            var waits = new CheckBox { Content = "Only run when I’ve been active since the last turn", IsChecked = settings.RequiresEngagement == true }; panel.Children.Add(waits);
             var seconds = new NumberBox { Header = "Fixed interval · minutes", Value = settings.IntervalSeconds / 60, Minimum = 1, Maximum = 525600 }; panel.Children.Add(seconds);
             var schedule = new TextBox { Header = "Text schedule · leave blank for fixed interval", Text = settings.ScheduleText ?? "", PlaceholderText = "every 20 minutes while the US stock market is open" }; panel.Children.Add(schedule);
             var zone = new TextBox { Header = "Time zone", Text = settings.ScheduleTimeZone ?? "America/New_York" }; panel.Children.Add(zone);
@@ -110,8 +111,7 @@ public sealed partial class MainWindow
             void ReadSchedule() { settings.IntervalSeconds = seconds.Value * 60; settings.ScheduleText = schedule.Text; settings.ScheduleTimeZone = zone.Text; }
             previewButton.Click += (_, _) => { try { ReadSchedule(); var rule = AgentSchedule.Compile(settings); var now = DateTime.UtcNow; var times = new List<string>(); for (var n = 0; n < 3 && rule.Next(now) is { } next; n++) { times.Add(next.ToLocalTime().ToString("g")); now = next; } preview.Text = string.Join(" · ", times) + " (this device's time)"; } catch (Exception ex) { preview.Text = ex.Message; } };
             var runs = new NumberBox { Header = "Maximum turns per loop", Value = settings.TurnLimit, Minimum = 1, Maximum = 1000 }; panel.Children.Add(runs);
-            var cadence = new NumberBox { Header = "Refresh scoreboard every N loops", Value = settings.ScoreboardEveryLoops ?? 1, Minimum = 1, Maximum = 1000 }; panel.Children.Add(cadence);
-            var artDirection = new TextBox { Header = "Scoreboard art direction", Text = settings.ArtDirection ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxLength = 4000 }; panel.Children.Add(artDirection);
+            var artDirection = new TextBox { Header = "Portrait art direction", Text = settings.ArtDirection ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxLength = 4000 }; panel.Children.Add(artDirection);
             var art = new CheckBox { Content = "Generate mood art", IsChecked = settings.GenerateArt }; panel.Children.Add(art);
             panel.Children.Add(new TextBlock { Text = "Sessions this agent may read and message · select explicitly", TextWrapping = TextWrapping.Wrap });
             var scope = new List<(string Id, CheckBox Box)>();
@@ -145,13 +145,13 @@ public sealed partial class MainWindow
                 try
                 {
                     ReadSchedule(); AgentSchedule.Compile(settings);
-                    if (!double.IsFinite(runs.Value) || !double.IsFinite(cadence.Value)) throw new ArgumentException("Enter a run allowance and scoreboard interval.");
-                    settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true;
+                    if (!double.IsFinite(runs.Value)) throw new ArgumentException("Enter a run allowance.");
+                    settings.Model = model.SelectedValue as string ?? throw new ArgumentException("Choose a model."); settings.Repository = repo.Text.Trim(); settings.Objective = objective.Text; settings.Enabled = enabled.IsChecked == true; settings.RequiresEngagement = waits.IsChecked == true;
                     settings.HomeAssistantURL = local is null ? initialHAURL : haURL.Text.Trim();
                     settings.HomeAssistantEntities = local is null ? initialHAEntities : haEntities.Text.Trim();
                     settings.HomeAssistantRead = local is null ? initialHARead : haRead.IsChecked == true;
                     HomeAssistantAgent.Validate(settings.HomeAssistantURL, settings.HomeAssistantEntities, settings.HomeAssistantRead == true);
-                    settings.TurnLimit = checked((int)runs.Value); settings.ScoreboardEveryLoops = checked((int)cadence.Value); settings.GenerateArt = art.IsChecked == true; settings.ArtDirection = artDirection.Text;
+                    settings.TurnLimit = checked((int)runs.Value); settings.GenerateArt = art.IsChecked == true; settings.ArtDirection = artDirection.Text;
                     // Preserve selected IDs temporarily absent from the current directory.
                     settings.Watched = settings.Watched.Except(scope.Select(s => s.Id)).Concat(scope.Where(s => s.Box.IsChecked == true).Select(s => s.Id)).Distinct().ToList();
                     if (local?.Agent is { } config)
@@ -183,24 +183,27 @@ public sealed partial class MainWindow
     {
         if (row.LocalSessionID is { } id && _store.Sessions.FirstOrDefault(s => s.Id == id) is { Agent: not null } session)
         {
-            session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and refresh the scoreboard.", Autonomous = true }); _store.Save(); _store.RunNext(session);
+            session.Pending.Add(new PendingPrompt { Text = "[Human-requested agent run] Check progress and update your assessment.", Autonomous = true }); _store.Save(); _store.RunNext(session);
         }
         else if (row.GlobalID is { } target && DeviceGlobalID.Parse(target) is { } reference) { var result = await _devices.RequestParticipantAsync(reference.Home, "agent.run", target); await AgentNotice(result.Detail); }
     }
     internal void ShowAgentScoreboard(ChatSession session)
     {
         if (session.Agent is not { } agent) return;
-        var window = new Window { Title = session.Title + " · Scoreboard" };
+        var window = new Window { Title = session.Title + " · Assessment" };
         var scroll = new ScrollViewer(); window.Content = scroll;
         string? signature = null;
         void Render()
         {
-            var next = System.Text.Json.JsonSerializer.Serialize(agent.Widget) + agent.ArtPath + agent.ArtAtUtc;
+            var widget = AgentAssessments.WidgetFor(agent, DateTime.UtcNow);
+            var next = System.Text.Json.JsonSerializer.Serialize(widget) + agent.ArtPath + agent.ArtAtUtc;
             if (next == signature) return; signature = next;
             var panel = new StackPanel { Spacing = 12, Padding = new Thickness(20), Background = new SolidColorBrush(Microsoft.UI.Colors.Black) };
             if (agent.ArtPath is { } path && File.Exists(path)) panel.Children.Add(new Image { Source = new BitmapImage(new Uri(path)), MaxHeight = 380, Stretch = Stretch.UniformToFill });
-            foreach (var metric in agent.Widget?.Metrics ?? new()) panel.Children.Add(new TextBlock { Text = metric.Label + ": " + metric.Value, FontSize = 24, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), TextWrapping = TextWrapping.Wrap });
-            panel.Children.Add(new TextBlock { Text = agent.Widget?.Summary ?? "No scoreboard yet. Run the agent to collect evidence.", Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), TextWrapping = TextWrapping.Wrap });
+            var line = string.Join(" · ", new[] { widget.Status, widget.Freshness, widget.Revision is { } revision ? "rev " + revision : null }.Where(part => part is not null));
+            panel.Children.Add(new TextBlock { Text = line, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), TextWrapping = TextWrapping.Wrap });
+            panel.Children.Add(new TextBlock { Text = widget.Summary, FontSize = 20, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), TextWrapping = TextWrapping.Wrap });
+            foreach (var metric in widget.Metrics) panel.Children.Add(new TextBlock { Text = metric.Label + ": " + metric.Value, FontSize = 24, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), TextWrapping = TextWrapping.Wrap });
             scroll.Content = panel;
         }
         void Changed() => DispatcherQueue.TryEnqueue(Render);

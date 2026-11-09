@@ -16,6 +16,10 @@ if (args.FirstOrDefault() == "--echo-stdin")
 }
 if (args.Length == 3 && args[0] == "--mac-parking-interop")
     return await MacParkingInteropChecks.Run(args[1], int.Parse(args[2]));
+if (args.Length == 3 && args[0] == "--mac-command-interop")
+    return await CommandBindingInteropChecks.RunViewer(args[1], int.Parse(args[2]));
+if (args.Length == 2 && args[0] == "--core-command-home")
+    return await CommandBindingInteropChecks.RunHome(args[1]);
 var failures = 0;
 var failedLabels = new List<string>();
 void Check(bool ok, string label)
@@ -138,7 +142,7 @@ if (args.Contains("--group-leave-only")) {
     return failures == 0 ? 0 : 1;
 }
 
-if (args.Contains("--support-only")) { await AppSupportChecks.Run(Check); return failures == 0 ? 0 : 1; }
+if (args.Contains("--support-only")) { await AppSupportChecks.Run(Check); await TurnAuthorityChecks.Run(Check); return failures == 0 ? 0 : 1; }
 
 Console.WriteLine("ChaCha20Poly1305 supported: " + ChaCha20Poly1305.IsSupported);
 Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on Windows/Linux)");
@@ -268,9 +272,33 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     {
         var commands = new DeviceCommandStore(root);
         var id = Guid.NewGuid();
-        Check(commands.Begin(id, "device-a", "s1", "h1") && !commands.Begin(id, "device-a", "s1", "h1") && !commands.BindingMatches(id, "device-a", "s2", "h1"), "Dedup binds origin session hash");
+        var boundBytes = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"h1\"}");
+        var boundHash = DeviceCommandBinding.Hash(boundBytes, DeviceCommandBinding.CanonicalScheme)!;
+        Check(commands.Begin(id, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme) && !commands.Begin(id, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme)
+            && commands.BindingMatches(id, "device-a", "s1", boundBytes) && !commands.BindingMatches(id, "device-a", "s2", boundBytes) && !commands.BindingMatches(id, "device-b", "s1", boundBytes), "Dedup binds origin session hash");
         commands.MarkRunning(id);
         Check(new DeviceCommandStore(root).Outcome(id) == "uncertain", "Running command recovers as uncertain");
+        // Overlapping connections can deliver one command at the same moment.
+        var raceRoot = Path.Combine(root, "race");
+        var raced = new DeviceCommandStore(raceRoot);
+        var racedWinners = 0;
+        var distinctIds = Enumerable.Range(0, 64).Select(_ => Guid.NewGuid()).ToList();
+        for (var round = 0; round < 200; round++)
+        {
+            var shared = Guid.NewGuid();
+            using var start = new Barrier(8);
+            var winners = 0;
+            var racers = Enumerable.Range(0, 8).Select(_ => Task.Factory.StartNew(() =>
+            {
+                start.SignalAndWait();
+                if (raced.Begin(shared, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme)) Interlocked.Increment(ref winners);
+            }, TaskCreationOptions.LongRunning)).ToArray();
+            Task.WaitAll(racers);
+            if (winners == 1) racedWinners++;
+        }
+        Check(racedWinners == 200, "Concurrent Begin calls for one command admit exactly one winner");
+        Parallel.ForEach(distinctIds, new ParallelOptions { MaxDegreeOfParallelism = 8 }, commandId => raced.Begin(commandId, "device-a", "s1", boundHash, DeviceCommandBinding.CanonicalScheme));
+        Check(distinctIds.All(new DeviceCommandStore(raceRoot).Records.ContainsKey), "Concurrent Begin calls persist every distinct command");
         var outbox = new DeviceOutboxStore(root);
         var record = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = "home/s", Payload = new DeviceCommandPayload { Action = "submit", Text = "keep me" }, PayloadHash = "h", Epoch = 4 };
         outbox.Add(record);
@@ -283,6 +311,135 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         homeDraft.Apply("s", 5, "preserved");
         viewerDraft.Adopt("s", 5, "preserved");
         Check(viewerDraft.Bump("s", "edit") == 6 && homeDraft.Apply("s", 6, "edit"), "New holder adopts home draft version");
+    }
+    finally { Cleanup(root); }
+}
+
+// Command binding: shared canonical vectors (also run by the Swift suite),
+// versioned home hash schemes and exact-byte viewer outbox records.
+{
+    var root = Directory.CreateTempSubdirectory("converse-binding-").FullName;
+    try
+    {
+        string? vectorFile = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null && vectorFile is null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "Tests", "command-payload-canonical-vectors.json"))) vectorFile = Path.Combine(dir.FullName, "Tests", "command-payload-canonical-vectors.json");
+        var vectors = vectorFile is null ? new List<System.Text.Json.JsonElement>()
+            : System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(vectorFile)).RootElement.GetProperty("vectors").EnumerateArray().ToList();
+        var mismatched = new List<string>();
+        foreach (var vector in vectors)
+        {
+            var input = vector.TryGetProperty("inputHex", out var hex) ? Convert.FromHexString(hex.GetString()!) : Utf8(vector.GetProperty("input").GetString()!);
+            byte[]? output;
+            try { output = DeviceCommandBinding.Canonical(input); } catch (DeviceCommandBinding.UnbindableException) { output = null; }
+            var reject = vector.TryGetProperty("reject", out var r) && r.GetBoolean();
+            var ok = reject ? output is null : output is not null && output.SequenceEqual(Utf8(vector.GetProperty("canonical").GetString()!));
+            if (!ok) mismatched.Add(vector.GetProperty("name").GetString()!);
+        }
+        Check(vectors.Count >= 80 && mismatched.Count == 0, "Core command canonicalization matches every shared vector" + (mismatched.Count == 0 ? "" : ": " + string.Join(", ", mismatched)));
+        // Remote payloads are canonicalized while a home handles the
+        // connection: key count, nesting and size must not turn into a stall.
+        // The Swift suite runs the same shapes and bounds.
+        (byte[]? Output, double Seconds) TimedCanonical(byte[] input)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            byte[]? output;
+            try { output = DeviceCommandBinding.Canonical(input); } catch (DeviceCommandBinding.UnbindableException) { output = null; }
+            return (output, clock.Elapsed.TotalSeconds);
+        }
+        var manyKeys = "{\"action\":\"injectAll\",\"blobHashes\":[],\"extra\":{" + string.Join(",", Enumerable.Range(0, 32_000).Select(i => "\"field" + i + "\":0")) + "}}";
+        var manyKeysRun = TimedCanonical(Utf8(manyKeys));
+        Check(manyKeysRun.Output?.Length == Utf8(manyKeys).Length && manyKeysRun.Seconds < 0.25, $"Core canonicalizes a 32,000-key object in under 250 ms ({(int)(manyKeysRun.Seconds * 1000)} ms)");
+        var reversedKeys = "{" + string.Join(",", Enumerable.Range(0, 32_000).Reverse().Select(i => "\"k" + i + "\":0")) + "}";
+        var reversedRun = TimedCanonical(Utf8(reversedKeys));
+        Check(reversedRun.Output is { } reversedOutput && System.Text.Encoding.UTF8.GetString(reversedOutput).StartsWith("{\"k0\":0,\"k1\":0,\"k10\":0,", StringComparison.Ordinal) && reversedRun.Seconds < 0.25,
+            $"Core sorts 32,000 reversed keys in under 250 ms ({(int)(reversedRun.Seconds * 1000)} ms)");
+        var duplicateRun = TimedCanonical(Utf8(manyKeys[..^2] + ",\"field0\":1}}"));
+        Check(duplicateRun.Output is null && duplicateRun.Seconds < 0.25, "Core rejects a duplicate after 32,000 keys in under 250 ms");
+        // Worst case near the size cap: unsorted objects at every level move
+        // their contents once per level.
+        var deep = "[" + string.Join(",", Enumerable.Repeat("\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"", 118_000)) + "]";
+        for (var level = 0; level < DeviceCommandBinding.MaxDepth - 1; level++) deep = "{\"z\":0,\"a\":" + deep + "}";
+        var deepRun = TimedCanonical(Utf8(deep));
+        Check(deepRun.Output?.Length == Utf8(deep).Length && deepRun.Seconds < 1, $"Core canonicalizes a 3.9 MB payload with unsorted objects at every nesting level in under 1 s ({(int)(deepRun.Seconds * 1000)} ms)");
+        var atLimit = new byte[DeviceCommandBinding.MaxBytes];
+        System.Array.Fill(atLimit, (byte)' ');
+        Utf8("\"x\"").CopyTo(atLimit, 0);
+        Check(TimedCanonical(atLimit).Output?.SequenceEqual(Utf8("\"x\"")) == true, "Core accepts a payload of exactly the 4 MiB size limit");
+        string? oversizeReason = null;
+        try { DeviceCommandBinding.Canonical([.. atLimit, (byte)' ']); } catch (DeviceCommandBinding.UnbindableException error) { oversizeReason = error.Message; }
+        Check(oversizeReason == "Payload exceeds 4194304 bytes.", "Core rejects a payload over the size limit with an explicit reason");
+        var overDeep = new string('[', DeviceCommandBinding.MaxDepth + 1) + new string(']', DeviceCommandBinding.MaxDepth + 1);
+        Check(TimedCanonical(Utf8(overDeep)).Output is null && TimedCanonical(Utf8(overDeep[1..^1])).Output is not null, "Core nesting limit is exactly 64 levels");
+        string? duplicateReason = null;
+        try { DeviceCommandBinding.Canonical(Utf8("{\"a\":1,\"\\u0061\":2}")); } catch (DeviceCommandBinding.UnbindableException error) { duplicateReason = error.Message; }
+        Check(duplicateReason?.StartsWith("Duplicate object key", StringComparison.Ordinal) == true, "Core names an escaped duplicate key");
+        var typed = new DeviceCommandPayload { Action = "rename", Text = "X" };
+        Check(DeviceCommandBinding.Encode(typed).SequenceEqual(Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}")),
+            "Core viewer command bytes are canonical, matching the Mac and iPad client");
+        const string canonical = DeviceCommandBinding.CanonicalScheme;
+        var sorted = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}");
+        var permuted = Utf8("{\"text\":\"X\",\"blobHashes\":[],\"action\":\"rename\"}");
+        var changed = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Y\"}");
+        var extraA = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var extraAPermuted = Utf8("{\"zExtra\":{\"a\":2,\"b\":1},\"text\":\"X\",\"action\":\"rename\",\"blobHashes\":[]}");
+        var extraB = Utf8("{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\",\"zExtra\":{\"b\":1,\"a\":3}}");
+        // Archive written by an earlier home: no HashScheme, raw byte hash.
+        var legacyId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(root, "device-commands.json"),
+            "[{\"Id\":\"" + legacyId + "\",\"Origin\":\"a\",\"Outcome\":\"completed\",\"UpdatedAt\":\"2026-01-01T00:00:00Z\",\"SessionID\":\"s1\",\"PayloadHash\":\"" + DeviceBlob.Sha256Hex(permuted) + "\"}]");
+        var store = new DeviceCommandStore(root);
+        Check(store.Records[legacyId].HashScheme is null && store.Outcome(legacyId) == "completed", "An earlier Core home's command archive decodes with no hash scheme");
+        Check(store.BindingMatches(legacyId, "a", "s1", permuted) && !store.BindingMatches(legacyId, "a", "s1", sorted),
+            "A legacy raw Core record matches only an identical raw retry, never a permuted one");
+        var canonicalId = Guid.NewGuid();
+        var extraId = Guid.NewGuid();
+        store.Begin(canonicalId, "a", "s1", DeviceCommandBinding.Hash(permuted, canonical)!, canonical);
+        store.Begin(extraId, "a", "s1", DeviceCommandBinding.Hash(extraA, canonical)!, canonical);
+        var reloaded = new DeviceCommandStore(root);
+        Check(reloaded.Records[canonicalId].HashScheme == canonical && reloaded.Records[legacyId].HashScheme is null
+            && reloaded.BindingMatches(canonicalId, "a", "s1", sorted) && reloaded.BindingMatches(canonicalId, "a", "s1", permuted)
+            && !reloaded.BindingMatches(canonicalId, "a", "s1", changed),
+            "Core canonical records survive reload and bind content, not key order");
+        Check(reloaded.BindingMatches(extraId, "a", "s1", extraAPermuted) && !reloaded.BindingMatches(extraId, "a", "s1", extraB) && !reloaded.BindingMatches(extraId, "a", "s1", sorted),
+            "Core keeps unknown fields in the binding: dropping or changing one is different content");
+        // Viewer outbox: exact bytes survive restart; earlier records cannot be resent.
+        var outboxRoot = Path.Combine(root, "outbox");
+        var outbox = new DeviceOutboxStore(outboxRoot);
+        outbox.Add(new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = "home/s", Payload = typed, PayloadHash = DeviceBlob.Sha256Hex(permuted), Epoch = 3, PayloadBytes = permuted });
+        var restarted = new DeviceOutboxStore(outboxRoot).Records.Single();
+        Check(restarted.PayloadBytes is { } kept && kept.SequenceEqual(permuted) && restarted.Outcome == "pending", "Core outbox records keep their exact payload bytes across restart");
+        var legacyRoot = Path.Combine(root, "legacy-outbox");
+        Directory.CreateDirectory(legacyRoot);
+        var legacyOutboxId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(legacyRoot, "device-outbox.json"),
+            "[{\"CommandID\":\"" + legacyOutboxId + "\",\"SessionID\":\"home/s\",\"Payload\":{\"action\":\"rename\",\"text\":\"Old\",\"blobHashes\":[]},\"PayloadHash\":\"h\",\"Epoch\":3,\"Outcome\":\"pending\",\"Detail\":null}]");
+        var legacyRecord = new DeviceOutboxStore(legacyRoot).Records.Single();
+        Check(legacyRecord.CommandID == legacyOutboxId && legacyRecord.PayloadBytes is null && legacyRecord.Outcome == "uncertain" && legacyRecord.Detail == DeviceOutboxRecord.LegacyDetail
+            && legacyRecord.Payload.Text == "Old" && new DeviceOutboxStore(legacyRoot).Records.Single().Outcome == "uncertain",
+            "An earlier Core version's pending outbox record loads as uncertain with Check home, keeping its ID and content");
+        // Migration must not stop device sync starting when the outbox cannot
+        // be rewritten yet: a directory squats on the atomic-write temp path.
+        var lockedRoot = Path.Combine(root, "locked-outbox");
+        Directory.CreateDirectory(lockedRoot);
+        var lockedId = Guid.NewGuid();
+        var lockedJson = "[{\"CommandID\":\"" + lockedId + "\",\"SessionID\":\"home/s\",\"Payload\":{\"action\":\"rename\",\"text\":\"Locked\",\"blobHashes\":[]},\"PayloadHash\":\"h\",\"Epoch\":3,\"Outcome\":\"pending\",\"Detail\":null}]";
+        File.WriteAllText(Path.Combine(lockedRoot, "device-outbox.json"), lockedJson);
+        var squatter = Path.Combine(lockedRoot, "device-outbox.json.tmp");
+        Directory.CreateDirectory(squatter);
+        DeviceSyncService? lockedService = null;
+        Exception? startError = null;
+        try { lockedService = new DeviceSyncService(lockedRoot, new SessionStore(lockedRoot, new FakeRunner()), "Locked"); }
+        catch (Exception e) { startError = e; }
+        Check(startError is null && lockedService!.Outbox.SingleOrDefault(r => r.CommandID == lockedId) is { Outcome: "uncertain", Detail: DeviceOutboxRecord.LegacyDetail }
+            && File.ReadAllText(Path.Combine(lockedRoot, "device-outbox.json")) == lockedJson,
+            "Core device sync starts with an unwritable outbox, legacy records migrated in memory" + (startError is null ? "" : ": " + startError.Message));
+        Directory.Delete(squatter);
+        lockedService?.DiscardOutbox(Guid.NewGuid());
+        Check(new DeviceOutboxStore(lockedRoot).Records.SingleOrDefault(r => r.CommandID == lockedId) is { Outcome: "uncertain", Detail: DeviceOutboxRecord.LegacyDetail }
+            && File.ReadAllText(Path.Combine(lockedRoot, "device-outbox.json")).Contains("\"Outcome\":\"uncertain\""),
+            "The next normal Core outbox save persists the in-memory migration");
+        lockedService?.Dispose();
     }
     finally { Cleanup(root); }
 }
@@ -301,6 +458,26 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(session.Messages.Any(m => m.Role == "assistant" && m.Text.Contains("fake reply")), "Engine consumes Codex JSONL into assistant text");
         Check(session.RemoteID == "thread-1" && session.Status == "Ready", "Engine records Codex thread and ready status");
         Check(session.Messages.Any(m => m.FinalReply == "fake reply\n"), "Engine captures Codex final-answer file");
+    }
+    finally { Cleanup(root); }
+}
+
+// Remove one queued message never takes the prompt an inject is starting.
+{
+    var root = Directory.CreateTempSubdirectory("converse-remove-").FullName;
+    try
+    {
+        var store = new SessionStore(root, new FakeRunner());
+        var session = store.Create(store.Entries.First(e => e.Engine == "codex"));
+        var starting = new PendingPrompt { Text = "starting" };
+        var later = new PendingPrompt { Text = "later" };
+        session.QueuePaused = true;
+        session.Pending.AddRange(new[] { starting, later });
+        session.Interrupted = true; session.ResumeAfterInterrupt = true;
+        Check(store.RemovePending(session, starting.Id)?.Contains("already starting") == true && session.Pending.Count == 2,
+            "Remove refuses the queued message an inject is already starting");
+        Check(store.RemovePending(session, later.Id) is null && session.Pending.Single().Id == starting.Id && session.Interrupted,
+            "Remove takes another queued message without touching the interrupt");
     }
     finally { Cleanup(root); }
 }
@@ -397,6 +574,70 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
             "Drain refuses new submit work without queueing");
         if (drainSubmit is not null) viewer.DiscardOutbox(drainSubmit.Value);
         home.SetAcceptingWork(true);
+        // Remove one queued message (queue-remove-v1): exactly that entry
+        // leaves; the others keep order and provenance; retries never reapply.
+        Check(Link(viewer, home.DeviceId)?.Hello?.Capabilities.Contains(DeviceSyncService.QueueRemoveCapability) == true && viewer.CanRemoveQueuedRemote(gid),
+            "Core home advertises single queued-message removal");
+        var keepFirst = new PendingPrompt { Text = "keep first", Hop = 2, OriginGroupID = "group-a", OriginHomeID = "peer-home", AgentRunReserved = true, Autonomous = true };
+        var dropMiddle = new PendingPrompt { Text = "drop middle", Hop = 1 };
+        var keepLast = new PendingPrompt { Text = "part one\n\npart two", ComponentIDs = new() { Guid.NewGuid(), Guid.NewGuid() } };
+        var savedObligations = homeSession.SwitchboardObligations;
+        homeSession.SwitchboardObligations = new()
+        {
+            new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/one", SourceName = "Peer", PromptID = dropMiddle.Id },
+            new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/two", SourceName = "Peer", PromptID = keepFirst.Id },
+        };
+        string ObligationState() => string.Join("|", homeSession.SwitchboardObligations.Select(o => $"{o.Id} {o.PromptID} {o.State} {o.FinishedAt is null}"));
+        var obligationsBefore = ObligationState();
+        homeSession.QueuePaused = true;
+        homeSession.Pending.Clear();
+        homeSession.Pending.AddRange(new[] { keepFirst, dropMiddle, keepLast });
+        homeStore.Save();
+        // Saving a queue edit does not push a transcript; the Remove command's own
+        // snapshot is what refreshes the viewer below.
+        Check(homeSession.Pending.Count == 3 && !homeSession.Busy, "Remove fixture holds three queued messages on an idle, paused home");
+        var leaseEpoch = viewer.RemoteLeases[gid];
+        Task RawRemove(Guid commandId, Guid? pendingId, ulong epoch) => viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+        { Kind = DeviceKind.Command, SessionID = gid, CommandID = commandId, Epoch = epoch, Payload = DeviceJson.Encode(new DeviceCommandPayload { Action = "removeQueued", PendingID = pendingId }) });
+        await RawRemove(Guid.NewGuid(), dropMiddle.Id, 0);
+        await RawRemove(Guid.NewGuid(), dropMiddle.Id, leaseEpoch + 99);
+        await Task.Delay(300);
+        Check(homeSession.Pending.Count == 3, "Single removal requires the current display lease; it has no lease-free exemption");
+        var removeId = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = dropMiddle.Id });
+        Check(removeId is not null && await Until(() => viewer.Unresolved(gid).All(r => r.CommandID != removeId)
+            && viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Pending.Select(p => p.Id).SequenceEqual(new[] { keepFirst.Id, keepLast.Id }) == true),
+            "A leased viewer removes exactly one of three queued messages and its queue refreshes in order");
+        Check(homeSession.Pending.Select(p => p.Id).SequenceEqual(new[] { keepFirst.Id, keepLast.Id })
+            && homeSession.Pending[0] is { Hop: 2, OriginGroupID: "group-a", OriginHomeID: "peer-home", AgentRunReserved: true, Autonomous: true }
+            && homeSession.Pending[1].ComponentIDs!.SequenceEqual(keepLast.ComponentIDs!),
+            "Remaining queued messages keep their hop, origin, reservation and merged components");
+        var archived = File.ReadAllText(Path.Combine(homeRoot, "sessions.json"));
+        Check(!archived.Contains("drop middle") && archived.Contains("keep first"), "Single removal is saved to the home archive");
+        Check(ObligationState() == obligationsBefore, "Single removal leaves switchboard obligations exactly as Clear queue does");
+        var duplicateId = Guid.NewGuid();
+        await RawRemove(duplicateId, keepLast.Id, leaseEpoch);
+        Check(await Until(() => homeSession.Pending.Count == 1), "Raw Remove applies with the current lease");
+        homeSession.Pending.Add(new PendingPrompt { Id = keepLast.Id, Text = "requeued with the same ID" });
+        await RawRemove(duplicateId, keepLast.Id, leaseEpoch);
+        await Task.Delay(300);
+        Check(homeSession.Pending.Count == 2 && homeSession.Pending[1].Text == "requeued with the same ID", "A duplicate Remove command ID is never applied twice");
+        var staleRemove = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = dropMiddle.Id });
+        Check(staleRemove is not null && await Until(() => viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == staleRemove) is { Outcome: "failed" } r
+            && r.Detail == SessionStore.QueuedMessageGone) && homeSession.Pending.Count == 2,
+            "Removing an already-started or removed message fails clearly without side effects");
+        if (staleRemove is not null) viewer.DiscardOutbox(staleRemove.Value);
+        var homeLink = Link(viewer, home.DeviceId)!;
+        var homeCapabilities = homeLink.Hello!.Capabilities;
+        homeLink.Hello.Capabilities = homeCapabilities.Where(c => c != DeviceSyncService.QueueRemoveCapability).ToArray();
+        var oldHomeRemove = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "removeQueued", PendingID = keepFirst.Id });
+        Check(oldHomeRemove is null && !viewer.CanRemoveQueuedRemote(gid) && !viewer.Unresolved(gid).Any(r => r.Payload.Action == "removeQueued") && homeSession.Pending.Count == 2,
+            "An older home without queue-remove-v1 is never sent a single removal");
+        homeLink.Hello.Capabilities = homeCapabilities;
+        homeSession.Pending.Clear();
+        Check(ObligationState() == obligationsBefore, "Clear queue leaves the same obligations a single removal leaves");
+        homeSession.SwitchboardObligations = savedObligations;
+        homeSession.QueuePaused = false;
+        homeStore.Save();
         homeSession.Title = "Renamed on home while viewed remotely";
         homeSession.Draft = "keep this draft";
         homeStore.Save();
@@ -550,10 +791,20 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
     var viewerRoot = Directory.CreateTempSubdirectory("converse-injviewer-").FullName;
     try
     {
-        var homeStore = new SessionStore(homeRoot, new FakeRunner());
+        var homeRunner = new FakeRunner();
+        var homeStore = new SessionStore(homeRoot, homeRunner);
         var homeSession = homeStore.Create(homeStore.Entries.First(e => e.Engine == "codex"));
         using var home = new DeviceSyncService(homeRoot, homeStore, "HomePC");
         using var viewer = new DeviceSyncService(viewerRoot, new SessionStore(viewerRoot, new FakeRunner()), "ViewerPC");
+        var acks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload Ack)>();
+        viewer.AckReceivedForTest += (id, ack) => acks.Enqueue((id, ack));
+        DeviceAckPayload? LastAck(Guid? id) => acks.LastOrDefault(a => a.Id == id).Ack;
+        // Exact command bytes as first sent, so duplicates resend them verbatim.
+        var sentCommands = new System.Collections.Concurrent.ConcurrentDictionary<Guid, byte[]>();
+        viewer.EnvelopeSentForTest += e => { if (e.Kind == DeviceKind.Command && e.CommandID is { } sentId && e.Payload is { } sentBytes) sentCommands.TryAdd(sentId, sentBytes); };
+        Peer? Link(DeviceSyncService from, string to) =>
+            ((Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(from)!)
+                .Values.FirstOrDefault(p => p.TrustedReady && p.Hello?.DeviceID == to);
         home.PairingConfirmation = _ => Task.FromResult(true);
         viewer.PairingConfirmation = _ => Task.FromResult(true);
         await home.StartAsync(0, enableDiscovery: false, loopbackOnly: true);
@@ -568,19 +819,144 @@ Check(ChaCha20Poly1305.IsSupported, "Platform provides ChaCha20-Poly1305 (run on
         Check(await JoinPair(home, viewer, () => viewer.Homes.GetValueOrDefault(home.DeviceId)?.Rows.Any(r => r.GlobalID == gid) == true), "Inject loopback pairing publishes home sidebar");
         await viewer.AcquireRemoteAsync(gid);
         Check(await Until(() => viewer.RemoteLeases.ContainsKey(gid)), "Inject loopback take holds a lease");
-        var failed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
-        Check(failed is not null && await Until(() => viewer.Unresolved(gid)
-            .Any(r => r.CommandID == failed && r.Outcome == "failed" && (r.Detail ?? "").Contains("already empty"))),
-            "Remote inject on an empty queue fails honestly");
-        viewer.DiscardOutbox(failed!.Value);
+        var empty = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(empty is not null && await Until(() => LastAck(empty) is { Outcome: "completed", Detail: SessionStore.InjectNothingQueued }
+            && viewer.Unresolved(gid).All(r => r.CommandID != empty)) && !homeSession.Messages.Any(m => m.Role == "notice"),
+            "Remote inject on an empty queue completes as a quiet no-op");
+        // Automatic dequeue wins the race: the last queued prompt starts just
+        // before Inject all arrives. Nothing is interrupted, resent or noted.
+        homeRunner.Gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var last = new PendingPrompt { Text = "last queued" };
+        homeSession.Pending.Add(last);
+        homeStore.RunNext(homeSession);
+        Check(await Until(() => homeSession.Busy && homeSession.Pending.Count == 0 && homeRunner.Prompts.Count == 1),
+            "Race fixture: automatic dequeue started the last queued prompt");
+        var messagesBefore = homeSession.Messages.Select(m => m.Id).ToList();
+        var race = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(race is not null && await Until(() => LastAck(race) is { Outcome: "completed", Detail: SessionStore.InjectNothingQueued }
+            && viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Pending.Count == 0 && viewer.Unresolved(gid).All(r => r.CommandID != race)),
+            "Inject all after automatic dequeue completes as a quiet no-op and refreshes the viewer's queue");
+        Check(homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && homeSession.Busy && !homeSession.Interrupted
+            && !homeSession.ResumeAfterInterrupt && homeRunner.Prompts.Count == 1,
+            "Inject all on an emptied queue appends no notice, never interrupts the running turn and sends nothing again");
+        await viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+        { Kind = DeviceKind.Command, SessionID = gid, CommandID = race, Epoch = viewer.RemoteLeases[gid], Payload = sentCommands[race!.Value] });
+        Check(await Until(() => acks.Count(a => a.Id == race) == 2) && LastAck(race) is { Outcome: "completed", Detail: "Already recorded on home." }
+            && home.CommandReceipts.Count(r => r.Id == race && r.Outcome == "completed") == 1
+            && homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && !homeSession.Interrupted && homeRunner.Prompts.Count == 1,
+            "A duplicate no-op Inject all command ID is answered from its receipt, never applied twice");
+        // Same command ID, hand-permuted bytes: answered from the receipt and
+        // applied once. Changed content, unknown fields included, is refused.
+        async Task<DeviceAckPayload?> BindingAck(Guid commandId, string json)
+        {
+            var before = acks.Count(a => a.Id == commandId);
+            await viewer.SendEnvelopeAsync(Link(viewer, home.DeviceId)!, new DeviceEnvelope
+            { Kind = DeviceKind.Command, SessionID = gid, CommandID = commandId, Epoch = viewer.RemoteLeases[gid], Payload = Utf8(json) });
+            return await Until(() => acks.Count(a => a.Id == commandId) > before) ? LastAck(commandId) : null;
+        }
+        var titleBefore = homeSession.Title;
+        var firstRename = Guid.NewGuid();
+        var secondRename = Guid.NewGuid();
+        var firstAck = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var secondAck = await BindingAck(secondRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding B\"}");
+        Check(firstAck?.Outcome == "completed" && secondAck?.Outcome == "completed" && homeSession.Title == "Binding B", "Core home applies hand-built commands carrying unknown fields");
+        var permutedRetry = await BindingAck(firstRename, "{\"zExtra\":{\"a\":2,\"b\":1},\"text\":\"Binding A\",\"blobHashes\":[],\"action\":\"rename\"}");
+        var spacedRetry = await BindingAck(firstRename, " {\n \"blobHashes\" : [ ], \"zExtra\":{\"b\":1,\"a\":2}, \"action\":\"rename\", \"text\":\"Binding A\" } ");
+        Check(permutedRetry is { Outcome: "completed", Detail: "Already recorded on home." } && spacedRetry is { Outcome: "completed", Detail: "Already recorded on home." } && homeSession.Title == "Binding B",
+            "Core home answers a key-permuted retry of the same command ID from its receipt and never re-applies it");
+        var changedText = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding C\",\"zExtra\":{\"b\":1,\"a\":2}}");
+        var changedExtra = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\",\"zExtra\":{\"b\":1,\"a\":3}}");
+        var droppedExtra = await BindingAck(firstRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding A\"}");
+        Check(new[] { changedText, changedExtra, droppedExtra }.All(a => a is { Outcome: "rejected", Detail: "Command ID reused with different content." }) && homeSession.Title == "Binding B",
+            "Core home rejects a reused command ID with changed text or a changed or missing unknown field, applying nothing");
+        var duplicateField = Guid.NewGuid();
+        var ambiguous = await BindingAck(duplicateField, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding D\",\"text\":\"Binding E\"}");
+        Check(ambiguous?.Outcome == "rejected" && homeSession.Title == "Binding B" && home.CommandReceipts.All(r => r.Id != duplicateField),
+            "Core home explicitly refuses a command whose content cannot be bound faithfully, recording and applying nothing");
+        // A command recorded by an earlier Core home keeps raw-byte comparison.
+        var legacyRename = Guid.NewGuid();
+        const string legacyJson = "{\"text\":\"Binding L\",\"action\":\"rename\",\"blobHashes\":[]}";
+        home.CommandStoreForTest.Begin(legacyRename, viewer.DeviceId, gid, DeviceBlob.Sha256Hex(Utf8(legacyJson)));
+        home.CommandStoreForTest.MarkCompleted(legacyRename);
+        var legacyRaw = await BindingAck(legacyRename, legacyJson);
+        var legacyPermuted = await BindingAck(legacyRename, "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"Binding L\"}");
+        Check(legacyRaw is { Outcome: "completed", Detail: "Already recorded on home." } && legacyPermuted is { Outcome: "uncertain", Detail: DeviceCommandBinding.RawMismatchDetail }
+            && homeSession.Title == "Binding B" && home.CommandReceipts.Single(r => r.Id == legacyRename) is { HashScheme: null, Outcome: "completed" }
+            && home.CommandReceipts.Single(r => r.Id == firstRename).HashScheme == DeviceCommandBinding.CanonicalScheme,
+            "A legacy raw Core record matches an identical raw retry; a permuted one is uncertain (check home), never rejected or executed");
+        homeSession.Title = titleBefore;
+        var started = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "inject", PendingID = last.Id });
+        Check(started is not null && await Until(() => LastAck(started) is { Outcome: "completed", Detail: SessionStore.InjectItemGone }
+            && viewer.Unresolved(gid).All(r => r.CommandID != started))
+            && homeSession.Messages.Select(m => m.Id).SequenceEqual(messagesBefore) && !homeSession.Interrupted && homeRunner.Prompts.Count == 1,
+            "Inject now for a message that already started reports it is gone without a notice or interrupt");
+        homeRunner.Gate.SetResult(true);
+        Check(await Until(() => !homeSession.Busy), "Race fixture turn finishes once released");
+        homeRunner.Gate = null;
+        // Inject all with items still queued keeps merging and running them.
+        homeSession.QueuePaused = true;
+        homeSession.Pending.AddRange(new[] { new PendingPrompt { Text = "merge a" }, new PendingPrompt { Text = "merge b" } });
+        homeStore.Save();
+        var merge = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        Check(merge is not null && await Until(() => LastAck(merge) is { Outcome: "completed", Detail: "Applied once on home." }
+            && viewer.Unresolved(gid).All(r => r.CommandID != merge)
+            && homeRunner.Prompts.LastOrDefault() == "merge a\n\nmerge b" && !homeSession.Busy && homeSession.Pending.Count == 0),
+            "Inject all with queued items still merges them into one turn");
+        // A queued tell merged with typed input (Mac 941BAB1E parity): the
+        // transcript records each part; text, prompt and durability are unchanged.
+        var tellText = $"[Converse message from ClaudeConverse · session peer/one · delivery {Guid.NewGuid()} · hop 2/100]\nDiagnosis\n[Reply to request {Guid.NewGuid()}]";
+        var queuedTell = new PendingPrompt { Text = tellText, Autonomous = true, Hop = 2 };
+        var queuedTyped = new PendingPrompt { Text = "OK, propose: make 148", Typed = true };
+        homeSession.QueuePaused = true;
+        homeSession.Pending.AddRange(new[] { queuedTell, queuedTyped });
+        var tellObligation = new SwitchboardObligation { Id = Guid.NewGuid(), Source = "peer/one", SourceName = "ClaudeConverse", PromptID = queuedTell.Id };
+        homeSession.SwitchboardObligations.Add(tellObligation);
+        homeStore.Save();
+        var mixed = await viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
+        var mergedText = tellText + "\n\nOK, propose: make 148";
+        ChatMessage? MergedUser() => homeSession.Messages.ToArray().LastOrDefault(m => m.Role == "user");
+        Check(mixed is not null && await Until(() => LastAck(mixed) is { Outcome: "completed" } && !homeSession.Busy && homeSession.Pending.Count == 0 && homeRunner.Prompts.LastOrDefault() == mergedText),
+            "Inject all of a tell and typed input sends the byte-identical merged prompt");
+        var mergedUser = MergedUser();
+        Check(mergedUser?.Text == mergedText && mergedUser.Components is [{ Offset: 0, Kind: "traffic" } tellPart, { Kind: "human" } typedPart]
+            && tellPart.Length == tellText.Length && typedPart.Offset == tellText.Length + 2 && typedPart.Length == "OK, propose: make 148".Length,
+            "The merged message records where the tell and the typed prompt sit");
+        Check(homeSession.SwitchboardObligations.Any(o => o.Id == tellObligation.Id && o.State == "submitted"), "The merged tell's request obligation is submitted exactly as before");
+        homeSession.SwitchboardObligations.RemoveAll(o => o.Id == tellObligation.Id);
+        var reloadedStore = new SessionStore(homeRoot, new FakeRunner());
+        var reloadedUser = reloadedStore.Sessions.FirstOrDefault(s => s.Id == homeSession.Id)?.Messages.LastOrDefault(m => m.Role == "user");
+        Check(reloadedUser?.Text == mergedText && reloadedUser.Components?.Select(c => (c.Offset, c.Length, c.Kind)).SequenceEqual(mergedUser!.Components!.Select(c => (c.Offset, c.Length, c.Kind))) == true,
+            "Merged components survive archive save and load");
+        Check(await Until(() => viewer.RemoteTranscripts.GetValueOrDefault(gid)?.Messages.LastOrDefault(m => m.Role == "user") is { Components.Count: 2 } wire && wire.Text == mergedText
+            && SwitchboardPresentation.Segments(wire.Text, wire.Components) is [{ Summary: "Received reply from ClaudeConverse · Diagnosis" }, { Summary: null, Text: "OK, propose: make 148" }]),
+            "The remote transcript snapshot carries components and the viewer renders the typed part visibly");
         // Both sends start before either ack returns: the second must reuse
         // the outstanding command instead of sending a duplicate interrupt.
+        // Earlier completed inject records may not be pruned yet; count only new ones.
+        // The outbox list is also updated by acks on the network thread, so
+        // retry a read that races a concurrent change.
+        T ReadOutbox<T>(Func<IReadOnlyList<DeviceOutboxRecord>, T> read)
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try { return read(viewer.Outbox); }
+                catch (InvalidOperationException) when (attempt < 100) { Thread.Sleep(1); }
+            }
+        }
+        var priorInjects = ReadOutbox(o => o.Where(r => r.SessionID == gid && r.Payload.Action == "injectAll").Select(r => r.CommandID).ToHashSet());
         var first = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
         var second = viewer.SendRemoteCommandAsync(gid, new DeviceCommandPayload { Action = "injectAll" });
         var ids = await Task.WhenAll(first, second);
-        Check(ids[0] is not null && ids[0] == ids[1]
-            && viewer.Outbox.Count(r => r.SessionID == gid && r.Payload.Action == "injectAll") == 1,
-            "Double inject reuses the outstanding command");
+        // The quiet empty-queue completion can return before the second send.
+        // Then a new command is correct; what must never happen is two
+        // outstanding injects for the session.
+        // A completed record may already be pruned, so at most one new record.
+        var reused = ids[0] is not null && ids[0] == ids[1]
+            && ReadOutbox(o => o.Count(r => r.SessionID == gid && r.Payload.Action == "injectAll" && !priorInjects.Contains(r.CommandID))) <= 1;
+        var sequential = ids[0] is not null && ids[1] is not null && ids[0] != ids[1]
+            && await Until(() => LastAck(ids[0]) is { Outcome: "completed" });
+        var single = await Until(() => viewer.Unresolved(gid).Count(r => r.Payload.Action == "injectAll") <= 1);
+        Check((reused || sequential) && single, "Double inject reuses the outstanding command");
     }
     finally
     {
@@ -737,6 +1113,9 @@ MdnsChecks.RunGroupDevices(Check);
         "Help search ranks title hits before body-only hits");
     var rejected = false;
     try { HelpDocument.Load("{\"schemaVersion\":99,\"topics\":[]}"); } catch (InvalidDataException) { rejected = true; }
+    Check(HelpDocument.RenderPlain("![pic](a.png)See [docs](https://x.example/a(1)) now.") == "See docs now.", "Help plain text removes images before link labels, with parentheses");
+    Check(HelpDocument.RenderPlain("# Title\n**bold** and *italic* and `code`\n* item\n2*3*4") == "Title\nbold and italic and code\n* item\n2*3*4", "Help plain text removes single-star emphasis but keeps list bullets and arithmetic");
+    Check(new HelpDocument { SourceCommit = "abc123" }.SourceCommitSuffix == " @abc123" && new HelpDocument { SourceCommit = "unknown" }.SourceCommitSuffix == "" && new HelpDocument { SourceCommit = "" }.SourceCommitSuffix == "", "Help hides a source revision the build could not determine");
     Check(rejected, "Help loader rejects unsupported schema versions");
     // Generated artifact, when present next to the test runner or in the app Assets, must load.
     var candidates = new[]
@@ -1009,17 +1388,104 @@ MdnsChecks.RunGroupDevices(Check);
         Check(await Until(() =>
             viewer.Unresolved(gid).FirstOrDefault(r => r.CommandID == failed)?.Detail == "Home record lookup."),
             "Outbox query returns the authoritative home outcome");
-        Check(await viewer.RetryOutboxAsync(record)
+        var sent = new System.Collections.Concurrent.ConcurrentQueue<DeviceEnvelope>();
+        viewer.EnvelopeSentForTest += sent.Enqueue;
+        // Reload the outbox from disk, as after a restart, and retry from it.
+        var fromDisk = new DeviceOutboxStore(viewerRoot).Records.Single(r => r.CommandID == failed);
+        Check(fromDisk.PayloadBytes is { } diskBytes && diskBytes.SequenceEqual(DeviceCommandBinding.Encode(new DeviceCommandPayload { Action = "submit", Text = "  " })),
+            "Core outbox persists the exact canonical bytes it sent");
+        Check(await viewer.RetryOutboxAsync(fromDisk)
             && await Until(() => viewer.Unresolved(gid).Any(r => r.CommandID == failed && r.Outcome == "failed")),
             "Retry resends under the original ID and home dedups the replay");
+        Check(sent.Where(e => e.Kind == DeviceKind.Command && e.CommandID == failed).Select(e => e.Payload!).SingleOrDefault() is { } resent && resent.SequenceEqual(fromDisk.PayloadBytes!),
+            "After reload, Core Resend same ID sends byte-identical payload bytes");
+        // A record saved by an earlier version has no bytes: never re-encoded,
+        // never given a new ID; Resend asks home instead.
+        var legacyOutbox = new DeviceOutboxRecord { CommandID = Guid.NewGuid(), SessionID = gid, Payload = new DeviceCommandPayload { Action = "rename", Text = "Old" }, PayloadHash = "h", Epoch = viewer.RemoteLeases[gid] };
+        viewer.OutboxStoreForTest.Add(legacyOutbox);
+        var queryAcks = new System.Collections.Concurrent.ConcurrentQueue<(Guid Id, DeviceAckPayload? Ack)>();
+        viewer.AckReceivedForTest += (id, ack) => queryAcks.Enqueue((id, ack));
+        sent.Clear();
+        Check(!await viewer.RetryOutboxAsync(legacyOutbox)
+            && sent.Any(e => e.Kind == DeviceKind.CommandQuery && e.CommandID == legacyOutbox.CommandID) && !sent.Any(e => e.Kind == DeviceKind.Command)
+            && viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID).Detail is DeviceOutboxRecord.LegacyDetail or DeviceCommandBinding.UnrecordedDetail,
+            "Resending a legacy Core record queries home under its original ID and sends no re-encoded command");
+        Check(await Until(() => viewer.Unresolved(gid).Single(r => r.CommandID == legacyOutbox.CommandID) is { Outcome: "rejected", Detail: DeviceCommandBinding.UnrecordedDetail })
+            && homeSession.Title != "Old",
+            "Home's answer resolves the legacy record: it never reached home, so nothing was applied");
+        Check(queryAcks.Any(q => q.Id == legacyOutbox.CommandID && q.Ack?.Query == true),
+            "Core home marks its status-query answer as a query reply");
+        viewer.DiscardOutbox(legacyOutbox.CommandID);
         viewer.DiscardOutbox(failed.Value);
         Check(viewer.Unresolved(gid).Count == 0, "Discard drops the outbox record");
+        // A connection arriving while the heartbeat is sending must not end the sweep.
+        await viewer.AcquireRemoteAsync(gid);
+        Check(await Until(() => home.DisplayHolder(homeSession.Id)?.Device == viewer.DeviceId), "Heartbeat fixture holds a display lease");
+        var homePeers = (Dictionary<Guid, Peer>)typeof(DeviceSyncService).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(home)!;
+        var arriving = new Peer { Id = Guid.NewGuid(), Client = new System.Net.Sockets.TcpClient(), IsInitiator = false };
+        var arrivedMidSweep = false;
+        void ArriveMidSweep(DeviceEnvelope envelope)
+        {
+            if (arrivedMidSweep || envelope.Kind is not (DeviceKind.LeaseExpired or DeviceKind.LeaseStolen)) return;
+            arrivedMidSweep = true; homePeers[arriving.Id] = arriving;
+        }
+        home.EnvelopeSentForTest += ArriveMidSweep;
+        home.LeasesForTest.ExpireForTest(homeSession.Id);
+        Exception? sweepFailure = null;
+        try { await home.HeartbeatPassAsync(1); }
+        catch (Exception e) { sweepFailure = e; }
+        home.EnvelopeSentForTest -= ArriveMidSweep;
+        homePeers.Remove(arriving.Id);
+        Check(arrivedMidSweep && sweepFailure is null, "A connection added during the lease sweep cannot end the heartbeat pass" + (sweepFailure is null ? "" : ": " + sweepFailure.Message));
+        // One failed pass must not stop the loop for the life of the process.
+        var beatRoot = Path.Combine(homeRoot, "heartbeat");
+        Directory.CreateDirectory(beatRoot);
+        using var beat = new DeviceSyncService(beatRoot, new SessionStore(beatRoot, new FakeRunner()), "BeatPC");
+        var beatPasses = 0;
+        beat.HeartbeatInterval = TimeSpan.FromMilliseconds(10);
+        beat.HeartbeatPassStartingForTest = () => Interlocked.Increment(ref beatPasses) == 1 ? throw new InvalidOperationException("injected heartbeat failure") : Task.CompletedTask;
+        await beat.StartAsync(0);
+        Check(await Until(() => Volatile.Read(ref beatPasses) >= 3), "The heartbeat loop survives an exception in one pass");
     }
     finally
     {
         Cleanup(homeRoot);
         Cleanup(viewerRoot);
     }
+}
+
+// Lease, outbox and draft state is shared by connection loops and the heartbeat.
+{
+    var root = Directory.CreateTempSubdirectory("converse-sync-state-").FullName;
+    try
+    {
+        var leases = new DeviceLeaseManager(ttlSeconds: 0);
+        var outbox = new DeviceOutboxStore(root);
+        var drafts = new DeviceDraftTracker();
+        var collisions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var tasks = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            try
+            {
+                for (var i = 0; i < 200; i++)
+                {
+                    var id = Guid.NewGuid();
+                    leases.Acquire(id, "device"); leases.Holder(id); leases.SweepExpired();
+                    outbox.Add(new DeviceOutboxRecord { CommandID = id, SessionID = "s" + worker });
+                    outbox.MarkUncertain("s" + worker);
+                    _ = outbox.Records.Count(record => record.Outcome == "pending");
+                    outbox.Resolve(id, "completed", null);
+                    drafts.Bump("shared", "text " + i); drafts.AdoptIfNewer("shared", (ulong)i, "older");
+                }
+            }
+            catch (Exception e) { collisions.Enqueue(e); }
+        })).ToArray();
+        Task.WaitAll(tasks);
+        Check(collisions.IsEmpty, "Concurrent lease, outbox and draft updates never collide" + (collisions.TryPeek(out var collision) ? ": " + collision.Message : ""));
+        Check(outbox.Records.Count == 0 && new DeviceOutboxStore(root).Records.Count == 0 && drafts.Version("shared") >= 1600,
+            "Concurrent outbox and draft updates lose nothing");
+    }
+    finally { Cleanup(root); }
 }
 
 // AtomicJson: concurrent saves of one store cannot collide on Windows.
@@ -1141,12 +1607,13 @@ MdnsChecks.RunGroupDevices(Check);
             && merged.Messages.First(m => m.Role == "user").Text == "alpha\n\nbeta",
             "Inject-all merges the queue into one prompt (Mac parity)");
         var honest = mergeStore.Create(mergeStore.Entries.First(e => e.Engine == "codex"));
-        Check(mergeStore.InjectPending(honest) is string emptyFail && emptyFail.Length > 0 && honest.Pending.Count == 0,
-            "Inject on an empty queue reports honestly instead of going silent");
+        var honestMessages = honest.Messages.Count;
+        Check(mergeStore.InjectPending(honest) == SessionStore.InjectNothingQueued && honest.Pending.Count == 0 && honest.Messages.Count == honestMessages,
+            "Inject on an empty queue reports a quiet no-op instead of going silent");
         honest.Pending.Add(new Converse.Core.PendingPrompt { Text = "kept" });
-        Check(mergeStore.InjectPending(honest, Guid.NewGuid()) is string missingFail && missingFail.Length > 0
-            && honest.Pending.Count == 1 && honest.Pending[0].Text == "kept",
-            "Inject of a missing queued item reports honestly and keeps the queue");
+        Check(mergeStore.InjectPending(honest, Guid.NewGuid()) == SessionStore.InjectItemGone
+            && honest.Pending.Count == 1 && honest.Pending[0].Text == "kept" && honest.Messages.Count == honestMessages,
+            "Inject of a missing queued item reports it is gone and keeps the queue");
     }
     finally { Cleanup(root); }
 }
@@ -2162,6 +2629,28 @@ await CheckGroupLeave();
     Check(angled.Count == 1 && angled[0].Path == "C:/pics/my cat.png", "Angle-bracket path with spaces parses");
     var fenced = ResponseImages.ParseFileRefs("```\n![no](/tmp/no.png)\n```\n> ![q](/tmp/q.png)\n`![c](/tmp/c.png)`\n\\![e](/tmp/e.png)");
     Check(fenced.Count == 0, "Fenced, quoted, inline-code, and escaped refs stay text");
+    const string shot = "![x](/tmp/shot(1).png)";
+    var balanced = ResponseImages.ParseFileRefs(shot);
+    Check(balanced.Count == 1 && balanced[0].Path == "/tmp/shot(1).png" && balanced[0].Start == 0 && balanced[0].Length == shot.Length, "Image paths keep balanced parentheses");
+    var nestedParens = ResponseImages.ParseFileRefs("![x](/tmp/a(b(c))(d).png) ![y](/tmp/y.png)");
+    Check(nestedParens.Count == 2 && nestedParens[0].Path == "/tmp/a(b(c))(d).png" && nestedParens[1].Path == "/tmp/y.png", "Nested parentheses end at the image's own closer and the next image still parses");
+    Check(ResponseImages.ParseWebRefs("![w](https://example.com/w_(1).png)").Single().Url == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses");
+    var unbalanced = ResponseImages.ParseFileRefs("![x](/tmp/a(b.png) and more)");
+    Check(unbalanced.Count == 1 && unbalanced[0].Path == "/tmp/a(b.png" && unbalanced[0].Length == "![x](/tmp/a(b.png)".Length, "An unbalanced parenthesis keeps the original first-closer match");
+    var overlong = "![x](/tmp/a(" + new string('b', 4080) + ")" + new string('c', 20) + ".png)";
+    Check(ResponseImages.ParseFileRefs(overlong).Single().Path == "/tmp/a(" + new string('b', 4080), "A target past the bound is not extended");
+    Check(ResponseImages.ParseFileRefs("![x](/tmp/" + new string('a', 5000) + ".png)").Count == 0, "A target beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![" + new string('x', 513) + "](/tmp/a.png)").Count == 0, "A caption beyond the cap is not captured");
+    Check(ResponseImages.ParseFileRefs("![a[b](/tmp/a.png)").Count == 0, "A bracket inside a caption means it is not an image");
+    var hostile = string.Concat(Enumerable.Repeat("![x](/tmp/a()", 20000));
+    var hostileClock = System.Diagnostics.Stopwatch.StartNew();
+    var hostileRefs = ResponseImages.ParseFileRefs(hostile);
+    Check(hostileRefs.Count == ResponseImages.MaxImages && hostileClock.ElapsedMilliseconds < 2000, "Repeated open parentheses stay bounded");
+    // The limit is generous: unbounded scans take minutes on this input, and a loaded machine must not fail it.
+    var unclosed = string.Concat(Enumerable.Repeat("![x](a", 200_000));
+    var unclosedClock = System.Diagnostics.Stopwatch.StartNew();
+    Check(ResponseImages.ParseFileRefs(unclosed).Count == 0 && ResponseImages.ParseWebRefs(unclosed).Count == 0 && unclosedClock.Elapsed < TimeSpan.FromSeconds(30),
+        "Repeated unclosed image openers on one line stay bounded");
     var web = ResponseImages.ParseFileRefs("![w](https://example.com/a.png)");
     Check(web.Count == 0 && ResponseImages.ParseWebRefs("![w](https://example.com/a.png)").Count == 1,
         "HTTPS refs route to the web parser, not the file parser");
@@ -2586,7 +3075,9 @@ await CheckGroupLeave();
     Check(SidebarMarkers.LoopPaused(ran) == false && SidebarMarkers.PausedReason(ran) is null, "Running loops are not paused");
 }
 await SwitchboardSupervisionChecks.Run(Check, JoinPair);
+await TranscriptSelfReadChecks.Run(Check);
 await AppSupportChecks.Run(Check);
+await TurnAuthorityChecks.Run(Check);
 await AgentChecks.Run(Check, JoinPair);
 await HeadlessSessionChecks.Run(Check, JoinPair);
 

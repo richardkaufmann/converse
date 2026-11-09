@@ -31,7 +31,6 @@ enum ProviderHandoff {
 
     static let prompt = "[Converse handoff] Another assistant is about to take over this conversation. Write a concise Markdown handoff note for your successor with these sections: Goals and success criteria; Decisions and why; Current state; Open items and next steps; Gotchas; Important files and commands. Base it on this conversation and the work you did. Reply with the note only, and don't change any files."
     static let maxNoteCharacters = 200_000
-    static let remoteRefusal = "This session runs on another device in your Group. Change its assistant or login on that device: right-click the session there and choose Change Assistant or Login…."
     static func error(_ text: String) -> NSError { NSError(domain: "Converse Handoff", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
     static func takeoverPreface(from: String, handoff: String?, transcript: String) -> String {
         if let handoff {
@@ -51,6 +50,7 @@ extension Store {
     func handoffNoteURL(_ s: Session) -> URL { handoffFolder(s).appendingPathComponent("handoff.md") }
     func handoffTranscriptURL(_ s: Session) -> URL { handoffFolder(s).appendingPathComponent("transcript.md") }
     private func makeHandoffFolder(_ s: Session) throws {
+        imageReferenceFileWrites += 1
         try FileManager.default.createDirectory(at: handoffFolder(s), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     @discardableResult func writeHandoffTranscript(_ s: Session, pending: HandoffPending?) throws -> URL {

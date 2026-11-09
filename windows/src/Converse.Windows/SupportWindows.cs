@@ -20,7 +20,7 @@ internal static class SetupPreview
 #endif
     public static string Name => Demo ? "Converse Demo" : "Converse Setup Preview";
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Name);
-    public static string CredentialResource => Demo ? "Converse.Demo.Agent" : Enabled ? "Converse.SetupPreview.Agent" : "Converse.Agent";
+    public static string CredentialResource => Demo ? "Converse.Demo.Agent" : Enabled ? "Converse.SetupPreview.Agent" : CredentialScope.Resource("Converse.Agent", Environment.GetEnvironmentVariable("CONVERSE_DATA_DIR"));
     public static void Initialize()
     {
         if (Enabled) Environment.SetEnvironmentVariable("CONVERSE_DATA_DIR", Folder);
@@ -204,10 +204,11 @@ public sealed partial class MainWindow
         else { Refresh(); _panes[0].FocusDraft(); }
     }
 
-    private Task HandleSupportRequest(ChatSession source, JsonObject command)
+    // authority is the requesting turn's, captured when its prompt started;
+    // the session may be running a different turn by the time this
+    // dispatches, so nothing here reads that turn's provenance.
+    private Task HandleSupportRequest(ChatSession source, JsonObject command, TurnAuthority authority)
     {
-        var background = source.ActiveBackground || source.ActiveHop > 0;
-        var depth = source.ActiveAppControlDepth;
         var done = new TaskCompletionSource();
         if (!DispatcherQueue.TryEnqueue(async () =>
         {
@@ -216,8 +217,7 @@ public sealed partial class MainWindow
                 string result;
                 try
                 {
-                    if (background || depth >= 8) throw new ArgumentException("This turn cannot configure the app.");
-                    result = AppSupportActions.Execute(_store, source, command, _help);
+                    result = AppSupportActions.Execute(_store, source, authority, command, _help);
                     if (result.StartsWith("Coding session ready: ") && Guid.TryParse(result[22..], out var createdID))
                     {
                         ShowSupportSession(_store.Sessions.First(s => s.Id == createdID));
@@ -244,14 +244,7 @@ public sealed partial class MainWindow
                     }
                 }
                 catch (Exception ex) { result = "App operation blocked: " + ex.Message; }
-                // Only human-initiated, taught chains get another turn. No
-                // auto-replies to background/forwarded requests or chain overflow.
-                if (source.SupportTeachingVersion is not null && !background && depth < 8)
-                {
-                    source.Pending.Add(new PendingPrompt { Text = "[Converse app operation result]\n" + result, AppControlDepth = depth + 1 });
-                    _store.Save(); _store.RunNext(source);
-                }
-                else { source.Messages.Add(new ChatMessage { Role = "notice", Text = result }); _store.Save(); }
+                AppSupportActions.Continue(_store, source, authority, result);
                 done.TrySetResult();
             }
             catch (Exception ex) { done.TrySetException(ex); }

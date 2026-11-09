@@ -7,6 +7,38 @@ enum DeviceBlob {
     static let maxBlob = 25_000_000
 }
 
+// The latest real human input on this device and anywhere in the Group. A
+// report says how long ago the input happened, never a clock time, so device
+// clock skew cannot strand someone who came back. Each device reports only its
+// own input, directly to the agent hosts it can reach, so reports cannot echo.
+// An offline device sends nothing; on reconnect it reports its last input with
+// that input's age. Held in memory only: peers report again after a restart.
+struct DeviceEngagement: Equatable {
+    static let capability = "engagement-v1"
+    static let kind = "engagement"
+    // First input goes at once; steady use sends at most one report this often.
+    static let reportInterval: TimeInterval = 30
+    static let maxReportAge: TimeInterval = 30 * 86400
+    struct Report: Codable, Equatable { var ageSeconds: Double }
+    private(set) var local: Date?
+    private(set) var latest: Date?
+    // Only real input handlers call this. Agents, the switchboard and
+    // automation deliver prompts through other paths and never reach it.
+    mutating func recordLocal(at now: Date) {
+        local = max(local ?? now, now); latest = max(latest ?? now, now)
+    }
+    mutating func recordPeer(_ report: Report, receivedAt now: Date) {
+        guard report.ageSeconds.isFinite, (0...Self.maxReportAge).contains(report.ageSeconds) else { return }
+        let at = now.addingTimeInterval(-report.ageSeconds)
+        latest = max(latest ?? at, at)
+    }
+    func report(lastReported: Date?, lastSent: Date?, now: Date) -> Report? {
+        guard let local, local > (lastReported ?? .distantPast) else { return nil }
+        if let lastSent, now.timeIntervalSince(lastSent) < Self.reportInterval { return nil }
+        return Report(ageSeconds: max(0, now.timeIntervalSince(local)))
+    }
+}
+
 struct DeviceLease: Equatable {
     var device: String
     var epoch: UInt64
@@ -74,6 +106,9 @@ struct DeviceCommandRecord: Codable, Equatable {
     var updatedAt: Date
     var sessionID: String = ""
     var payloadHash: String = ""
+    // Absent on records written before canonical binding: those keep raw
+    // byte hashes, so only an identical legacy retry still matches.
+    var hashScheme: String? = nil
 }
 
 // Persisted before CLI start. A record left running across restart becomes
@@ -92,14 +127,22 @@ final class DeviceCommandStore {
             try save()
         }
     }
-    func begin(id: UUID, origin: String, sessionID: String = "", payloadHash: String = "") throws -> Bool {
+    func begin(id: UUID, origin: String, sessionID: String = "", payloadHash: String = "", hashScheme: String? = nil) throws -> Bool {
         guard records[id] == nil else { return false }
-        records[id] = DeviceCommandRecord(id: id, origin: origin, outcome: .accepted, updatedAt: Date(), sessionID: sessionID, payloadHash: payloadHash)
+        records[id] = DeviceCommandRecord(id: id, origin: origin, outcome: .accepted, updatedAt: Date(), sessionID: sessionID, payloadHash: payloadHash, hashScheme: hashScheme)
         try save(); return true
     }
-    func bindingMatches(id: UUID, origin: String, sessionID: String, payloadHash: String) -> Bool {
-        guard let record = records[id] else { return false }
-        return record.origin == origin && record.sessionID == sessionID && record.payloadHash == payloadHash
+    // Compares under the scheme the record was written with.
+    func bindingMatches(id: UUID, origin: String, sessionID: String, payload: Data) -> Bool {
+        guard let record = records[id], record.origin == origin, record.sessionID == sessionID,
+              let hash = DeviceCommandBinding.hash(payload, scheme: record.hashScheme) else { return false }
+        return record.payloadHash == hash
+    }
+    // An earlier home hashed raw bytes, so a key-reordered retry of the same
+    // command misses. Its original may already have run: never call it rejected.
+    func rawBindingUnconfirmed(id: UUID, origin: String, sessionID: String) -> Bool {
+        guard let record = records[id], record.origin == origin, record.sessionID == sessionID else { return false }
+        return (record.hashScheme ?? DeviceCommandBinding.rawScheme) == DeviceCommandBinding.rawScheme
     }
     func markRunning(id: UUID) throws { try update(id: id, outcome: .running) }
     func markCompleted(id: UUID) throws { try update(id: id, outcome: .completed) }
@@ -144,8 +187,8 @@ struct DeviceDraftTracker {
 }
 
 // Viewer outbox: submitted content and its command ID persist until an
-// authoritative home ack. Retries reuse the same ID; uncertain entries are
-// never resent automatically.
+// authoritative home ack. Retries reuse the same ID and the exact bytes
+// first sent; uncertain entries are never resent automatically.
 struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var id: UUID { commandID }
     var commandID: UUID
@@ -155,6 +198,9 @@ struct DeviceOutboxRecord: Codable, Equatable, Identifiable {
     var epoch: UInt64 = 0
     var outcome: String = "pending"
     var detail: String? = nil
+    // Absent on records saved by earlier versions, which cannot be resent.
+    var payloadData: Data? = nil
+    static let legacyDetail = "Saved by an earlier Converse version, so it cannot be resent exactly. Check home for its result."
 }
 
 enum DeviceDraftRecovery {
@@ -170,6 +216,18 @@ final class DeviceOutboxStore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         file = folder.appendingPathComponent("device-outbox.json")
         if let data = try? Data(contentsOf: file) { records = (try? JSONDecoder().decode([DeviceOutboxRecord].self, from: data)) ?? [] }
+        // Re-encoding a legacy payload could differ from what home bound, and
+        // a fresh command ID could apply it twice. Only Check home is safe.
+        let legacy = records.indices.filter { records[$0].payloadData == nil && records[$0].outcome == "pending" }
+        for index in legacy { records[index].outcome = "uncertain"; records[index].detail = DeviceOutboxRecord.legacyDetail }
+        // Never block sync start: memory keeps the migration and the next save writes it.
+        if !legacy.isEmpty {
+            do { try save() } catch { NSLog("Device outbox migration not saved yet: %@", error.localizedDescription) }
+        }
+    }
+    func markLegacyUncertain(commandID: UUID) throws {
+        guard let index = records.firstIndex(where: { $0.commandID == commandID }) else { return }
+        records[index].outcome = "uncertain"; records[index].detail = DeviceOutboxRecord.legacyDetail; try save()
     }
     func add(_ record: DeviceOutboxRecord) throws { records.removeAll { $0.commandID == record.commandID }; records.append(record); try save() }
     func resolve(commandID: UUID, outcome: String, detail: String?) throws {

@@ -483,7 +483,7 @@ final class TranscriptExportController: NSObject, NSOpenSavePanelDelegate {
             }
         }
         var result = session
-        result.messages = messages.map { Message(id: $0.id, role: $0.role, text: $0.text, images: $0.imageHashes.map { "remote-image-" + $0 + ".png" }, createdAt: $0.createdAt) }
+        result.messages = messages.map { Message(id: $0.id, role: $0.role, text: $0.text, images: $0.imageHashes.map { "remote-image-" + $0 + ".png" }, createdAt: $0.createdAt, components: $0.components) }
         return (result, images)
     }
     static func imageData(_ path: String) -> Data? {

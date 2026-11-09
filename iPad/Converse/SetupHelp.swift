@@ -1,4 +1,6 @@
+import AVKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PadConnect: View {
     @ObservedObject var model: PadModel
@@ -57,12 +59,17 @@ struct PadRequest: View {
 struct PadHelp: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
-    private let book = try? HelpBook.load()
+    private let book: HelpBook?
+    @StateObject private var videos: HelpVideoPresenter
+    init() {
+        let book = try? HelpBook.load()
+        self.book = book
+        _videos = StateObject(wrappedValue: HelpVideoPresenter(videos: book?.videos ?? []))
+    }
     var body: some View {
         NavigationStack {
             List {
-                Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
-                    Text("This repository is private. Sign into GitHub with an authorized account to open it. The same documentation is available offline below.").font(.caption).foregroundStyle(.secondary) }
+                Section { Link("GitHub README", destination: ConverseAbout.readme) }
                 if let book {
                     if let security = book.topics.first(where: { $0.id == "security-and-privacy" }) {
                         NavigationLink("Security and privacy") { ScrollView { Text(security.plainText).textSelection(.enabled).padding() }.navigationTitle("Security and privacy") }
@@ -80,21 +87,116 @@ struct PadHelp: View {
             }.searchable(text: $query, prompt: "Search Help").navigationTitle("Converse Help")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        // Manifest video links play here; every other Help link opens as usual.
+        .environment(\.openURL, OpenURLAction { videos.open($0) ? .handled : .systemAction })
+        .fullScreenCover(item: $videos.playback) { PadHelpVideo(playback: $0, close: videos.close) }
+        .onDisappear(perform: videos.close)
     }
+}
+
+// Done, swipe-down and closing Help all clear the presenter's playback, which
+// stops it and releases the player. Full screen in every orientation; on a
+// landscape phone Done moves to a side rail so the video keeps the height.
+struct PadHelpVideo: View {
+    @ObservedObject var playback: HelpVideoPlayback
+    let close: () -> Void
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    var body: some View {
+        let rail = verticalSizeClass == .compact
+        // AnyLayout keeps the player's identity across rotation: the same
+        // AVKit controller and AVPlayer, so position and pause state survive.
+        let layout = rail ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        let bar = rail ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 12))
+        layout {
+            bar {
+                if !rail { Text(playback.video.title + " · " + playback.video.durationLabel).font(.headline).lineLimit(1) }
+                Spacer(minLength: 0)
+                Button("Done", action: close).fontWeight(.semibold)
+            }.padding(rail ? .vertical : .horizontal, 12).padding(rail ? .horizontal : .vertical, 10)
+                .frame(maxWidth: rail ? nil : .infinity, maxHeight: rail ? .infinity : nil)
+            Group {
+                if case .failed(let message) = playback.state {
+                    VStack(spacing: 14) {
+                        Text(message).multilineTextAlignment(.center)
+                        Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
+                        // Opened directly: Help's openURL handler would route it back here.
+                        if let url = playback.video.browserURL { Button("Open link") { UIApplication.shared.open(url) } }
+                    }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    HelpVideoPlayerView(player: playback.player).overlay { if playback.state == .loading { ProgressView() } }
+                }
+            }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
+        .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { drag in
+            if drag.translation.height > 120 && abs(drag.translation.width) < drag.translation.height / 2 { close() }
+        })
+        .onDisappear(perform: close)
+    }
+}
+
+// AVKit's own player: scrubbing, AirPlay and aspect-fit, so the whole frame
+// shows with black bars instead of being cropped. Picture in Picture stays
+// off so dismissing a Help video always ends playback.
+struct HelpVideoPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer?
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.videoGravity = .resizeAspect
+        controller.allowsPictureInPicturePlayback = false
+        controller.entersFullScreenWhenPlaybackBegins = false
+        controller.view.backgroundColor = .black
+        return controller
+    }
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player { controller.player = player }
+    }
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) { controller.player = nil }
 }
 
 struct PadAbout: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("performanceCapture") private var captureTimings = false
+    @State private var timingFile: TimingExportFile?
+    @State private var exportTimings = false
+    @State private var timingError = ""
     var body: some View {
         NavigationStack {
             Form {
-                Section { Text("Converse " + ConverseAbout.versionBuild).font(.headline) }
+                Section { Text("Converse " + ConverseAbout.versionBuild).font(.title2.bold()) }
                 Section { Text(ConverseAbout.copyright); Text(ConverseAbout.license); Link("GPLv3 or later · licensing details", destination: ConverseAbout.licenseURL) }
-                Section { Link("GitHub README (sign-in required)", destination: ConverseAbout.readme); Link("richard@kaoslabs.app", destination: URL(string: "mailto:richard@kaoslabs.app")!) }
+                Section { ForEach(ConverseAbout.links, id: \.title) { Link($0.title, destination: $0.url) }; Link("GitHub README", destination: ConverseAbout.readme) }
+                Section("Performance diagnostics") {
+                    Toggle("Record performance timings", isOn: $captureTimings)
+                        .onChange(of: captureTimings) { _, enabled in
+                            PerformanceCapture.shared.configure(folder: DeviceSyncService.shared.storageFolder, enabled: enabled)
+                        }
+                    Text("Records timing and counts, including Parking Lot save round trips. No lot text or message contents. Starting a capture replaces the previous capture.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("Export timings…") {
+                        PerformanceCapture.shared.prepareExport { url in
+                            guard let url else { timingError = "Record some timings first."; return }
+                            do { timingFile = TimingExportFile(data: try Data(contentsOf: url)); timingError = ""; exportTimings = true }
+                            catch { timingError = error.localizedDescription }
+                        }
+                    }
+                    if !timingError.isEmpty { Text(timingError).font(.footnote).foregroundStyle(.red) }
+                }
             }.navigationTitle("About Converse")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .fileExporter(isPresented: $exportTimings, document: timingFile, contentType: .json, defaultFilename: "Converse performance timings") { result in
+            if case .failure(let error) = result { timingError = error.localizedDescription }
+        }
     }
+}
+private struct TimingExportFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+    init(data: Data) { self.data = data }
+    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 struct PadRenameSession: View {
     let row: DeviceSidebarRow

@@ -8,6 +8,7 @@ private let gutterLog = Logger(subsystem: "local.richard.Converse", category: "g
 // transcript space. Keep SwiftUI's split-view delegates and constraints intact.
 final class PaneDividerHandle: NSView {
     static let hitWidth: CGFloat = 14
+    static var setCursor: (NSCursor) -> Void = { $0.set() }
     weak var split: NSSplitView?
     let dividerIndex: Int
     private var tracking: NSTrackingArea?
@@ -15,6 +16,7 @@ final class PaneDividerHandle: NSView {
     private var lastDragEvent = Date.distantPast
     private var pendingPosition: CGFloat?
     private var dragFrame: DispatchWorkItem?
+    private var pendingFrameMeasurement: PerformanceCapture.Span?
     private var idleCheck: DispatchWorkItem?
     private var releaseMonitor: Any?
     private var lastLocationInWindow: NSPoint = .zero
@@ -46,9 +48,9 @@ final class PaneDividerHandle: NSView {
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area); tracking = area
     }
-    override func cursorUpdate(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
-    override func mouseEntered(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
-    override func mouseExited(with event: NSEvent) { if dragStart == nil { NSCursor.arrow.set() } }
+    override func cursorUpdate(with event: NSEvent) { Self.setCursor(.resizeLeftRight) }
+    override func mouseEntered(with event: NSEvent) { Self.setCursor(.resizeLeftRight) }
+    override func mouseExited(with event: NSEvent) { if dragStart == nil { Self.setCursor(.arrow) } }
     override func mouseDown(with event: NSEvent) {
         guard let split, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         dragFrame?.cancel(); dragFrame = nil; pendingPosition = nil
@@ -63,9 +65,12 @@ final class PaneDividerHandle: NSView {
         dragBegan?()
         startReleaseMonitor()
         scheduleIdleCheck()
-        NSCursor.resizeLeftRight.set()
+        Self.setCursor(.resizeLeftRight)
     }
     override func mouseDragged(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .dragDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.dragHandling, measurement) }
         guard let split, let dragStart, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         lastDragEvent = Date()
         lastLocationInWindow = event.locationInWindow
@@ -81,18 +86,26 @@ final class PaneDividerHandle: NSView {
         // Consume only the newest pointer position each display interval.
         // Reflowing every queued mouse event makes long transcripts lag behind.
         if dragFrame == nil {
+            pendingFrameMeasurement = PerformanceCapture.shared.begin()
             let frame = DispatchWorkItem { [weak self] in self?.applyDragFrame() }
             dragFrame = frame
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60, execute: frame)
         }
-        NSCursor.resizeLeftRight.set()
+        Self.setCursor(.resizeLeftRight)
     }
     private func applyDragFrame() {
+        PerformanceCapture.shared.end(.dragFrameWait, pendingFrameMeasurement)
+        pendingFrameMeasurement = nil
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.dragApply, measurement) }
         dragFrame = nil
         guard let split, let position = pendingPosition, split.arrangedSubviews.indices.contains(dividerIndex + 1) else { return }
         pendingPosition = nil
         let constrained = max(split.minPossiblePositionOfDivider(at: dividerIndex), min(position, split.maxPossiblePositionOfDivider(at: dividerIndex)))
-        if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 { split.setPosition(constrained, ofDividerAt: dividerIndex) }
+        if abs(split.arrangedSubviews[dividerIndex].frame.maxX - constrained) > 0.25 {
+            ConversationTextView.markResize(in: split)
+            split.setPosition(constrained, ofDividerAt: dividerIndex)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -197,24 +210,42 @@ final class PaneDividerHandle: NSView {
 final class WrapFreeze {
     /// Characters a pause may reflow without stalling the gesture.
     static let pauseReflowLimit = 100_000
-    private var frozen: [(container: NSTextContainer, tracks: Bool)] = []
+    // Placement, live resize and gutter gestures may overlap and finish in
+    // either order. Restore the original setting only after the last owner ends.
+    private struct Hold { var owners: Int; let tracks: Bool }
+    private static var holds: [ObjectIdentifier: Hold] = [:]
+    private var frozen: [NSTextContainer] = []
     var count: Int { frozen.count }
     deinit { thaw() }
     func freeze(in view: NSView?) {
         guard let view else { return }
-        if let text = view as? NSTextView, let container = text.textContainer, !frozen.contains(where: { $0.container === container }) {
-            frozen.append((container, container.widthTracksTextView))
+        // A lot of ordinary size reflows live so its gutter and comments stay in line.
+        if let text = view as? NSTextView, (text as? ParkingOutlineText)?.reflowsDuringResize != true,
+           let container = text.textContainer, !frozen.contains(where: { $0 === container }) {
+            frozen.append(container)
+            let key = ObjectIdentifier(container)
+            if var hold = Self.holds[key] { hold.owners += 1; Self.holds[key] = hold }
+            else { Self.holds[key] = Hold(owners: 1, tracks: container.widthTracksTextView) }
             container.widthTracksTextView = false
         }
         for child in view.subviews { freeze(in: child) }
     }
     /// Restores wrapping, or only for transcripts up to `limit` characters.
     func thaw(upTo limit: Int = .max) {
-        let thawing = frozen.filter { ($0.container.textView?.textStorage?.length ?? 0) <= limit }
-        frozen.removeAll { entry in thawing.contains { $0.container === entry.container } }
-        for (container, tracks) in thawing {
-            container.widthTracksTextView = tracks
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.wrapThaw, measurement) }
+        let thawing = frozen.filter { ($0.textView?.textStorage?.length ?? 0) <= limit }
+        frozen.removeAll { entry in thawing.contains { $0 === entry } }
+        for container in thawing {
+            let key = ObjectIdentifier(container)
+            guard var hold = Self.holds[key] else { continue }
+            hold.owners -= 1
+            if hold.owners > 0 { Self.holds[key] = hold; continue }
+            Self.holds[key] = nil
+            ConversationTextView.markResize(in: container.textView)
+            container.widthTracksTextView = hold.tracks
             Self.matchTrackedWidth(container)
+            (container.textView as? ParkingOutlineText)?.widthSettled()
         }
     }
     // Re-enabling widthTracksTextView only follows *later* frame changes. The
@@ -267,8 +298,15 @@ enum PaneSizing {
         }
         return result
     }
+    static func mountedPanes(in window: NSWindow) -> Int {
+        guard let outer = split(in: window.contentView), outer.arrangedSubviews.count == 2 else { return 0 }
+        return split(in: outer.arrangedSubviews[1])?.arrangedSubviews.count ?? 0
+    }
     @discardableResult
     static func apply(to window: NSWindow, sidebar: CGFloat, paneCount: Int, weights: [CGFloat] = []) -> Bool {
+        // Intermediate divider positions must not reflow existing transcripts.
+        let wrapping = WrapFreeze(); wrapping.freeze(in: window.contentView)
+        defer { wrapping.thaw() }
         window.contentView?.layoutSubtreeIfNeeded()
         guard let outer = split(in: window.contentView), outer.arrangedSubviews.count == 2 else { return false }
         outer.setPosition(sidebar, ofDividerAt: 0)
@@ -286,6 +324,7 @@ enum PaneSizing {
         // Clear space from both directions before considering the layout done.
         for index in positions.indices.reversed() { inner.setPosition(positions[index], ofDividerAt: index) }
         for index in positions.indices { inner.setPosition(positions[index], ofDividerAt: index) }
+        window.contentView?.layoutSubtreeIfNeeded()
         return true
     }
 }
@@ -294,6 +333,9 @@ enum PaneSizing {
 // during a resize. Count changes and window resizes equalize session panes.
 // Divider changes last until the next window resize.
 final class WindowPaneLayout {
+    private static let layouts = NSMapTable<NSWindow, WindowPaneLayout>.weakToWeakObjects()
+    static func forWindow(_ window: NSWindow) -> WindowPaneLayout? { layouts.object(forKey: window) }
+    func transcriptMounted() { schedule() }
     weak var window: NSWindow?
     private(set) var paneCount = -1
     private(set) var preferredSidebar: CGFloat = 340
@@ -313,9 +355,11 @@ final class WindowPaneLayout {
     private var observers: [NSObjectProtocol] = []
     private var dividerHandles: [PaneDividerHandle] = []
     private let liveResizeWrapping = WrapFreeze()
+    private let placementWrapping = WrapFreeze()
     init(window: NSWindow) {
         self.window = window
         referenceWidth = window.contentRect(forFrameRect: window.frame).width; lastWidth = referenceWidth
+        Self.layouts.setObject(self, forKey: window)
         observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in self?.windowResized() })
         // Dragging the window edge resizes every pane each frame. Reflow once
         // at the end, as a gutter drag does.
@@ -383,6 +427,7 @@ final class WindowPaneLayout {
     }
     func setPaneCount(_ count: Int) {
         guard count != paneCount, let window else { return }
+        placementWrapping.freeze(in: window.contentView)
         // Capture the displayed sidebar before SwiftUI replaces its pane tree.
         // Rapid count changes retain this same width through intermediate layouts.
         if paneCount >= 0 { countChangeSidebar = countChangeSidebar ?? (sidebarCollapsed ? PaneSizing.collapsedSidebar : PaneSizing.sidebarWidth(in: window) ?? lastSidebar) }
@@ -394,14 +439,25 @@ final class WindowPaneLayout {
             sidebarLimit = 480; restoreSidebarCap = nil
         }
         schedule()
-        // A late-mounting pane (remote transcript, heavy history) can miss the
-        // short retries and stay narrow. One last attempt a second later adopts
-        // it; if layout already settled this succeeds immediately as a no-op.
-        let token = revision
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.revision == token else { return }
-            self.schedule()
+        scheduleLastAttempt()
+    }
+    private var lastAttempt: DispatchWorkItem?
+    // A late-mounting pane (remote transcript, heavy history) can miss the
+    // short retries and stay narrow. One last attempt a second later adopts
+    // it; if layout already settled this succeeds immediately as a no-op.
+    // A mount bumping the revision must not cancel it. It also bounds the
+    // wait for a pane that never mounts (a forgotten remote home): the panes
+    // that did mount are arranged, thawed and populated rather than left blank.
+    private func scheduleLastAttempt(restart: Bool = true) {
+        guard restart || lastAttempt == nil else { return }
+        lastAttempt?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lastAttempt = nil; self.revision += 1
+            self.arrange(self.revision, attempts: 0, acceptingMounted: true)
         }
+        lastAttempt = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
     }
     private var contentSignature = ""
     // Replacing what a pane shows (session → Parking Lot, etc.) swaps the split's
@@ -413,12 +469,9 @@ final class WindowPaneLayout {
         let first = contentSignature.isEmpty
         contentSignature = signature
         guard !first, paneCount > 0 else { return }
+        placementWrapping.freeze(in: window?.contentView)
         schedule()
-        let token = revision
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.revision == token else { return }
-            self.schedule()
-        }
+        scheduleLastAttempt()
     }
     private func windowResized() {
         guard !applying else { return }
@@ -475,18 +528,24 @@ final class WindowPaneLayout {
         }
         sweep(contentView)
     }
-    private func arrange(_ token: Int, attempts: Int) {
+    private func arrange(_ token: Int, attempts: Int, acceptingMounted: Bool = false) {
         cancelStaleDrags()
         guard token == revision, !draggingDivider, let window else { return }
         let width = window.contentRect(forFrameRect: window.frame).width
         let sidebar = sidebarCollapsed ? PaneSizing.collapsedSidebar : countChangeSidebar ?? PaneSizing.sidebar(preferred: preferredSidebar, reference: referenceWidth, window: width, limit: min(sidebarLimit, restoreSidebarCap ?? sidebarLimit), paneCount: max(0, paneCount))
         applying = true
-        let success = PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights)
+        var success = PerformanceCapture.shared.measure(.paneArrangement) { PaneSizing.apply(to: window, sidebar: sidebar, paneCount: max(0, paneCount), weights: weights) }
+        if !success, acceptingMounted {
+            _ = PaneSizing.apply(to: window, sidebar: sidebar, paneCount: PaneSizing.mountedPanes(in: window))
+            success = true
+        }
         applying = false
         if !success {
             if attempts > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.arrange(token, attempts: attempts - 1) } }
             // A remote pane can mount after these short retries. Its native
-            // layout notification will retry; do not adopt intermediate widths.
+            // layout notification or the last attempt retries; do not adopt
+            // intermediate widths before then.
+            else { scheduleLastAttempt(restart: false) }
             return
         }
         lastWidth = width; lastSidebar = PaneSizing.sidebarWidth(in: window) ?? sidebar
@@ -496,12 +555,40 @@ final class WindowPaneLayout {
         // transition; later manual window resizing keeps its usual minimum.
         window.contentMinSize = NSSize(width: Workspace.minimumWidth(paneCount: max(0, paneCount), sidebarCollapsed: sidebarCollapsed), height: 540)
         pending = false
+        placementWrapping.thaw()
         refreshDividerHandles()
+        // The final frames now exist. Populate new transcripts only at this width.
+        func populate(_ view: NSView) {
+            if let scroll = view as? ConversationScrollView { scroll.renderAfterPaneArrangement() }
+            for child in view.subviews { populate(child) }
+        }
+        if let root = window.contentView { populate(root) }
     }
 }
 
 func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
+    let originalCursorSetter = PaneDividerHandle.setCursor
+    var requestedCursor: NSCursor?
+    PaneDividerHandle.setCursor = { requestedCursor = $0 }
+    defer { PaneDividerHandle.setCursor = originalCursorSetter }
+
     _ = NSApplication.shared
+    do {
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        let container = text.textContainer!, placement = WrapFreeze(), resize = WrapFreeze()
+        container.widthTracksTextView = true
+        placement.freeze(in: text); resize.freeze(in: text); placement.thaw()
+        check(!container.widthTracksTextView, "Ending placement keeps wrapping suspended while a resize still owns it")
+        resize.thaw()
+        check(container.widthTracksTextView, "Overlapping placement and resize restore wrapping after both finish")
+        placement.freeze(in: text); resize.freeze(in: text); resize.thaw()
+        check(!container.widthTracksTextView, "Ending resize first keeps the pending placement suspended")
+        placement.thaw()
+        check(container.widthTracksTextView, "Overlapping wrapping holds can finish in either order")
+        container.widthTracksTextView = false
+        placement.freeze(in: text); placement.thaw()
+        check(!container.widthTracksTextView, "Wrapping holds preserve a container that did not track width originally")
+    }
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 700), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 1400, height: 700)); outer.isVertical = true; outer.dividerStyle = .thin
@@ -533,8 +620,8 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
         settle()
         check(abs(inner.arrangedSubviews[0].frame.width - before - 45) < 2, "Dragging the wider gutter moves its native divider by the pointer delta")
         handle.cursorUpdate(with: event(.mouseMoved, start))
-        check(NSCursor.current == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
-        NSCursor.arrow.set()
+        check(requestedCursor == NSCursor.resizeLeftRight, "Gutter hover selects the horizontal resize cursor")
+        PaneDividerHandle.setCursor(.arrow)
     } else { check(false, "Session gutter handle is installed") }
     let longText = NSTextView(frame: inner.arrangedSubviews[0].bounds)
     longText.autoresizingMask = [.width, .height]
@@ -688,6 +775,38 @@ func paneSizingSelfTests(_ check: (Bool, String) -> Void) {
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 999) - PaneSizing.collapsedSidebar) < 2 && layout.weights == savedWeights, "A collapsed sidebar stays minimized during resizing and preserves session-pane proportions")
     layout.setSidebarCollapsed(false); settle()
     check(abs((PaneSizing.sidebarWidth(in: window) ?? 0) - expandedSidebar) < 2, "The pin restores the previous native sidebar width after resizing")
+    // A pane counted by placements may never mount (a forgotten remote home),
+    // or mount after the short retries. Neither may strand the mounted panes.
+    func waitUntil(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(8)
+        while !condition() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        return condition()
+    }
+    func mountedTranscript(render: @escaping () -> Void) -> (scroll: ConversationScrollView, text: NSTextView) {
+        let scroll = ConversationScrollView(frame: inner.arrangedSubviews[0].bounds)
+        let text = NSTextView(frame: inner.arrangedSubviews[0].bounds)
+        text.textContainer!.widthTracksTextView = true
+        scroll.documentView = text; scroll.initialRenderPending = true; scroll.renderWhenAttached = render
+        inner.arrangedSubviews[0].addSubview(scroll)
+        return (scroll, text)
+    }
+    // The mount reschedules asynchronously, so the placement below is pending
+    // when it does: the same revision bump that used to cancel the last attempt.
+    var ghostRendered = false
+    let ghost = mountedTranscript { ghostRendered = true }
+    layout.setPaneCount(4)
+    check(!ghost.text.textContainer!.widthTracksTextView && !ghostRendered, "A pending placement holds a mounted transcript until it is arranged")
+    check(waitUntil { ghostRendered && ghost.text.textContainer!.widthTracksTextView && !ghost.scroll.initialRenderPending }, "A pane that never mounts cannot leave its neighbours blank or frozen, even after a mount bumps the revision")
+    check(layout.paneCount == 4 && inner.arrangedSubviews.count == 3 && sizes().max()! - sizes().min()! < 2, "The fallback arranges the panes that did mount")
+    ghost.scroll.removeFromSuperview()
+    var lateRendered = false
+    layout.setPaneCount(3); settle()
+    let neighbour = mountedTranscript { lateRendered = true }
+    layout.setPaneCount(4)
+    check(waitUntil { lateRendered && neighbour.text.textContainer!.widthTracksTextView }, "A pane still mounting after the short retries does not blank its neighbours")
+    inner.addArrangedSubview(NSView()); layout.transcriptMounted()
+    check(waitUntil { inner.arrangedSubviews.count == 4 && sizes().max()! - sizes().min()! < 2 }, "A pane that mounts after the fallback joins at an equal width (panes: \(sizes()))")
+    neighbour.scroll.removeFromSuperview()
     window.close()
     swiftUIPaneCountSelfTests(check)
     paneMountSelfTests(check)
@@ -774,6 +893,12 @@ func paneMountSelfTests(_ check: (Bool, String) -> Void) {
         }
         let steward = store.createAgent(title: "Converse Steward", persist: false)
         steward.messages = largeTranscript(600)
+        let savedSelection = NSRange(location: 17, length: 3), savedOrigin = NSPoint(x: 0, y: 40)
+        steward.textSelection = savedSelection; steward.textScrollOrigin = savedOrigin
+        let abandoned = ConversationScrollView(frame: .zero); abandoned.initialRenderPending = true
+        ScrollingConversation.dismantleNSView(abandoned, coordinator: ScrollingConversation.Coordinator(steward))
+        check(steward.textSelection == savedSelection && steward.textScrollOrigin == savedOrigin, "Abandoning an empty mount preserves the session's saved selection and reading position")
+        steward.textSelection = nil; steward.textScrollOrigin = nil
         steward.agent?.attention = "Quit Converse on Mac and Windows to install build 138. Windows WAITING; the Mac update is queued until quit."
         let lot = try? ParkingLotLibrary.shared.create(name: "Pane mount fixture")
         let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 1500, height: 800), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
@@ -801,6 +926,12 @@ func paneMountSelfTests(_ check: (Bool, String) -> Void) {
         if let lot { workspace.assign(lot.id, to: state.id, pane: 3); settle() }
         workspace.assign(steward.id, to: state.id, pane: 3); settle()
         check(sane(3), "Pressing 3 on a long agent transcript replaces a lot at an equal pane width (panes: \(widths().map { Int($0) }))")
+        if let text = steward.inputTextView, let scroll = text.enclosingScrollView as? ConversationScrollView {
+            check(scroll.initialContentWidth != nil && abs((scroll.initialContentWidth ?? 0) - (text.textContainer?.containerSize.width ?? 0)) < 2,
+                  "Long transcript's first content layout uses the final pane width, not a provisional column (first \(scroll.initialContentWidth ?? 0), final \(text.textContainer?.containerSize.width ?? 0))")
+            check(!text.string.isEmpty && !scroll.initialRenderPending, "Deferred pane population completes with readable transcript and input")
+        } else { check(false, "Mounted transcript exposes its native scroll view") }
+
         workspace.assign(steward.id, to: state.id, pane: 1); settle()
         workspace.assign(steward.id, to: state.id, pane: 3); settle()
         check(sane(widths().count) && widths().count >= 2, "Moving the agent between panes keeps every pane at a readable equal width (panes: \(widths().map { Int($0) }))")

@@ -60,8 +60,8 @@ enum AppSupport {
     }
     static func credentialStatus(metaKeySaved: Bool) -> String {
         metaKeySaved
-            ? "Credential status (checked by Converse now): a Meta API key is already saved on this Mac. Never ask the human to add, paste or re-enter a Meta key, and never tell them to add one in Agent Setup. Muse Spark agents, scoreboard art, voice and image tools can use it."
-            : "Credential status (checked by Converse now): no Meta API key is saved. Only Meta API features (Muse Spark agents, scoreboard art, voice, image tools) need one; Claude, Codex and Muse CLI sessions, the switchboard, Parking Lots and Groups do not. If the human wants those features, open agents so they can paste it into Agent Setup's secure field, never into chat."
+            ? "Credential status (checked by Converse now): a Meta API key is already saved on this Mac. Never ask the human to add, paste or re-enter a Meta key, and never tell them to add one in Agent Setup. Muse Spark agents, on-demand portraits, voice and image tools can use it."
+            : "Credential status (checked by Converse now): no Meta API key is saved. Only Meta API features (Muse Spark agents, portraits, voice, image tools) need one; Claude, Codex and Muse CLI sessions, the switchboard, Parking Lots and Groups do not. If the human wants those features, open agents so they can paste it into Agent Setup's secure field, never into chat."
     }
     static func instructions(agent: Bool) -> String {
         """
@@ -98,10 +98,10 @@ enum AppSupport {
         case "readme": app.helpController.show(topic: "overview", query: "")
         case "discord":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
-            else { app.helpController.show(topic: "agents-and-project-scoreboards", query: "Discord") }
+            else { app.helpController.show(topic: "agents-assessments-and-portraits", query: "Discord") }
         case "home-assistant":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
-            else { app.helpController.show(topic: "agents-and-project-scoreboards", query: "Home Assistant") }
+            else { app.helpController.show(topic: "agents-assessments-and-portraits", query: "Home Assistant") }
         case "agents":
             if let s = store.sessions.first(where: { $0.agent != nil && $0.title == title }) { MainActor.assumeIsolated { AgentWindows.shared.setup(s) } }
             else { app.newAgent() }
@@ -135,11 +135,11 @@ extension Store {
             config.model = AgentModels.reference(engine: session.entry.engine, account: account, model: session.choices.model ?? "")
         }
         config.objective = "Keep Converse up to date, especially when critical bugs are reported. Check richardkaufmann/converse daily for releases and serious open issues. Treat critical bugs as reasons for grave concern: explain their impact and the recommended next step with links and observed dates. Do not install updates or change settings without the user's request. Answer questions about this app's current health, Group and hosts from supplied live evidence."
-        config.repository = "richardkaufmann/converse"; config.intervalSeconds = 86400
+        config.repository = AgentConfig.converseRepository; config.feedbackBanner = true; config.intervalSeconds = 86400
         config.scheduleText = ""; config.enabled = true; config.generateArt = false; config.speak = false
         // A daily check by default; Auto pacing may move it within its bounds.
         config.autoPace = true
-        config.scoreboardEveryLoops = 1; config.jollyAllowed = true; config.supportDefaultsVersion = 1
+        config.jollyAllowed = true; config.supportDefaultsVersion = 1
         config.nextRunAt = config.nextScheduledRun(after: Date())
         session.agent = config; session.entry.engine = "agent"; session.entry.name = "Agent"
         session.supportTeachingVersion = AppSupport.version; session.switchboardEnabled = true
@@ -442,4 +442,342 @@ extension Store {
         }
         save()
     }
+}
+
+/// A local invitation, deliberately outside agent prompts and transcripts.
+/// Two steps: the banner is laid out once App Support is on screen, and the
+/// release is consumed (feedback_ask = true) only after the banner itself has
+/// been measurably exposed. Expiry counts from that moment.
+final class FeedbackInvitation: ObservableObject {
+    static let shared = FeedbackInvitation()
+    @Published private(set) var visible = false
+    /// A Setup → Debug test show: looks real, touches no saved state.
+    private(set) var previewing = false
+    var bannerAgentExists: () -> Bool = { Store.shared.sessions.contains { $0.feedbackRepository != nil } }
+    private(set) var consumed = false
+    private var state = FeedbackInvitationState(release: "")
+    /// App Support's sidebar row and pane: where the banner would appear.
+    let surfaces = NSHashTable<NSView>.weakObjects()
+    /// The banners themselves, sidebar and pane.
+    let banners = NSHashTable<NSView>.weakObjects()
+    var isMonitoring: Bool { timer != nil || eventMonitor != nil }
+    private func exposed(_ views: [NSView], minimumFraction: CGFloat) -> Bool {
+        let screens = NSScreen.screens.map(\.frame)
+        return views.contains { view in
+            guard let window = view.window, window.isVisible, !window.isMiniaturized,
+                  window.occlusionState.contains(.visible), !view.isHiddenOrHasHiddenAncestor,
+                  !view.visibleRect.isEmpty else { return false }
+            guard let covers = FeedbackInvitationVisibility.covers(above: window) else { return false }
+            let full = window.convertToScreen(view.convert(view.bounds, to: nil))
+            let rect = window.convertToScreen(view.convert(view.visibleRect, to: nil))
+            return FeedbackInvitationVisibility.exposed(rect, of: full, screens: screens, beneath: covers, minimumFraction: minimumFraction)
+        }
+    }
+    private var file: URL?
+    private var timer: Timer?
+    private var eventMonitor: Any?
+    private var lastInput: TimeInterval = -.infinity
+    private var lastTick: TimeInterval = 0
+    private var remaining = FeedbackInvitationState.bannerSeconds
+    private var publishing = false
+    private let writes = DispatchQueue(label: "Converse.feedback-invitation.persistence", qos: .utility)
+
+    func start(folder: URL, info: [String: Any] = Bundle.main.infoDictionary ?? [:], environment: [String: String] = ProcessInfo.processInfo.environment, arguments: [String] = CommandLine.arguments) {
+        guard timer == nil, FeedbackInvitationState.allowed(info: info, environment: environment, arguments: arguments) else { return }
+        let target = folder.appendingPathComponent("feedback-invitation.json")
+        let release = ConverseAbout.version + "/" + ConverseAbout.build
+        if FileManager.default.fileExists(atPath: target.path) {
+            // Do not overwrite a damaged record and accidentally ask again.
+            guard let data = try? Data(contentsOf: target), let saved = try? JSONDecoder().decode(FeedbackInvitationState.self, from: data) else { return }
+            state = saved; state.useRelease(release)
+        } else { state = FeedbackInvitationState(release: release) }
+        file = target
+        guard !state.suppressed, !state.feedbackAsk else { return }
+        lastTick = ProcessInfo.processInfo.systemUptime
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved]) { [weak self] event in
+            self?.lastInput = ProcessInfo.processInfo.systemUptime
+            return event
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.tick() }
+    }
+    private func tick() {
+        let now = ProcessInfo.processInfo.systemUptime, elapsed = now - lastTick
+        lastTick = now
+        guard !previewing else { return }
+        // Foreground with recent human input; sleeping or a stalled run loop adds no time.
+        let active = NSApp.isActive && now - lastInput < 60 && elapsed > 0 && elapsed <= 10
+        if active && consumed { remaining -= elapsed; if remaining <= 0 { dismiss(); return } }
+        guard active, !publishing, !state.suppressed else { return }
+        if !visible {
+            if state.eligible && bannerAgentExists() && exposed(surfaces.allObjects, minimumFraction: 0) { visible = true }
+        } else if !consumed && state.eligible && exposed(banners.allObjects, minimumFraction: FeedbackInvitationVisibility.minimumBannerFraction) {
+            publishing = true
+            var shown = state; shown.markShown()
+            persist(shown) { [weak self] ok in
+                guard let self else { return }
+                self.publishing = false
+                guard ok, !self.state.suppressed else { return }
+                self.state = shown; self.consumed = true; self.remaining = FeedbackInvitationState.bannerSeconds
+            }
+        }
+    }
+    func completedTurn(success: Bool, interrupted: Bool, humanDirected: Bool) {
+        guard file != nil, !state.suppressed, !publishing, !state.feedbackAsk else { return }
+        state.completedTurn(success: success, interrupted: interrupted, humanDirected: humanDirected)
+        if success && !interrupted && humanDirected { persist(state) }
+    }
+    private func persist(_ value: FeedbackInvitationState, completion: ((Bool) -> Void)? = nil) {
+        guard let file, let data = try? JSONEncoder().encode(value) else { completion?(false); return }
+        writes.async {
+            let ok: Bool
+            do { try data.write(to: file, options: [.atomic]); ok = true } catch { ok = false }
+            if let completion { DispatchQueue.main.async { completion(ok) } }
+        }
+    }
+    /// Clicking the banner or its X means it was seen, so either consumes it.
+    func dismiss() {
+        if previewing { previewing = false; visible = false; return }
+        if visible && !consumed && state.eligible { var shown = state; shown.markShown(); state = shown; persist(shown); consumed = true }
+        visible = false; timer?.invalidate(); timer = nil
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
+    }
+    func feedbackWasGiven() {
+        guard file != nil else { return }
+        state.markFeedbackGiven()
+        dismiss()
+        persist(state)
+    }
+    func openInvitation(repository: String) {
+        let preview = previewing
+        dismiss()
+        FeedbackInvitationWindow.shared.show(repository: repository, preview: preview)
+    }
+    /// Shows the banner now, skipping the turn count and this release's
+    /// consumed state. Nothing is written, so the real invitation still comes.
+    @discardableResult func triggerTestBanner() -> Bool {
+        guard !visible, bannerAgentExists() else { return false }
+        previewing = true; visible = true
+        return true
+    }
+    func neverAskInWindow(preview: Bool) {
+        guard !preview, file != nil else { return }
+        state.neverAsk = true
+        dismiss(); persist(state)
+    }
+    func feedbackGivenInWindow(preview: Bool) { if !preview { feedbackWasGiven() } }
+    var stateForTesting: FeedbackInvitationState { state }
+    func flushWritesForTesting() { writes.sync {} }
+}
+
+/// A non-interactive view measures actual clipping/window visibility, including a scrolled-away sidebar row.
+struct FeedbackInvitationSurface: NSViewRepresentable {
+    final class Probe: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    /// The banner probes itself; other surfaces only mark where it would appear.
+    var banner = false
+    func makeNSView(context: Context) -> NSView {
+        let view = Probe(); (banner ? FeedbackInvitation.shared.banners : FeedbackInvitation.shared.surfaces).add(view); return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
+extension Session {
+    var feedbackRepository: String? { agent?.feedbackRepository }
+}
+
+struct FeedbackInvitationBanner: View {
+    @ObservedObject private var invitation = FeedbackInvitation.shared
+    /// The agent whose repository the banner opens; nil means App Support.
+    var session: Session? = nil
+    private var repository: String? { (session ?? Store.shared.sessions.first(where: \.supportAssistant))?.feedbackRepository }
+    var body: some View {
+        if invitation.visible, let repository {
+            HStack(spacing: 8) {
+                Button("Thoughts About Converse?") { invitation.openInvitation(repository: repository) }
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+                Button { invitation.dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.plain).accessibilityLabel("Dismiss appreciation invitation")
+            }.foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color(red: 0.08, green: 0.32, blue: 0.65), in: RoundedRectangle(cornerRadius: 5))
+                .background { FeedbackInvitationSurface(banner: true) }
+        }
+    }
+}
+
+struct FeedbackInvitationPanel: View {
+    static let message = "Hi, we appreciate feedback on GitHub. This isn’t tracked. The button below brings up the GitHub repo in your browser. If you like what you see, please consider pressing the star icon at the top of that page. In addition, you can press the other buttons to file an issue or bug. THANK YOU!"
+    var repository: () -> Void
+    var issue: () -> Void
+    var report: (() -> Void)?
+    var close: () -> Void
+    var feedbackGiven: () -> Void = {}
+    var neverAsk: () -> Void = {}
+    var repositoryName = AgentConfig.converseRepository
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                ParkingLotShoe().frame(width: 52, height: 52).accessibilityHidden(true)
+                Text("Thoughts About Converse").font(.title2.bold())
+            }
+            Text(Self.message)
+            HStack {
+                // Only opens the repository in the browser; starring stays on GitHub.
+                Button(action: repository) { Label("Star on GitHub", systemImage: "star") }
+                    .help("Opens github.com/" + repositoryName + " in your browser")
+                Button("File an Issue…", action: issue)
+                // The bug form files against Converse, so other repositories omit it.
+                if let report { Button("File a Bug…", action: report) }
+            }
+            Text("Already given feedback? Tell us below and this app will remember locally, even after upgrades.").font(.callout)
+            HStack {
+                Button("I’ve given feedback", action: feedbackGiven)
+                Spacer()
+                Button("Not now", action: close).keyboardShortcut(.cancelAction)
+                Button("Never!", action: neverAsk)
+            }
+        }.font(.body).padding(24).frame(width: 440).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+final class FeedbackInvitationWindow: NSObject, NSWindowDelegate {
+    static let shared = FeedbackInvitationWindow()
+    private var window: NSWindow?
+    private var shown: (repository: String, preview: Bool)?
+    func show(repository: String, preview: Bool) {
+        if let window, let shown, shown.repository == repository, shown.preview == preview { window.makeKeyAndOrderFront(nil); return }
+        window?.close()
+        shown = (repository, preview)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 488, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Thoughts About Converse"; window.isReleasedWhenClosed = false; window.delegate = self
+        let panel = FeedbackInvitationPanel(repository: {
+            if let url = FeedbackLinks.repository(repository) { NSWorkspace.shared.open(url) }
+        }, issue: {
+            if let url = FeedbackLinks.issue(repository) { NSWorkspace.shared.open(url) }
+        }, report: repository.lowercased() == AgentConfig.converseRepository ? {
+            AppDelegate.shared.reportConverseBug()
+        } : nil, close: { [weak self] in self?.window?.close() }, feedbackGiven: { [weak self] in
+            FeedbackInvitation.shared.feedbackGivenInWindow(preview: preview)
+            self?.window?.close()
+        }, neverAsk: { [weak self] in
+            FeedbackInvitation.shared.neverAskInWindow(preview: preview)
+            self?.window?.close()
+        }, repositoryName: repository)
+        let host = NSHostingView(rootView: panel)
+        window.contentView = host; window.setContentSize(host.fittingSize)
+        self.window = window; window.center(); window.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) { window = nil; shown = nil }
+}
+
+/// Window-level visibility alone is insufficient: clip to the displays, then
+/// subtract every higher Converse window, panel and sheet.
+enum FeedbackInvitationVisibility {
+    /// At least half of the banner must be on screen and uncovered.
+    static let minimumBannerFraction: CGFloat = 0.5
+    /// Frames above `window`. orderedWindows omits panels and sheets, whose
+    /// stacking is unknown, so every visible one counts as a cover.
+    /// Nil when the window is not in the stacking order at all.
+    struct Layer { var id: ObjectIdentifier; var frame: CGRect; var shown: Bool }
+    static func layer(_ window: NSWindow) -> Layer {
+        Layer(id: ObjectIdentifier(window), frame: window.frame, shown: window.isVisible && !window.isMiniaturized && window.alphaValue > 0)
+    }
+    static func covers(above window: NSWindow) -> [CGRect]? {
+        covers(above: ObjectIdentifier(window), ordered: NSApp.orderedWindows.map(layer), all: NSApp.windows.map(layer))
+    }
+    static func covers(above target: ObjectIdentifier, ordered: [Layer], all: [Layer]) -> [CGRect]? {
+        guard let index = ordered.firstIndex(where: { $0.id == target }) else { return nil }
+        let stacked = Set(ordered.map(\.id))
+        return (ordered.prefix(index).filter(\.shown) + all.filter { $0.shown && $0.id != target && !stacked.contains($0.id) }).map(\.frame)
+    }
+    /// `rect` is the view's clipped visible rect and `full` its whole bounds,
+    /// both in screen coordinates. Displays never overlap, so the exposed
+    /// pieces on each one add up.
+    static func exposed(_ rect: CGRect, of full: CGRect, screens: [CGRect], beneath covers: [CGRect], minimumFraction: CGFloat) -> Bool {
+        guard !rect.isEmpty, !full.isEmpty else { return false }
+        let area = uncovered(screens.map { rect.intersection($0) }.filter { !$0.isNull && !$0.isEmpty }, beneath: covers)
+            .reduce(0) { $0 + $1.width * $1.height }
+        return area > 0 && area >= minimumFraction * full.width * full.height
+    }
+    static func uncovered(_ start: [CGRect], beneath covers: [CGRect]) -> [CGRect] {
+        var pieces = start
+        for cover in covers {
+            pieces = pieces.flatMap { piece -> [CGRect] in
+                let cut = piece.intersection(cover)
+                guard !cut.isNull && !cut.isEmpty else { return [piece] }
+                return [CGRect(x: piece.minX, y: piece.minY, width: piece.width, height: cut.minY - piece.minY),
+                        CGRect(x: piece.minX, y: cut.maxY, width: piece.width, height: piece.maxY - cut.maxY),
+                        CGRect(x: piece.minX, y: cut.minY, width: cut.minX - piece.minX, height: cut.height),
+                        CGRect(x: cut.maxX, y: cut.minY, width: piece.maxX - cut.maxX, height: cut.height)].filter { !$0.isEmpty }
+            }
+            if pieces.isEmpty { break }
+        }
+        return pieces
+    }
+}
+
+func feedbackInvitationControllerSelfTests(_ check: (Bool, String) -> Void) {
+    typealias V = FeedbackInvitationVisibility
+    let rect = CGRect(x: 10, y: 10, width: 100, height: 30), screen = [CGRect(x: 0, y: 0, width: 1000, height: 800)]
+    func shown(_ rect: CGRect, beneath covers: [CGRect], screens: [CGRect] = screen) -> Bool {
+        V.exposed(rect, of: rect, screens: screens, beneath: covers, minimumFraction: V.minimumBannerFraction)
+    }
+    check(shown(rect, beneath: []), "An uncovered banner on screen consumes the invitation")
+    check(!shown(rect, beneath: [CGRect(x: 0, y: 0, width: 200, height: 200)]), "A higher app window covering the banner prevents consumption")
+    check(!shown(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30), CGRect(x: 60, y: 10, width: 50, height: 30)]), "Several higher windows can jointly cover the banner")
+    check(shown(rect, beneath: [CGRect(x: 10, y: 10, width: 50, height: 30)]) && !shown(rect, beneath: [CGRect(x: 10, y: 10, width: 51, height: 30)]),
+          "Half the banner must stay uncovered")
+    check(!shown(CGRect(x: 990, y: 10, width: 100, height: 30), beneath: []), "A banner mostly off the display edge is not consumed")
+    check(!shown(rect, beneath: [], screens: []), "No display means nothing is visible")
+    check(shown(CGRect(x: 960, y: 10, width: 80, height: 30), beneath: [], screens: screen + [CGRect(x: 1000, y: 0, width: 800, height: 600)]),
+          "A banner straddling two displays counts both exposed parts")
+    check(!V.exposed(CGRect(x: 10, y: 10, width: 100, height: 1), of: rect, screens: screen, beneath: [], minimumFraction: V.minimumBannerFraction),
+          "A visible sliver of a clipped banner is not enough")
+    let objects = (0..<5).map { _ in NSObject() } // kept alive so identifiers stay distinct
+    let (window, above, below, panel, hidden) = (ObjectIdentifier(objects[0]), ObjectIdentifier(objects[1]), ObjectIdentifier(objects[2]), ObjectIdentifier(objects[3]), ObjectIdentifier(objects[4]))
+    let frame = CGRect(x: 1, y: 2, width: 3, height: 4)
+    let ordered = [V.Layer(id: above, frame: frame, shown: true), V.Layer(id: window, frame: .zero, shown: true), V.Layer(id: below, frame: .zero, shown: true)]
+    let all = ordered + [V.Layer(id: panel, frame: frame.offsetBy(dx: 5, dy: 0), shown: true), V.Layer(id: hidden, frame: frame, shown: false)]
+    check(V.covers(above: window, ordered: ordered, all: all) == [frame, frame.offsetBy(dx: 5, dy: 0)],
+          "Higher windows and visible panels or sheets cover the banner; lower and hidden ones do not")
+    check(V.covers(above: panel, ordered: ordered, all: all) == nil, "A window outside the stacking order is never treated as visible")
+    withExtendedLifetime(objects) {}
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let controller = FeedbackInvitation()
+    controller.start(folder: folder, info: ["ConverseDemo": true], environment: [:], arguments: [])
+    check(!controller.isMonitoring, "Demo controller never installs timers or input monitors")
+    controller.start(folder: folder, info: [:], environment: ["CONVERSE_DATA_DIR": folder.path], arguments: [])
+    check(!controller.isMonitoring, "Data-directory automation never installs invitation monitors")
+    controller.start(folder: folder, info: [:], environment: [:], arguments: [])
+    check(controller.isMonitoring, "Normal controller starts its visibility and activity monitor")
+    controller.dismiss()
+    check(!controller.isMonitoring && !controller.visible, "Dismissing the invitation removes timer and input monitor")
+    let testFolder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? FileManager.default.createDirectory(at: testFolder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: testFolder) }
+    let tested = FeedbackInvitation(); var agentEnabled = false
+    tested.bannerAgentExists = { agentEnabled }
+    tested.start(folder: testFolder, info: [:], environment: [:], arguments: [])
+    for _ in 0..<20 { tested.completedTurn(success: true, interrupted: false, humanDirected: true) }
+    tested.flushWritesForTesting()
+    let stateFile = testFolder.appendingPathComponent("feedback-invitation.json")
+    let saved = try? Data(contentsOf: stateFile)
+    check(saved != nil && tested.stateForTesting.eligible, "The real invitation is earned before the test show")
+    check(!tested.triggerTestBanner() && !tested.visible, "Trigger GitHub banner does nothing when no agent enables the banner")
+    agentEnabled = true
+    check(tested.triggerTestBanner() && tested.visible && tested.previewing, "Trigger GitHub banner shows the banner now")
+    check(!tested.triggerTestBanner(), "A second trigger does not stack on the banner already showing")
+    tested.feedbackGivenInWindow(preview: true)
+    tested.dismiss(); tested.flushWritesForTesting()
+    check(!tested.visible && !tested.previewing && tested.isMonitoring, "Closing a test show keeps the real invitation's timer running")
+    check((try? Data(contentsOf: stateFile)) == saved && !tested.stateForTesting.feedbackAsk && !tested.stateForTesting.suppressed && tested.stateForTesting.eligible && !tested.consumed,
+          "A test show leaves the saved state untouched: not consumed, feedbackGiven not set, still eligible")
+    let spent = FeedbackInvitation(); spent.bannerAgentExists = { true }
+    var consumedState = FeedbackInvitationState(release: ConverseAbout.version + "/" + ConverseAbout.build, completedTurns: 20)
+    consumedState.markShown(); consumedState.markFeedbackGiven()
+    let spentFolder = testFolder.appendingPathComponent("spent"); try? FileManager.default.createDirectory(at: spentFolder, withIntermediateDirectories: true)
+    try? JSONEncoder().encode(consumedState).write(to: spentFolder.appendingPathComponent("feedback-invitation.json"))
+    spent.start(folder: spentFolder, info: [:], environment: [:], arguments: [])
+    check(spent.triggerTestBanner() && spent.visible, "Trigger GitHub banner bypasses a consumed release and feedbackGiven")
+    tested.dismiss(); spent.dismiss()
 }

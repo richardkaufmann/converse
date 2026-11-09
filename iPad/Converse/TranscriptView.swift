@@ -71,6 +71,7 @@ final class TailTextView: UITextView {
     var insertingNewline = false
     var pastingText = false
     var historyLength = 0
+    var messageLabels: [(location: Int, number: Int)] = []
     var promptBlocks: [NSRange] = []
     var trafficBlocks: [NSRange] = []
     let gutter = PadGutter()
@@ -88,6 +89,45 @@ final class TailTextView: UITextView {
             addSubview(button); draftImageButtons.append(button)
         }
         setNeedsLayout()
+    }
+    // Draft attachments precede the editable text tail, but are not history.
+    // Delete through the model so an echoed snapshot cannot restore the image.
+    @discardableResult func deleteDraftImages(in range: NSRange) -> Bool {
+        guard isEditable, let coordinator = delegate as? PadTranscript.Coordinator,
+              !coordinator.updating, coordinator.parent.editable,
+              let first = draftImages.first, range.location >= first.location,
+              range.location < historyLength, range.length > 0,
+              range.location <= textStorage.length,
+              range.length <= textStorage.length - range.location else { return false }
+        let end = range.location + range.length
+        let removed = draftImages.filter {
+            ($0.location >= range.location && $0.location < end) ||
+            (range.length == 1 && range.location == $0.location + 1)
+        }
+        guard !removed.isEmpty else { return false }
+        // Backspace at the beginning of the text hits the attachment's newline.
+        // Removing an image must never edit a submitted message with the same hash.
+        selectedRange = NSRange(location: historyLength, length: 0)
+        if end > historyLength {
+            let draft = (textStorage.string as NSString).substring(from: historyLength) as NSString
+            coordinator.parent.edit(draft.replacingCharacters(in: NSRange(location: 0, length: end - historyLength), with: ""))
+        }
+        for image in removed { coordinator.parent.removeImage(image.hash) }
+        return true
+    }
+    override func deleteBackward() {
+        guard isEditable else { return }
+        let range = selectedRange
+        if range.length > 0 {
+            if deleteDraftImages(in: range) { return }
+        } else if range.location > 0, range.location != NSNotFound,
+                  deleteDraftImages(in: NSRange(location: range.location - 1, length: 1)) { return }
+        // UIKit's direct deleteBackward path can bypass shouldChangeTextIn.
+        // Keep the same history boundary for keyboard and delegate edits.
+        if range.location < historyLength || (range.length == 0 && range.location == historyLength) {
+            focusDraft(); return
+        }
+        super.deleteBackward()
     }
     private func layoutDraftImageButtons() {
         guard !draftImageButtons.isEmpty else { return }
@@ -230,6 +270,11 @@ final class TailTextView: UITextView {
     override func replace(_ range: UITextRange, withText text: String) {
         guard isEditable else { return }
         if Self.isReturn(text), !insertingNewline, !pastingText, markedTextRange == nil { send?(); return }
+        if text.isEmpty {
+            let start = offset(from: beginningOfDocument, to: range.start)
+            let length = offset(from: range.start, to: range.end)
+            if deleteDraftImages(in: NSRange(location: start, length: length)) { return }
+        }
         if offset(from: beginningOfDocument, to: range.start) < historyLength {
             focusDraft()
             if !text.isEmpty { insertText(text) }; return
@@ -345,7 +390,7 @@ struct PadTranscript: UIViewRepresentable {
         if view.textContainerInset.left != leftInset { view.textContainerInset.left = leftInset }
         let imageSignature = Set(messages.flatMap(\.imageHashes) + draftImageHashes).sorted().map { $0 + (images[$0]?.path ?? "") }.joined()
         let visibleMessages = messages.filter { $0.role != "activity" && !($0.role == "notice" && TranscriptStyle.isQueueReceipt($0.text)) && (!$0.text.isEmpty || !$0.imageHashes.isEmpty) }
-        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + $0.imageHashes.joined() }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
+        let signature = visibleMessages.map { $0.id.uuidString + $0.role + $0.text + TranscriptStyle.componentsKey($0.components) + $0.imageHashes.joined() + String($0.messageNumber ?? 0) }.joined() + imageSignature + draftImageHashes.joined() + String(lineNumbers)
         view.draftImageButtons.forEach { $0.isHidden = !editable }
         let contentChanged = signature != c.signature || c.lastDraft != draft
         guard contentChanged || c.textSize != textSize else { return }
@@ -388,13 +433,28 @@ struct PadTranscript: UIViewRepresentable {
         c.updating = true
 
         let result = NSMutableAttributedString()
-        view.promptBlocks = []; view.trafficBlocks = []
+        view.promptBlocks = []; view.trafficBlocks = []; view.messageLabels = []
+        var messageNumber = 0
         c.trafficDetails = [:]
         for message in visibleMessages {
             let prompt = message.role == "user"
             let color: UIColor = prompt ? .label : .label
             let body: NSMutableAttributedString
-            if let summary = TranscriptStyle.trafficSummary(message.text, resolveName: DeviceSyncService.shared.switchboardDisplayName) {
+            // Inject all can merge traffic with typed input: each part renders on its own.
+            let segments = prompt ? TranscriptStyle.segments(message.text, components: message.components, resolveName: DeviceSyncService.shared.switchboardDisplayName) : nil
+            var segmentTraffic: [NSRange] = []
+            if let segments {
+                body = NSMutableAttributedString(string: "")
+                for (index, segment) in segments.enumerated() {
+                    if body.length > 0 { body.append(NSAttributedString(string: "\n", attributes: [.font: UIFont.systemFont(ofSize: 16)])) }
+                    guard let summary = segment.summary else { body.append(Self.render(segment.text.trimmingCharacters(in: .newlines))); continue }
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    let key = message.id.uuidString + "-" + String(index)
+                    c.trafficDetails[key] = segment.text
+                    segmentTraffic.append(NSRange(location: body.length, length: (summary as NSString).length))
+                    body.append(NSAttributedString(string: summary, attributes: [.font: UIFont.systemFont(ofSize: 16), .paragraphStyle: oneLine, .link: URL(string: "converse-traffic://message/" + key)!]))
+                }
+            } else if let summary = TranscriptStyle.trafficSummary(message.text, resolveName: DeviceSyncService.shared.switchboardDisplayName) {
                 let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
                 let key = message.id.uuidString
                 c.trafficDetails[key] = message.text
@@ -409,7 +469,9 @@ struct PadTranscript: UIViewRepresentable {
                 if link != nil { body.addAttribute(.foregroundColor, value: UIColor.link, range: range) }
             }
             let start = result.length
-            if TranscriptStyle.isTraffic(message.text) { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            let traffic = segments == nil && TranscriptStyle.isTraffic(message.text)
+            if traffic { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            for range in segmentTraffic where NSMaxRange(range) <= body.length { body.addAttribute(.foregroundColor, value: PadPalette.traffic, range: range) }
             result.append(body)
             for hash in message.imageHashes {
                 guard let url = images[hash], let image = UIImage(contentsOfFile: url.path) else { continue }
@@ -422,6 +484,8 @@ struct PadTranscript: UIViewRepresentable {
                 result.addAttribute(NSAttributedString.Key("Converse.imageHash"), value: hash, range: NSRange(location: result.length - 1, length: 1))
             }
             guard result.length > start else { continue }
+            messageNumber = message.messageNumber.flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber < Int.max ? messageNumber + 1 : Int.max)
+            view.messageLabels.append((location: start, number: messageNumber))
             let last = result.length - 1
             let paragraphRange = (result.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
             let style = ((result.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? .default).mutableCopy() as! NSMutableParagraphStyle
@@ -431,7 +495,8 @@ struct PadTranscript: UIViewRepresentable {
             let range = NSRange(location: start, length: result.length - start)
             c.messageRanges.append((message.id, range))
             if prompt { view.promptBlocks.append(range) }
-            if TranscriptStyle.isTraffic(message.text) { view.trafficBlocks.append(range) }
+            if traffic { view.trafficBlocks.append(range) }
+            for part in segmentTraffic where NSMaxRange(part) <= body.length { view.trafficBlocks.append(NSRange(location: start + part.location, length: part.length)) }
         }
         view.draftImages = []
         for hash in draftImageHashes {
@@ -579,13 +644,27 @@ struct PadTranscript: UIViewRepresentable {
                 self.parent.imageTools?(hash, bytes)
             }
         }
+        func imageMenuActions(_ textView: UITextView, range: NSRange) -> [UIAction] {
+            var actions = [UIAction]()
+            if let tools = imageToolsAction(textView, range: range) { actions.append(tools) }
+            if parent.editable, textView.isEditable, let tail = textView as? TailTextView,
+               let image = tail.draftImages.first(where: { $0.location == range.location }) {
+                actions.append(UIAction(title: "Remove image from draft", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                    guard let self, self.parent.editable else { return }
+                    self.parent.removeImage(image.hash)
+                })
+            }
+            return actions
+        }
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
-            guard let action = imageToolsAction(textView, range: range) else { return nil }
-            return UIMenu(children: [action] + suggestedActions)
+            let actions = imageMenuActions(textView, range: range)
+            guard !actions.isEmpty else { return nil }
+            return UIMenu(children: actions + suggestedActions)
         }
         func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
-            guard let action = imageToolsAction(textView, range: textItem.range) else { return nil }
-            return UITextItem.MenuConfiguration(menu: UIMenu(children: [action] + defaultMenu.children))
+            let actions = imageMenuActions(textView, range: textItem.range)
+            guard !actions.isEmpty else { return nil }
+            return UITextItem.MenuConfiguration(menu: UIMenu(children: actions + defaultMenu.children))
         }
         func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
             guard URL.scheme == "converse-traffic" else { return true }
@@ -645,6 +724,7 @@ struct PadTranscript: UIViewRepresentable {
         init(_ parent: PadTranscript) { self.parent = parent }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             guard !updating, parent.editable, view.isEditable else { return false }
+            if text.isEmpty, let tail = view as? TailTextView, tail.deleteDraftImages(in: range) { return false }
             guard range.location >= historyLength else {
                 if let tail = view as? TailTextView {
                     tail.focusDraft()

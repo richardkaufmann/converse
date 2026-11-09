@@ -22,6 +22,13 @@ public static class ImageGuidance
         "[Converse image delivery: save any picture for this request as a PNG file " +
         "inside the session working directory and reply with standard markdown " +
         "![caption](absolute path) pointing at that file so it renders inline. " +
+        "Do BOTH in the same turn: save the PNG, then include its image Markdown in the SAME final reply. " +
+        "Use the real absolute file URL, for example ![A short description](file:///C:/project/Outputs/example.png) " +
+        "on Windows or ![A short description](file:///home/user/project/Outputs/example.png) on Linux; " +
+        "replace the example with your actual saved path and encode spaces as %20. " +
+        "The leading ! is required; put the image Markdown on its own line outside code fences, inline code and blockquotes. " +
+        "Saving a file alone, mentioning its path, or using an ordinary [link](file:///...) does NOT display it inline. " +
+        "If also sending a switchboard command, put the image Markdown BEFORE the final converse command fence. " +
         "Do not open a browser or any other app to display it.]";
 
     public static bool WantsPicture(string prompt)

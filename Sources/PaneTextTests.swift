@@ -83,8 +83,44 @@ func visibleText(_ bitmap: NSBitmapImageRep) -> [String] {
     return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
 }
 
+// A front trim moves the reader's text even when retained layout cannot be reused.
+@MainActor func transcriptTrimAnchorSelfTests(_ check: (Bool, String) -> Void) {
+    func holdsPlace(_ label: String, trim: (Session) -> Void) {
+        let session = Session(entry: Entry(name: "Trim QA", command: "/usr/bin/false", directory: NSTemporaryDirectory(), engine: "claude"))
+        session.messages = largeTranscript(160)
+        let pane = PaneTextFixture(session)
+        defer { pane.close() }
+        let text = pane.text, target = "Question 40:"
+        let at = (text.string as NSString).range(of: target).location
+        pane.scroll(toY: max(0, pane.viewportY(at) + pane.clip.bounds.minY - 40))
+        check(!pane.scroll.followState.following, "Reader is scrolled into retained history: " + label)
+        text.setSelectedRange(NSRange(location: at, length: (target as NSString).length))
+        let before = pane.viewportY(at), line = pane.lineHeight(at)
+        trim(session); pane.coordinator.render(text)
+        let selected = text.selectedRange()
+        check(NSMaxRange(selected) <= (text.string as NSString).length && (text.string as NSString).substring(with: selected) == target, "Front trim keeps the selection on the same text: " + label)
+        check(abs(pane.viewportY((text.string as NSString).range(of: target).location) - before) <= line, "Front trim keeps the viewport on the same text: " + label)
+    }
+    holdsPlace("stable numbering") { $0.messages.removeFirst(4); $0.messageNumberOffset = 4 }
+    holdsPlace("numbering fallback rebuild") { $0.messages.removeFirst(4) }
+
+    let receipt = Message(role: "notice", text: "Switchboard: message queued from Peer")
+    let session = Session(entry: Entry(name: "Receipt QA", command: "/usr/bin/false", directory: NSTemporaryDirectory(), engine: "claude"))
+    session.messages = [Message(role: "user", text: "One"), receipt, Message(role: "assistant", text: "Two"), Message(role: "user", text: "Three"), Message(role: "assistant", text: "Four")]
+    let pane = PaneTextFixture(session)
+    defer { pane.close() }
+    check(pane.text.messageLabels.map(\.number) == [1, 2, 3, 4], "Hidden queue receipts consume no gutter number")
+    let numbers = session.transcriptMessageNumbers()
+    check(numbers[receipt.id] == nil && session.messages.filter { $0.id != receipt.id }.map { numbers[$0.id] } == [1, 2, 3, 4], "Home message numbers match the gutter around a hidden queue receipt")
+    let highest = session.messages.prefix(3).compactMap { numbers[$0.id] }.max() ?? 0
+    session.messages.removeFirst(3); session.trimmedMessageNumber = highest
+    pane.coordinator.render(pane.text)
+    check(pane.text.messageLabels.map(\.number) == [3, 4], "Trimming past a hidden queue receipt does not shift later labels")
+}
+
 func paneTextResizeSelfTests(_ check: (Bool, String) -> Void) {
     MainActor.assumeIsolated {
+        transcriptTrimAnchorSelfTests(check)
         let interval = PaneTextSize.repeatInterval, hidden = PaneTextSize.isHidden
         PaneTextSize.repeatInterval = 0
         defer { PaneTextSize.repeatInterval = interval; PaneTextSize.isHidden = hidden }
@@ -241,6 +277,29 @@ func paneTextRoutingSelfTests(_ check: (Bool, String) -> Void) {
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-route-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
+        let capture = PerformanceCapture.shared
+        capture.configure(folder: root, enabled: true, sampleMainQueue: false)
+        for scroll in [ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200)),
+                       ParkingLotScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))] as [NSScrollView] {
+            scroll.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 2000))
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: 500))
+            for delta: Int32 in [-12, 12] {
+                if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) {
+                    cg.timestamp = DispatchTime.now().uptimeNanoseconds - 80_000_000
+                    if let event = NSEvent(cgEvent: cg) { scroll.scrollWheel(with: event) }
+                }
+            }
+        }
+        capture.flushForTesting()
+        do {
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+            for prefix in ["session", "lot"] {
+                check(snapshot.summaries[prefix + "ScrollDelivery"]?.count == 2 && snapshot.summaries[prefix + "ScrollHandling"]?.count == 2,
+                      "\(prefix) scrolling records upward and downward native event delivery and handling")
+            }
+        } catch { check(false, "Native scroll telemetry exports: \(error)") }
+        capture.configure(folder: root, enabled: false)
         let store = Store(folder: root)
         let entry = Entry(name: "Echo", command: "unused", directory: NSTemporaryDirectory(), engine: "muse")
         let a = store.create(entry), b = store.create(entry)

@@ -4,22 +4,32 @@ import AppKit
 // Source stays untouched for persistence, streaming and CLI context.
 struct MarkdownText {
     static let font = NSFont.systemFont(ofSize: 16)
+    private static let inlineFonts: [Int: NSFont] = Dictionary(uniqueKeysWithValues: (0..<8).map { key in
+        let base = key & 1 != 0 ? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular) : font
+        var traits: NSFontTraitMask = []
+        if key & 2 != 0 { traits.insert(.boldFontMask) }
+        if key & 4 != 0 { traits.insert(.italicFontMask) }
+        return (key, NSFontManager.shared.convert(base, toHaveTrait: traits))
+    })
     static func inline(_ source: String, bold: Bool = false) -> NSMutableAttributedString {
         let output = NSMutableAttributedString(string: "")
+        let localImages = Set(TranscriptStyle.localImageReferences(source).map(\.url))
         guard let parsed = try? AttributedString(markdown: TranscriptStyle.imageLinks(source), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSMutableAttributedString(string: source, attributes: [.font: font, .foregroundColor: NSColor.textColor])
         }
         for run in parsed.runs {
             let intent = run.inlinePresentationIntent ?? []
-            var selectedFont = intent.contains(.code) ? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular) : font
-            var traits: NSFontTraitMask = []
-            if bold || intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
-            if intent.contains(.emphasized) { traits.insert(.italicFontMask) }
-            selectedFont = NSFontManager.shared.convert(selectedFont, toHaveTrait: traits)
+            let fontKey = (intent.contains(.code) ? 1 : 0) | ((bold || intent.contains(.stronglyEmphasized)) ? 2 : 0) | (intent.contains(.emphasized) ? 4 : 0)
+            let selectedFont = inlineFonts[fontKey]!
             var attributes: [NSAttributedString.Key: Any] = [.font: selectedFont, .foregroundColor: NSColor.textColor]
             if intent.contains(.code) { attributes[.backgroundColor] = NSColor.quaternaryLabelColor.withAlphaComponent(0.10) }
             if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             if let link = run.link, ["https", "http", "converse-help"].contains(link.scheme ?? "") { attributes[.link] = link; attributes[.toolTip] = link.absoluteString }
+            if let link = run.link, link.isFileURL, localImages.contains(link) {
+                attributes[.link] = link
+                attributes[LocalImageFallback.attribute] = link
+                attributes[.toolTip] = "Reveal image in Finder on this session's home Mac: " + link.path
+            }
             output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
         }
         return output

@@ -5,6 +5,10 @@ import ImageIO
 // Explicit image references become managed attachments. File imports stay
 // inside permitted roots; HTTPS downloads use a bounded, credential-free client.
 enum ResponseImages {
+    /// Keep recurring prompt overhead small; the complete explanation lives in Teach.
+    static func deliveryReminder(output: URL) -> String {
+        "[Converse image output: save images in \(output.path); embed each as ![caption](\(output.appendingPathComponent("name.png").absoluteString)) using its real filename, on its own line in the SAME final reply, outside code and before any converse fence. Saving alone does not display it. Do not open a desktop viewer.]"
+    }
     // Local screenshots may be much larger than the attachment sent to peers.
     // Keep network downloads and normalized output at their existing 8 MB limit.
     static let localInputLimit = 32_000_000
@@ -54,8 +58,67 @@ enum ResponseImages {
     }
 }
 
+/// Explicit navigation for a local image that could not be imported. Never
+/// widen capture roots or open the referenced file as an executable/document.
+enum LocalImageFallback {
+    static let attribute = NSAttributedString.Key("Converse.localImageFallback")
+    static func follow(_ url: URL, onHome: Bool,
+                       exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                       reveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }) -> String? {
+        guard onHome else { return "This image is a local file on the session's home device. Open this conversation on its home Mac to reveal it, or ask the assistant to send it as a Converse attachment." }
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { return "This is not a local image path on this Mac." }
+        guard exists(url.path) else { return "The image file is no longer available at " + url.path + ". Ask the assistant to recreate it or send it as a Converse attachment." }
+        reveal(url); return nil
+    }
+    private static func isFileLink(_ value: Any?) -> Bool { ((value as? URL) ?? (value as? String).flatMap(URL.init(string:)))?.isFileURL == true }
+    static func hasFileLink(_ text: NSAttributedString, in ranges: [NSRange]) -> Bool {
+        var found = false
+        for range in ranges where range.length > 0 && NSMaxRange(range) <= text.length {
+            text.enumerateAttribute(.link, in: range) { value, _, stop in if isFileLink(value) { found = true; stop.pointee = true } }
+        }
+        return found
+    }
+    // Formatted clipboard data keeps the visible text but no link into this
+    // Mac's files. The transcript itself keeps its in-app reveal.
+    static func withoutFileLinks(_ text: NSAttributedString) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString(attributedString: text)
+        text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            guard isFileLink(value) else { return }
+            for key in [NSAttributedString.Key.link, .toolTip, attribute] { result.removeAttribute(key, range: range) }
+        }
+        return result
+    }
+    // A selection holding a file link writes rich text without it and none of
+    // AppKit's URL types. Nil leaves plain text to AppKit.
+    static func writeSelection(_ selection: NSAttributedString, to board: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool? {
+        let documentType: NSAttributedString.DocumentType
+        switch type.rawValue {
+        case NSPasteboard.PasteboardType.string.rawValue, "NSStringPboardType": return nil
+        case NSPasteboard.PasteboardType.rtf.rawValue, "NeXT Rich Text Format v1.0 pasteboard type": documentType = .rtf
+        case NSPasteboard.PasteboardType.rtfd.rawValue, "com.apple.flat-rtfd", "NeXT RTFD pasteboard type": documentType = .rtfd
+        default: return false
+        }
+        let clean = withoutFileLinks(selection)
+        guard let data = try? clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: documentType]) else { return false }
+        return board.setData(data, forType: type)
+    }
+}
+
 extension Store {
     func responseImageFolder(_ session: Session) -> URL { folder.appendingPathComponent("Attachments").appendingPathComponent(session.id.uuidString).appendingPathComponent("Outputs") }
+    func responseImageTeaching(_ session: Session) -> String {
+        let output = responseImageFolder(session)
+        let example = output.appendingPathComponent("example.png").absoluteString
+        return """
+        [Converse inline images]
+        To SHOW an image in the conversation, do BOTH steps in the same turn:
+        1. Save the image you create or download as a PNG in this session's Outputs folder: \(output.path)
+        2. Include a Markdown IMAGE in your final reply, using the actual saved file's absolute file URL. Example (replace example.png with your real filename):
+        ![A short description](\(example))
+        The leading ! is required. Put the image Markdown on its own line, outside code fences, inline code and blockquotes. Encode spaces in file URLs as %20. Saving a file alone, mentioning its path, or writing an ordinary [link](file:///...) does NOT display it inline. Do not claim an image is displayed without including its image Markdown in that same reply.
+        Converse imports the referenced image and displays it in the conversation, including on remote devices. Do not open Preview, a browser or another desktop viewer to show it. If the reply also sends a switchboard command, put the image Markdown BEFORE the final converse command fence; that command fence must still be last.
+        """
+    }
     // Local captures only. Web images wait for the reader's click
     // (loadResponseImage): fetching one unasked would let a prompt-injected
     // link leak conversation details through its hostname or path.
@@ -67,12 +130,10 @@ extension Store {
         let working = URL(fileURLWithPath: NSString(string: session.entry.directory).expandingTildeInPath).standardizedFileURL
         if working.path != "/" && working.path != NSHomeDirectory() { roots.append(working) }
         var changed = false
-        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].text.contains("![") {
+        for index in session.messages.indices where session.messages[index].role == "assistant" && session.messages[index].imported != true && session.messages[index].text.contains("![") {
             let items = ResponseImages.capture(session.messages[index].text, roots: roots, destination: output)
             guard !items.isEmpty else { continue }
-            let text = NSMutableString(string: session.messages[index].text)
-            for item in items.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-            session.messages[index].text = text as String
+            session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, items.map { ($0.range, $0.caption) })
             for item in items where !session.messages[index].images.contains(item.file.path) { session.messages[index].images.append(item.file.path) }
             changed = true
         }
@@ -100,9 +161,7 @@ extension Store {
                 do {
                     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     try png.write(to: file, options: .atomic)
-                    let text = NSMutableString(string: session.messages[index].text)
-                    for item in refs.reversed() { text.replaceCharacters(in: item.range, with: item.caption) }
-                    session.messages[index].text = text as String
+                    session.messages[index].text = TranscriptStyle.splice(session.messages[index].text, refs.map { ($0.range, $0.caption) })
                     if !session.messages[index].images.contains(file.path) { session.messages[index].images.append(file.path) }
                 } catch { session.messages.append(Message(role: "notice", text: "Image could not be saved. Its link remains available.")) }
             case .failure:
@@ -165,6 +224,10 @@ enum ImageLinkSuspicion {
 }
 
 func responseImageSelfTests(_ check: (Bool, String) -> Void) {
+    let reminderOutput = URL(fileURLWithPath: "/Users/example/Library/Application Support/Converse/Attachments/00000000-0000-0000-0000-000000000000/Outputs")
+    let reminder = ResponseImages.deliveryReminder(output: reminderOutput)
+    check(reminder.count < 650 && !reminder.contains("\n"), "Per-turn image reminder stays one line under 650 characters for a normal session path")
+    check(TranscriptStyle.localImageReferences(reminder).first?.url == reminderOutput.appendingPathComponent("name.png"), "Compact image reminder example resolves through the real image parser, including spaces")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("converse-response-images-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     do {
@@ -178,6 +241,72 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         check(images.count == 1 && bytes?.prefix(8) == Data([137,80,78,71,13,10,26,10]), "Response image references become bounded managed PNG attachments")
         check(images.first.map { (source as NSString).substring(with: $0.range).hasPrefix("![Grasshopper]") } == true, "Response image ranges preserve Unicode transcript offsets")
         let outside = root.appendingPathComponent("outside.jpg"); try Data(contentsOf: input).write(to: outside)
+        let fallbackSpaced = root.appendingPathComponent("image with spaces.png")
+        try Data(contentsOf: input).write(to: fallbackSpaced)
+        let fallbackSource = "![Local picture](" + fallbackSpaced.absoluteString + ")"
+        check(ResponseImages.capture(fallbackSource, roots: [allowed], destination: output).isEmpty,
+              "Clickable fallback does not broaden permitted attachment imports")
+        let fallbackSession = Session(entry: Entry(name: "Fallback QA", command: "/usr/bin/false", directory: root.path, engine: "codex"))
+        fallbackSession.messages = [Message(role: "assistant", text: fallbackSource)]
+        let fallbackText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let fallbackCoordinator = ScrollingConversation.Coordinator(fallbackSession)
+        fallbackCoordinator.render(fallbackText)
+        var target: URL?, position = -1, revealed: [URL] = [], notices: [String] = []
+        fallbackText.textStorage?.enumerateAttribute(LocalImageFallback.attribute, in: NSRange(location: 0, length: fallbackText.inputStart)) { value, range, _ in
+            if let url = value as? URL { target = url; position = range.location }
+        }
+        check(target == fallbackSpaced && position >= 0 && fallbackText.textStorage?.attribute(.link, at: max(0, position), effectiveRange: nil) as? URL == fallbackSpaced,
+              "Native local fallback retains a clickable file URL with spaces")
+        fallbackCoordinator.localImageIsHome = { true }
+        fallbackCoordinator.localImageReveal = { revealed.append($0) }
+        fallbackCoordinator.localImageNotice = { message, _ in notices.append(message) }
+        if let target, position >= 0 {
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed == [fallbackSpaced] && notices.isEmpty, "Native fallback click reveals the exact local file")
+            fallbackCoordinator.localImageIsHome = { false }
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed.count == 1 && notices.last?.contains("home device") == true, "Remote fallback click explains the home path without opening a local file")
+            fallbackCoordinator.localImageIsHome = { true }
+            try FileManager.default.removeItem(at: fallbackSpaced)
+            _ = fallbackCoordinator.textView(fallbackText, clickedOnLink: target, at: position)
+            check(revealed.count == 1 && notices.last?.contains("no longer available") == true, "Missing local fallback reports the path without opening Finder")
+        }
+        func hasHyperlink(_ data: Data?) -> Bool { String(decoding: data ?? Data(), as: UTF8.self).contains("HYPERLINK") }
+        let formattedBoard = NSPasteboard.withUniqueName()
+        fallbackText.copyBlock(0, to: formattedBoard)
+        let formattedRTF = formattedBoard.data(forType: .rtf), formattedHTML = String(decoding: formattedBoard.data(forType: .html) ?? Data(), as: UTF8.self)
+        let decodedRTF = formattedRTF.flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+        check(formattedRTF != nil && !hasHyperlink(formattedRTF) && decodedRTF?.string.contains("image%20with%20spaces.png") == true, "Copy Message RTF keeps the fallback text without its file link")
+        check(!formattedHTML.isEmpty && !formattedHTML.contains("href=\"file:") && !formattedHTML.lowercased().contains("reveal image"), "Copy Message HTML carries no file link")
+        check(formattedBoard.string(forType: .string) == fallbackSource, "Copy Message plain text stays the exact source")
+        formattedBoard.releaseGlobally()
+        if position >= 0 {
+            let selectionBoard = NSPasteboard.withUniqueName()
+            fallbackText.setSelectedRange(NSRange(location: position, length: 12))
+            fallbackText.copySelection(to: selectionBoard)
+            let selectionRTF = selectionBoard.data(forType: .rtf)
+            check(selectionRTF != nil && !hasHyperlink(selectionRTF) && selectionBoard.data(forType: .URL) == nil && selectionBoard.string(forType: NSPasteboard.PasteboardType("public.url-name")) == nil,
+                  "Selection copy writes rich text without a file link or URL types")
+            check(selectionBoard.string(forType: .string)?.contains(fallbackSpaced.absoluteString) == true, "Selection copy plain text still names the file")
+            selectionBoard.releaseGlobally()
+            check(fallbackText.textStorage?.attribute(.link, at: position, effectiveRange: nil) as? URL == fallbackSpaced && fallbackText.textStorage?.attribute(LocalImageFallback.attribute, at: position, effectiveRange: nil) as? URL == fallbackSpaced,
+                  "Copying leaves the in-app reveal link in place")
+        }
+        let mixedLinks = NSMutableAttributedString(string: "web file")
+        mixedLinks.addAttribute(.link, value: URL(string: "https://example.com/a")!, range: NSRange(location: 0, length: 3))
+        mixedLinks.addAttribute(.link, value: "file:///tmp/a.png", range: NSRange(location: 4, length: 4))
+        let cleanedLinks = LocalImageFallback.withoutFileLinks(mixedLinks)
+        check(cleanedLinks.attribute(.link, at: 0, effectiveRange: nil) as? URL == URL(string: "https://example.com/a") && cleanedLinks.attribute(.link, at: 4, effectiveRange: nil) == nil && cleanedLinks.string == "web file",
+              "Formatted copy strips file links only, whether stored as URL or string")
+        var probedRemoteDisk = false
+        _ = LocalImageFallback.follow(fallbackSpaced, onHome: false, exists: { _ in probedRemoteDisk = true; return true }, reveal: { _ in check(false, "Remote path must never reveal") })
+        check(!probedRemoteDisk, "Remote image fallback does not even probe the viewer's filesystem")
+        let arbitrary = MarkdownText.inline("[Run](file:///tmp/example.command)")
+        check(arbitrary.attribute(.link, at: 0, effectiveRange: nil) == nil,
+              "Ordinary file links do not gain the image fallback navigation privilege")
+        check(fallbackSession.messages.first?.text == fallbackSource && fallbackSession.messages.first?.images.isEmpty == true,
+              "Fallback navigation leaves stored source and attachment ownership unchanged")
+
         let escape = allowed.appendingPathComponent("escape.jpg"); try FileManager.default.createSymbolicLink(at: escape, withDestinationURL: outside)
         check(ResponseImages.capture("![private](" + escape.absoluteString + ")", roots: [allowed], destination: output).isEmpty, "Response image imports reject symlink escapes")
         let quoted = "```md\n![Example](" + input.absoluteString + ")\n```\n[ordinary link](" + input.absoluteString + ")\n![remote](https://example.invalid/image.jpg)"
@@ -203,6 +332,79 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         let unavailable = MarkdownText.render("![Missing](" + spaced.absoluteString + ")")
         check(unavailable.string.contains("Image not displayed") && unavailable.string.contains("full%20page.png"), "Uncaptured local images retain an explicit fallback path")
         check(ConverseExchange.neutralizeLocalImages("![Raw](file://" + spaced.path + ")").hasPrefix("[Raw]"), "Imported raw-space local embeds remain neutralized")
+        for planted in ["!![x](/tmp/a.png)", "!!![x](/tmp/a.png)", "!!!!![x](file:///tmp/a.png)", "!![x](< /tmp/a.png>)", "!![x](FILE:///tmp/a.png) !![y](/tmp/b.png)"] {
+            let neutral = ConverseExchange.neutralizeLocalImages(planted)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.contains("[x]("), "Stacked image markers cannot rebuild a local embed: " + planted)
+        }
+        // A hostile import with long marker runs must stay linear: whole runs go at once.
+        for target in ["(/tmp/nonexistent.png)", "(~/a.png)", "(file:///tmp/a.png)", "(relative.png)"] {
+            let hostile = String(repeating: "!", count: 20_000) + "[x]" + target
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(hostile)
+            // Relative paths were never local embeds and stay as written.
+            let neutralized = target == "(relative.png)" ? neutral == hostile : neutral.hasPrefix("[x]")
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutralized && Date().timeIntervalSince(started) < 0.5, "20,000 stacked image markers are handled in one bounded pass: " + target)
+        }
+        let fencedExample = "```\n![![x](/tmp/code-example.png)\n```\n" + String(repeating: "![", count: 3) + "x](/tmp/nonexistent.png)"
+        let fencedNeutral = ConverseExchange.neutralizeLocalImages(fencedExample)
+        check(TranscriptStyle.localImageReferences(fencedNeutral).isEmpty && fencedNeutral.hasPrefix("```\n![[x](/tmp/code-example.png)\n```\n"), "Nested-marker cleanup only edits lines the fence-aware scan flags")
+        // Rejecting long nested or unclosed lines must stay bounded too.
+        for tail in ["x](https://example.com/w.png)", "x](relative.png)", "x(/tmp/a.png", "x](/tmp/a.png)"] {
+            let line = String(repeating: "![", count: 10_000) + tail
+            let started = Date()
+            let local = TranscriptStyle.localImageReferences(line), web = TranscriptStyle.imageReferences(line)
+            let neutral = ConverseExchange.neutralizeLocalImages(line)
+            check(Date().timeIntervalSince(started) < 0.5 && TranscriptStyle.localImageReferences(neutral).isEmpty && local.count <= 1 && web.count <= 1, "10,000 nested image openers are scanned in bounded time: " + tail)
+        }
+        check(TranscriptStyle.imageReferences("![" + String(repeating: "a", count: 600) + "](https://example.com/w.png)").isEmpty && TranscriptStyle.imageReferences("![Chart](https://example.com/w.png)").count == 1, "Image captions longer than 512 characters are not treated as images")
+        let balancedShot = "![x](/tmp/shot(1).png)"
+        let balancedRefs = TranscriptStyle.localImageReferences(balancedShot)
+        check(balancedRefs.count == 1 && balancedRefs.first?.url.path == "/tmp/shot(1).png" && balancedRefs.first?.range == NSRange(location: 0, length: (balancedShot as NSString).length), "Image paths keep balanced parentheses")
+        check(TranscriptStyle.localImageReferences("![x](/tmp/a(b(c))(d).png) ![y](/tmp/y.png)").map(\.url.path) == ["/tmp/a(b(c))(d).png", "/tmp/y.png"], "Nested parentheses end at the image's own closer and the next image still parses")
+        check(TranscriptStyle.localImageReferences("![x](file:///tmp/my%20shot(1).png)").first?.url.path == "/tmp/my shot(1).png" && TranscriptStyle.localImageReferences("![x](file:///tmp/my shot(1).png)").first?.url.path == "/tmp/my shot(1).png", "File URLs keep balanced parentheses, encoded or with raw spaces")
+        check(TranscriptStyle.imageReferences("![w](https://example.com/w_(1).png)").first?.url.absoluteString == "https://example.com/w_(1).png", "Web image URLs keep balanced parentheses")
+        check(TranscriptStyle.imageLinks("![w](https://example.com/w_(1).png) tail") == "w: [https://example.com/w\\_(1).png](https://example.com/w_(1).png) tail", "Image fallbacks replace the whole parenthesized reference")
+        let unbalancedLine = "![x](/tmp/a(b.png) and more)"
+        check(TranscriptStyle.localImageReferences(unbalancedLine).first?.url.path == "/tmp/a(b.png" && TranscriptStyle.localImageReferences(unbalancedLine).first?.range.length == ("![x](/tmp/a(b.png)" as NSString).length, "An unbalanced parenthesis keeps the original first-closer match")
+        let prose = TranscriptStyle.localImageReferences("![x](file:///tmp/a(b.png) and more)")
+        check(prose.first?.url.path == "/tmp/a(b.png" && prose.first?.range.length == ("![x](file:///tmp/a(b.png)" as NSString).length, "A raw-space file target keeps its first closer instead of absorbing later prose")
+        let pastBound = "![x](/tmp/a(" + String(repeating: "b", count: 4080) + ")" + String(repeating: "c", count: 20) + ".png)"
+        check(TranscriptStyle.localImageReferences(pastBound).first?.url.path.hasSuffix("b") == true, "Balanced scanning never reads past the target bound")
+        let balancedFallback = MarkdownText.inline(balancedShot), balancedURL = URL(fileURLWithPath: "/tmp/shot(1).png")
+        var balancedAttribute: URL?
+        balancedFallback.enumerateAttribute(LocalImageFallback.attribute, in: NSRange(location: 0, length: balancedFallback.length)) { value, _, _ in if let url = value as? URL { balancedAttribute = url } }
+        check(balancedAttribute == balancedURL && !balancedFallback.string.hasSuffix(".png)"), "A parenthesized local image renders one complete fallback link")
+        check(ConverseExchange.neutralizeLocalImages(balancedShot) == "[x](/tmp/shot(1).png)" && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages(balancedShot)).isEmpty, "Import neutralization covers parenthesized paths")
+        do {
+            let hostile = String(repeating: "![x](/tmp/a()", count: 20_000), started = Date()
+            let found = TranscriptStyle.localImageReferences(hostile)
+            check(found.count == 20_000 && found.allSatisfy { $0.url.path == "/tmp/a(" } && Date().timeIntervalSince(started) < 1, "Repeated open parentheses stay linear and keep their first-closer matches")
+        }
+        check(TranscriptStyle.localImageReferences("![![x](/tmp/a.png)").count == 1 && TranscriptStyle.localImageReferences(ConverseExchange.neutralizeLocalImages("![![x](/tmp/a.png)")).isEmpty, "A nested local embed is still found and neutralized")
+        // Nested opening markers once needed one round per level; any depth now goes in one pass.
+        for depth in [2, 6, 10, 100, 5_000] {
+            let nestedImport = String(repeating: "![", count: depth) + "x](/tmp/nonexistent.png)\n![web](https://example.com/w.png)"
+            let started = Date()
+            let neutral = ConverseExchange.neutralizeLocalImages(nestedImport)
+            check(TranscriptStyle.localImageReferences(neutral).isEmpty && neutral.hasSuffix("\n![web](https://example.com/w.png)") && Date().timeIntervalSince(started) < 0.5, "Nested image markers cannot keep a local embed: depth \(depth)")
+        }
+        check(TranscriptStyle.splice("abc", [(NSRange(location: Int.max - 1, length: 5), "X"), (NSRange(location: 1, length: Int.max), "Y"), (NSRange(location: 4, length: 0), "Z")]) == "abc", "Splice ignores malformed ranges without overflowing")
+        let mixed = ConverseExchange.neutralizeLocalImages("![web](https://example.com/w.png)\n!![local](/tmp/a.png) ![two](https://example.com/v.png)")
+        check(mixed == "![web](https://example.com/w.png)\n[local](/tmp/a.png) ![two](https://example.com/v.png)" && TranscriptStyle.imageReferences(mixed).count == 2, "Neutralizing local embeds leaves web images intact")
+        // Separate web and local scans can enclose one another; rendering must never raise.
+        let nested = "![a](file:///x ![](https://y.co/i.png" + String(repeating: " ", count: 40) + ")"
+        let nestedRefs = TranscriptStyle.imageReferences(nested).map(\.range) + TranscriptStyle.localImageReferences(nested).map(\.range)
+        check(nestedRefs.count == 2 && nestedRefs.contains { outer in nestedRefs.contains { $0 != outer && NSIntersectionRange($0, outer).length > 0 } }, "Nested image fixture really produces overlapping references")
+        let nestedOutput = TranscriptStyle.imageLinks(nested)
+        check(nestedOutput.hasPrefix("Image not displayed: a: [") && !nestedOutput.contains("!["), "An image reference enclosing another renders once without raising")
+        let nestedRender = MarkdownText.render(nested + "\nafter").string
+        check(nestedRender.hasPrefix("Image not displayed: a: ") && nestedRender.trimmingCharacters(in: .newlines).hasSuffix("after"), "Overlapping image references render through Markdown")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 4), "X"), (NSRange(location: 2, length: 1), "Y")]) == "aXf", "Splice keeps the outer of nested ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 2, length: 3), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXdef", "Splice keeps the earlier of partly overlapping ranges")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 1, length: 2), "X"), (NSRange(location: 1, length: 2), "Y")]).count == 5, "Splice applies identical ranges once")
+        check(TranscriptStyle.splice("abcdef", [(NSRange(location: 3, length: 2), "Y"), (NSRange(location: 1, length: 2), "X")]) == "aXYf", "Splice applies adjacent ranges in order")
+        check(TranscriptStyle.splice("abc", [(NSRange(location: 2, length: 9), "X"), (NSRange(location: 9, length: 1), "Y"), (NSRange(location: 0, length: 1), "Z")]) == "Zbc", "Splice ignores ranges beyond the text")
+        check(TranscriptStyle.imageLinks("See ![one](https://example.com/1.png) and ![](https://example.com/2.png)\n![three](/tmp/missing-3.png)") == "See one: [https://example.com/1.png](https://example.com/1.png) and [https://example.com/2.png](https://example.com/2.png)\nImage not displayed: three: [file:///tmp/missing-3.png](file:///tmp/missing-3.png)", "Single and multiple image fallbacks render as before")
         if let fixture = ProcessInfo.processInfo.environment["CONVERSE_RESPONSE_IMAGE_FIXTURE"] {
             let file = URL(fileURLWithPath: fixture)
             let captured = ResponseImages.capture("![Full-page regression](" + file.absoluteString + ")", roots: [file.deletingLastPathComponent()], destination: output)
@@ -288,7 +490,16 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
         hoverView.textContainer?.containerSize = NSSize(width: 700, height: CGFloat.greatestFiniteMagnitude)
         ScrollingConversation.Coordinator(hoverSession).render(hoverView)
         var hoverClicks = 0
+        check(hoverView.hasImageLinks && hoverView.imageHoverTracking == nil, "A rendered web image link is detected; no move tracking until Load image is available")
         hoverView.loadImage = { _ in hoverClicks += 1 }
+        check(hoverView.imageHoverTracking?.options.contains(.mouseMoved) == true, "Move tracking exists while a hoverable web image link is shown")
+        let plainSession = store.create(Entry(name: "Plain hover", command: "unused", directory: allowed.path, engine: "claude"))
+        plainSession.messages = [Message(role: "assistant", text: "No images here, just [a link](https://example.invalid/page) and text")]
+        let plainView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        plainView.loadImage = { _ in }
+        ScrollingConversation.Coordinator(plainSession).render(plainView)
+        check(!plainView.hasImageLinks && plainView.imageHoverTracking == nil, "Transcripts without web image links install no per-move tracking")
+        check(ConversationTextView.containsImageLinks(NSAttributedString(string: "x"), in: NSRange(location: 5, length: 3)) == false, "Image link scan tolerates out-of-range requests")
         let beforeHover = validations
         var linkRange = NSRange(location: NSNotFound, length: 0)
         hoverView.textStorage?.enumerateAttribute(.converseImageLink, in: NSRange(location: 0, length: hoverView.textStorage?.length ?? 0)) { value, range, stop in
@@ -302,9 +513,22 @@ func responseImageSelfTests(_ check: (Bool, String) -> Void) {
             check(hoverView.imageHover?.isHidden == false && (hoverView.imageHover?.frame.minY ?? 0) >= rect.maxY && hoverView.imageHover?.link?.url == remoteURL, "Hovering a web image link shows Load image directly beneath it")
             hoverView.updateImageHover(NSPoint(x: rect.minX + 4, y: rect.minY - 30))
             check(hoverView.imageHover?.isHidden == true && hoverClicks == 0 && validations == beforeHover, "Moving off the link hides Load image; hovering never fetches")
+            // A real mouse-moved event, as AppKit delivers it through the tracking area.
+            let hoverWindow = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 700, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+            hoverWindow.isReleasedWhenClosed = false; hoverWindow.contentView = hoverView
+            func move(to point: NSPoint) {
+                guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: hoverView.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: hoverWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else { check(false, "Mouse-moved fixture event"); return }
+                hoverView.mouseMoved(with: event)
+            }
+            move(to: NSPoint(x: rect.minX + 4, y: rect.midY))
+            check(hoverView.imageHoverTracking != nil && hoverView.imageHover?.isHidden == false && hoverView.imageHover?.link?.url == remoteURL, "A real mouse-moved event over a web image link shows Load image")
+            move(to: NSPoint(x: rect.minX + 4, y: rect.minY - 30))
+            check(hoverView.imageHover?.isHidden == true && hoverClicks == 0 && validations == beforeHover, "A real mouse-moved event off the link hides Load image without fetching")
+            hoverWindow.contentView = nil; hoverWindow.close()
             hoverView.loadImage = nil
             hoverView.updateImageHover(NSPoint(x: rect.minX + 4, y: rect.midY))
             check(hoverView.imageHover?.isHidden != false, "Viewer panes offer no Load image")
+            check(hoverView.imageHoverTracking == nil, "Viewer panes drop per-move tracking with Load image")
         } else { check(false, "Web image link carries a hover target in the rendered transcript") }
         let missingURL = URL(string: "https://images.example.invalid/missing")!
         let failing = store.create(Entry(name: "Failing image", command: "unused", directory: allowed.path, engine: "claude"))

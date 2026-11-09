@@ -26,6 +26,14 @@ struct PendingPrompt: Codable, Identifiable {
     var originGroupID: String? = nil
     var originHomeID: String? = nil
     var components: [PendingPrompt]? = nil
+    /// Typed in a local or remote composer; stays visible after Inject all.
+    var typed: Bool? = nil
+    /// Every part was typed by a human. Survives held() and Inject all, so
+    /// a requeued human prompt still counts toward the feedback invitation.
+    var humanTyped: Bool {
+        guard let components, !components.isEmpty else { return typed == true }
+        return components.allSatisfy(\.humanTyped)
+    }
     var originParticipants: [GroupMessageOrigin]? = nil
     var groupOrigins: [GroupMessageOrigin] { (originParticipants ?? []) + (originGroupID.map { [GroupMessageOrigin(group: $0, home: originHomeID ?? "")] } ?? []) }
     var agentRunReserved: Bool? = nil
@@ -42,6 +50,19 @@ struct PendingPrompt: Codable, Identifiable {
     var images: [String]
     /// This prompt and, after Inject all, the prompts combined into it.
     var durabilityIDs: Set<UUID> { Set([id] + (components ?? []).map(\.id)) }
+    /// Where each combined prompt sits in the merged text, for the transcript.
+    /// Parts that no longer reproduce the text keep it all visible.
+    var messageComponents: [MessageComponent]? {
+        guard let components, !components.isEmpty, !(components.count == 1 && components[0].text == text) else { return nil }
+        return TranscriptStyle.components(joining: components.map { ($0.text, TranscriptStyle.componentKind($0.text, typed: $0.typed == true)) }, into: text)
+            ?? TranscriptStyle.expandedComponents(text)
+    }
+    /// A copy to hold again after a turn could not start: same text, parts
+    /// and typed flags, with fresh identities so no delivery is rematched.
+    func held(text display: String, images: [String], switchboardHop: Int?) -> PendingPrompt {
+        PendingPrompt(switchboardHop: switchboardHop, components: components?.map { PendingPrompt(typed: $0.typed, text: $0.text, images: $0.images) },
+                      typed: typed, text: display, images: images)
+    }
 }
 // Applied after login-shell startup, consistently for turns, catalog queries and login.
 // Credentials stay in CLI stores; Converse only retains a label and directory.
@@ -445,6 +466,16 @@ extension Store {
         s.draft = prompt.text + (s.draft.isEmpty ? "" : "\n" + s.draft); s.attachments = prompt.images + s.attachments
         save()
     }
+    static let queuedMessageGone = "That message already started or was removed. Nothing else changed."
+    /// Removes exactly one queued prompt. Every other entry keeps its order and
+    /// provenance; switchboard obligations stay as Clear queue leaves them.
+    @discardableResult
+    func removePending(_ s: Session, id: UUID) -> String? {
+        if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID == id { return "That message is already starting. Nothing was removed." }
+        guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return Store.queuedMessageGone }
+        s.pending.remove(at: index)
+        save(); return nil
+    }
 }
 
 import SwiftUI
@@ -543,7 +574,7 @@ struct PendingMessagesView: View {
             }
             ForEach(session.pending) { prompt in
                 HStack {
-                    Text(TranscriptStyle.trafficSummary(prompt.text, queued: true) ?? (prompt.text.isEmpty ? "Attached image" : prompt.text)).help(prompt.text).foregroundStyle(TranscriptStyle.isTraffic(prompt.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                    Text(TranscriptStyle.queueSummary(prompt.text, components: prompt.messageComponents) ?? (prompt.text.isEmpty ? "Attached image" : prompt.text)).help(prompt.text).foregroundStyle(TranscriptStyle.queueSummary(prompt.text, components: prompt.messageComponents) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                     Spacer()
                     if session.pending.count == 1 {
                         Button(session.queuePaused ? "Resume queue" : "Pause queue") {
@@ -553,7 +584,8 @@ struct PendingMessagesView: View {
                     }
                     Button(session.interrupted && session.injectionTargetID == prompt.id ? "Interrupting…" : "Inject now") { Store.shared.injectPending(session, id: prompt.id) }.disabled(session.changingSetting || (session.interrupted && session.resumeAfterInterrupt)).help("Interrupt and send this message next")
                     Button("Edit") { Store.shared.restorePending(session, id: prompt.id) }
-                    Button { session.pending.removeAll { $0.id == prompt.id }; Store.shared.save() } label: { Image(systemName: "xmark") }
+                    Button { Store.shared.removePending(session, id: prompt.id) } label: { Image(systemName: "xmark") }
+                        .disabled(session.interrupted && session.resumeAfterInterrupt && session.injectionTargetID == prompt.id).help("Remove this queued message")
                 }
             }
         }.font(.caption).padding(8).background(StatusTint.queue)

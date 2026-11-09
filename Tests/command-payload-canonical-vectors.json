@@ -1,0 +1,415 @@
+{
+ "comment": "Shared command payload canonicalization vectors (canonical-v1). Read by Sources/DeviceSyncTests.swift and windows/src/Converse.Core.Tests/Program.cs. input is UTF-8 encoded; inputHex gives raw bytes. canonical is the exact UTF-8 output; reject means canonicalization must fail.",
+ "vectors": [
+  {
+   "name": "already canonical command",
+   "input": "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}",
+   "canonical": "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}"
+  },
+  {
+   "name": "permuted command keys",
+   "input": "{\"text\":\"X\",\"action\":\"rename\",\"blobHashes\":[]}",
+   "canonical": "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}"
+  },
+  {
+   "name": "permuted command keys, second order",
+   "input": "{\"blobHashes\":[],\"text\":\"X\",\"action\":\"rename\"}",
+   "canonical": "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}"
+  },
+  {
+   "name": "insignificant whitespace removed",
+   "input": " { \"text\" : \"X\" ,\n\t\"action\":\"rename\" , \"blobHashes\" : [ ] } \r\n",
+   "canonical": "{\"action\":\"rename\",\"blobHashes\":[],\"text\":\"X\"}"
+  },
+  {
+   "name": "unknown fields kept and nested objects sorted",
+   "input": "{\"zeta\":{\"b\":1,\"a\":[true,false,null]},\"action\":\"submit\",\"Alpha\":\"x\"}",
+   "canonical": "{\"Alpha\":\"x\",\"action\":\"submit\",\"zeta\":{\"a\":[true,false,null],\"b\":1}}"
+  },
+  {
+   "name": "array order preserved",
+   "input": "{\"blobHashes\":[\"b\",\"a\",\"c\"],\"action\":\"submit\"}",
+   "canonical": "{\"action\":\"submit\",\"blobHashes\":[\"b\",\"a\",\"c\"]}"
+  },
+  {
+   "name": "numbers kept verbatim",
+   "input": "{\"n\":[0,-0,1.50,1e2,-2.5E-3,10,1E+2]}",
+   "canonical": "{\"n\":[0,-0,1.50,1e2,-2.5E-3,10,1E+2]}"
+  },
+  {
+   "name": "escapes decoded and re-escaped minimally",
+   "input": "{\"s\":\"\\u0041\\/\\\"\\\\\\b\\f\\n\\r\\t\\u001f\\u00e9\\u00E9\\u20ac\\ud83d\\ude00\"}",
+   "canonical": "{\"s\":\"A/\\\"\\\\\\b\\f\\n\\r\\t\\u001féé€😀\"}"
+  },
+  {
+   "name": "raw non-ASCII passes through",
+   "input": "{\"t\":\"héllo — 日本 😀\"}",
+   "canonical": "{\"t\":\"héllo — 日本 😀\"}"
+  },
+  {
+   "name": "NUL escaped, DEL and line separators raw",
+   "input": "{\"c\":\"\\u0000\\u007f\\u2028\"}",
+   "canonical": "{\"c\":\"\\u0000 \"}"
+  },
+  {
+   "name": "keys sort by code point, not UTF-16 unit",
+   "input": "{\"😀\":1,\"Ａ\":2}",
+   "canonical": "{\"Ａ\":2,\"😀\":1}"
+  },
+  {
+   "name": "keys sort by code point across scripts",
+   "input": "{\"é\":1,\"f\":2,\"e\":3,\"E\":4}",
+   "canonical": "{\"E\":4,\"e\":3,\"f\":2,\"é\":1}"
+  },
+  {
+   "name": "prefix key sorts first",
+   "input": "{\"ab\":1,\"a\":2,\"\":3}",
+   "canonical": "{\"\":3,\"a\":2,\"ab\":1}"
+  },
+  {
+   "name": "escaped key decoded before sorting",
+   "input": "{\"b\":1,\"\\u0061\":2}",
+   "canonical": "{\"a\":2,\"b\":1}"
+  },
+  {
+   "name": "key with quote and slash",
+   "input": "{\"a\\\"b\":1,\"c\\/d\":2}",
+   "canonical": "{\"a\\\"b\":1,\"c/d\":2}"
+  },
+  {
+   "name": "empty containers",
+   "input": "{ \"b\" : [ ] , \"a\" : { } }",
+   "canonical": "{\"a\":{},\"b\":[]}"
+  },
+  {
+   "name": "empty object",
+   "input": " { } ",
+   "canonical": "{}"
+  },
+  {
+   "name": "top-level array",
+   "input": "[3, \"x\" ,{\"b\":1,\"a\":2}]",
+   "canonical": "[3,\"x\",{\"a\":2,\"b\":1}]"
+  },
+  {
+   "name": "top-level string",
+   "input": "\"x\"",
+   "canonical": "\"x\""
+  },
+  {
+   "name": "top-level number",
+   "input": " 7 ",
+   "canonical": "7"
+  },
+  {
+   "name": "Swift escaped slashes in text",
+   "input": "{\"text\":\"a\\/b\",\"action\":\"submit\",\"blobHashes\":[\"ab12\"]}",
+   "canonical": "{\"action\":\"submit\",\"blobHashes\":[\"ab12\"],\"text\":\"a/b\"}"
+  },
+  {
+   "name": "base64 answers keep plus and slash",
+   "input": "{\"answersJSON\":\"W3siaWQiOiJ4In1d+/=\",\"action\":\"answer\",\"blobHashes\":[]}",
+   "canonical": "{\"action\":\"answer\",\"answersJSON\":\"W3siaWQiOiJ4In1d+/=\",\"blobHashes\":[]}"
+  },
+  {
+   "name": "pending ID command",
+   "input": "{\"pendingID\":\"6F9619FF-8B86-D011-B42D-00C04FC964FF\",\"action\":\"inject\",\"blobHashes\":[]}",
+   "canonical": "{\"action\":\"inject\",\"blobHashes\":[],\"pendingID\":\"6F9619FF-8B86-D011-B42D-00C04FC964FF\"}"
+  },
+  {
+   "name": "nesting at the depth limit",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "canonical": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+  },
+  {
+   "name": "nesting beyond the depth limit",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "reject": true
+  },
+  {
+   "name": "object nesting at the depth limit",
+   "input": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+   "canonical": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}"
+  },
+  {
+   "name": "object nesting beyond the depth limit",
+   "input": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+   "reject": true
+  },
+  {
+   "name": "mixed nesting beyond the depth limit",
+   "input": "[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]",
+   "reject": true
+  },
+  {
+   "name": "duplicate key",
+   "input": "{\"action\":\"rename\",\"action\":\"submit\"}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key after unescaping",
+   "input": "{\"a\":1,\"\\u0061\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key in nested object",
+   "input": "{\"x\":{\"k\":1,\"k\":1}}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key separated by other keys",
+   "input": "{\"a\":1,\"m\":2,\"z\":3,\"b\":4,\"a\":5}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key after sorted keys",
+   "input": "{\"a\":1,\"b\":2,\"c\":3,\"b\":4}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key: raw and escaped non-ASCII",
+   "input": "{\"é\":1,\"\\u00e9\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key: upper and lower case hex escapes",
+   "input": "{\"\\u00E9\":1,\"\\u00e9\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key: escaped and raw slash",
+   "input": "{\"a/b\":1,\"a\\/b\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key: surrogate pair escape and raw emoji",
+   "input": "{\"😀\":1,\"\\ud83d\\ude00\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate key: short escape and unicode escape",
+   "input": "{\"a\\nb\":1,\"a\\u000ab\":2}",
+   "reject": true
+  },
+  {
+   "name": "duplicate empty key",
+   "input": "{\"\":1,\"\":2}",
+   "reject": true
+  },
+  {
+   "name": "same key in sibling objects is not a duplicate",
+   "input": "{\"y\":{\"k\":1},\"x\":{\"k\":2}}",
+   "canonical": "{\"x\":{\"k\":2},\"y\":{\"k\":1}}"
+  },
+  {
+   "name": "precomposed and decomposed keys are distinct",
+   "input": "{\"é\":1,\"é\":2}",
+   "canonical": "{\"é\":2,\"é\":1}"
+  },
+  {
+   "name": "precomposed and decomposed keys, other input order",
+   "input": "{\"é\":2,\"é\":1}",
+   "canonical": "{\"é\":2,\"é\":1}"
+  },
+  {
+   "name": "precomposed and decomposed keys, escaped",
+   "input": "{\"\\u00e9\":1,\"e\\u0301\":2}",
+   "canonical": "{\"é\":2,\"é\":1}"
+  },
+  {
+   "name": "angstrom sign and A with ring are distinct keys",
+   "input": "{\"Å\":1,\"Å\":2,\"Å\":3}",
+   "canonical": "{\"Å\":3,\"Å\":2,\"Å\":1}"
+  },
+  {
+   "name": "decomposed string value kept unnormalized",
+   "input": "{\"t\":\"e\\u0301 Å\"}",
+   "canonical": "{\"t\":\"é Å\"}"
+  },
+  {
+   "name": "trailing comma in object",
+   "input": "{\"a\":1,}",
+   "reject": true
+  },
+  {
+   "name": "trailing comma in array",
+   "input": "[1,]",
+   "reject": true
+  },
+  {
+   "name": "trailing content",
+   "input": "{\"a\":1} x",
+   "reject": true
+  },
+  {
+   "name": "two values",
+   "input": "{}{}",
+   "reject": true
+  },
+  {
+   "name": "leading zero",
+   "input": "{\"n\":01}",
+   "reject": true
+  },
+  {
+   "name": "bare fraction point",
+   "input": "{\"n\":1.}",
+   "reject": true
+  },
+  {
+   "name": "leading fraction point",
+   "input": "{\"n\":.5}",
+   "reject": true
+  },
+  {
+   "name": "lone minus",
+   "input": "{\"n\":-}",
+   "reject": true
+  },
+  {
+   "name": "empty exponent",
+   "input": "{\"n\":1e}",
+   "reject": true
+  },
+  {
+   "name": "plus sign",
+   "input": "{\"n\":+1}",
+   "reject": true
+  },
+  {
+   "name": "NaN",
+   "input": "{\"n\":NaN}",
+   "reject": true
+  },
+  {
+   "name": "Infinity",
+   "input": "{\"n\":Infinity}",
+   "reject": true
+  },
+  {
+   "name": "single quotes",
+   "input": "{'a':1}",
+   "reject": true
+  },
+  {
+   "name": "comment",
+   "input": "{\"a\":1 /*x*/}",
+   "reject": true
+  },
+  {
+   "name": "unquoted key",
+   "input": "{a:1}",
+   "reject": true
+  },
+  {
+   "name": "lone high surrogate escape",
+   "input": "{\"s\":\"\\ud800\"}",
+   "reject": true
+  },
+  {
+   "name": "lone low surrogate escape",
+   "input": "{\"s\":\"\\udc00\"}",
+   "reject": true
+  },
+  {
+   "name": "high surrogate then non-surrogate",
+   "input": "{\"s\":\"\\ud800\\u0041\"}",
+   "reject": true
+  },
+  {
+   "name": "invalid escape",
+   "input": "{\"s\":\"\\x41\"}",
+   "reject": true
+  },
+  {
+   "name": "short unicode escape",
+   "input": "{\"s\":\"\\u12\"}",
+   "reject": true
+  },
+  {
+   "name": "raw tab in string",
+   "input": "{\"s\":\"a\tb\"}",
+   "reject": true
+  },
+  {
+   "name": "raw newline in string",
+   "input": "{\"s\":\"a\nb\"}",
+   "reject": true
+  },
+  {
+   "name": "unterminated string",
+   "input": "{\"s\":\"abc",
+   "reject": true
+  },
+  {
+   "name": "unterminated object",
+   "input": "{\"a\":1",
+   "reject": true
+  },
+  {
+   "name": "invalid literal",
+   "input": "{\"a\":tru}",
+   "reject": true
+  },
+  {
+   "name": "capitalized literal",
+   "input": "{\"a\":True}",
+   "reject": true
+  },
+  {
+   "name": "empty input",
+   "input": "",
+   "reject": true
+  },
+  {
+   "name": "whitespace only",
+   "input": " \n ",
+   "reject": true
+  },
+  {
+   "name": "non-breaking space is not JSON whitespace",
+   "input": "{\"a\":1} ",
+   "reject": true
+  },
+  {
+   "name": "invalid UTF-8 continuation",
+   "inputHex": "7b2273223a22c328227d",
+   "reject": true
+  },
+  {
+   "name": "overlong UTF-8",
+   "inputHex": "7b2273223a22c0af227d",
+   "reject": true
+  },
+  {
+   "name": "UTF-8 encoded surrogate",
+   "inputHex": "7b2273223a22eda080227d",
+   "reject": true
+  },
+  {
+   "name": "UTF-8 beyond U+10FFFF",
+   "inputHex": "7b2273223a22f4908080227d",
+   "reject": true
+  },
+  {
+   "name": "invalid UTF-8 lead byte",
+   "inputHex": "7b2273223a22f5808080227d",
+   "reject": true
+  },
+  {
+   "name": "truncated UTF-8",
+   "inputHex": "7b2273223a22e282227d",
+   "reject": true
+  },
+  {
+   "name": "byte order mark",
+   "inputHex": "efbbbf7b7d",
+   "reject": true
+  },
+  {
+   "name": "invalid UTF-8 in key",
+   "inputHex": "7b22ff223a317d",
+   "reject": true
+  }
+ ]
+}

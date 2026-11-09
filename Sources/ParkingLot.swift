@@ -1,5 +1,10 @@
 import AppKit
 import SwiftUI
+import Combine
+
+/// Signals the views around the editor. Typing changes only row text, which they
+/// never show, so a text-only user edit defers this signal until typing pauses.
+final class ParkingLotChrome: ObservableObject {}
 
 // Local notes, not a provider session. The stable ID uses the ordinary agent
 // watched-session scope and workspace placement, without starting a CLI.
@@ -13,11 +18,17 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     // Named lots are owned by ParkingLotLibrary; there is no second singleton copy.
     let id: UUID
     let substitutionFeedback = SubstitutionFeedback()
+    let chrome = ParkingLotChrome()
+    private var chromeObserver: AnyCancellable?
+    private var deferChrome = false
+    private var pendingChrome: DispatchWorkItem?
     let undoManager: UndoManager = { let manager = UndoManager(); manager.groupsByEvent = false; manager.levelsOfUndo = 100; return manager }()
     @Published var name: String
     @Published private(set) var document = ParkingLotDocument()
     @Published private(set) var active = false
     @Published var error = ""
+    /// A rejected user edit or Undo notice; unlike `error`, it never blocks other writers.
+    @Published var notice = ""
     @Published private(set) var readOnlyReason: String?
     @Published private(set) var lastSeenRevision = 0
     var hasUnseenChanges: Bool { active && document.revision > lastSeenRevision }
@@ -47,18 +58,52 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         }
         lastSeenRevision = (try? JSONDecoder().decode(Int.self, from: Data(contentsOf: seenFile))) ?? document.revision
         if active { saveSeenRevision() }
+        chromeObserver = objectWillChange.sink { [weak self] _ in
+            guard let self, !self.deferChrome else { return }
+            self.pendingChrome?.cancel(); self.pendingChrome = nil
+            self.chrome.objectWillChange.send()
+        }
     }
+    private func refreshChromeSoon() {
+        pendingChrome?.cancel()
+        let task = DispatchWorkItem { [weak self] in self?.pendingChrome = nil; self?.chrome.objectWillChange.send() }
+        pendingChrome = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
+    }
+    var chromeRefreshPending: Bool { pendingChrome != nil }
+    private static func onlyTextDiffers(_ a: [ParkingLotRow], _ b: [ParkingLotRow]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy {
+            $0.id == $1.id && $0.heading == $1.heading && $0.parentID == $1.parentID && $0.tag == $1.tag && $0.done == $1.done && $0.images == $1.images && $0.notes == $1.notes
+        }
+    }
+    private var savedSeenRevision: Int?
+    private var pendingSeenSave: DispatchWorkItem?
     private func saveSeenRevision() {
+        pendingSeenSave?.cancel(); pendingSeenSave = nil
         do {
             try FileManager.default.createDirectory(at: seenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(lastSeenRevision).write(to: seenFile, options: .atomic)
+            savedSeenRevision = lastSeenRevision
         } catch { NSLog("Could not save Parking Lot reading position: %@", error.localizedDescription) }
+    }
+    /// The file only drives the unseen marker, and a lost beat of it just shows
+    /// the marker again, so a burst of edits to an open lot writes it once.
+    private func saveSeenRevisionSoon() {
+        guard lastSeenRevision != savedSeenRevision else { return }
+        guard savedSeenRevision != nil, !viewers.isEmpty, Thread.isMainThread else { saveSeenRevision(); return }
+        guard pendingSeenSave == nil else { return }
+        let task = DispatchWorkItem { [weak self] in self?.saveSeenRevision() }
+        pendingSeenSave = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: task)
     }
     func beginViewing(_ viewer: UUID) {
         viewers.insert(viewer)
         if lastSeenRevision != document.revision { lastSeenRevision = document.revision; saveSeenRevision() }
     }
-    func endViewing(_ viewer: UUID) { viewers.remove(viewer) }
+    func endViewing(_ viewer: UUID) {
+        viewers.remove(viewer)
+        if pendingSeenSave != nil { saveSeenRevision() }
+    }
     var authorityCheck: (() throws -> Void)?
     var snapshotCheck: ((ParkingLotDocument) throws -> Void)?
     private func requireWritable() throws {
@@ -88,17 +133,15 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     var exportMessages: [Message] { Self.exportMessages(document) }
     static func exportMessages(_ document: ParkingLotDocument) -> [Message] {
         let hierarchy = (try? ParkingLotTree.nodes(document.rows)) ?? [:]
-        var counts: [UUID?: Int] = [:]
+        let numbers = ParkingLotTree.numbers(document.rows)
         return document.rows.map { row in
-            let parent = hierarchy[row.id]?.parentID
-            if !row.heading { counts[parent, default: 0] += 1 }
             var copy = row
             // The ordinary Markdown helper numbers a standalone item as one.
             // Preserve the section's actual numbering in the exported message.
             copy.images = nil
             var text = Self.markdown([copy])
             if !row.heading {
-                if text.hasPrefix("1. ") { text = ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". " + text.dropFirst(3) }
+                if text.hasPrefix("1. ") { text = ParkingLotTree.label(numbers[row.id] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". " + text.dropFirst(3) }
                 let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
                 text = indent + text.replacingOccurrences(of: "\n   ", with: "\n" + indent + "   ")
             }
@@ -115,28 +158,53 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         guard !active, error.isEmpty else { return }
         commit(rows)
     }
-    private func persist(_ next: ParkingLotDocument) throws {
+    /// Only `user` saves (native editor, outline commands, reorder, tags) join
+    /// the Undo history; session, agent, device and Undo saves never do.
+    private func persist(_ next: ParkingLotDocument, user: Bool = false, undoName: String? = nil) throws {
         try requireWritable()
+        let capture = PerformanceCapture.shared
         var next = next
-        next.rows = try ParkingLotTree.normalized(next.rows)
-        next.schemaVersion = next.rows.contains(where: { $0.tag != nil }) ? 3 : 2
-        try snapshotCheck?(next)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        let before = document.rows
-        if active && before != next.rows {
-            let group = !undoManager.isUndoing && !undoManager.isRedoing
-            if group { undoManager.beginUndoGrouping() }
-            undoManager.registerUndo(withTarget: self) { lot in lot.restoreUndo(before, replacing: next.rows) }
-            if group { undoManager.setActionName("Edit Parking Lot"); undoManager.endUndoGrouping() }
+        next.rows = try capture.measure(.lotNormalize) { try ParkingLotTree.normalized(next.rows) }
+        next.schemaVersion = ParkingLotDocument.schemaVersion(for: next.rows)
+        try capture.measure(.lotSnapshotCheck) { try snapshotCheck?(next) }
+        try capture.measure(.lotEncodeWrite) {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(next).write(to: file, options: .atomic)
         }
-        document = next; active = true; error = ""
-        if !viewers.isEmpty { lastSeenRevision = next.revision }
-        saveSeenRevision()
+        let before = document.rows, after = next.rows
+        if user && active && before != after {
+            capture.measure(.lotUndoRegister) {
+                let name = undoName ?? ParkingLotUndo.actionName(before, after)
+                undoManager.beginUndoGrouping()
+                undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: after, to: before) }
+                undoManager.setActionName(name)
+                undoManager.endUndoGrouping()
+            }
+        }
+        capture.measure(.lotPublish) {
+            let textOnly = user && active && Thread.isMainThread && error.isEmpty && notice.isEmpty && Self.onlyTextDiffers(before, after)
+            deferChrome = textOnly
+            document = next; active = true; error = ""
+            if user { notice = "" }
+            if !viewers.isEmpty { lastSeenRevision = next.revision }
+            deferChrome = false
+            if textOnly { refreshChromeSoon() }
+        }
+        capture.measure(.lotSeenWrite) { saveSeenRevisionSoon() }
     }
-    private func restoreUndo(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
-        guard document.rows == expected else { error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
-        commit(rows)
+    /// Undo or Redo one user edit against the current rows. A conflict drops
+    /// the entry and explains why; it never restores an older document.
+    private func revert(from base: [ParkingLotRow], to target: [ParkingLotRow]) {
+        let redo = undoManager.isRedoing
+        do {
+            let rows = try ParkingLotUndo.applying(from: base, to: target, onto: document.rows)
+            try Self.validate(rows)
+            if rows != document.rows { try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+            // UndoManager carries the group's action name over to Redo.
+            undoManager.registerUndo(withTarget: self) { lot in lot.revert(from: target, to: base) }
+            notice = ""
+        } catch let conflict as ParkingLotUndo.Conflict { notice = conflict.message(redo: redo) }
+        catch { self.error = "Parking Lot was not saved: " + error.localizedDescription }
     }
     func commitRemote(_ document: ParkingLotDocument) throws {
         try Self.validate(document.rows)
@@ -144,8 +212,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
         try persist(document)
         undoManager.removeAllActions()
     }
-    private func commit(_ rows: [ParkingLotRow]) {
-        do { try Self.validate(rows); try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows)) }
+    private func commit(_ rows: [ParkingLotRow], undoName: String? = nil) {
+        do { try Self.validate(rows); try persist(ParkingLotDocument(revision: document.revision + 1, rows: rows), user: true, undoName: undoName) }
         catch { self.error = "Parking Lot was not saved: " + error.localizedDescription }
     }
     static func validate(_ rows: [ParkingLotRow]) throws {
@@ -158,28 +226,24 @@ final class ParkingLotStore: ObservableObject, Identifiable {
             throw AgentFailure.message("Parking Lot exceeds its size limit (500 entries, 20,000 characters per entry).")
         }
     }
-    func replaceUserRows(_ rows: [ParkingLotRow], revision: Int) throws {
+    struct StaleUserEdit: LocalizedError {
+        var errorDescription: String? { "Parking Lot changed. Please try your edit again." }
+    }
+    func replaceUserRows(_ rows: [ParkingLotRow], revision: Int, undoName: String? = nil) throws {
         try requireWritable()
-        guard revision == document.revision else { throw AgentFailure.message("Parking Lot changed. Please try your edit again.") }
-        try Self.validate(rows)
-        if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows)) }
+        guard revision == document.revision else { throw StaleUserEdit() }
+        try PerformanceCapture.shared.measure(.lotValidate) { try Self.validate(rows) }
+        if rows != document.rows { try persist(ParkingLotDocument(revision: revision + 1, rows: rows), user: true, undoName: undoName) }
     }
     func setDone(_ id: UUID, _ done: Bool) {
         var rows = document.rows
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].isDone != done else { return }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
-        rows[index].done = done; rows[index].editedBy = nil; commit(rows)
-        let actionName: String = done ? "Mark Done" : "Mark Not Done"
-        undoManager.setActionName(actionName)
+        rows[index].done = done; rows[index].editedBy = nil; commit(rows, undoName: done ? "Mark Done" : "Mark Not Done")
     }
     func setTag(_ id: UUID, _ tag: ParkingLotTag?) {
         var rows = document.rows
         guard !isReadOnly, let index = rows.firstIndex(where: { $0.id == id }), rows[index].tag != tag else { return }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
-        rows[index].tag = tag; rows[index].editedBy = nil; commit(rows)
-        undoManager.setActionName(tag == nil ? "Clear Color Tag" : "Color Tag")
+        rows[index].tag = tag; rows[index].editedBy = nil; commit(rows, undoName: tag == nil ? "Clear Color Tag" : "Color Tag")
     }
     static func unresolvedTagCounts(_ rows: [ParkingLotRow]) -> [String: Int] {
         var counts = Dictionary(uniqueKeysWithValues: ParkingLotTag.allCases.map { ($0.rawValue, 0) })
@@ -193,11 +257,8 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     @discardableResult func changeIndent(_ ids: Set<UUID>, deeper: Bool) -> Bool {
         guard !isReadOnly, let rows = ParkingLotTree.changingIndent(ids, in: document.rows, deeper: deeper) else { return false }
-        undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
         do {
-            try replaceUserRows(rows, revision: document.revision)
-            undoManager.setActionName(deeper ? "Indent Items" : "Outdent Items")
+            try replaceUserRows(rows, revision: document.revision, undoName: deeper ? "Indent Items" : "Outdent Items")
             return true
         } catch { self.error = "Parking Lot was not saved: " + error.localizedDescription; return false }
     }
@@ -220,7 +281,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     func delete(_ id: UUID) {
         guard let range = Self.entryRange(id, in: document.rows) else { return }
-        var rows = document.rows; rows.removeSubrange(range); commit(rows)
+        var rows = document.rows; rows.removeSubrange(range); commit(rows, undoName: "Delete")
     }
     /// Where an agent's add/move lands. With a parentID, `before` is honored only
     /// when it names one of that parent's direct children; otherwise the row goes
@@ -238,13 +299,11 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     }
     static func markdown(_ rows: [ParkingLotRow]) -> String {
         let hierarchy = (try? ParkingLotTree.nodes(rows)) ?? [:]
-        var counts: [UUID?: Int] = [:]
+        let numbers = ParkingLotTree.numbers(rows)
         return rows.map { row in
-            let parent = hierarchy[row.id]?.parentID
-            if !row.heading { counts[parent, default: 0] += 1 }
             let indent = String(repeating: "  ", count: max(0, (hierarchy[row.id]?.depth ?? 1) - 1))
             let continuation = "\n" + indent + "   "
-            let line = (row.heading ? "# " : indent + ParkingLotTree.label(counts[parent] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + (row.tag.map { "[Tag: " + $0.rawValue + "] " } ?? "") + row.text.replacingOccurrences(of: "\n", with: continuation)
+            let line = (row.heading ? "# " : indent + ParkingLotTree.label(numbers[row.id] ?? 1, depth: hierarchy[row.id]?.depth ?? 1) + ". ") + (row.isDone ? "[Done] " : "") + (row.tag.map { "[Tag: " + $0.rawValue + "] " } ?? "") + row.text.replacingOccurrences(of: "\n", with: continuation)
             return line + (row.images ?? []).map { continuation + "[Image: " + URL(fileURLWithPath: $0).lastPathComponent + "]" }.joined() + (row.notes ?? []).map { continuation + "> " + $0.author + ": " + $0.text.replacingOccurrences(of: "\n", with: continuation + "> ") }.joined()
         }.joined(separator: "\n")
     }
@@ -271,7 +330,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
     /// A drop or move adopts the parent at the destination; see ParkingLotTree.moving.
     @discardableResult func move(_ id: UUID, before destination: UUID?, depth: Int? = nil) -> Bool {
         guard !isReadOnly, let rows = ParkingLotTree.moving(id, before: destination, depth: depth, in: document.rows) else { return false }
-        if rows != document.rows { commit(rows) }
+        if rows != document.rows { commit(rows, undoName: "Move") }
         return true
     }
     func evidence() throws -> Any {
@@ -331,6 +390,7 @@ final class ParkingLotStore: ObservableObject, Identifiable {
                     throw AgentFailure.message("A Parking Lot heading cannot be nested inside an item.")
                 }
                 moving[0].parentID = moving[0].heading ? nil : operation.parentID ?? ParkingLotTree.parentForInsertion(at: position, in: rows, heading: false)
+                moving[0].indent = nil
                 rows.insert(contentsOf: moving, at: position)
             default: throw AgentFailure.message("Unknown Parking Lot operation; no edits applied.")
             }
@@ -343,13 +403,26 @@ final class ParkingLotStore: ObservableObject, Identifiable {
 struct ParkingLotSidebar: View {
     @State private var showingLinks = false
     @ObservedObject private var library = ParkingLotLibrary.shared
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var workspace: Workspace
     @ObservedObject var state: WindowState
     @StateObject private var paneHover = SidebarHoverState()
+    init(lot: ParkingLotStore, workspace: Workspace, state: WindowState) {
+        self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome)
+        _workspace = ObservedObject(wrappedValue: workspace); _state = ObservedObject(wrappedValue: state)
+    }
     private func show(_ pane: Int? = nil) {
         lot.open()
         workspace.assign(lot.id, to: state.id, pane: pane ?? workspace.firstAvailablePane(in: state.id))
+    }
+    // Only the hovered row asks which panes are free.
+    private var placement: PanePlacement {
+        let devices = DeviceSyncService.shared, localPane = workspace.pane(for: lot.id, in: state.id)
+        return PanePlacement(localPane: localPane,
+                             elsewhere: ShownElsewhere.resolve(localPane: localPane, window: ShownElsewhere.window(workspace.placements[lot.id], here: state.id, names: workspace.names),
+                                                               device: ShownElsewhere.device(devices.remoteDisplayHolder(lot.id), me: devices.identity?.deviceID) { devices.displayName(for: $0) }),
+                             free: paneHover.overButtons ? Set((1...3).filter { workspace.paneIsAvailable($0, for: lot.id, in: state.id) }) : [])
     }
     var body: some View {
         HStack(spacing: 6) {
@@ -360,18 +433,24 @@ struct ParkingLotSidebar: View {
                         .accessibilityLabel("Unseen Parking Lot changes")
                 } else { Color.clear.accessibilityHidden(true) }
             }.frame(width: 12, height: 12)
-            Button { show() } label: {
+            SidebarRevealName(location: workspace.placements[lot.id],
+                              windowName: workspace.placements[lot.id].flatMap { workspace.names[$0.windowID] },
+                              deviceName: ShownElsewhere.device(DeviceSyncService.shared.remoteDisplayHolder(lot.id), me: DeviceSyncService.shared.identity?.deviceID) { DeviceSyncService.shared.displayName(for: $0) },
+                              parkedHelp: "Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.",
+                              onParked: { show() }) {
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).foregroundStyle(lot.active ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).layoutPriority(-1).help("Keep ideas and bugs under headings. Agents can help when you select Parking Lot in their session access list.")
+            }.layoutPriority(-1)
             ProviderLogo(engine: "parking").frame(width: 24)
             PaneButtonGroup(hover: paneHover) {
-                PaneButton(label: "P", selected: workspace.placements[lot.id] == nil) { workspace.park(lot.id) }
-                    .accessibilityLabel("Park " + lot.name).help("Park this Parking Lot without deleting it")
+                let shown = placement
+                PaneButton(label: "P", look: shown.look(.park, stripHovered: paneHover.overButtons)) { workspace.park(lot.id) }
+                    .accessibilityLabel(shown.parkLabel(lot.name)).help(shown.parkHelp("Park this Parking Lot without deleting it"))
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: workspace.pane(for: lot.id, in: state.id) == pane, available: workspace.paneIsAvailable(pane, for: lot.id, in: state.id), stripHovered: paneHover.overButtons) { show(pane) }
+                    PaneButton(label: String(pane), look: shown.look(.pane(pane), stripHovered: paneHover.overButtons)) { show(pane) }
+                        .accessibilityLabel("Show " + lot.name + " in pane " + String(pane)).accessibilityValue(shown.paneValue(pane)).help(shown.paneHelp(pane, item: "this Parking Lot"))
                 }
-                PaneButton(label: "X", selected: false) { ParkingLotLibrary.shared.promptDelete(lot) }
+                PaneButton(label: "X", look: shown.look(.close, stripHovered: paneHover.overButtons)) { ParkingLotLibrary.shared.promptDelete(lot) }
                     .accessibilityLabel("Delete " + lot.name).help("Delete this Parking Lot…")
             }
         }.padding(.leading, 16).padding(.trailing, 4).frame(height: 30)
@@ -404,11 +483,17 @@ enum ParkingLotTransfer {
 
 struct ParkingLotView: View {
     @State private var viewerID = UUID()
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var workspace: Workspace
     let pane: Int
+    init(lot: ParkingLotStore, workspace: Workspace, pane: Int) {
+        self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome)
+        _workspace = ObservedObject(wrappedValue: workspace); self.pane = pane
+    }
     @State private var reordering = false
     @StateObject private var undoFocus = ParkingLotUndoFocus()
+    @StateObject private var finder = ParkingLotFinder()
     @State private var talking = false
     @State private var dragging: UUID?
     @State private var dropBefore: UUID?
@@ -425,16 +510,7 @@ struct ParkingLotView: View {
             return !hidden
         }
     }
-    func number(_ row: ParkingLotRow) -> Int {
-        let hierarchy = (try? ParkingLotTree.nodes(lot.document.rows)) ?? [:]
-        let parent = hierarchy[row.id]?.parentID
-        var number = 0
-        for entry in lot.document.rows {
-            if !entry.heading && hierarchy[entry.id]?.parentID == parent { number += 1 }
-            if entry.id == row.id { return number }
-        }
-        return number
-    }
+    func number(_ row: ParkingLotRow) -> Int { ParkingLotTree.numbers(lot.document.rows)[row.id] ?? 0 }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     private func rowField(_ row: ParkingLotRow) -> some View {
                 TextField(row.heading ? "Heading" : "Write an idea, prompt or bug…", text: Binding(get: { lot.document.rows.first(where: { $0.id == row.id })?.text ?? "" }, set: { lot.update(row.id, text: $0) }), axis: .vertical)
@@ -549,7 +625,7 @@ struct ParkingLotView: View {
                 ProviderLogo(engine: "parking")
                 SessionName(title: lot.name, isAgent: false, isParkingLot: true).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 0)
-                PaneButton(label: "P", selected: false) { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
+                PaneButton(label: "P") { workspace.park(lot.id) }.accessibilityLabel("Park " + lot.name).help("Park this Parking Lot")
             }.padding(.horizontal, 8).padding(.vertical, 4)
             HStack(spacing: 6) {
                 Button(reordering ? "Done" : "Reorder") {
@@ -585,19 +661,17 @@ struct ParkingLotView: View {
             Divider()
             if reordering { Text("Drag the handles to reorder headings and items. Drag sideways to change an item's level.").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
             if !lot.error.isEmpty { Text(lot.error).foregroundStyle(.red).padding(.horizontal).textSelection(.enabled) }
+            else if !lot.notice.isEmpty { Text(lot.notice).foregroundStyle(.secondary).padding(.horizontal).textSelection(.enabled) }
             if let reason = lot.readOnlyReason {
                 Text(reason).font(.callout).padding(.horizontal).textSelection(.enabled)
                 HStack {
                     Button("Export recovery copy…", action: exportRecovery)
                     Button("Show saved file") { lot.showSavedFile() }
                 }.padding(.horizontal)
-                ScrollView {
-                    Text(ParkingLotStore.markdown(lot.document.rows))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled).padding()
-                }
+                ParkingLotReadOnlyText(text: ParkingLotStore.markdown(lot.document.rows))
             } else if !reordering {
-                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true })
+                if finder.visible { ParkingLotFindBar(finder: finder); Divider() }
+                ParkingLotEditor(lot: lot, collapsed: $collapsed, reorder: { reordering = true }, finder: finder)
                     .overlay(alignment: .bottomTrailing) { SubstitutionButton(feedback: lot.substitutionFeedback).padding(12) }
             } else {
             ScrollView {
@@ -623,6 +697,21 @@ struct ParkingLotView: View {
             .sheet(isPresented: $talking) { ParkingLotTalkView(lot: lot) }
     }
 }
+/// Read-only recovery view: native selection and Find, with nothing to replace.
+struct ParkingLotReadOnlyText: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        guard let view = scroll.documentView as? NSTextView else { return scroll }
+        view.isEditable = false; view.usesFindBar = true; view.isIncrementalSearchingEnabled = true
+        view.textContainerInset = NSSize(width: 12, height: 8); view.font = .systemFont(ofSize: 13)
+        view.setAccessibilityLabel("Parking Lot text")
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if let view = scroll.documentView as? NSTextView, view.string != text { view.string = text }
+    }
+}
 private struct ParkingLotFrames: PreferenceKey {
     static let defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
@@ -638,6 +727,8 @@ func parkingLotSelfTests(_ check: (Bool, String) -> Void) {
           && ParkingLotTree.letters(27) == "aa" && ParkingLotTree.letters(26) == "z", "Outline labels go 1, a, i by level, then repeat")
     parkingOutlineSelfTests(check)
     parkingLinkEditorSelfTests(check)
+    parkingUserUndoSelfTests(check)
+    parkingLotTypingSelfTests(check)
     parkingLibrarySelfTests(check)
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("parking-tests-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -859,8 +950,12 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
     check(lot.changeIndent([b.id, c.id], deeper: false) && lot.document.rows == before,
           "Batch outdent preserves sibling order, comments, Done and descendant identities")
     let revision = lot.document.revision
-    check(!lot.changeIndent([a.id, c.id], deeper: true) && lot.document.revision == revision && lot.document.rows == before,
-          "An impossible batch is refused atomically instead of indenting only some items")
+    let deepest = (1...7).reduce(into: [a]) { rows, n in rows.append(ParkingLotRow(heading: false, text: "d\(n)", parentID: rows.last!.id)) }
+    let capLot = ParkingLotStore(folder: folder.appendingPathComponent("cap")); capLot.openStarter([h] + deepest + [c])
+    let capBefore = capLot.document
+    check(!capLot.changeIndent([deepest[7].id, c.id], deeper: true) && capLot.document == capBefore,
+          "A batch with an item already at the depth cap is refused atomically instead of indenting only some items")
+    check(lot.document.revision == revision && lot.document.rows == before, "Refusing a batch elsewhere leaves this lot unchanged")
     check(!lot.changeIndent([h.id, b.id], deeper: true), "A selection containing a heading cannot accidentally nest the heading")
     // Richard's lot: 17 > a > i…vii. Shift-Tab on i keeps every row in place.
     let oh = ParkingLotRow(heading: true, text: "Lot"), o17 = ParkingLotRow(heading: false, text: "17", parentID: oh.id)
@@ -941,9 +1036,11 @@ private func parkingLotPolishSelfTests(_ check: (Bool, String) -> Void) {
 /// Voice controls and the last stop/failure stay in the lot's own pane because
 /// the idle Talk helper is hidden from the sidebar.
 struct ParkingLotTalkBar: View {
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
+    @ObservedObject private var chrome: ParkingLotChrome
     @ObservedObject var conversation = AgentConversation.shared
     @ObservedObject var store = Store.shared
+    init(lot: ParkingLotStore) { self.lot = lot; _chrome = ObservedObject(wrappedValue: lot.chrome) }
     static func talkSession(for lot: UUID, sessionID: UUID?, sessions: [Session]) -> Session? {
         guard let sessionID else { return nil }
         return sessions.first { $0.id == sessionID && $0.agent?.parkingLotTalkID == lot }

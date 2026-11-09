@@ -10,6 +10,10 @@ internal static class AppSupportChecks
         var scrubbed = BugReportPrivacy.Scrub("Bug 123\nBearer fixture-secret\ngithub_pat_fixture\nuser@example.com\n/Users/alice/private.txt\nC:\\Users\\alice\\private.txt\n192.168.1.2\n-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----");
         check(scrubbed.Contains("Bug 123") && !scrubbed.Contains("alice") && !scrubbed.Contains("fixture") && !scrubbed.Contains("example.com") && !scrubbed.Contains("192.168"), "Local scrubber removes common credentials and identifiers while preserving symptoms");
         check(BugReportPrivacy.Summary("test", "Windows", true, 2, 1, 3, 1).Contains("Known peers: 2; online: 1"), "Diagnostics contain only allowlisted versions and counts");
+        var isolated = CredentialScope.Resource("Converse.Agent", "/tmp/converse-a");
+        check(CredentialScope.Resource("Converse.Agent", null) == "Converse.Agent" && CredentialScope.Resource("Converse.Agent", "") == "Converse.Agent", "The default profile keeps its existing saved-key resource");
+        check(isolated != "Converse.Agent" && isolated.StartsWith("Converse.Agent.", StringComparison.Ordinal) && isolated != CredentialScope.Resource("Converse.Agent", "/tmp/converse-b"), "A data folder override never shares the default or another profile's saved keys");
+        check(isolated == CredentialScope.Resource("Converse.Agent", "/tmp/converse-a") && isolated == CredentialScope.Resource("Converse.Agent", "/TMP/CONVERSE-A"), "An isolated profile finds its own saved keys again");
         var root = Directory.CreateTempSubdirectory("converse-support-check-").FullName;
         try
         {
@@ -33,7 +37,8 @@ internal static class AppSupportChecks
             foreach (var engine in new[] { "claude", "codex" })
             {
                 var runner = new SupportRunner(); var store = new SessionStore(Path.Combine(root, engine), runner);
-                store.AgentRun = (s, prompt, images) => { runner.Prompts.Add(prompt); s.Messages.Add(new ChatMessage { Role = "assistant", Text = "Welcome to Converse! " + AppSupportTeaching.Invitation }); s.Busy = false; store.Save(); return Task.CompletedTask; };
+                var human = TurnAuthority.Foreground();
+                store.AgentRun = (s, prompt, images, _) => { runner.Prompts.Add(prompt); s.Messages.Add(new ChatMessage { Role = "assistant", Text = "Welcome to Converse! " + AppSupportTeaching.Invitation }); s.Busy = false; store.Save(); return Task.CompletedTask; };
                 var setup = new SupportSetup(store); var session = setup.Session();
                 check(store.Sessions.Count == 1 && session.Title == AppSupportTeaching.Title && !session.MessagingEnabled, engine + " starts with one unprivileged App Support session");
                 session.Draft = "Do not send before login"; store.Submit(session);
@@ -65,42 +70,39 @@ internal static class AppSupportChecks
                 check(!session.DisplayedMessages.Any() && session.Messages.Count == count && session.Attachments.Count == 1 && session.Pending.Count == 1, "/clear preserves context, images and queued work");
                 session.Draft = "/unclear"; store.Submit(session); check(session.DisplayedMessages.Count() == count, "/unclear restores history");
                 var create = JsonNode.Parse("""{"command":"app-control","action":"create-agent","title":"Test Steward","objective":"Report progress"}""")!.AsObject();
-                var result = AppSupportActions.Execute(store, session, create, null);
+                var result = AppSupportActions.Execute(store, session, human, create, null);
                 var agent = store.Sessions.Single(s => s.Agent is not null && !s.SupportAssistant);
                 check(result.Contains("Created paused") && !agent.Agent!.Settings.Enabled && !agent.Agent.Settings.GenerateArt && !agent.Agent.Settings.Speak && agent.Agent.Settings.Watched.Count == 0, "App control creates an inert, scoped agent without paid work");
-                AppSupportActions.Execute(store, session, create, null);
+                AppSupportActions.Execute(store, session, human, create, null);
                 check(store.Sessions.Count(s => s.Agent is not null && !s.SupportAssistant) == 1, "Repeated create does not duplicate an agent");
                 check(agent.Agent!.Settings.Model == session.Agent!.Settings.Model, "New agent inherits the verified onboarding provider");
                 var codingCommand = new JsonObject { ["command"] = "app-control", ["action"] = "create-session", ["provider"] = engine, ["title"] = "My project", ["directory"] = store.Folder };
-                var codingResult = AppSupportActions.Execute(store, session, codingCommand, null);
+                var codingResult = AppSupportActions.Execute(store, session, human, codingCommand, null);
                 var coding = store.Sessions.Single(s => s.Title == "My project");
                 check(codingResult.Contains(coding.Id.ToString()) && coding.Entry.AccountDirectory == session.Entry.AccountDirectory && !coding.Busy, "Support creates an idle coding session sharing the verified login");
-                AppSupportActions.Execute(store, session, codingCommand, null);
+                AppSupportActions.Execute(store, session, human, codingCommand, null);
                 check(store.Sessions.Count(s => s.Title == "My project") == 1, "Repeated coding session request is idempotent");
                 var normal = store.Create(store.Entries.First(e => e.Engine == engine));
                 check(normal.Entry.AccountDirectory == session.Entry.AccountDirectory, "Ordinary new sessions reuse onboarding login");
                 var restoredStore = new SessionStore(store.Folder, runner);
                 check(restoredStore.Create(restoredStore.Entries.First(e => e.Engine == engine)).Entry.AccountDirectory == session.Entry.AccountDirectory, "Verified login preference survives restart");
                 codingCommand["directory"] = Path.Combine(store.Folder, "missing");
-                check(Rejected(() => AppSupportActions.Execute(store, session, codingCommand, null)), "Missing project folder rejected");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, codingCommand, null)), "Missing project folder rejected");
                 agent.Title = AppSupportTeaching.Title; agent.Agent!.Settings.Enabled = true; agent.Agent.Settings.ScheduleText = ""; agent.Agent.Settings.TurnLimit = 2;
                 normal.Busy = true;
                 check(store.QuitActivity() == (1, 1), "Ordinary running sessions and scheduled agents still warn, even when named App Support");
                 normal.Busy = false; agent.Agent.Settings.Enabled = false;
                 var configure = new JsonObject { ["command"] = "app-control", ["action"] = "configure-agent", ["target"] = agent.Id.ToString(), ["repository"] = "not a repository" };
                 var old = JsonSerializer.Serialize(agent.Agent);
-                check(Rejected(() => AppSupportActions.Execute(store, session, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, configure, null)) && JsonSerializer.Serialize(agent.Agent) == old, "Invalid app configuration leaves the agent unchanged");
                 var bug = new JsonObject { ["command"] = "app-control", ["action"] = "report-bug", ["title"] = "Fixture", ["body"] = "Only this description" };
-                check(AppSupportActions.Execute(store, session, bug, null) == "UI", "Report prepares native review without Discord or credentials");
-                session.ActiveBackground = true;
-                check(Rejected(() => AppSupportActions.Execute(store, session, bug, null)), "Background agents cannot open bug report submission");
-                session.ActiveBackground = false;
-                session.ActiveBackground = true;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "Background and forwarded turns cannot configure the app");
-                session.ActiveBackground = false; session.ActiveAppControlDepth = 8;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "App operation chains have a bounded turn limit");
-                session.ActiveAppControlDepth = 0; session.SupportTeachingVersion = null;
-                check(Rejected(() => AppSupportActions.Execute(store, session, create, null)), "Revoking teaching removes app-control access");
+                check(AppSupportActions.Execute(store, session, human, bug, null) == "UI", "Report prepares native review without Discord or credentials");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { Background = true }, bug, null)), "Background agents cannot open bug report submission");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { Background = true }, create, null))
+                    && Rejected(() => AppSupportActions.Execute(store, session, human with { Hop = 1 }, create, null)), "Background and forwarded turns cannot configure the app");
+                check(Rejected(() => AppSupportActions.Execute(store, session, human with { AppControlDepth = AppSupportActions.MaxDepth }, create, null)), "App operation chains have a bounded turn limit");
+                session.SupportTeachingVersion = null;
+                check(Rejected(() => AppSupportActions.Execute(store, session, human, create, null)), "Revoking teaching removes app-control access");
             }
             {
                 var store = new SessionStore(Path.Combine(root, "native-agent"));
@@ -117,11 +119,11 @@ internal static class AppSupportChecks
                     if (explicitAction) reply["appControl"] = new JsonObject { ["command"] = "app-control", ["action"] = "inspect" };
                     return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
                 };
-                store.AppSupportRequest = (_, command) => { calls++; return Task.CompletedTask; };
+                store.AppSupportRequest = (_, command, _) => { calls++; return Task.CompletedTask; };
                 session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 0 && instructions.Contains("optional appControl object"), "Native-agent teaching preserves JSON format and never executes prose commands");
                 check(instructions.Contains("Never search the web for bare") && instructions.Contains("site:github.com/richardkaufmann/converse") && instructions.Contains("no relevant result is found"), "Previously taught agents receive current scoped research policy on their next request");
-                check(instructions.Contains(AgentPolicy.ScoreboardScope), "Agent scoreboard instructions limit metrics to that agent's own objective and scope");
+                check(instructions.Contains(AgentPolicy.AssessmentScope) && !instructions.Contains("scoreboard"), "Agent assessment instructions limit facts to that agent's own objective and scope");
                 check(instructions.Contains(AgentPolicy.ObjectiveGoverns), "Agent instructions make the current objective govern supplied evidence and older notes");
                 explicitAction = true; session.Draft = "Inspect setup"; store.Submit(session); await WaitIdle(session);
                 check(calls == 1, "Native agents dispatch only the explicit appControl operation");
@@ -149,22 +151,22 @@ internal static class AppSupportChecks
 
                 var session = store.CreateAgent("Art fallback", false);
                 session.Agent!.Settings.Model = "muse-spark-1.3"; session.Agent.Settings.GenerateArt = true; session.Agent.Settings.Enabled = true; session.Agent.Settings.ArtDirection = "Watercolor";
-                var keyReads = 0;
+                var keyReads = 0; var imageRequests = 0;
                 devices.Agents.ReadSecret = name => name == "meta" && keyReads++ == 0 ? "fixture-key" : null;
                 devices.Agents.Request = async (request, token) =>
                 {
-                    if (request.RequestUri!.AbsolutePath.EndsWith("/images/generations")) throw new HttpRequestException("image service down");
+                    if (request.RequestUri!.AbsolutePath.EndsWith("/images/generations")) { imageRequests++; throw new HttpRequestException("image service down"); }
                     await Task.Yield();
                     var reply = new JsonObject { ["reply"] = "Completed CLI-style reply", ["attention"] = "", ["memory"] = "", ["tell"] = new JsonArray(), ["artPrompt"] = "A cheerful lighthouse", ["scoreboard"] = new JsonObject { ["summary"] = "Steady progress", ["sentiment"] = "up", ["metrics"] = new JsonArray() } };
                     return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = reply.ToJsonString() } } } } }));
                 };
-                bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.Last().Role == "notice" && session.Messages.Last().Text == AgentArtPolicy.Unavailable
-                    && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget?.Summary == "Steady progress";
+                bool KeptReply() => session.Messages.Any(m => m.Role == "assistant" && m.Text == "Completed CLI-style reply") && session.Messages.All(m => m.Images.Count == 0) && imageRequests == 0 && session.Agent!.AssessmentProblem == "No assessment returned this turn."
+                    && session.Status == "Ready" && session.Agent!.Settings.Enabled && session.Agent.Attention.Length == 0 && session.Agent.Widget is null && AgentAssessments.WidgetFor(session.Agent, DateTime.UtcNow).Summary.StartsWith("No assessment yet");
                 session.Draft = "Check progress"; store.Submit(session); await WaitIdle(session);
-                check(KeptReply(), "A missing Meta key for mood art keeps the completed reply and the loop, with a quiet notice");
+                check(KeptReply(), "Agent turns generate no art: the reply and loop are kept, a missing assessment is only marked stale");
                 keyReads = 0; devices.Agents.ReadSecret = name => name == "meta" ? "fixture-key" : null; session.Agent.Widget = null; session.Agent.ArtAtUtc = null; session.Agent.ArtMood = null;
                 session.Draft = "Check again"; store.Submit(session); await WaitIdle(session);
-                check(KeptReply(), "An image API failure keeps the completed reply and the loop, with a quiet notice");
+                check(KeptReply(), "A legacy artPrompt field is ignored: no image request, no transcript attachment");
                 devices.Agents.ReadSecret = _ => null; session.Agent.Settings.Enabled = false;
                 session.Draft = "Run once"; store.Submit(session); await WaitIdle(session);
                 check(session.Agent.Attention.Contains(AgentPolicy.MissingMetaKey), "Run once without a Meta key says how to fix it");

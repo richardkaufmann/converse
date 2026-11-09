@@ -53,11 +53,18 @@ public sealed class ChatMessage
     public List<string> Images { get; set; } = new();
     public DateTime? CreatedAt { get; set; }
     public string? FinalReply { get; set; }
+    // Inject all parts, so a typed prompt merged with switchboard traffic
+    // stays visible. Presentation only; Text is what was sent.
+    [System.Text.Json.Serialization.JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
 }
 
 public sealed class PendingPrompt
 {
     public List<Guid>? ComponentIDs { get; set; }
+    // Where each prompt combined by Inject all sits in Text, for the transcript.
+    [System.Text.Json.Serialization.JsonConverter(typeof(LenientComponentsConverter))] public List<MessageComponent>? Components { get; set; }
+    // Typed in a local or remote composer; stays visible after Inject all.
+    public bool Typed { get; set; }
     public bool ClearDisplayBeforeReply { get; set; }
     public int AppControlDepth { get; set; }
     public bool Autonomous { get; set; }
@@ -72,6 +79,19 @@ public sealed class PendingPrompt
     public List<string> Images { get; set; } = new();
 }
 
+// Who started one turn, captured when its prompt starts and carried with
+// its reply through completion and app control. Nothing later rewrites it,
+// so a reply that finishes after the next prompt began keeps its own
+// provenance and depth. Teaching, revocation and session existence stay
+// live checks at the point of use.
+public sealed record TurnAuthority(Guid PromptID, bool Background, int Hop, int AppControlDepth, bool AgentLoopTick)
+{
+    public static TurnAuthority Foreground() => new(Guid.NewGuid(), false, 0, 0, false);
+    public static TurnAuthority Of(PendingPrompt prompt) => new(prompt.Id,
+        prompt.Autonomous || prompt.OriginGroupID is not null || prompt.OriginHomeID is not null || prompt.Hop > 0,
+        prompt.Hop, prompt.AppControlDepth, prompt.AgentLoopTick);
+}
+
 public sealed class ChatSession
 {
     public bool SupportAssistant { get; set; }
@@ -79,16 +99,12 @@ public sealed class ChatSession
     public bool SupportSetupCompleted { get; set; }
     public Guid? ClearedThroughMessageID { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public IEnumerable<ChatMessage> DisplayedMessages => ClearedThroughMessageID is { } id && Messages.FindIndex(m => m.Id == id) is var at && at >= 0 ? Messages.Skip(at + 1) : Messages;
-    [System.Text.Json.Serialization.JsonIgnore] public bool ActiveBackground { get; set; }
-    [System.Text.Json.Serialization.JsonIgnore] public int ActiveAppControlDepth { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] internal TaskCompletionSource<bool>? SupportProbe { get; set; }
     public AgentConfig? Agent { get; set; }
     public bool MessagingEnabled { get; set; }
     public List<SwitchboardObligation> SwitchboardObligations { get; set; } = new();
     public List<SwitchboardExpectation> SwitchboardExpectations { get; set; } = new();
     public DateTime? SwitchboardLastRecoveryAt { get; set; }
-    [System.Text.Json.Serialization.JsonIgnore] public bool ActiveAgentLoopTick { get; set; }
-    [System.Text.Json.Serialization.JsonIgnore] public int ActiveHop { get; set; }
 
     public Guid Id { get; set; } = Guid.NewGuid();
     private string _title = "New session";
@@ -246,10 +262,12 @@ public sealed class SessionStore
     public CodexModelCatalog CodexModels { get; } = new();
     public event Action? Changed;
     public List<ParticipantReceipt> ParticipantReceipts { get; private set; } = new();
-    public Func<ChatSession, string, IReadOnlyList<string>, Task>? AgentRun { get; set; }
+    public Func<ChatSession, string, IReadOnlyList<string>, TurnAuthority, Task>? AgentRun { get; set; }
     public Func<PendingPrompt, bool>? AcceptGroupPrompt { get; set; }
-    public Action<ChatSession, string>? FinalParticipantReply { get; set; }
-    public Func<ChatSession, System.Text.Json.Nodes.JsonObject, Task>? AppSupportRequest { get; set; }
+    public Action<ChatSession, string, TurnAuthority>? FinalParticipantReply { get; set; }
+    public Func<ChatSession, System.Text.Json.Nodes.JsonObject, TurnAuthority, Task>? AppSupportRequest { get; set; }
+    // Test seam: lets checks hold a finished reply at its image import.
+    internal Func<string, ChatSession, ChatMessage, Task<bool>> ImportResponseImages { get; set; } = ResponseImages.ImportAsync;
     // New-agent defaults. The app wires the credential reader; null keeps the
     // Meta API defaults (fixtures, headless hosts without a key store).
     public Func<string, string?>? AgentSecret { get; set; }
@@ -426,15 +444,14 @@ public sealed class SessionStore
         if (text.Length == 0 && images.Count > 0) text = "Please examine the attached image.";
         if (session.Busy || session.Pending.Count > 0)
         {
-            session.Pending.Add(new PendingPrompt { Text = text, Images = images });
+            session.Pending.Add(new PendingPrompt { Text = text, Images = images, Typed = true });
             session.QueuePaused = false;
             if (!session.Busy) RunNext(session);
             Save();
             return;
         }
-        session.ActiveAgentLoopTick = false; session.ActiveHop = 0; session.ActiveBackground = false; session.ActiveAppControlDepth = 0;
         AppendUserMessage(session, text, images);
-        _ = RunTurnAsync(session, text, images);
+        _ = RunTurnAsync(session, text, images, TurnAuthority.Foreground());
     }
 
     public void RunNext(ChatSession session)
@@ -455,15 +472,13 @@ public sealed class SessionStore
             try { Save(); }
             catch { config.Settings.RemainingRuns = old; config.Settings.Enabled = enabled; config.Settings.Revision = revision; next.AgentRunReserved = false; session.QueuePaused = true; config.Attention = "Could not preserve run budget. Agent paused."; return; }
         }
-        session.ActiveAgentLoopTick = next.AgentLoopTick; session.ActiveHop = next.Hop;
-        session.ActiveBackground = next.Autonomous || next.OriginGroupID is not null || next.OriginHomeID is not null || next.Hop > 0;
-        session.ActiveAppControlDepth = next.AppControlDepth;
+        var authority = TurnAuthority.Of(next);
         session.Pending.RemoveAt(0);
         foreach (var item in session.SwitchboardObligations.Where(o => o.PromptID == next.Id || next.ComponentIDs?.Contains(o.PromptID) == true))
         { item.State = item.Kind == "request" ? "submitted" : "resolved"; item.FinishedAt = null; }
-        AppendUserMessage(session, next.Text, next.Images);
+        AppendUserMessage(session, next.Text, next.Images, next.Components);
         if (next.ClearDisplayBeforeReply) session.ClearedThroughMessageID = session.Messages.LastOrDefault()?.Id;
-        _ = RunTurnAsync(session, next.Text, next.Images);
+        _ = RunTurnAsync(session, next.Text, next.Images, authority);
     }
 
     private static bool LoopPermitted(ChatSession session)
@@ -481,7 +496,7 @@ public sealed class SessionStore
     public string? InjectPending(ChatSession session, Guid? id = null)
     {
         if (session.Pending.Count == 0)
-            return "Inject not applied: the queue is already empty. Nothing was sent.";
+            return id is null ? InjectNothingQueued : InjectItemGone;
         if (id is null && session.Pending.Count > 1)
         {
             // Mac sanitizeGroupQueue parity: check each part's Group sender
@@ -501,6 +516,7 @@ public sealed class SessionStore
                     Text = string.Join("\n\n", merge.Select(p => p.Text)),
                     Images = merge.SelectMany(p => p.Images).ToList(),
                     ComponentIDs = merge.SelectMany(p => (p.ComponentIDs ?? new()).Append(p.Id)).Distinct().ToList(),
+                    Components = MergedComponents(merge),
                     Autonomous = merge.Any(p => p.Autonomous || p.AgentRunReserved),
                     AgentRunReserved = merge.Any(p => p.AgentRunReserved),
                     Hop = merge.Max(p => p.Hop),
@@ -520,7 +536,7 @@ public sealed class SessionStore
         {
             var target = session.Pending.FirstOrDefault(p => p.Id == id);
             if (target is null)
-                return "Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.";
+                return InjectItemGone;
             session.Pending.Remove(target);
             session.Pending.Insert(0, target);
         }
@@ -530,11 +546,52 @@ public sealed class SessionStore
         return null;
     }
 
-    private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images)
+    // Each part keeps its own kind; an already merged part contributes its
+    // recorded parts, shifted to where its text lands in the new merge. Parts
+    // whose ranges do not tile their text stay visible as a whole, never
+    // reclassified as one traffic part over the typed text inside.
+    private static List<MessageComponent>? MergedComponents(IReadOnlyList<PendingPrompt> merge)
+    {
+        var result = new List<MessageComponent>();
+        var offset = 0;
+        foreach (var prompt in merge)
+        {
+            if (SwitchboardPresentation.Components(prompt.Components, prompt.Text, prompt.Text, text => text) is { } parts)
+                result.AddRange(parts.Select(part => new MessageComponent { Offset = offset + part.Offset, Length = part.Length, Kind = part.Kind }));
+            else result.Add(new MessageComponent { Offset = offset, Length = prompt.Text.Length, Kind = SwitchboardPresentation.ComponentKind(prompt.Text, prompt.Typed) });
+            offset += prompt.Text.Length + SwitchboardPresentation.InjectSeparator.Length;
+        }
+        return result.Count > 1 ? result : null;
+    }
+
+    // Mac injectNothingQueued/injectItemGone parity: automatic dequeue can
+    // win the race with an inject request. These results are quiet no-ops,
+    // not failures: nothing is interrupted, sent again or noted.
+    public const string InjectNothingQueued = "Queue already empty; nothing to inject.";
+    public const string InjectItemGone = "That message already started or was removed. Nothing was injected.";
+    public static bool InjectIsNoOp(string? result) => result is InjectNothingQueued or InjectItemGone;
+
+    public const string QueuedMessageGone = "That message already started or was removed. Nothing else changed.";
+
+    // Mac removePending parity: removes exactly one queued prompt. Every
+    // other entry keeps its order and provenance; switchboard obligations
+    // stay as Clear queue leaves them. The running turn is never touched.
+    public string? RemovePending(ChatSession session, Guid id)
+    {
+        if (session.Interrupted && session.ResumeAfterInterrupt && session.Pending.FirstOrDefault()?.Id == id)
+            return "That message is already starting. Nothing was removed.";
+        var index = session.Pending.FindIndex(p => p.Id == id);
+        if (index < 0) return QueuedMessageGone;
+        session.Pending.RemoveAt(index);
+        Save();
+        return null;
+    }
+
+    private static void AppendUserMessage(ChatSession session, string text, IReadOnlyList<string> images, List<MessageComponent>? components = null)
     {
         var first = !session.Messages.Any(m => m.Role == "user");
         session.Messages.Add(new ChatMessage
-        { Role = "user", Text = text, Images = new List<string>(images), CreatedAt = DateTime.UtcNow });
+        { Role = "user", Text = text, Images = new List<string>(images), CreatedAt = DateTime.UtcNow, Components = components });
         if (first && (session.Title == "New session" || session.Title == session.Entry.Name))
             session.Title = text.Length <= 45 ? text : text[..45];
     }
@@ -549,7 +606,7 @@ public sealed class SessionStore
     // Factory seam so tests can drive MSP over a loopback stream.
     public Func<AgentEntry, ChatSession, MuseMspClient>? MuseFactory { get; set; }
 
-    private async Task RunMuseTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
+    private async Task RunMuseTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images, TurnAuthority authority)
     {
         session.Busy = true;
         session.Interrupted = false;
@@ -580,15 +637,15 @@ public sealed class SessionStore
             await client.SubmitAsync(ImageGuidance.WithGuidance(AppSupportTeaching.WithPolicy(session, SwitchboardInstructions.WithPolicy(session, prompt))), prompt, images, session.Choices.Effort);
             if (session.Interrupted) await client.InterruptAsync();
             var (status, notice) = await session.MuseTurnDone.Task;
-            FinishMuse(session, status, notice);
+            FinishMuse(session, status, notice, authority);
         }
         catch (Exception error)
         {
-            FinishMuse(session, "Connection failed", error.Message);
+            FinishMuse(session, "Connection failed", error.Message, authority);
         }
     }
 
-    private void FinishMuse(ChatSession session, string status, string? notice)
+    private void FinishMuse(ChatSession session, string status, string? notice, TurnAuthority authority)
     {
         var client = session.Muse;
         session.Muse = null;
@@ -602,7 +659,7 @@ public sealed class SessionStore
         // Mac finishQueue parity: an interrupted turn runs the queue only
         // when an inject asked for the resume; anything else held pauses.
         CompleteReply(session, status == "Ready" && !session.Interrupted,
-            string.Join("\n", session.Messages.Where(m => session.MuseItems.Values.Contains(m.Id)).Select(m => m.FinalReply ?? m.Text)));
+            string.Join("\n", session.Messages.Where(m => session.MuseItems.Values.Contains(m.Id)).Select(m => m.FinalReply ?? m.Text)), authority);
         var shouldRun = status == "Ready" || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -726,15 +783,15 @@ public sealed class SessionStore
         }
     }
 
-    private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images)
+    private async Task RunTurnAsync(ChatSession session, string prompt, IReadOnlyList<string> images, TurnAuthority authority)
     {
         if (session.Agent is not null)
         {
-            if (AgentRun is not null) await AgentRun(session, prompt, images);
+            if (AgentRun is not null) await AgentRun(session, prompt, images, authority);
             else { session.Agent.Attention = "Agent runtime unavailable."; Save(); }
             return;
         }
-        if (session.Entry.Engine == "muse") { await RunMuseTurnAsync(session, prompt, images); return; }
+        if (session.Entry.Engine == "muse") { await RunMuseTurnAsync(session, prompt, images, authority); return; }
         session.Busy = true;
         session.Interrupted = false;
         session.ResumeAfterInterrupt = false;
@@ -791,11 +848,13 @@ public sealed class SessionStore
         // Explicit local image refs in the reply become managed attachments
         // (Mac importResponseImages parity); the viewer resolves them by
         // hash, so generation stays wherever the agent ran. Web images wait
-        // for the reader's Load image click (LoadResponseImageAsync).
+        // for the reader's Load image click (LoadResponseImageAsync). The
+        // session is already idle, so another turn can start during this
+        // await; the reply below carries this turn's authority, not that one's.
         if (success && !string.IsNullOrEmpty(response.Text))
-            await ResponseImages.ImportAsync(Folder, session, response);
+            await ImportResponseImages(Folder, session, response);
         if (string.IsNullOrEmpty(response.Text)) session.Messages.Remove(response);
-        CompleteReply(session, success && !session.Interrupted, response.FinalReply);
+        CompleteReply(session, success && !session.Interrupted, response.FinalReply, authority);
         var shouldRun = success || (session.Interrupted && session.ResumeAfterInterrupt);
         session.ResumeAfterInterrupt = false;
         if (!shouldRun) session.QueuePaused = session.Pending.Count > 0;
@@ -820,14 +879,14 @@ public sealed class SessionStore
         Changed?.Invoke();
     }
 
-    private void CompleteReply(ChatSession session, bool success, string? reply)
+    private void CompleteReply(ChatSession session, bool success, string? reply, TurnAuthority authority)
     {
         if (session.SupportProbe is { } probe)
         {
             session.SupportProbe = null;
             probe.TrySetResult(success && reply?.Trim() == AppSupportTeaching.ConnectionReply);
         }
-        else if (success && reply is not null) FinalParticipantReply?.Invoke(session, reply);
+        else if (success && reply is not null) FinalParticipantReply?.Invoke(session, reply, authority);
     }
 
     // JSONL consumption mirroring Store.consume for claude/codex/muse-exec.

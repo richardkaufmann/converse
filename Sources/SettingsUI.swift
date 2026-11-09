@@ -2,53 +2,10 @@ import AppKit
 import SwiftUI
 import Security
 
-struct TranscriptLimits: Codable, Equatable {
-    var days: Int? = nil
-    var count: Int? = 1000
-    var valid: Bool { [days, count].allSatisfy { $0 == nil || (1...1_000_000).contains($0!) } }
-    /// Delete a prefix only, retaining the prompt that starts a retained turn.
-    func cut(_ messages: [Message], now: Date) -> Int {
-        guard valid else { return 0 }
-        let counted = messages.indices.filter { ["user", "assistant"].contains(messages[$0].role) }
-        var boundary = 0
-        if let count, counted.count > count { boundary = counted[counted.count - count] }
-        if let days {
-            let oldest = now.addingTimeInterval(-Double(days) * 86400)
-            // Unknown legacy times are never assumed to be old.
-            let ageBoundary = messages.firstIndex { $0.createdAt == nil || $0.createdAt! >= oldest } ?? messages.count
-            boundary = max(boundary, ageBoundary)
-        }
-        if boundary >= messages.count { return messages.count }
-        if messages[boundary].role != "user", let prompt = messages[..<boundary].lastIndex(where: { $0.role == "user" }) { boundary = prompt }
-        return boundary
-    }
-}
-extension Store {
-    @discardableResult func trimIdleTranscripts(now: Date = Date()) -> Int {
-        guard !applicationQuitting else { return 0 }
-        var removed = 0
-        for session in sessions {
-            guard !session.busy, !session.compacting, !session.changingSetting,
-                  session.draft.isEmpty, session.attachments.isEmpty, session.pending.isEmpty,
-                  session.requests.isEmpty, session.handoffPending == nil, session.restoreRetry == nil,
-                  !session.switchboardObligations.contains(where: { !$0.terminal }),
-                  !session.switchboardExpectations.contains(where: { !$0.answered }) else { continue }
-            let cut = session.transcriptLimits.cut(session.messages, now: now)
-            guard cut > 0 else { continue }
-            let deleted = Set(session.messages.prefix(cut).map(\.id))
-            session.messages.removeFirst(cut)
-            if let marker = session.clearedThroughMessageID, deleted.contains(marker) { session.clearedThroughMessageID = nil }
-            removed += cut
-        }
-        if removed > 0 { save() }
-        return removed
-    }
-}
-
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case general = "General", jolly = "Jolly", welcome = "New User Experience / Reset"
+    case general = "General", debug = "Debug", jolly = "Jolly", welcome = "New User Experience / Reset"
     var id: String { rawValue }
-    var icon: String { switch self { case .general: return "gearshape"; case .jolly: return "bubble.left.and.bubble.right"; case .welcome: return "sparkles" } }
+    var icon: String { switch self { case .general: return "gearshape"; case .debug: return "waveform.path.ecg"; case .jolly: return "bubble.left.and.bubble.right"; case .welcome: return "sparkles" } }
 }
 struct SettingsView: View {
     @ObservedObject var state: WindowState
@@ -88,12 +45,16 @@ struct SettingsView: View {
                             if let session = store.sessions.first(where: { $0.id == sessionID }) {
                                 TranscriptLimitsView(session: session).id(session.id)
                             }
-                            Text("Limits apply to this Mac’s saved transcript. Each prompt and each response counts as one message; a prompt/response pair counts as two. A retained turn stays together, so the count can exceed the limit. Attachments and provider-owned history are not deleted.")
+                            TranscriptDefaultLimitsView()
+                            Text("Limits apply to this Mac’s saved transcript; the assistant’s own provider history isn’t changed. " + TranscriptLimits.unitExplanation + " " + TranscriptLimits.imageExplanation)
                                 .font(.caption).foregroundStyle(.secondary)
+                            TrimImagesView(store: store)
                             Divider()
                             ModelsSettingsView(state: state)
+
                         }.padding(22)
                     }
+                case .debug: PerformanceDebugView()
                 case .jolly: JollyView()
                 case .welcome: ResetSettingsView(state: state)
                 }
@@ -107,24 +68,76 @@ struct TranscriptLimitsView: View {
     @State private var days = ""
     @State private var count = ""
     @State private var saved = false
-    private func parse(_ text: String) -> Int? { Int(text.trimmingCharacters(in: .whitespaces)) }
-    private var valid: Bool { [days, count].allSatisfy { $0.isEmpty || parse($0).map { (1...1_000_000).contains($0) } == true } }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack { Text("Delete messages older than"); TextField("None", text: $days).frame(width: 85); Text("days") }
-            HStack { Text("Keep the most recent"); TextField("None", text: $count).frame(width: 85); Text("prompts and responses") }
-            Text("Leave either field blank for None. Defaults: no age limit, 1,000 messages. Checked once a minute while the session is idle, with no draft or pending work. Either limit can remove older messages.")
-                .font(.caption).foregroundStyle(.secondary)
+            TranscriptLimitFields(days: $days, count: $count)
+            Text("Leave either field blank for None. Defaults: no age limit, 1,000 messages. " + TranscriptLimits.timingExplanation)
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Save limits") {
-                    session.transcriptLimits = TranscriptLimits(days: parse(days), count: parse(count))
-                    Store.shared.save(); saved = true
-                }.disabled(!valid)
-                if saved { Text("Saved · applies when idle").font(.caption).foregroundStyle(.secondary) }
+                    saved = Store.shared.applyTranscriptLimits(session, TranscriptLimits(days: TranscriptLimitFields.parse(days), count: TranscriptLimitFields.parse(count)))
+                }.disabled(!TranscriptLimitFields.valid(days, count))
+                if saved { Text("Saved · " + session.transcriptLimits.summary).font(.caption).foregroundStyle(.secondary) }
             }
         }.textFieldStyle(.roundedBorder)
             .onAppear { days = session.transcriptLimits.days.map(String.init) ?? ""; count = session.transcriptLimits.count.map(String.init) ?? "" }
             .onChange(of: days) { _, _ in saved = false }.onChange(of: count) { _, _ in saved = false }
+    }
+}
+struct TranscriptLimitFields: View {
+    @Binding var days: String
+    @Binding var count: String
+    static func parse(_ text: String) -> Int? { Int(text.trimmingCharacters(in: .whitespaces)) }
+    static func valid(_ days: String, _ count: String) -> Bool {
+        [days, count].allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty || parse($0).map { TranscriptLimits.range.contains($0) } == true }
+    }
+    var body: some View {
+        HStack { Text("Delete messages older than"); TextField("None", text: $days).frame(width: 85); Text("days") }
+        HStack { Text("Keep the most recent"); TextField("None", text: $count).frame(width: 85); Text("messages (each prompt and each response is one)") }
+    }
+}
+/// Seeds sessions created from now on; existing sessions keep their own limits.
+struct TranscriptDefaultLimitsView: View {
+    @State private var days = ""
+    @State private var count = ""
+    @State private var saved = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("New sessions start with").font(.subheadline.bold())
+            TranscriptLimitFields(days: $days, count: $count)
+            HStack {
+                Button("Save default") {
+                    TranscriptLimits.newSessionDefault = TranscriptLimits(days: TranscriptLimitFields.parse(days), count: TranscriptLimitFields.parse(count)); saved = true
+                }.disabled(!TranscriptLimitFields.valid(days, count))
+                if saved { Text("Saved · applies to sessions you create next").font(.caption).foregroundStyle(.secondary) }
+            }
+        }.textFieldStyle(.roundedBorder)
+            .onAppear { let limits = TranscriptLimits.newSessionDefault; days = limits.days.map(String.init) ?? ""; count = limits.count.map(String.init) ?? "" }
+            .onChange(of: days) { _, _ in saved = false }.onChange(of: count) { _, _ in saved = false }
+    }
+}
+/// Removes every image from the chosen sessions' transcripts after confirmation.
+struct TrimImagesView: View {
+    @ObservedObject var store: Store
+    @State private var chosen: Set<UUID> = []
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Trim all images").font(.subheadline.bold())
+            Text("Removes every image from the chosen transcripts and deletes its file from Converse’s Attachments folder when nothing else uses it. Text, drafts and queued prompts are kept.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(store.sessions) { session in
+                        let images = session.messages.reduce(0) { $0 + $1.images.count }
+                        Toggle(session.title + (images > 0 ? " · \(images) image" + (images == 1 ? "" : "s") : ""), isOn: Binding(
+                            get: { chosen.contains(session.id) }, set: { if $0 { chosen.insert(session.id) } else { chosen.remove(session.id) } }))
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 140)
+            Button("Trim All Images…") {
+                if store.confirmTrimAllImages(store.sessions.filter { chosen.contains($0.id) }) { chosen = [] }
+            }.disabled(chosen.isEmpty)
+        }
     }
 }
 final class ProfileResetState: ObservableObject {
@@ -263,8 +276,53 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
         session.title = "Example conversation"
     }
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let diagnostics = PerformanceDebugState.shared
+    func titlePreview(_ name: String) {
+        let state = WindowState(); Workspace.shared.rename(state.id, to: "Converse App Development")
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: appearanceName)!
+            let view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state).background(Color(nsColor: .windowBackgroundColor)))
+            view.frame = NSRect(x: 0, y: 0, width: 510, height: 24)
+            let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.appearance = appearance; view.appearance = appearance; window.contentView = view
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            appearance.performAsCurrentDrawingAppearance {
+                if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("telemetry-title-" + name + "-" + appearanceName.rawValue + ".png"))
+                }
+            }
+        }
+    }
+    let suite = "Converse.PerformancePreview." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    diagnostics.initialize(folder: store.folder, defaults: defaults, info: [:], environment: [:])
+    titlePreview("off")
+    diagnostics.record(folder: store.folder)
+    titlePreview("recording")
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 125)
+    diagnostics.pause()
+    let deadline = Date().addingTimeInterval(3)
+    while diagnostics.busy && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    guard diagnostics.paused, !diagnostics.recording, diagnostics.file != nil, !diagnostics.busy else {
+        throw NSError(domain: "PerformancePreview", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pause did not freeze a capture"])
+    }
+    titlePreview("paused")
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
         let appearance = NSAppearance(named: appearanceName)!
+        let invitation = NSHostingView(rootView: FeedbackInvitationPanel(repository: {}, issue: {}, report: {}, close: {}).background(Color(nsColor: .windowBackgroundColor)))
+        invitation.frame = NSRect(x: 0, y: 0, width: 488, height: 480)
+        let invitationWindow = NSWindow(contentRect: invitation.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        invitationWindow.appearance = appearance; invitation.appearance = appearance; invitationWindow.contentView = invitation
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        invitation.layoutSubtreeIfNeeded()
+        appearance.performAsCurrentDrawingAppearance {
+            if let bitmap = invitation.bitmapImageRepForCachingDisplay(in: invitation.bounds) {
+                invitation.cacheDisplay(in: invitation.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("feedback-invitation-" + appearanceName.rawValue + ".png"))
+            }
+        }
         for (index, category) in SettingsCategory.allCases.enumerated() {
             let state = WindowState(); state.settingsCategory = category
             let view = NSHostingView(rootView: SettingsView(state: state))
@@ -283,4 +341,177 @@ func settingsSelfTests(_ check: (Bool, String) -> Void) {
             }
         }
     }
+}
+
+final class PerformanceDebugState: ObservableObject {
+    static let shared = PerformanceDebugState()
+    @Published private(set) var recording = false
+    @Published private(set) var paused = false
+    @Published private(set) var busy = false
+    @Published private(set) var status = "Off."
+    @Published private(set) var file: URL?
+    @Published var exportError: String?
+    @Published var history = 60.0 {
+        didSet {
+            if !loadingPreferences { preferences.set(history, forKey: "performanceHistorySeconds") }
+            PerformanceCapture.shared.setHistory(seconds: history)
+        }
+    }
+    @Published var automatic = false {
+        didSet { if !loadingPreferences { preferences.set(automatic, forKey: "performanceRecordOnLaunch") } }
+    }
+    private var loadingPreferences = false
+    private var preferences = UserDefaults.standard
+    private var request = 0
+    private var folder: URL?
+    func initialize(folder: URL, defaults: UserDefaults = .standard, info: [String: Any] = Bundle.main.infoDictionary ?? [:], environment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.folder = folder; preferences = defaults
+        loadingPreferences = true
+        defer { loadingPreferences = false }
+        history = PerformanceCapture.clampedHistory((defaults.object(forKey: "performanceHistorySeconds") as? Double) ?? 60)
+        automatic = (defaults.object(forKey: "performanceRecordOnLaunch") as? Bool) ?? PerformanceCapture.recordingDefault(
+            info: info, environment: environment)
+        let paused = folder.appendingPathComponent("Performance Diagnostics/paused-performance.json")
+        if FileManager.default.fileExists(atPath: paused.path) { file = paused }
+        if automatic { record(folder: folder) }
+    }
+    func record(folder: URL) {
+        guard !recording, !busy else { return }
+        self.folder = folder; request += 1; exportError = nil
+        PerformanceCapture.shared.configure(folder: folder, enabled: true, historySeconds: history)
+        recording = true; paused = false; status = "Recording recent activity. Pause after a stutter."
+    }
+    func setMonitoringEnabled(_ enabled: Bool, folder: URL) {
+        guard !busy else { return }
+        if enabled {
+            automatic = true
+            if !recording && !paused { record(folder: folder) }
+        } else { turnOff() }
+    }
+    func pause() {
+        guard recording, !busy, let folder else { return }
+        request += 1; let token = request
+        recording = false; paused = true; busy = true; status = "Saving paused buffer…"
+        PerformanceCapture.shared.finish { result in
+            var result = result
+            if case .success(let current) = result {
+                do {
+                    let paused = folder.appendingPathComponent("Performance Diagnostics/paused-performance.json")
+                    try Data(contentsOf: current).write(to: paused, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paused.path)
+                    result = .success(paused)
+                } catch { result = .failure(error) }
+            }
+            DispatchQueue.main.async {
+                guard self.request == token else { return }
+                self.busy = false
+                switch result {
+                case .success(let file): self.file = file; self.status = "Paused. Buffer saved locally and ready to export."
+                case .failure(let error): self.file = nil; self.status = "Could not save buffer: " + error.localizedDescription
+                }
+            }
+        }
+    }
+    func turnOff() {
+        guard !busy else { return }
+        automatic = false
+        if let folder, recording { PerformanceCapture.shared.configure(folder: folder, enabled: false) }
+        recording = false; paused = false
+        status = "Off. Last paused buffer remains available to export."
+    }
+    func export() {
+        guard let file, !busy else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Converse-performance.json"
+        panel.title = "Export performance capture"
+        let token = request
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let data = try Data(contentsOf: file)
+                    try data.write(to: destination, options: .atomic)
+                    DispatchQueue.main.async { if self.request == token { self.status = self.recording ? "Paused buffer exported. Recording continues." : "Paused buffer exported." } }
+                } catch {
+                    DispatchQueue.main.async { if self.request == token { self.exportError = "Could not export: " + error.localizedDescription } }
+                }
+            }
+        }
+    }
+}
+struct PerformanceDebugView: View {
+    @ObservedObject private var capture = PerformanceDebugState.shared
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("Debug").font(.title2.bold())
+            Toggle("Performance monitoring", isOn: Binding(
+                get: { capture.recording || capture.paused },
+                set: { capture.setMonitoringEnabled($0, folder: Store.shared.folder) }))
+                .disabled(capture.busy)
+            Text("On starts monitoring and remembers your choice for the next launch. Click PERF MONITORING beside the window title to pause or record: red is recording, grey is paused.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Keep a rolling buffer of typing, rendering, saving and main-thread timings locally. No conversations, key characters or credentials are recorded. Nothing is uploaded.")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Keep the last \(Int(capture.history)) seconds").monospacedDigit()
+                Slider(value: $capture.history, in: 30...600, step: 10)
+                    .accessibilityLabel("History in seconds")
+            }.disabled(capture.busy)
+            HStack(spacing: 14) {
+                Button("Export…") { capture.export() }
+                    .disabled(capture.file == nil || capture.busy)
+            }
+            Text(capture.status).foregroundStyle(.secondary).accessibilityIdentifier("performanceCaptureStatus")
+            if let error = capture.exportError { Text(error).foregroundStyle(.red) }
+            Text("You can close Settings while monitoring. Clicking the red PERF MONITORING button freezes the recent buffer; clicking it again when grey starts a new buffer. Off also disables monitoring at launch. Export saves the last paused buffer, which stays saved until you pause again.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text("GitHub banner").font(.headline)
+            if Store.shared.sessions.contains(where: { $0.feedbackRepository != nil }) {
+                Button("Trigger GitHub banner") { FeedbackInvitation.shared.triggerTestBanner() }
+                Text("Shows the blue banner now, beside each agent that enables it. This is only a test: it doesn’t count as this release’s invitation or record that you gave feedback. Close it with its X.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("No agent shows the feedback banner yet. Turn on “Show the feedback banner for this repository” in Agent Setup to test it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Run by the ordinary test.sh self-test, with isolated preferences and capture files.
+func performanceDebugSelfTests(_ check: (Bool, String) -> Void) {
+    let suite = "Converse.PerformanceTests." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let standardBefore = ["performanceRecordOnLaunch", "performanceHistorySeconds"].map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
+    defer {
+        defaults.removePersistentDomain(forName: suite)
+        try? FileManager.default.removeItem(at: folder)
+    }
+    let probe = PerformanceDebugState()
+    probe.initialize(folder: folder, defaults: defaults, info: [:], environment: [:])
+    check(!probe.automatic && defaults.object(forKey: "performanceRecordOnLaunch") == nil && defaults.object(forKey: "performanceHistorySeconds") == nil, "Production recording/history defaults do not become saved user choices")
+    probe.initialize(folder: folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    check(probe.automatic && defaults.object(forKey: "performanceRecordOnLaunch") == nil, "Development recording default remains computed")
+    probe.turnOff(); probe.history = 120
+    probe.initialize(folder: folder, defaults: defaults, info: ["ConverseDevelopmentBuild": true], environment: [:])
+    check(!probe.automatic && probe.history == 120 && defaults.object(forKey: "performanceRecordOnLaunch") as? Bool == false, "Explicit Off and history survive initialization using injected preferences")
+    probe.setMonitoringEnabled(true, folder: folder)
+    check(probe.recording && probe.automatic && defaults.bool(forKey: "performanceRecordOnLaunch"), "Monitoring On starts capture and remembers the launch choice")
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 125)
+    probe.pause()
+    let deadline = Date().addingTimeInterval(5)
+    while probe.busy && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    guard let file = probe.file, let bytes = try? Data(contentsOf: file), !probe.busy else { check(false, "Controller pause writes isolated capture"); return }
+    probe.setMonitoringEnabled(true, folder: folder)
+    check(probe.paused && !probe.recording && (try? Data(contentsOf: file)) == bytes, "Monitoring On while paused preserves the frozen capture")
+    probe.record(folder: folder)
+    PerformanceCapture.shared.recordForTesting(.keyDelivery, milliseconds: 500)
+    probe.setMonitoringEnabled(false, folder: folder)
+    check(!probe.recording && !probe.paused && probe.file == file && (try? Data(contentsOf: file)) == bytes, "Record then Off preserves the previous paused export bytes")
+    let standardAfter = ["performanceRecordOnLaunch", "performanceHistorySeconds"].map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
+    check(standardAfter == standardBefore, "Controller regression tests never alter standard recording or history preferences")
 }

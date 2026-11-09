@@ -26,6 +26,27 @@ struct Message: Codable, Identifiable, Equatable {
     var finalReply: String? = nil
     // Older archives have no message times. Leave those unknown on decode.
     var createdAt: Date? = Date()
+    // Came from a .converse file. Its text never captures files from this Mac.
+    var imported: Bool? = nil
+    // Inject all parts, so a typed prompt merged with switchboard traffic
+    // stays visible. Presentation only; `text` is what was sent.
+    var components: [MessageComponent]? = nil
+    // Keep `==` compiler-synthesized: the transcript's prepared-message cache
+    // keys on whole-Message equality, so it must cover `components` too.
+}
+extension Message {
+    // Synthesized decoding, except that unreadable Inject all parts never
+    // fail the archive: the message keeps its text and shows whole.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        images = try c.decode([String].self, forKey: .images)
+        delays = try c.decodeIfPresent([DelayMark].self, forKey: .delays)
+        finalReply = try c.decodeIfPresent(String.self, forKey: .finalReply)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
+        imported = try c.decodeIfPresent(Bool.self, forKey: .imported)
+        components = c.decodeComponents(forKey: .components)
+    }
 }
 struct ToolStatus: Codable {
     var model = "not reported"
@@ -83,6 +104,9 @@ struct SavedSession: Codable {
     // This pane's text size; nil follows the global default.
     var textSize: Double? = nil
     var transcriptLimits: TranscriptLimits? = nil
+    // The highest message number transcript limits have deleted, so retained
+    // messages keep their numbers. Absent means nothing was trimmed.
+    var trimmedMessageNumber: Int? = nil
 }
 final class Session: ObservableObject, Identifiable {
     let id: UUID
@@ -141,9 +165,12 @@ final class Session: ObservableObject, Identifiable {
     var messageNumberOffset = 0 { didSet { if messageNumberOffset != oldValue { messagesRevision &+= 1 } } }
     private var numberedMessagesRevision: UInt64?
     private var cachedMessageNumbers: [UUID: Int] = [:]
+    // Local sessions only (persisted): numbering continues after trimming.
+    // The pane counts from messageNumberOffset, so the two move together.
+    var trimmedMessageNumber = 0 { didSet { if trimmedMessageNumber != oldValue { messageNumberOffset = trimmedMessageNumber; messagesRevision &+= 1 } } }
     func transcriptMessageNumbers() -> [UUID: Int] {
         if numberedMessagesRevision != messagesRevision {
-            cachedMessageNumbers = Store.transcriptMessageNumbers(messages)
+            cachedMessageNumbers = Store.transcriptMessageNumbers(messages, after: trimmedMessageNumber)
             numberedMessagesRevision = messagesRevision
         }
         return cachedMessageNumbers
@@ -165,6 +192,7 @@ final class Session: ObservableObject, Identifiable {
     var switchboardProgress: (revision: UInt64, at: Date)?
     var switchboardTurnStart: Int?
     var switchboardHop = 0
+    var feedbackHumanTurn = false
     var interrupted = false
     var resumeAfterInterrupt = false
     // Queued prompt IDs whose archive write is still in flight, or failed
@@ -188,6 +216,8 @@ final class Session: ObservableObject, Identifiable {
     // Remote viewers' unseen marker: the newest assistant response this home
     // holds. A running turn's partial reply never counts until it finishes.
     var lastResponseAt: Date? { Session.lastResponseAt(messages, busy: busy) }
+    // Recently changed sidebar sort: the newest message either way, else creation.
+    var lastChangedAt: Date { messages.last { $0.createdAt != nil }?.createdAt ?? createdAt }
     static func lastResponseAt(_ messages: [Message], busy: Bool) -> Date? {
         var candidates = messages[...]
         if busy, let turn = messages.lastIndex(where: { $0.role == "user" }) { candidates = messages[..<turn] }
@@ -271,6 +301,7 @@ final class Session: ObservableObject, Identifiable {
         switchboardTeachingVersion = saved.switchboardTeachingVersion ?? (saved.switchboardEnabled == true ? 1 : nil)
         teachingBannerDismissed = saved.teachingBannerDismissed; textSize = saved.textSize
         transcriptLimits = saved.transcriptLimits ?? TranscriptLimits()
+        trimmedMessageNumber = max(0, saved.trimmedMessageNumber ?? 0); messageNumberOffset = trimmedMessageNumber
         switchboardLastRecoveryAt = saved.switchboardLastRecoveryAt
         switchboardObligations = saved.switchboardObligations ?? []; switchboardExpectations = saved.switchboardExpectations ?? []
         // An interrupted supervised turn is uncertain after restart, never auto-replayed.
@@ -293,7 +324,7 @@ final class Session: ObservableObject, Identifiable {
     convenience init(entry: Entry) {
         self.init(SavedSession(id: UUID(uuidString: MuseStatusProbe.commandID())!, entry: entry, title: "New conversation", messages: [], draft: "", attachments: [], remoteID: nil, started: false))
     }
-    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize, transcriptLimits: transcriptLimits) }
+    var saved: SavedSession { SavedSession(id: id, entry: entry, title: title, messages: messages, draft: draft, attachments: attachments, remoteID: remoteID, started: started, toolStatus: toolStatus, choices: choices, pending: pending, switchboardEnabled: switchboardEnabled, switchboardHandled: switchboardHandled, switchboardObligations: switchboardObligations, switchboardExpectations: switchboardExpectations, switchboardLastRecoveryAt: switchboardLastRecoveryAt, createdAt: createdAt, titleUpdatedAt: titleUpdatedAt, agent: agent, compactionInProgress: compacting, lastCompactedAt: lastCompactedAt, supportTeachingVersion: supportTeachingVersion, supportAssistant: supportAssistant, clearedThroughMessageID: clearedThroughMessageID, unseenResponse: unseenResponse ? true : nil, importedTranscriptPending: handoffPending != nil ? true : nil, handoffPending: handoffPending, freshConversationID: freshConversationID, restoreContext: restoreContext, switchboardTeachingVersion: switchboardTeachingVersion, teachingBannerDismissed: teachingBannerDismissed, textSize: textSize, transcriptLimits: transcriptLimits, trimmedMessageNumber: trimmedMessageNumber > 0 ? trimmedMessageNumber : nil) }
 }
 /// Writes archives off the main thread: one serial queue, newest snapshot per
 /// folder wins, at most one background write per `minimumInterval`; checked
@@ -357,9 +388,9 @@ final class ArchiveWriter {
 }
 struct Archive: Codable { var entries: [Entry]; var sessions: [SavedSession]; var accounts: [AccountProfile]? = nil; var setupCompleted: Bool? = nil; var groupTellReceipts: [GroupTellReceipt]? = nil; var participantReceipts: [ParticipantMutationReceipt]? = nil; var paneTextSize: Double? = nil }
 final class Store: ObservableObject {
-    static func transcriptMessageNumbers(_ messages: [Message]) -> [UUID: Int] {
-        var result: [UUID: Int] = [:], number = 0
-        for message in messages where message.role != "activity" {
+    static func transcriptMessageNumbers(_ messages: [Message], after start: Int = 0) -> [UUID: Int] {
+        var result: [UUID: Int] = [:], number = max(0, start)
+        for message in messages where message.role != "activity" && !(message.role == "notice" && TranscriptStyle.isQueueReceipt(message.text)) {
             guard TranscriptStyle.blockContentLength(visibleText(message.text)) > 0 || !message.images.isEmpty else { continue }
             number += 1; result[message.id] = number
         }
@@ -385,6 +416,9 @@ final class Store: ObservableObject {
     var agentCommandAvailable: (Entry) -> Bool = { ProviderCommand.resolve($0.command) != nil }
     let responseImageLoader = ResponseImageLoader()
     private(set) var applicationQuitting = false
+    /// Counts writes of closed-session snapshots and handoff files, so image
+    /// cleanup knows when a reference may have moved from memory to disk.
+    var imageReferenceFileWrites = 0
     var usesInteractiveMuse = ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil
     let identityFolder: URL
     var loginFileOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
@@ -465,12 +499,16 @@ final class Store: ObservableObject {
     /// and returns the expensive part, encoding and the atomic write, to run on
     /// ArchiveWriter's queue.
     private func archiveWrite(source: String) -> (generation: Int, write: () throws -> Void) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.archiveSnapshot, measurement) }
         ArchiveWriter.generation += 1
         let generation = ArchiveWriter.generation
         let archive = Archive(entries: entries, sessions: sessions.map(\.saved), accounts: accounts, setupCompleted: setupCompleted, groupTellReceipts: groupTellReceipts, participantReceipts: participantReceipts, paneTextSize: paneTextSize == PaneTextSize.standard ? nil : paneTextSize)
         let summary = ConfigurationAudit.SaveSummary(sessions)
         let audit = configurationAudit, url = folder.appendingPathComponent("sessions.json")
         return (generation, {
+            let measurement = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.archiveEncodeWrite, measurement) }
             do {
                 let data = try JSONEncoder().encode(archive)
                 audit.willSave(summary, data: data, source: source)
@@ -485,6 +523,8 @@ final class Store: ObservableObject {
     /// Writes now and reports failure. Use where a caller must know the save
     /// succeeded (it waits for the archive queue); ordinary saves use save().
     func saveChecked(file: String = #fileID, line: Int = #line, function: String = #function) throws {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.checkedSave, measurement) }
         let source = "\(file):\(line) \(function)"
         let began = ProcessInfo.processInfo.systemUptime
         defer {
@@ -509,7 +549,8 @@ final class Store: ObservableObject {
         if entry.accountDirectory == nil, let profile = (entry.accountID.flatMap { id in accounts.first { $0.id == id && $0.engine == entry.engine } } ?? (entry.accountID == nil ? preferredLogin(engine: entry.engine) : nil)) {
             entry.accountID = profile.id; entry.accountName = profile.name; entry.accountDirectory = profile.directory; entry.useDefaultAccountStore = profile.useDefaultStore
         }
-        let s = Session(entry: entry); sessions.append(s); attachIdentity(s); if persist { save() }; return s
+        let s = Session(entry: entry); s.transcriptLimits = TranscriptLimits.newSessionDefault
+        sessions.append(s); attachIdentity(s); if persist { save() }; return s
     }
     func stop(_ s: Session) {
         MainActor.assumeIsolated { if AgentConversation.shared.owns(s) { AgentConversation.shared.stop(resumeQueued: false) } }
@@ -567,7 +608,7 @@ final class Store: ObservableObject {
         // A first-run teaching rides with this message; the queue keeps it if the turn cannot start.
         let preamble = firstRun.teachIfNeeded(s)
         if preamble != nil || s.busy || !s.pending.isEmpty || claudeLiveBlocks(s, images: s.attachments) {
-            var prompt = PendingPrompt(text: s.draft, images: s.attachments)
+            var prompt = PendingPrompt(typed: true, text: s.draft, images: s.attachments)
             prompt.hiddenPreamble = preamble
             if interrupt { s.pending.insert(prompt, at: 0) } else { s.pending.append(prompt) }
             s.draft = ""; s.attachments = []; s.queuePaused = false
@@ -576,8 +617,13 @@ final class Store: ObservableObject {
             else if !s.busy { runNext(s) }
             save(); return
         }
-        send(s)
+        send(s, input: PendingPrompt(typed: true, text: s.draft, images: s.attachments))
     }
+    static let injectNothingQueued = "Queue already empty; nothing to inject."
+    static let injectItemGone = "That message already started or was removed. Nothing was injected."
+    /// Automatic dequeue can win the race with an inject request. These
+    /// results are quiet no-ops, not failures: no notice, no interrupt.
+    static func injectIsNoOp(_ result: String?) -> Bool { result == injectNothingQueued || result == injectItemGone }
     @discardableResult
     func injectPending(_ s: Session, id: UUID? = nil) -> String? {
         func refused(_ detail: String) -> String {
@@ -586,9 +632,13 @@ final class Store: ObservableObject {
             }
             saveSoon(); return detail
         }
+        let hadQueue = !s.pending.isEmpty
         sanitizeGroupQueue(s)
         if s.changingSetting { return refused("Inject not applied: a session setting is still changing. Wait for its result, then try again.") }
-        if s.pending.isEmpty { return refused("Inject not applied: the queue is already empty. Nothing was sent.") }
+        if s.pending.isEmpty {
+            if hadQueue { return refused("Inject not applied: the queued group messages were discarded because their senders are no longer in this group. Nothing was sent.") }
+            return id == nil ? Store.injectNothingQueued : Store.injectItemGone
+        }
         if s.interrupted && s.resumeAfterInterrupt && s.injectionTargetID != nil {
             guard (id == nil && s.injectionAll) || id == s.injectionTargetID else {
                 return refused("Inject not applied: another queued prompt is already being injected. Wait for it to start before choosing a different item.")
@@ -596,9 +646,7 @@ final class Store: ObservableObject {
             s.injectionNotice = "Interrupting — your queued prompt is next"; return nil
         }
         if let id {
-            guard let index = s.pending.firstIndex(where: { $0.id == id }) else {
-                return refused("Inject not applied: that queued item is no longer available. The queue has been refreshed; nothing else was sent.")
-            }
+            guard let index = s.pending.firstIndex(where: { $0.id == id }) else { return Store.injectItemGone }
             let prompt = s.pending.remove(at: index)
             s.pending.insert(prompt, at: 0)
         } else {
@@ -684,7 +732,7 @@ final class Store: ObservableObject {
         // A separately edited draft stays editable while queued messages run.
         let draft = s.draft, attachments = s.attachments
         let next = s.pending.removeFirst(); s.draft = next.text; s.attachments = next.images
-        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble)
+        send(s, switchboardHop: next.switchboardHop ?? 0, agentLoopTick: next.agentLoopTick == true, supportContinuation: next.supportContinuation == true, supportAutonomous: next.autonomous == true || next.agentLoopTick == true, clearDisplayBeforeReply: next.clearDisplayBeforeReply == true, displayNotice: next.displayNotice, hiddenPreamble: next.hiddenPreamble, input: next)
         if !s.busy { s.pending.insert(next, at: 0); s.queuePaused = true }
         else { switchboardStarted(s, prompt: next) }
         if s.injectionTargetID == next.id {
@@ -705,6 +753,7 @@ final class Store: ObservableObject {
         let completedTurn = success && !s.interrupted, turnCompletion = s.turnCompletion
         s.turnCompletion = nil
         if Workspace.shared.flagsUnseenResponse(s, success: success, interrupted: s.interrupted) { s.unseenResponse = true }
+        FeedbackInvitation.shared.completedTurn(success: success, interrupted: s.interrupted, humanDirected: s.feedbackHumanTurn && turnCompletion == nil && s.agent == nil && s.switchboardHop == 0 && !s.supportAutonomous && !s.supportContinuation && s.supportProbeCompletion == nil)
         importResponseImages(s)
         finishSupportProbe(s, success: success)
         if success && !s.interrupted { processAppSupport(s); processSwitchboard(s) }
@@ -745,7 +794,7 @@ final class Store: ObservableObject {
         turnCompletion?(completedTurn)
         if shouldRun { DispatchQueue.main.async { self.runNext(s) } }
     }
-    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil) {
+    func send(_ s: Session, switchboardHop: Int = 0, agentLoopTick: Bool = false, preservingAgentDraft: (text: String, images: [String])? = nil, supportContinuation: Bool = false, supportAutonomous: Bool = false, clearDisplayBeforeReply: Bool = false, displayNotice: String? = nil, hiddenPreamble: String? = nil, input: PendingPrompt? = nil) {
         guard s.entry.engine != "support", !s.isUnboundImport else { return }
         if s.supportAssistant && !setupCompleted && s.supportProbeCompletion == nil { return }
         guard !s.needsAgentSetup else {
@@ -774,8 +823,12 @@ final class Store: ObservableObject {
         s.supportContinuation = supportContinuation; s.supportAutonomous = supportAutonomous || agentLoopTick || preservingAgentDraft != nil
         if !supportContinuation { s.supportActionCount = 0 }
         s.supportPendingCommand = nil
+        // Only composer text counts. App-generated, relayed and handoff prompts never do.
+        s.feedbackHumanTurn = input?.humanTyped == true
         s.switchboardTurnStart = s.messages.count; s.switchboardHop = switchboardHop
-        s.messages.append(Message(role: "user", text: text, images: images))
+        // Inject all parts render separately; text that differs from the queued input shows whole.
+        let components = input.flatMap { TranscriptStyle.components($0.messageComponents, from: $0.text, to: text) { $0 } }
+        s.messages.append(Message(role: "user", text: text, images: images, components: components))
         if let context = s.restoreContext { s.restoreRetry = (text, context) }
         s.restoreContext = nil
         if clearDisplayBeforeReply {
@@ -804,11 +857,11 @@ final class Store: ObservableObject {
             prompt += "\n\n" + localContext(s, directory: directory)
             let imageFolder = responseImageFolder(s)
             try? FileManager.default.createDirectory(at: imageFolder, withIntermediateDirectories: true)
-            prompt += "\n[Converse image output: save images you create or download in " + imageFolder.path + "; include each as ![caption](file:///absolute/path.png) in your reply. Converse displays these in the conversation, including on remote devices. Do not open Preview or another desktop viewer.]"
+            prompt += "\n" + ResponseImages.deliveryReminder(output: imageFolder)
         }
         if !images.isEmpty { prompt += "\n\nAttached image files (read these images):\n" + images.joined(separator: "\n") }
         if s.entry.engine == "muse" && usesInteractiveMuse {
-            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID); return
+            sendMuse(s, prompt: prompt, display: text, images: images, responseID: responseID, input: input); return
         }
         if let live = s.claudeLive { deliverClaudeLive(s, live: live, prompt: prompt, responseID: responseID); save(); return }
         switch s.entry.engine {
@@ -906,7 +959,7 @@ final class Store: ObservableObject {
             }
         }
     }
-    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = []) {
+    func sendMuse(_ s: Session, prompt: String, display: String, images: [String], responseID: UUID, serverArguments: [String] = [], input: PendingPrompt? = nil) {
         let connection = MuseConnection(sessionID: s.remoteID ?? s.conversationID.uuidString)
         s.muse = connection; s.museItems = [:]; s.requests = []; s.requestError = ""; s.status = "Connecting…"
         connection.event = { [weak self, weak s] method, params in
@@ -932,7 +985,9 @@ final class Store: ObservableObject {
                            s.messages[index - 1].images == images {
                             s.messages.removeSubrange((index - 1)...index)
                         }
-                        s.pending.insert(PendingPrompt(switchboardHop: s.switchboardHop, text: display, images: images), at: 0)
+                        // Inject all parts and typed flags travel with it, so the retried
+                        // message renders the same way.
+                        s.pending.insert((input ?? PendingPrompt(text: display, images: images)).held(text: display, images: images, switchboardHop: s.switchboardHop), at: 0)
                         s.interrupted = false; s.resumeAfterInterrupt = false; s.queuePaused = true
                         self.finishMuse(s, status: "Session in use · input held", notice: "Muse has this session open in another host. This prompt was not submitted and is held in the paused queue. Close the other host, then choose Resume queue or Inject now. Your conversation identity and draft are unchanged.")
                     } else { self.finishMuse(s, status: "Could not open session", notice: error.localizedDescription) }
@@ -1291,6 +1346,7 @@ final class Store: ObservableObject {
         let deleted = folder.appendingPathComponent("Deleted Sessions")
         try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
         try JSONEncoder().encode(s.saved).write(to: deleted.appendingPathComponent(s.id.uuidString + ".json"), options: .atomic)
+        imageReferenceFileWrites += 1
         try closeIdentity(s)
         sessions.remove(at: index)
         if let receipt { participantReceipts.append(receipt) }
@@ -1404,6 +1460,7 @@ final class Store: ObservableObject {
         guard let data = line.data(using: .utf8), let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             activity(line, session: s); saveSoon(); return
         }
+        CharacterLatencyProbe.shared.received(obj, session: s)
         updateReportedStatus(obj, session: s)
         var text: String?; var replace = false; var delta = false; var startsTextBlock = false
         let type = obj["type"] as? String ?? ""
@@ -1679,14 +1736,33 @@ final class ConversationScrollView: NSScrollView {
     func revealInitialTail() { initialTailPending = true; needsLayout = true }
     /// An update that arrived while detached; see ScrollingConversation.updateNSView.
     var renderWhenAttached: (() -> Void)?
+    var initialRenderPending = false
+    private(set) var initialContentWidth: CGFloat?
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil, let render = renderWhenAttached { renderWhenAttached = nil; render() }
+        // Mount the empty native view first. Pane sizing owns when its content
+        // becomes expensive: never render at the construction/default width.
+        if window != nil, renderWhenAttached != nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window, self.renderWhenAttached != nil else { return }
+                if let layout = WindowPaneLayout.forWindow(window) { layout.transcriptMounted() }
+                else {
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    self.renderAfterPaneArrangement()
+                }
+            }
+        }
         if initialTailPending { needsLayout = true }
+    }
+    func renderAfterPaneArrangement() {
+        guard window != nil, bounds.width > 0, bounds.height > 0, let render = renderWhenAttached else { return }
+        renderWhenAttached = nil; initialRenderPending = false
+        if initialContentWidth == nil { initialContentWidth = (documentView as? NSTextView)?.textContainer?.containerSize.width }
+        render()
     }
     override func layout() {
         super.layout()
-        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        guard window != nil, bounds.width > 0, bounds.height > 0, !initialRenderPending else { return }
         if initialTailPending {
             initialTailPending = false; tile(); jumpToLatest()
         } else if followState.following && !selecting && !isFindBarVisible { followLatest() }
@@ -1774,7 +1850,12 @@ final class ConversationScrollView: NSScrollView {
         followState.scroll(nearBottom: nearBottom && !selecting, now: ProcessInfo.processInfo.systemUptime)
         scheduleResume(); refreshLatest()
     }
-    override func scrollWheel(with event: NSEvent) { super.scrollWheel(with: event); recordScroll() }
+    override func scrollWheel(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .sessionScrollDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.sessionScrollHandling, measurement) }
+        super.scrollWheel(with: event); recordScroll()
+    }
     func followLatest() {
         guard !settlingTail, let text = documentView as? ConversationTextView else { return }
         settlingTail = true; defer { settlingTail = false }
@@ -1815,7 +1896,7 @@ final class ConversationScrollView: NSScrollView {
         guard !tiling else { return }
         tiling = true; defer { tiling = false }
         super.tile()
-        (documentView as? ConversationTextView)?.fitDocumentHeight()
+        if !initialRenderPending { (documentView as? ConversationTextView)?.fitDocumentHeight() }
         refreshLatest()
     }
 }
@@ -1864,6 +1945,14 @@ final class TranscriptFindClient: NSObject, NSTextFinderClient {
     }
 }
 final class ConversationTextView: NSTextView {
+    private var resizeMeasurement: PerformanceCapture.Span?
+    static func markResize(in view: NSView?) {
+        guard PerformanceCapture.shared.enabled, let view else { return }
+        if let text = view as? ConversationTextView, text.resizeMeasurement == nil {
+            text.resizeMeasurement = PerformanceCapture.shared.begin()
+        }
+        for child in view.subviews { markResize(in: child) }
+    }
     var explicitCursor = false
     var handlingSelectionGesture = false
     var findOwnsSelection = false
@@ -1885,18 +1974,37 @@ final class ConversationTextView: NSTextView {
         (enclosingScrollView as? ConversationScrollView)?.interaction()
     }
 
-    var loadImage: ((ResponseImageLink) -> Void)? { didSet { if loadImage == nil { hideImageHover() } } }
+    var loadImage: ((ResponseImageLink) -> Void)? { didSet { if loadImage == nil { hideImageHover() }; if (loadImage == nil) != (oldValue == nil) { updateTrackingAreas() } } }
     var imageHover: ResponseImageLoadControl?
-    private var imageHoverTracking: NSTrackingArea?
+    private(set) var imageHoverTracking: NSTrackingArea?
+    var tracksResponseImageHover: Bool { imageHoverTracking != nil }
+    // Move tracking delivers an event per pointer move and per scroll frame
+    // under a still pointer, so it exists only while a web image link can
+    // be hovered. Renders set this from the transcript's link attributes.
+    var hasImageLinks = false { didSet { if hasImageLinks != oldValue { updateTrackingAreas() } } }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let imageHoverTracking { removeTrackingArea(imageHoverTracking) }
+        if let imageHoverTracking { removeTrackingArea(imageHoverTracking); self.imageHoverTracking = nil }
+        guard hasImageLinks, loadImage != nil else { hideImageHover(); return }
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area); imageHoverTracking = area
     }
+    // While our area exists it is the reason moves arrive, and they only
+    // drive Load image. The default handler would add a synchronous
+    // window-server lookup and SwiftUI hover forwarding per move. (Plain
+    // moved events have no trackingArea; reading it raises.)
     override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.mouseHover, measurement) }
+        guard imageHoverTracking != nil else { super.mouseMoved(with: event); return }
         updateImageHover(convert(event.locationInWindow, from: nil))
+    }
+    static func containsImageLinks(_ storage: NSAttributedString, in range: NSRange) -> Bool {
+        let range = NSIntersectionRange(range, NSRange(location: 0, length: storage.length))
+        guard range.length > 0 else { return false }
+        var found = false
+        storage.enumerateAttribute(.converseImageLink, in: range) { value, _, stop in if value != nil { found = true; stop.pointee = true } }
+        return found
     }
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
@@ -2029,6 +2137,8 @@ final class ConversationTextView: NSTextView {
         if manager.groupingLevel > 1 { manager.endUndoGrouping() }
     }
     override func insertText(_ value: Any, replacementRange: NSRange) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.textInsertion, measurement) }
         prepareTypingUndoGroup()
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
@@ -2071,6 +2181,22 @@ final class ConversationTextView: NSTextView {
         setSelectedRange(NSRange(location: inputStart + min(caret, (replacement as NSString).length), length: 0))
         if manager.isUndoing { substitutionFeedback.rejected() }
     }
+    @objc func toggleBold(_ sender: Any?) { toggleInlineStyle(.bold, name: "Bold") }
+    @objc func toggleItalic(_ sender: Any?) { toggleInlineStyle(.italic, name: "Italic") }
+    /// ⌘B/⌘I in the draft: toggles Markdown markers in the draft text only.
+    private func toggleInlineStyle(_ style: LotInline.Style, name: String) {
+        guard isEditable, selectedRange().location >= inputStart else { return }
+        let draft = (string as NSString).substring(from: inputStart)
+        let selection = NSRange(location: selectedRange().location - inputStart, length: selectedRange().length)
+        guard NSMaxRange(selection) <= (draft as NSString).length else { return }
+        let result = LotInline.toggling(style, in: draft, selection: selection)
+        // Each ⌘B/⌘I is one event, so it is already its own native Undo step.
+        breakUndoCoalescing()
+        suppressSubstitutions = true; defer { suppressSubstitutions = false }
+        super.insertText(result.text, replacementRange: NSRange(location: inputStart, length: (draft as NSString).length))
+        setSelectedRange(NSRange(location: inputStart + result.selection.location, length: result.selection.length))
+        breakUndoCoalescing(); undoManager?.setActionName(name)
+    }
     private var substitutionUndo: (expected: String, replacement: String, caret: Int, inverseCaret: Int)?
     func retainedSubstitutionUndo(for draft: String) -> (() -> Void)? {
         guard let value = substitutionUndo, value.expected == draft, undoManager?.undoActionName == TextSubstitutions.undoName else { return nil }
@@ -2103,22 +2229,32 @@ final class ConversationTextView: NSTextView {
         let formatted: NSAttributedString
     }
     var copyBlocks: [CopyBlock] = []
-    override func copy(_ sender: Any?) {
+    override func copy(_ sender: Any?) { copySelection(to: .general) }
+    func copySelection(to board: NSPasteboard) {
         let range = selectedRange()
         guard let textStorage, range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= textStorage.length else { return }
         let plain = TranscriptClipboard.plainText(textStorage.attributedSubstring(from: range))
-        super.copy(sender)
-        NSPasteboard.general.setString(plain, forType: .string)
+        board.clearContents()
+        _ = writeSelection(to: board, types: writablePasteboardTypes)
+        board.setString(plain, forType: .string)
+    }
+    override func writeSelection(to board: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        let ranges = selectedRanges.map(\.rangeValue)
+        guard let textStorage, LocalImageFallback.hasFileLink(textStorage, in: ranges) else { return super.writeSelection(to: board, type: type) }
+        let selection = NSMutableAttributedString()
+        for range in ranges where NSMaxRange(range) <= textStorage.length { selection.append(textStorage.attributedSubstring(from: range)) }
+        return LocalImageFallback.writeSelection(selection, to: board, type: type) ?? super.writeSelection(to: board, type: type)
     }
     func copyBlock(_ index: Int, to pasteboard: NSPasteboard) {
         guard copyBlocks.indices.contains(index) else { return }
         let block = copyBlocks[index]
         pasteboard.clearContents()
         pasteboard.setString(block.source, forType: .string)
-        if let rtf = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+        let formatted = LocalImageFallback.withoutFileLinks(block.formatted)
+        if let rtf = try? formatted.data(from: NSRange(location: 0, length: formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
             pasteboard.setData(rtf, forType: .rtf)
         }
-        if let html = try? block.formatted.data(from: NSRange(location: 0, length: block.formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.html]) {
+        if let html = try? formatted.data(from: NSRange(location: 0, length: formatted.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.html]) {
             pasteboard.setData(html, forType: .html)
         }
     }
@@ -2208,6 +2344,13 @@ final class ConversationTextView: NSTextView {
     var trafficBlocks: [NSRange] = []
     func refreshDecorations() { (enclosingScrollView as? ConversationScrollView)?.refreshLatest(); layoutDraftImageButtons(); needsDisplay = true; enclosingScrollView?.verticalRulerView?.needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
+        defer {
+            if window?.isVisible == true, !visibleRect.isEmpty, dirtyRect.intersects(visibleRect) {
+                PerformanceCapture.shared.end(.resizeDraw, resizeMeasurement)
+                resizeMeasurement = nil
+            }
+            CharacterLatencyProbe.shared.didDraw(self, dirty: dirtyRect)
+        }
         super.draw(dirtyRect)
         guard let layout = layoutManager, let container = textContainer else { return }
         layout.ensureLayout(for: container)
@@ -2231,6 +2374,9 @@ final class ConversationTextView: NSTextView {
     var imagePaste: ((NSImage) -> Void)?
     var droppedFileSourceDevice: String?
     override func keyDown(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.keyHandling, measurement) }
         handlingSelectionGesture = true
         defer { handlingSelectionGesture = false }
         (enclosingScrollView as? ConversationScrollView)?.interaction()
@@ -2340,7 +2486,9 @@ struct ScrollingConversation: NSViewRepresentable {
     var onImageRemove: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(session) }
     func makeNSView(context: Context) -> NSScrollView {
+        let mount = PerformanceCapture.shared.begin()
         let scroll = ConversationScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 600))
+        scroll.initialRenderPending = true
         scroll.contentView = InputClipView()
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.borderType = .noBorder; scroll.backgroundColor = NSColor.textBackgroundColor
@@ -2369,20 +2517,23 @@ struct ScrollingConversation: NSViewRepresentable {
         text.imagePaste = inputEnabled ? (onImagePaste ?? { Store.shared.attach(session, image: $0) }) : nil
         text.imageRemove = inputEnabled ? (onImageRemove ?? { Store.shared.removeDraftImage(session, path: $0) }) : nil
         text.loadImage = Self.imageLoader(session)
-        text.isEditable = inputEnabled
+        text.isEditable = false // Enabled after the initial transcript is ready.
         text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
         context.coordinator.draftChanged = onDraftChanged
         scroll.documentView = text
         scroll.verticalRulerView = MessageNumberRuler(scroll: scroll, text: text)
         scroll.hasVerticalRuler = true; scroll.rulersVisible = lineNumbers
-        context.coordinator.render(text)
-        if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
-        if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
-        else { scroll.revealInitialTail() } // Startup: wait for the actual pane width and height.
-        DispatchQueue.main.async {
-            // A newly mounted pane must not steal focus from a question answer,
-            // settings field, or another pane's draft.
+        scroll.renderWhenAttached = { [weak coordinator = context.coordinator, weak text, weak scroll] in
+            guard let coordinator, let text, let scroll else { return }
+            let capture = PerformanceCapture.shared
+            capture.measure(.transcriptInitialRender) { coordinator.render(text) }
+            text.isEditable = text.submit != nil // Use the latest permission from updateNSView.
+            if let selection = session.textSelection, NSMaxRange(selection) <= (text.string as NSString).length { text.setSelectedRange(selection) }
+            if let origin = session.textScrollOrigin { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
+            else { scroll.revealInitialTail() }
+            capture.end(.transcriptMount, mount)
+            // A newly mounted pane must not steal focus from another input.
             guard let window = text.window, window.isKeyWindow,
                   window.firstResponder == nil || window.firstResponder === window else { return }
             window.makeFirstResponder(text)
@@ -2399,7 +2550,7 @@ struct ScrollingConversation: NSViewRepresentable {
         if let text = scroll.documentView as? ConversationTextView {
             text.droppedFileSourceDevice = droppedFileSourceDevice
             text.fontSize = CGFloat(textSize ?? Store.shared.textSize(for: session))
-            text.isEditable = inputEnabled
+            text.isEditable = inputEnabled && (scroll as? ConversationScrollView)?.initialRenderPending != true
             text.teachApp = Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachAppSupport(session) } : nil
         text.teachSession = onTeachSwitchboard ?? (Store.shared.sessions.contains(where: { $0.id == session.id }) ? { Store.shared.teachSwitchboard(session) } : nil)
             text.submit = inputEnabled ? context.coordinator.submissionHandler(text, action: onSubmit ?? { Store.shared.submit(session) }) : nil
@@ -2410,6 +2561,7 @@ struct ScrollingConversation: NSViewRepresentable {
             // moved to another pane). Rendering there lays out the whole
             // history at a meaningless width, once per detached copy; catch up
             // if the view is attached again instead.
+            if let conversation = scroll as? ConversationScrollView, conversation.initialRenderPending { return }
             if let conversation = scroll as? ConversationScrollView, scroll.window == nil {
                 conversation.renderWhenAttached = { [weak coordinator = context.coordinator, weak text] in
                     if let coordinator, let text { coordinator.render(text); text.refreshDecorations() }
@@ -2427,6 +2579,8 @@ struct ScrollingConversation: NSViewRepresentable {
         } : nil
     }
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        // An abandoned empty mount must not overwrite the retained reading position.
+        guard (scroll as? ConversationScrollView)?.initialRenderPending != true else { return }
         coordinator.session.textScrollOrigin = scroll.contentView.bounds.origin
         coordinator.session.textSelection = (scroll.documentView as? NSTextView)?.selectedRange()
     }
@@ -2438,7 +2592,8 @@ struct ScrollingConversation: NSViewRepresentable {
         var renderedMessageNumberOffset = 0
         var renderedAttachments: [String] = []
         var renderedFontSize: CGFloat?
-        var messageStarts: [UUID: Int] = [:]
+        // Boundaries belong to occurrences, not IDs: imported history may repeat an ID.
+        var messageStarts: [Int] = []
         var expandedDisclosures: Set<UUID> = []
         private var disclosureNeedsRender = false
         private var renderedCollapse: Bool?
@@ -2448,13 +2603,52 @@ struct ScrollingConversation: NSViewRepresentable {
         /// Renders into a text view outside any window after its first render.
         static private(set) var detachedRenders = 0
         private(set) var lastReplacementStart = 0
-        // Rendered Markdown and the pane size it was scaled to.
-        var markdownCache: [UUID: (String, NSAttributedString, CGFloat)] = [:]
+        private struct PreparedMessage {
+            let message: Message
+            var fontSize: CGFloat
+            let collapse: Bool
+            let expanded: Bool
+            let dateEnvironment: String
+            let resolvedNames: [(String, String?)]
+            var body: NSAttributedString
+            var formattedCopy: NSAttributedString?
+            let traffic: Bool
+            /// Inject all traffic parts, relative to `body`.
+            let segmentTraffic: [NSRange]
+        }
+        // Per-pane and pruned to displayed history; retained bodies are immutable.
+        private var preparedMessages: [UUID: PreparedMessage] = [:]
+        // Retain assembled runs as well as parsed bodies. Streaming replaces only
+        // the changed suffix; it must not assemble or compare the entire archive.
+        private let assembledDocument = NSMutableAttributedString(string: "")
+        private var assembledFontSize: CGFloat?
+        private var assembledImageSignatures: [String: String] = [:]
+        private var renderNames: [String: String] = [:]
+        private var missingRenderNames: Set<String> = []
+        private func nameForRender(_ id: String) -> String? {
+            if let name = renderNames[id] { return name }
+            if missingRenderNames.contains(id) { return nil }
+            if let name = resolveSessionName(id) { renderNames[id] = name; return name }
+            missingRenderNames.insert(id); return nil
+        }
+        private func imageSignature(_ path: String) -> String? {
+            guard let info = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+            return "\(path)|\(info[.size] ?? 0)|\((info[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        }
+        private var formattingObserver: NSObjectProtocol?
+        private static let renderProfilingEnabled = {
+            let environment = ProcessInfo.processInfo.environment
+            return environment["CONVERSE_RENDER_PROFILE"] == "1"
+                && environment["CONVERSE_TEST_COMMAND"] != nil && environment["CONVERSE_DATA_DIR"] != nil
+        }()
+        private(set) var messageAssemblyCount = 0
+        private(set) var messagePreparationCount = 0
+        var cachedPreparedMessageCount: Int { preparedMessages.count }
         private let imageCache = NSCache<NSString, NSTextAttachment>()
         private(set) var imagePreparationCount = 0
         func preparedImage(_ path: String) -> NSTextAttachment? {
-            guard let info = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
-            let key = "\(path)|\(info[.size] ?? 0)|\((info[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)" as NSString
+            guard let signature = imageSignature(path) else { return nil }
+            let key = signature as NSString
             if let cached = imageCache.object(forKey: key) { return cached }
             guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), let img = NSImage(data: bytes) else { return nil }
             let png: Data?
@@ -2477,9 +2671,17 @@ struct ScrollingConversation: NSViewRepresentable {
         var rendering = false
         var draftChanged: ((String) -> Void)?
         var resolveSessionName: (String) -> String? = { DeviceSyncService.shared.switchboardDisplayName($0) }
-        init(_ session: Session) { self.session = session }
+        init(_ session: Session) {
+            self.session = session
+            super.init()
+            // A 12/24-hour preference change can retain the same locale ID.
+            formattingObserver = NotificationCenter.default.addObserver(forName: NSLocale.currentLocaleDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.preparedMessages.removeAll()
+            }
+        }
         deinit {
             pendingRestyle?.cancel()
+            if let formattingObserver { NotificationCenter.default.removeObserver(formattingObserver) }
             if let hiddenRestyle { NotificationCenter.default.removeObserver(hiddenRestyle) }
         }
         func submissionHandler(_ text: ConversationTextView, action: @escaping () -> Void) -> () -> Void {
@@ -2519,6 +2721,13 @@ struct ScrollingConversation: NSViewRepresentable {
             if let draftChanged { draftChanged(session.draft) }
             else { Store.shared.saveSoon() }
         }
+        // Test seams exercise the native link delegate without opening Finder.
+        var localImageIsHome: (() -> Bool)?
+        var localImageReveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
+        var localImageNotice: (String, NSWindow?) -> Void = { message, window in
+            let alert = NSAlert(); alert.messageText = "Image not available here"; alert.informativeText = message
+            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        }
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
             if let url, url.scheme == "converse-disclosure", let id = url.host.flatMap(UUID.init(uuidString:)),
@@ -2526,6 +2735,15 @@ struct ScrollingConversation: NSViewRepresentable {
                text.textStorage?.attribute(TranscriptDisclosure.attribute, at: charIndex, effectiveRange: nil) as? String == id.uuidString {
                 if !expandedDisclosures.insert(id).inserted { expandedDisclosures.remove(id) }
                 disclosureNeedsRender = true; render(text); return true
+            }
+            if let url, url.isFileURL, let storage = textView.textStorage,
+               charIndex >= 0, charIndex < storage.length,
+               storage.attribute(LocalImageFallback.attribute, at: charIndex, effectiveRange: nil) as? URL == url {
+                let home = localImageIsHome?() ?? Store.shared.sessions.contains(where: { $0 === session })
+                if let notice = LocalImageFallback.follow(url, onHome: home, reveal: localImageReveal) {
+                    localImageNotice(notice, textView.window)
+                }
+                return true
             }
             if let url, AppSupport.handleLink(url) { return true }
             if let url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
@@ -2577,9 +2795,138 @@ struct ScrollingConversation: NSViewRepresentable {
             rendering = false
             lastRestyleAt = ProcessInfo.processInfo.systemUptime
         }
+        private func prepareMessage(_ message: Message, visible: String, fontSize: CGFloat,
+                                    bodyFont: NSFont, collapse: Bool, dateEnvironment: String,
+                                    base: [NSAttributedString.Key: Any]) -> PreparedMessage {
+            let expanded = expandedDisclosures.contains(message.id)
+            if var cached = preparedMessages[message.id], cached.message == message,
+               cached.collapse == collapse,
+               cached.expanded == expanded, cached.dateEnvironment == dateEnvironment,
+               cached.resolvedNames.allSatisfy({ nameForRender($0.0) == $0.1 }) {
+                // Bigger/Smaller already scaled the visible storage. On the next
+                // content update, scale the retained bodies instead of parsing
+                // the entire history again. Copies remain immutable and private
+                // to this pane; attachments use the separate image cache.
+                if cached.fontSize != fontSize {
+                    func scaled(_ value: NSAttributedString) -> NSAttributedString {
+                        let copy = NSMutableAttributedString(attributedString: value)
+                        PaneTextSize.scale(copy, by: fontSize / cached.fontSize)
+                        return NSAttributedString(attributedString: copy)
+                    }
+                    cached.body = scaled(cached.body)
+                    cached.formattedCopy = cached.formattedCopy.map(scaled)
+                    cached.fontSize = fontSize
+                    preparedMessages[message.id] = cached
+                }
+                return cached
+            }
+            var resolvedNames: [(String, String?)] = []
+            let resolveName: (String) -> String? = { [self] id in
+                let name = nameForRender(id)
+                resolvedNames.append((id, name))
+                return name
+            }
+            messagePreparationCount += 1
+            let body: NSMutableAttributedString
+            let disclosure: TranscriptDisclosure?
+            if !collapse { disclosure = nil }
+            else if message.role != "assistant", let cached = disclosureCache[message.id], cached.0 == visible { disclosure = cached.1 }
+            else {
+                disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveName)
+                // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
+                if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
+            }
+            // Inject all can merge traffic with typed input: each part renders on its own.
+            let segments = disclosure == nil && message.role == "user" ? TranscriptStyle.segments(visible, components: TranscriptStyle.components(message.components, from: message.text, to: visible, rewrite: Store.visibleText), resolveName: resolveName) : nil
+            let trafficSummary = segments != nil || !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveName)
+            var segmentTraffic: [NSRange] = []
+            if let disclosure {
+                body = disclosure.rendered(id: message.id, expanded: expanded, fontSize: fontSize, base: base)
+            } else if let summary = trafficSummary {
+                let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
+            } else if let segments {
+                body = NSMutableAttributedString(string: "")
+                for segment in segments {
+                    if body.length > 0 { body.append(NSAttributedString(string: "\n", attributes: base)) }
+                    guard let summary = segment.summary else {
+                        body.append(NSAttributedString(string: segment.text.trimmingCharacters(in: .newlines), attributes: base)); continue
+                    }
+                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+                    segmentTraffic.append(NSRange(location: body.length, length: (summary as NSString).length))
+                    body.append(NSAttributedString(string: summary, attributes: base.merging([.toolTip: segment.text, .paragraphStyle: oneLine]) { _, value in value }))
+                }
+            } else if message.role == "assistant" {
+                body = MarkdownText.render(visible)
+                PaneTextSize.scale(body, by: fontSize / CGFloat(PaneTextSize.standard))
+                let refs = TranscriptStyle.imageReferences(visible)
+                if !refs.isEmpty {
+                    body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                        guard let url = value as? URL, let ref = refs.first(where: { $0.url == url }) else { return }
+                        body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
+                    }
+                }
+            } else { body = NSMutableAttributedString(string: visible, attributes: base) }
+            // Copy keeps the full source/Markdown without inserted delay labels,
+            // matching the existing Copy Message representation.
+            let assistantCopy: NSAttributedString? = message.role == "assistant"
+                ? (disclosure != nil || trafficSummary != nil
+                   ? NSAttributedString(string: visible, attributes: base)
+                   : NSAttributedString(attributedString: body)) : nil
+            for mark in (trafficSummary == nil && disclosure == nil && segments == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
+                let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
+                let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
+                let at = min(renderedOffset, body.length)
+                body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
+            }
+            if let detector = linkDetector {
+                let value = body.string as NSString
+                for match in detector.matches(in: body.string, range: NSRange(location: 0, length: value.length)) {
+                    if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
+                }
+            }
+            if let timestamp = message.createdAt {
+                let hint = "Recorded " + timestamp.formatted(date: .abbreviated, time: .standard)
+                var ranges: [NSRange] = []
+                body.enumerateAttribute(.toolTip, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+                    if value == nil { ranges.append(range) }
+                }
+                for range in ranges { body.addAttribute(.toolTip, value: hint, range: range) }
+            }
+            let contentLength = TranscriptStyle.blockContentLength(body.string)
+            body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+            let traffic = segments == nil && (TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true)
+            if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
+            segmentTraffic = segmentTraffic.filter { NSMaxRange($0) <= body.length }
+            for range in segmentTraffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: range) }
+            if message.role == "user" {
+                body.addAttribute(.font, value: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
+            }
+            let formattedCopy: NSAttributedString?
+            if message.role == "user" || message.role == "assistant" {
+                formattedCopy = disclosure != nil || segments != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? assistantCopy! : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+            } else { formattedCopy = nil }
+            let result = PreparedMessage(message: message, fontSize: fontSize, collapse: collapse,
+                                         expanded: expanded, dateEnvironment: dateEnvironment,
+                                         resolvedNames: resolvedNames, body: NSAttributedString(attributedString: body),
+                                         formattedCopy: formattedCopy, traffic: traffic, segmentTraffic: segmentTraffic)
+            preparedMessages[message.id] = result
+            return result
+        }
         func render(_ text: ConversationTextView) {
+            defer { CharacterLatencyProbe.shared.bind(text, session: session) }
+            let measurement = PerformanceCapture.shared.begin()
+            defer { PerformanceCapture.shared.end(.transcriptRender, measurement) }
             let restoreSubstitutionUndo = text.retainedSubstitutionUndo(for: session.draft)
             let began = ProcessInfo.processInfo.systemUptime
+            let profile = Self.renderProfilingEnabled
+            var checkpoint = began
+            func stage(_ label: String) {
+                guard profile else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                print(String(format: "PROFILE %@ %.3f ms", label, (now - checkpoint) * 1000))
+                checkpoint = now
+            }
             defer {
                 let elapsed = ProcessInfo.processInfo.systemUptime - began
                 if elapsed > 0.15 { NSLog("Converse slow transcript render: %.0f ms, %d messages, %d prepared images", elapsed * 1000, session.messages.count, imagePreparationCount) }
@@ -2598,6 +2945,7 @@ struct ScrollingConversation: NSViewRepresentable {
                 historyChanged = historyChanged || previous != messages
                 renderedMessages = messages; seenMessagesRevision = session.messagesRevision
             }
+            let previousMessageNumbers = renderedMessageNumbers, previousNumberOffset = renderedMessageNumberOffset
             let numberingChanged = renderedMessageNumbers != session.messageNumbers || renderedMessageNumberOffset != session.messageNumberOffset
             historyChanged = historyChanged || numberingChanged
             let contentChanged = historyChanged
@@ -2632,11 +2980,49 @@ struct ScrollingConversation: NSViewRepresentable {
             let messages = renderedMessages ?? []
             let currentIDs = Set(messages.map(\.id))
             disclosureCache = disclosureCache.filter { currentIDs.contains($0.key) }
-            var common = 0
+            preparedMessages = preparedMessages.filter { currentIDs.contains($0.key) }
+            // Retention removes a leading range. Keep the remaining occurrences
+            // and their native layout instead of assembling the whole tail again.
+            var dropped = 0, common = 0
             if let previous {
-                while common < min(previous.count, messages.count) && previous[common] == messages[common] { common += 1 }
+                if let first = messages.first, previous.first != first,
+                   let index = previous.firstIndex(of: first) { dropped = index }
+                while common < min(previous.count - dropped, messages.count) && previous[dropped + common] == messages[common] { common += 1 }
             }
-            let unchangedPrefix = firstRender || restyle || disclosureChanged ? 0 : common == previous?.count ? historyEnd : previous.flatMap { common < $0.count ? messageStarts[$0[common].id] : nil } ?? 0
+            let candidateRemoval = dropped > 0 && dropped < messageStarts.count ? messageStarts[dropped] : 0
+            let removedLabels = text.messageLabels.filter { $0.location < candidateRemoval }.count
+            let numberingCompatible = previousNumberOffset + removedLabels == session.messageNumberOffset
+            let dateEnvironment = Locale.current.identifier + "|" + TimeZone.current.identifier
+            renderNames.removeAll(keepingCapacity: true); missingRenderNames.removeAll(keepingCapacity: true)
+            var reusable = 0
+            if !firstRender && !restyle && !disclosureChanged && numberingCompatible && assembledFontSize == text.fontSize {
+                for message in messages.prefix(common) {
+                    guard previousMessageNumbers[message.id] == session.messageNumbers[message.id] else { break }
+                    // Mutable names, locale and image files can invalidate an
+                    // otherwise unchanged message. Check them before retaining runs.
+                    let visible = Store.visibleText(message.text)
+                    if !visible.isEmpty || !message.images.isEmpty {
+                        guard let cached = preparedMessages[message.id], cached.message == message,
+                              cached.fontSize == text.fontSize, cached.collapse == collapse,
+                              cached.expanded == expandedDisclosures.contains(message.id),
+                              cached.dateEnvironment == dateEnvironment,
+                              cached.resolvedNames.allSatisfy({ nameForRender($0.0) == $0.1 }),
+                              message.images.allSatisfy({ imageSignature($0) == assembledImageSignatures[$0] }) else { break }
+                    }
+                    reusable += 1
+                }
+            }
+            var oldReuseEnd = dropped + reusable == previous?.count ? historyEnd
+                : (dropped + reusable < messageStarts.count ? messageStarts[dropped + reusable] : 0)
+            var removedPrefix = candidateRemoval
+            if reusable == 0 || oldReuseEnd > min(assembledDocument.length, current.length) || oldReuseEnd < removedPrefix {
+                reusable = 0; oldReuseEnd = 0; removedPrefix = 0; dropped = 0
+            }
+            let unchangedPrefix = oldReuseEnd - removedPrefix
+            // A trim that falls back to a full rebuild still moved the reader's text.
+            let trimAnchor = candidateRemoval > 0 ? text.resizeAnchor().map {
+                ConversationTextView.ResizeAnchor(character: max(0, $0.character - candidateRemoval), viewportY: $0.viewportY)
+            } : nil
             renderedAttachments = session.attachments
             historyBuildCount += 1
             let selection = text.selectedRange()
@@ -2650,13 +3036,23 @@ struct ScrollingConversation: NSViewRepresentable {
             rendering = true
             let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 2; paragraph.paragraphSpacing = 0
             let base: [NSAttributedString.Key: Any] = [.font: text.bodyFont, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
-            let document = NSMutableAttributedString(string: "")
+            stage("prepare")
+            let document = assembledDocument
+            document.deleteCharacters(in: NSRange(location: oldReuseEnd, length: document.length - oldReuseEnd))
+            if removedPrefix > 0 { document.deleteCharacters(in: NSRange(location: 0, length: removedPrefix)) }
+            assembledFontSize = text.fontSize
+            let imagePaths = Set(messages.flatMap(\.images) + session.attachments)
+            assembledImageSignatures = assembledImageSignatures.filter { imagePaths.contains($0.key) }
+            var profileImageMilliseconds = 0.0, profileBodyMilliseconds = 0.0
             func append(_ string: String, _ attrs: [NSAttributedString.Key: Any] = [:]) {
                 document.append(NSAttributedString(string: string, attributes: base.merging(attrs) { _, new in new }))
             }
             @discardableResult func image(_ path: String) -> Bool {
+                let imageBegan = profile ? ProcessInfo.processInfo.systemUptime : 0
+                defer { if profile { profileImageMilliseconds += (ProcessInfo.processInfo.systemUptime - imageBegan) * 1000 } }
+                assembledImageSignatures[path] = imageSignature(path)
                 guard let attachment = preparedImage(path) else { return false }
-                if document.length > 0 && !document.string.hasSuffix("\n") {
+                if document.length > 0 && document.mutableString.character(at: document.length - 1) != 10 {
                     let precedingStyle = document.attribute(.paragraphStyle, at: document.length - 1, effectiveRange: nil) as? NSParagraphStyle ?? paragraph
                     append("\n", [.paragraphStyle: precedingStyle])
                 }
@@ -2667,86 +3063,35 @@ struct ScrollingConversation: NSViewRepresentable {
                 preview.addAttributes(base.merging([.paragraphStyle: imageStyle]) { _, new in new }, range: NSRange(location: 0, length: preview.length))
                 document.append(preview); return true
             }
-            text.messageLabels = []
-            var messageNumber = max(0, session.messageNumberOffset)
-            text.userBlocks = []
-            text.trafficBlocks = []
-            text.copyBlocks = []
-            messageStarts = [:]
-            for message in messages {
-                messageStarts[message.id] = document.length
+            text.messageLabels = text.messageLabels.filter { $0.location >= removedPrefix && $0.location < oldReuseEnd }.map {
+                var label = $0; label.location -= removedPrefix; return label
+            }
+            var messageNumber = text.messageLabels.last?.number ?? max(0, session.messageNumberOffset)
+            func retainedRange(_ range: NSRange) -> NSRange? {
+                guard range.location >= removedPrefix, range.location < oldReuseEnd, NSMaxRange(range) <= oldReuseEnd else { return nil }
+                return NSRange(location: range.location - removedPrefix, length: range.length)
+            }
+            text.userBlocks = text.userBlocks.compactMap(retainedRange)
+            text.trafficBlocks = text.trafficBlocks.compactMap(retainedRange)
+            text.copyBlocks = text.copyBlocks.compactMap { block in
+                retainedRange(block.range).map { .init(range: $0, role: block.role, source: block.source, formatted: block.formatted) }
+            }
+            messageStarts = messageStarts.dropFirst(dropped).prefix(reusable).map { $0 - removedPrefix }
+            for message in messages.dropFirst(reusable) {
+                messageAssemblyCount += 1
+                messageStarts.append(document.length)
                 let visible = Store.visibleText(message.text)
                 if visible.isEmpty && message.images.isEmpty { continue }
-                let body: NSMutableAttributedString
-                let disclosure: TranscriptDisclosure?
-                if !collapse { disclosure = nil }
-                else if message.role != "assistant", let cached = disclosureCache[message.id], cached.0 == visible { disclosure = cached.1 }
-                else {
-                    disclosure = TranscriptDisclosure.parse(visible, role: message.role, resolveName: resolveSessionName)
-                    // Incoming lot JSON is expensive; outgoing summaries resolve mutable session names.
-                    if message.role != "assistant" { disclosureCache[message.id] = (visible, disclosure) }
-                }
-                let trafficSummary = !collapse && message.role == "assistant" ? nil : TranscriptStyle.trafficSummary(visible, resolveName: resolveSessionName)
-                if let disclosure {
-                    body = disclosure.rendered(id: message.id, expanded: expandedDisclosures.contains(message.id), fontSize: text.fontSize, base: base)
-                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
-                } else if let summary = trafficSummary {
-                    let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
-                    body = NSMutableAttributedString(string: summary, attributes: base.merging([.toolTip: visible, .paragraphStyle: oneLine]) { _, value in value })
-                    markdownCache[message.id] = (visible, NSAttributedString(string: visible, attributes: base), text.fontSize)
-                } else if message.role == "assistant" {
-                    if let cached = markdownCache[message.id], cached.0 == visible {
-                        body = NSMutableAttributedString(attributedString: cached.1)
-                        if cached.2 != text.fontSize {
-                            PaneTextSize.scale(body, by: text.fontSize / cached.2)
-                            markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
-                        }
-                    }
-                    else {
-                        body = MarkdownText.render(visible)
-                        PaneTextSize.scale(body, by: text.fontSize / CGFloat(PaneTextSize.standard))
-                        let refs = TranscriptStyle.imageReferences(visible)
-                        if !refs.isEmpty {
-                            body.enumerateAttribute(.link, in: NSRange(location: 0, length: body.length)) { value, range, _ in
-                                guard let url = value as? URL, let ref = refs.first(where: { $0.url == url }) else { return }
-                                body.addAttribute(.converseImageLink, value: ResponseImageLink(messageID: message.id, url: url, caption: ref.caption), range: range)
-                            }
-                        }
-                        markdownCache[message.id] = (visible, NSAttributedString(attributedString: body), text.fontSize)
-                    }
-                } else { body = NSMutableAttributedString(string: visible, attributes: base) }
-                for mark in (trafficSummary == nil && disclosure == nil ? message.delays ?? [] : []).sorted(by: { $0.offset > $1.offset }) {
-                    let sourceOffset = min(max(0, mark.offset), (visible as NSString).length)
-                    let renderedOffset = message.role == "assistant" ? MarkdownText.renderedOffset(in: visible, utf16Offset: sourceOffset) : sourceOffset
-                    let at = min(renderedOffset, body.length)
-                    body.insert(NSAttributedString(string: Store.delayLabel(mark.seconds) + " ", attributes: base.merging([.foregroundColor: NSColor.gray]) { _, new in new }), at: at)
-                }
-                if let detector = linkDetector {
-                    let value = body.string as NSString
-                    for match in detector.matches(in: body.string, range: NSRange(location: 0, length: value.length)) {
-                        if let url = match.url, ["http", "https"].contains(url.scheme ?? "") { body.addAttribute(.link, value: url, range: match.range) }
-                    }
-                }
-                if let timestamp = message.createdAt {
-                    let hint = "Recorded " + timestamp.formatted(date: .abbreviated, time: .standard)
-                    var ranges: [NSRange] = []
-                    body.enumerateAttribute(.toolTip, in: NSRange(location: 0, length: body.length)) { value, range, _ in
-                        if value == nil { ranges.append(range) }
-                    }
-                    for range in ranges { body.addAttribute(.toolTip, value: hint, range: range) }
-                }
-                let contentLength = TranscriptStyle.blockContentLength(body.string)
-                body.deleteCharacters(in: NSRange(location: contentLength, length: body.length - contentLength))
+                let bodyBegan = profile ? ProcessInfo.processInfo.systemUptime : 0
+                let prepared = prepareMessage(message, visible: visible, fontSize: text.fontSize,
+                                              bodyFont: text.bodyFont, collapse: collapse,
+                                              dateEnvironment: dateEnvironment, base: base)
+                if profile { profileBodyMilliseconds += (ProcessInfo.processInfo.systemUptime - bodyBegan) * 1000 }
+                let body = prepared.body, traffic = prepared.traffic
                 if body.length == 0 && message.images.isEmpty { continue }
                 let start = document.length
-                let traffic = TranscriptStyle.isTraffic(message.text) || message.finalReply.map(TranscriptStyle.isTraffic) == true
-                if traffic { body.addAttribute(.foregroundColor, value: TranscriptPalette.traffic, range: NSRange(location: 0, length: body.length)) }
-                if message.role == "user" {
-                    body.addAttribute(.font, value: NSFontManager.shared.convert(text.bodyFont, toHaveTrait: .italicFontMask), range: NSRange(location: 0, length: body.length))
-                }
                 document.append(body)
-                if message.role == "user" || message.role == "assistant" {
-                    let formatted = disclosure != nil ? NSAttributedString(string: visible, attributes: base) : message.role == "assistant" ? markdownCache[message.id]!.1 : NSAttributedString(string: visible, attributes: body.length > 0 ? body.attributes(at: 0, effectiveRange: nil) : base)
+                if let formatted = prepared.formattedCopy {
                     text.copyBlocks.append(.init(range: NSRange(location: start, length: body.length), role: message.role, source: visible, formatted: formatted))
                 }
                 for path in message.images { image(path) }
@@ -2754,14 +3099,17 @@ struct ScrollingConversation: NSViewRepresentable {
                 messageNumber = session.messageNumbers[message.id].flatMap { $0 > 0 ? $0 : nil } ?? (messageNumber + 1)
                 text.messageLabels.append(TranscriptMessageLabel(location: start, number: messageNumber, prompt: message.role == "user", timestamp: message.createdAt))
                 let last = document.length - 1
-                let paragraphRange = (document.string as NSString).paragraphRange(for: NSRange(location: last, length: 0))
+                let paragraphRange = document.mutableString.paragraphRange(for: NSRange(location: last, length: 0))
                 let style = ((document.attribute(.paragraphStyle, at: last, effectiveRange: nil) as? NSParagraphStyle) ?? paragraph).mutableCopy() as! NSMutableParagraphStyle
                 style.paragraphSpacing = TranscriptStyle.blockSpacing
                 append("\n", [.paragraphStyle: style])
                 document.addAttribute(.paragraphStyle, value: style, range: NSRange(location: paragraphRange.location, length: document.length - paragraphRange.location))
                 if traffic { text.trafficBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
+                for range in prepared.segmentTraffic { text.trafficBlocks.append(NSRange(location: start + range.location, length: range.length)) }
                 if message.role == "user" { text.userBlocks.append(NSRange(location: start, length: max(0, document.length - start - 1))) }
             }
+            stage("assemble-history")
+            if profile { print(String(format: "PROFILE-SUBTOTAL bodies %.3f ms images %.3f ms", profileBodyMilliseconds, profileImageMilliseconds)) }
             historyEnd = document.length
             text.draftImages = []
             for path in session.attachments {
@@ -2777,17 +3125,16 @@ struct ScrollingConversation: NSViewRepresentable {
             // Layout preceding unchanged messages remains valid while an
             // assistant streams. Replacing the entire storage invalidates
             // every paragraph, even when only the final block changed.
-            var prefix = min(unchangedPrefix, document.length, current.length)
-            // A directory refresh can change an earlier traffic label without
-            // changing its stored message. Never reuse offsets unless the
-            // actual rendered prefix still matches the new document.
-            if prefix > 0 && current.substring(to: prefix) != (document.string as NSString).substring(to: prefix) {
-                prefix = 0
-            }
+            // The retained prefix was validated above, including mutable names,
+            // images and formatting. Avoid copying/comparing its entire string.
+            let prefix = unchangedPrefix
             lastReplacementStart = prefix
             text.readOnlyFinder.noteClientStringWillChange()
             if prefix > 0 {
-                text.textStorage?.replaceCharacters(in: NSRange(location: prefix, length: current.length - prefix), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
+                text.textStorage?.beginEditing()
+                text.textStorage?.replaceCharacters(in: NSRange(location: oldReuseEnd, length: current.length - oldReuseEnd), with: document.attributedSubstring(from: NSRange(location: prefix, length: document.length - prefix)))
+                if removedPrefix > 0 { text.textStorage?.deleteCharacters(in: NSRange(location: 0, length: removedPrefix)) }
+                text.textStorage?.endEditing()
             } else { text.textStorage?.setAttributedString(document) }
             text.configureDraftImageButtons()
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
@@ -2797,11 +3144,14 @@ struct ScrollingConversation: NSViewRepresentable {
             if session.draft.isEmpty && selection.length == 0 && !text.explicitCursor { text.setSelectedRange(NSRange(location: document.length, length: 0)) }
             else if editing || firstRender { text.setSelectedRange(NSRange(location: min(document.length, text.inputStart + offset), length: min(selection.length, max(0, document.length - text.inputStart - offset)))) }
             else {
-                let start = min(selection.location, document.length)
-                text.setSelectedRange(NSRange(location: start, length: min(selection.length, document.length - start)))
+                let start = min(max(0, selection.location - candidateRemoval), document.length)
+                let end = min(max(0, NSMaxRange(selection) - candidateRemoval), document.length)
+                text.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
             }
             text.typingAttributes = base.merging(draftStyle) { _, value in value }
-            text.layoutManager?.ensureLayout(for: text.textContainer!)
+            stage("replace-storage")
+            PerformanceCapture.shared.measure(.transcriptLayout) { text.layoutManager?.ensureLayout(for: text.textContainer!) }
+            stage("ensure-layout")
             text.fitDocumentHeight()
             if addedAttachment {
                 nativeScroll?.jumpToLatest()
@@ -2810,13 +3160,19 @@ struct ScrollingConversation: NSViewRepresentable {
                 if let nativeScroll { nativeScroll.followLatest() }
                 else { text.scrollRangeToVisible(NSRange(location: document.length, length: 0)) }
             }
-            else if let anchor { text.restore(anchor) }
+            else if let anchor = trimAnchor ?? anchor { text.restore(anchor) }
             else if let scroll {
                 let bounds = NSRect(origin: origin, size: scroll.contentView.bounds.size)
                 scroll.contentView.scroll(to: scroll.contentView.constrainBoundsRect(bounds).origin)
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
+            // Links before an unchanged prefix are still there; rescan only what was replaced.
+            if let storage = text.textStorage {
+                text.hasImageLinks = (prefix > 0 && text.hasImageLinks) || ConversationTextView.containsImageLinks(storage, in: NSRange(location: prefix, length: max(0, min(text.inputStart, storage.length) - prefix)))
+            }
+            stage("height-scroll")
             text.refreshDecorations(); text.refreshImageHover()
+            stage("decorations")
             rendering = false
         }
     }
@@ -2831,7 +3187,6 @@ struct Conversation: View {
                 Spacer()
                 Toggle("message numbers", isOn: $store.lineNumbers).toggleStyle(.checkbox).font(.caption).fixedSize()
                 Button { let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; if panel.runModal() == .OK { for url in panel.urls { if let image = NSImage(contentsOf: url) { Store.shared.attach(session, image: image) } } } } label: { Image(systemName: "paperclip") }.help("Attach image or paste a screenshot")
-                if !session.attachments.isEmpty { Button("Clear images") { session.attachments = []; Store.shared.saveSoon() } }
                 if session.busy { if session.requests.isEmpty && !session.status.hasPrefix("Waiting") { ProgressView().controlSize(.small) }; Button("Stop") { Store.shared.stop(session) } }
                 else if session.claudeLive != nil { Button("Stop") { Store.shared.stop(session) }.help("Stop Claude’s background task") }
             }.padding(.horizontal, 10).padding(.vertical, 5)
@@ -2842,8 +3197,9 @@ struct Conversation: View {
                 }.padding(.horizontal, 10).padding(.vertical, 3)
                 Divider()
             }
-            Divider()
+            Divider().background { if session.supportAssistant { FeedbackInvitationSurface() } }
             SessionTeachingBanner(store: store, session: session)
+            if session.supportAssistant { FeedbackInvitationBanner() }
             if session.needsSignIn && session.entry.engine != "muse" {
                 HStack {
                     Text("Sign in to this conversation’s account, or choose another account below.").font(.caption)
@@ -2977,7 +3333,6 @@ struct RootView: View {
                     sidebarPin
                     Text("Conversation").lineLimit(1).truncationMode(.tail).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(width: 24, height: 12).accessibilityHidden(true)
-                    Button(sidebarOrder.reordering ? "Done" : "Reorder") { sidebarOrder.reordering.toggle() }.frame(width: 98, alignment: .leading)
                 }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, 6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -3149,6 +3504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var helpController = ConverseHelpController()
     lazy var jollyController = MainActor.assumeIsolated { JollyWindowController() }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PerformanceDebugState.shared.initialize(folder: Store.shared.folder)
         AppDelegate.shared = self
         Store.shared.chooseImportProvider = { [weak self] in self?.chooseLogin($0) }
         Store.shared.agentSecret = { (try? AgentSecrets.read($0)) ?? nil }
@@ -3174,6 +3530,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Store.shared.firstRun.linkLot(home: DeviceSyncService.shared.localDeviceID, library: .shared)
         AgentRuntime.shared.start()
         JollyRouter.shared.start()
+        CharacterLatencyProbe.shared.start(app: self)
+        FeedbackInvitation.shared.start(folder: Store.shared.folder)
         if ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] == nil {
             Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Store.shared.trimIdleTranscripts() }
         }
@@ -3229,6 +3587,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let edit = NSMenuItem(); edit.title = "Edit"; menu.addItem(edit); let e = NSMenu(title: "Edit"); edit.submenu = e
         for (name, action, key) in [("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] { e.addItem(withTitle: name, action: Selector(action), keyEquivalent: key) }
         e.addItem(.separator())
+        e.addItem(withTitle: "Bold", action: #selector(ParkingOutlineText.toggleBold(_:)), keyEquivalent: "b")
+        e.addItem(withTitle: "Italic", action: #selector(ParkingOutlineText.toggleItalic(_:)), keyEquivalent: "i")
+        e.addItem(.separator())
         for (title, key, tag) in [("Find…", "f", NSTextFinder.Action.showFindInterface.rawValue), ("Find Next", "g", NSTextFinder.Action.nextMatch.rawValue), ("Find Previous", "G", NSTextFinder.Action.previousMatch.rawValue)] {
             let item = e.addItem(withTitle: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
             item.tag = Int(tag)
@@ -3241,6 +3602,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // ⌘= (unshifted) also makes text bigger, as in other Mac apps.
         let equals = v.addItem(withTitle: "Bigger", action: #selector(biggerText(_:)), keyEquivalent: "=")
         equals.target = self; equals.isHidden = true; equals.allowsKeyEquivalentWhenHidden = true
+        v.addItem(.separator())
+        v.addItem(withTitle: "Galleries…", action: #selector(showGalleries), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Assessments", action: #selector(showAssessments), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Portraits", action: #selector(showPortraits), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Group", action: #selector(showGroupMap), keyEquivalent: "").target = self
         let window = NSMenuItem(); window.title = "Window"; menu.addItem(window); let w = NSMenu(title: "Window"); window.submenu = w
         w.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"); w.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""); NSApp.windowsMenu = w
         let help = NSMenuItem(); help.title = "Help"; menu.addItem(help); let h = NSMenu(title: "Help"); help.submenu = h
@@ -3282,11 +3648,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.settings = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { state.setup = true }
     }
+    @objc func showGalleries() { MainActor.assumeIsolated { GalleryWindows.shared.showPicker() } }
+    @objc func showAssessments() { MainActor.assumeIsolated { AgentBoardWindows.shared.showAssessments() } }
+    @objc func showPortraits() { MainActor.assumeIsolated { AgentBoardWindows.shared.showPortraits() } }
+    @objc func showGroupMap() { GroupMapWindows.shared.show() }
     @objc func showJolly() { showSettings(); (windows.first { $0.0.isKeyWindow } ?? windows.last)?.1.settingsCategory = .jolly }
     @objc func reportConverseBug() { MainActor.assumeIsolated { BugReportWindow.show(report: GitHubBugReport(title: "", body: "What happened:\n\nSteps to reproduce:\n\nWhat I expected:\n\nConverse " + ConverseAbout.versionBuild)) } }
     @objc func showSecurityHelp() { helpController.show(topic: "security-and-privacy", query: "") }
     @objc func showConverseHelp() { helpController.show() }
-    @objc func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Converse", .applicationVersion: ConverseAbout.versionBuild, .version: "", .credits: NSAttributedString(string: ConverseAbout.copyright + "\n" + ConverseAbout.license + "\nhttps://github.com/richardkaufmann/converse\nrichard@kaoslabs.app")]) }
+    @objc func about() { ConverseAboutWindow.shared.show() }
     @objc func newWindow() { makeWindow(WindowState()) }
     private func makeWindow(_ state: WindowState) {
         state.setup = !Store.shared.setupCompleted
@@ -3294,7 +3664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentMinSize = NSSize(width: 760, height: 540)
         window.title = (DemoReset.testName ?? (Bundle.main.object(forInfoDictionaryKey: "ConverseNUXPreview") as? Bool == true ? (Bundle.main.object(forInfoDictionaryKey: "ConverseDemo") as? Bool == true ? "Converse Demo" : "Converse Setup Preview") : state.title)) + " · " + ConverseAbout.versionBuild; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.isReleasedWhenClosed = false; window.delegate = self
         let title = NSTitlebarAccessoryViewController(); title.layoutAttribute = .left
-        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
+        title.view = NSHostingView(rootView: WindowTitle(workspace: .shared, state: state)); title.view.frame = NSRect(x: 0, y: 0, width: 510, height: 24)
         window.addTitlebarAccessoryViewController(title)
         window.contentView = NSHostingView(rootView: RootView(state: state)); window.center(); window.setFrameAutosaveName("ConverseWindow")
         if let (previous, _) = windows.last { window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)) }
@@ -3385,7 +3755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = notification.object as? NSWindow, let (_, state) = windows.first(where: { $0.0 === window }) else { return }
         paneLayouts.removeValue(forKey: state.id)
         DeviceSyncService.shared.releaseWindow(placements: Workspace.shared.placements, windowID: state.id)
-        Workspace.shared.close(state.id); NSApp.removeWindowsItem(window)
+        Workspace.shared.close(state.id); SidebarOrder.shared.forget(window: state.id.uuidString); NSApp.removeWindowsItem(window)
         windows.removeAll { $0.0 === window }; Store.shared.save()
     }
     @objc func resetDemo() {
@@ -3439,7 +3809,199 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+func conversationPreparedCacheSelfTests(_ check: (Bool, String) -> Void) {
+    let session = Session(entry: Entry(name: "Prepared history QA", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
+    let outgoing = "Summary **kept visible**\n\n```converse\n{\"command\":\"tell\",\"to\":\"" + UUID().uuidString + "\",\"text\":\"Review this\"}\n```"
+    session.messages = [Message(role: "user", text: "Unicode é😀 and https://example.com"),
+                        Message(role: "assistant", text: "**Bold** and [a link](https://example.com/path)\nSecond line", delays: [DelayMark(offset: 8, seconds: 3)]),
+                        Message(role: "assistant", text: outgoing)]
+    let text = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    let coordinator = ScrollingConversation.Coordinator(session)
+    coordinator.resolveSessionName = { _ in "Peer" }
+    coordinator.render(text)
+    func compareCold(_ label: String) {
+        let original = session.messages
+        let cold = ConversationTextView(frame: text.frame)
+        cold.fontSize = text.fontSize
+        let fresh = ScrollingConversation.Coordinator(session)
+        fresh.resolveSessionName = coordinator.resolveSessionName
+        fresh.expandedDisclosures = coordinator.expandedDisclosures
+        fresh.render(cold)
+        func comparable(_ source: NSAttributedString) -> NSAttributedString {
+            let result = NSMutableAttributedString(attributedString: source)
+            source.enumerateAttribute(.attachment, in: NSRange(location: 0, length: source.length)) { value, range, _ in
+                guard let attachment = value as? NSTextAttachment else { return }
+                // Fresh renderers own different attachment instances. Compare
+                // their actual exported bytes and preview dimensions instead.
+                result.removeAttribute(.attachment, range: range)
+                result.addAttribute(NSAttributedString.Key("qaImageBytes"), value: attachment.fileWrapper?.regularFileContents ?? Data(), range: range)
+                result.addAttribute(NSAttributedString.Key("qaImageSize"), value: NSValue(size: attachment.attachmentCell?.cellSize() ?? .zero), range: range)
+            }
+            return result
+        }
+        check(comparable(text.textStorage!).isEqual(to: comparable(cold.textStorage!)) && text.inputStart == cold.inputStart,
+              "Prepared history matches fresh text and attributes: " + label)
+        let copiesMatch = text.copyBlocks.count == cold.copyBlocks.count && zip(text.copyBlocks, cold.copyBlocks).allSatisfy {
+            $0.range == $1.range && $0.source == $1.source && $0.formatted.isEqual(to: $1.formatted)
+        }
+        check(copiesMatch && session.messages == original, "Prepared history preserves full Copy Message and archive: " + label)
+        check(text.trafficBlocks == cold.trafficBlocks && text.userBlocks == cold.userBlocks && text.messageLabels == cold.messageLabels,
+              "Prepared history matches fresh traffic shading, prompt blocks and message labels: " + label)
+    }
+    let assembliesBeforeAppend = coordinator.messageAssemblyCount
+    session.messages.append(Message(role: "assistant", text: "New **output**"))
+    coordinator.render(text)
+    check(coordinator.messageAssemblyCount == assembliesBeforeAppend + 1 && coordinator.lastReplacementStart > 0,
+          "Appending output retains assembled history and replaces only the new suffix")
+    check(coordinator.messagePreparationCount == 4, "Appending output prepares only the new message")
+    compareCold("append")
+    session.messages[1].delays = [DelayMark(offset: 15, seconds: 12)]
+    session.messages[1].createdAt = Date(timeIntervalSince1970: 1)
+    coordinator.render(text); compareCold("delay and timestamp changed")
+    session.messages[0].role = "assistant"
+    coordinator.render(text); compareCold("role changed with unchanged text")
+    coordinator.resolveSessionName = { _ in "Renamed peer" }
+    session.messages.append(Message(role: "user", text: "Following prompt"))
+    coordinator.render(text); compareCold("resolved name changed")
+    let oldCollapse = Store.shared.collapseTranscriptPayloads
+    defer { Store.shared.collapseTranscriptPayloads = oldCollapse }
+    Store.shared.collapseTranscriptPayloads = true
+    coordinator.render(text)
+    let disclosureID = session.messages[2].id
+    if let at = text.string.range(of: "▸ ") {
+        let offset = (text.string as NSString).range(of: String(text.string[at])).location
+        _ = coordinator.textView(text, clickedOnLink: URL(string: "converse-disclosure://" + disclosureID.uuidString)!, at: offset)
+    }
+    check(coordinator.expandedDisclosures.contains(disclosureID), "Cached disclosure can expand through its native link")
+    compareCold("disclosure expanded")
+    Store.shared.collapseTranscriptPayloads = false
+    coordinator.render(text); compareCold("collapse disabled")
+    Store.shared.collapseTranscriptPayloads = true
+    coordinator.render(text); compareCold("collapse restored")
+    let preparedBeforeZoom = coordinator.messagePreparationCount
+    text.fontSize += 2
+    coordinator.render(text)
+    check(coordinator.messagePreparationCount == preparedBeforeZoom, "Bigger restyles without preparing history")
+    session.messages.append(Message(role: "assistant", text: "Output after Bigger **keeps** cached history"))
+    coordinator.render(text); compareCold("append after Bigger")
+    check(coordinator.messagePreparationCount == preparedBeforeZoom + 1, "First content update after Bigger prepares only the new message")
+    text.fontSize -= 2
+    session.messages.append(Message(role: "user", text: "Prompt alongside Smaller"))
+    coordinator.render(text); compareCold("append alongside Smaller")
+    check(coordinator.messagePreparationCount == preparedBeforeZoom + 2, "Size and content changing together reuse unchanged prepared messages")
+    text.fontSize += 4
+    session.messages[0].text += " Font change"
+    coordinator.render(text); compareCold("font and history changed")
+    session.messages.removeFirst(2)
+    coordinator.render(text); compareCold("history trimmed")
+    check(coordinator.cachedPreparedMessageCount == session.messages.count, "Trimming releases prepared entries for removed messages")
+    NotificationCenter.default.post(name: NSLocale.currentLocaleDidChangeNotification, object: nil)
+    let preparedBeforeLocaleChange = coordinator.messagePreparationCount
+    session.messages.append(Message(role: "user", text: "After date-format preference change"))
+    coordinator.render(text); compareCold("locale preference notification")
+    check(coordinator.messagePreparationCount - preparedBeforeLocaleChange == session.messages.count,
+          "Locale preference changes reprepare retained timestamp tooltips")
+    // Inject all parts: valid, invalid, legacy delivery-block and markerless
+    // legacy merges, plus a tell whose destination name is resolved.
+    let typed = "MY TYPED PROMPT MUST STAY VISIBLE"
+    let plainTell = "[Converse message from Fixture · session peer/three · delivery test · hop 1/100]\nStatus message"
+    let deliveryReply = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+    let peer = UUID().uuidString
+    let namedTell = "```converse\n{\"command\":\"tell\",\"to\":\"" + peer + "\",\"text\":\"Injected status\"}\n```"
+    let plainMerged = plainTell + "\n\n" + typed, namedMerged = namedTell + "\n\n" + typed
+    session.messages += [Message(role: "user", text: plainMerged, components: TranscriptStyle.components(joining: [(plainTell, "traffic"), (typed, "human")], into: plainMerged)),
+                         Message(role: "user", text: plainMerged, components: [MessageComponent(offset: 0, length: (plainTell as NSString).length, kind: "traffic"), MessageComponent(offset: (plainMerged as NSString).length + 1, length: 1, kind: "human")]),
+                         Message(role: "user", text: deliveryReply + "\n\n" + typed),
+                         Message(role: "user", text: plainMerged),
+                         Message(role: "user", text: namedMerged, components: TranscriptStyle.components(joining: [(namedTell, "traffic"), (typed, "human")], into: namedMerged)),
+                         Message(role: "assistant", text: "After the merges")]
+    coordinator.render(text); compareCold("mixed Inject all messages")
+    check(text.string.contains("Received tell from Fixture · Status message\n" + typed) && text.string.contains("Received reply from ClaudeConverse · Read-only diagnosis\n" + typed)
+          && text.string.contains("Tell to Renamed peer · Injected status\n" + typed) && text.trafficBlocks.count >= 4,
+          "Prepared mixed messages split traffic parts from typed text")
+    let preparedBeforeMixedRender = coordinator.messagePreparationCount
+    coordinator.render(text)
+    check(coordinator.messagePreparationCount == preparedBeforeMixedRender, "Unchanged mixed messages reuse their prepared bodies")
+    coordinator.resolveSessionName = { $0 == peer ? "Moved peer" : "Renamed peer" }
+    session.messages.append(Message(role: "user", text: "After the rename"))
+    coordinator.render(text); compareCold("session renamed under an injected tell")
+    check(text.string.contains("Tell to Moved peer · Injected status") && !text.string.contains("Tell to Renamed peer · Injected status"),
+          "Renaming a session referenced by an injected tell re-prepares its label")
+    let mixedIndex = session.messages.count - 4
+    session.messages[mixedIndex].components = TranscriptStyle.components(joining: [(plainTell, "traffic"), (typed, "human")], into: plainMerged)
+    coordinator.render(text); compareCold("legacy merge gained parts")
+    session.messages.swapAt(1, 2)
+    coordinator.render(text); compareCold("messages reordered")
+    session.messages.remove(at: 1)
+    coordinator.render(text); compareCold("middle message deleted")
+    session.draft = "A native draft with é😀"
+    coordinator.render(text)
+    let draftOffset = 4
+    text.setSelectedRange(NSRange(location: text.inputStart + draftOffset, length: 0))
+    session.messages.append(Message(role: "assistant", text: "Output while editing the draft"))
+    coordinator.render(text); compareCold("draft preserved across append")
+    check(text.selectedRange().location == text.inputStart + draftOffset && session.draft == "A native draft with é😀",
+          "Suffix assembly preserves draft-relative caret and draft text")
+    let uniqueMessages = session.messages
+    let duplicate = Message(role: "assistant", text: "Repeated **message**")
+    session.messages = [Message(role: "user", text: "Prefix"), duplicate, duplicate]
+    coordinator.render(text); compareCold("duplicate IDs initially")
+    session.messages[1].text = "Earlier duplicate changed"
+    coordinator.render(text); compareCold("earlier duplicate changed")
+    session.messages[2].text = "Later duplicate changed"
+    coordinator.render(text); compareCold("later duplicate changed")
+    session.messages.removeLast()
+    coordinator.render(text); compareCold("duplicate occurrence removed")
+    session.messages = [duplicate, duplicate]
+    coordinator.render(text)
+    session.messages.append(Message(role: "assistant", text: "Appended after duplicates"))
+    coordinator.render(text); compareCold("append after identical duplicate IDs")
+    session.messages.removeFirst()
+    coordinator.render(text); compareCold("first duplicate occurrence removed")
+    session.messages = uniqueMessages
+    coordinator.render(text); compareCold("unique history restored")
+    session.messages = (0..<80).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Retained message \($0) **bold**") }
+    session.messageNumberOffset = 0
+    coordinator.render(text)
+    let beforeTrimAssemblies = coordinator.messageAssemblyCount
+    session.messages.removeFirst(2); session.messageNumberOffset = 2
+    coordinator.render(text); compareCold("front trim with stable numbers")
+    check(coordinator.messageAssemblyCount == beforeTrimAssemblies, "Front trim retains assembled messages without rebuilding them")
+    session.messages.removeFirst(2); session.messageNumberOffset = 4
+    session.messages.append(Message(role: "assistant", text: "New tail after trim"))
+    coordinator.render(text); compareCold("front trim plus append")
+    check(coordinator.messageAssemblyCount == beforeTrimAssemblies + 1, "Front trim plus append assembles only the new tail")
+    session.messages.removeFirst()
+    coordinator.render(text); compareCold("front trim without numbering offset falls back")
+    session.messages = uniqueMessages; session.messageNumberOffset = 0
+    coordinator.render(text)
+    let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("converse-assembly-" + UUID().uuidString + ".png")
+    defer { try? FileManager.default.removeItem(at: imageURL) }
+    func writeImage(_ color: NSColor, modified: TimeInterval) {
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(color, atX: x, y: y) } }
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: imageURL)
+        try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: modified)], ofItemAtPath: imageURL.path)
+    }
+    writeImage(.red, modified: 1)
+    session.messages.append(Message(role: "assistant", text: "Image with caption", images: [imageURL.path]))
+    coordinator.render(text); compareCold("image appended")
+    let preparedImages = coordinator.imagePreparationCount
+    session.messages.append(Message(role: "assistant", text: "After the image"))
+    coordinator.render(text); compareCold("history image retained")
+    check(coordinator.imagePreparationCount == preparedImages, "Unchanged historical image reuses prepared pixels")
+    writeImage(.blue, modified: 2)
+    session.messages.append(Message(role: "assistant", text: "After replacing image bytes"))
+    coordinator.render(text); compareCold("same path image replaced")
+    check(coordinator.imagePreparationCount == preparedImages + 1, "Changed image file invalidates retained attachment")
+    try! FileManager.default.removeItem(at: imageURL)
+    session.messages.append(Message(role: "assistant", text: "After deleting image file"))
+    coordinator.render(text); compareCold("historical image file disappeared")
+}
 func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    conversationPreparedCacheSelfTests(check)
     let performanceSession = Session(entry: Entry(name: "Typing QA", command: "false", directory: "/tmp", engine: "claude"))
     performanceSession.messages = (0..<600).map { Message(role: $0 % 2 == 0 ? "user" : "assistant", text: "Message \($0): " + String(repeating: "Retained history with **formatting**. ", count: 8)) }
     let performanceText = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
@@ -3456,9 +4018,10 @@ func conversationLayoutSelfTests(_ check: (Bool, String) -> Void) {
     performanceSession.draft = "External draft hydration"
     performanceCoordinator.render(performanceText)
     check(performanceCoordinator.historyBuildCount == 1 && (performanceText.string as NSString).substring(from: performanceText.inputStart) == performanceSession.draft, "Programmatic draft hydration replaces only the editable tail")
-    let previousPrefix = performanceCoordinator.messageStarts[performanceSession.messages.last!.id]!
+    let previousPrefix = performanceCoordinator.messageStarts.last!
     performanceSession.messages[performanceSession.messages.count - 1].text += " Streamed suffix."
     performanceCoordinator.render(performanceText)
+    check(performanceCoordinator.messagePreparationCount == 601, "A streamed suffix prepares only one of 600 retained messages")
     check(performanceCoordinator.historyBuildCount == 2 && performanceCoordinator.lastReplacementStart == previousPrefix && performanceText.string.contains("Streamed suffix."), "Streaming replaces the changed message suffix while retaining preceding native layout")
     performanceSession.messages.append(Message(role: "activity", text: "hidden tool status"))
     performanceCoordinator.render(performanceText)
@@ -3645,7 +4208,10 @@ func selfTest() {
     lotPortableExportSelfTests(check)
     conversationLayoutSelfTests(check)
     settingsSelfTests(check)
+    transcriptSelfReadSelfTests(check)
+    transcriptRetentionSelfTests(check)
     sessionSettingsMenuSelfTests(check)
+    sessionPaneMenuSelfTests(check)
     let entry = Entry(name: "Echo", command: ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] ?? "muse", directory: NSTemporaryDirectory(), engine: "muse")
     let s = store.create(entry)
     let r = UUID(); s.messages.append(Message(id: r, role: "assistant", text: ""))
@@ -3741,6 +4307,54 @@ func selfTest() {
     styledSession.messages += [Message(role: "activity", text: "hidden tool output"), Message(role: "assistant", text: ""), Message(role: "notice", text: "Switchboard: queued"), Message(role: "assistant", text: "paragraph one\n\nparagraph two\n```swift\nlet n = 1\n```" )]
     styledCoordinator.render(styled)
     check(styled.messageLabels.map(\.number) == [1, 2, 3, 4], "Hidden activity and empty placeholders consume no numbers; visible notices and code blocks each consume one")
+    // Inject all merged a reply with Richard's typed prompt (941BAB1E). The
+    // archived text has no metadata; the new path records components.
+    let mergedReply = "[Converse message from ClaudeConverse · session peer/one · delivery " + UUID().uuidString + " · hop 2/100]\nRead-only diagnosis\n[Reply to request " + UUID().uuidString + "]"
+    let mergedTyped = "OK, propose: make 148 on Mac have a Debug pane."
+    let mergedTell = "[Converse message from Muse · session peer/two · delivery " + UUID().uuidString + " · hop 1/100]\nStatus update"
+    let mergedText = mergedReply + "\n\n" + mergedTyped, mergedWithTell = mergedTell + "\n\n" + mergedTyped + "\n\n" + mergedReply
+    let mergedSession = Session(entry: entry)
+    mergedSession.messages = [Message(role: "user", text: mergedText), Message(role: "assistant", text: "response"),
+                              Message(role: "user", text: mergedWithTell, components: TranscriptStyle.components(joining: [(mergedTell, "traffic"), (mergedTyped, "human"), (mergedReply, "traffic")], into: mergedWithTell)),
+                              Message(role: "user", text: mergedReply)]
+    let mergedView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(mergedSession).render(mergedView)
+    let mergedString = mergedView.string as NSString
+    let typedRanges = [mergedString.range(of: mergedTyped), mergedString.range(of: mergedTyped, options: .backwards)]
+    check(typedRanges[0].location != NSNotFound && typedRanges[0] != typedRanges[1] && mergedString.range(of: "Received reply from ClaudeConverse · Read-only diagnosis").location == 0
+          && mergedString.range(of: "Received tell from Muse · Status update").location != NSNotFound && !mergedView.string.contains("[Reply to request"),
+          "Merged traffic collapses per part while the typed prompt is visible, for archived and newly recorded messages")
+    check(typedRanges.allSatisfy { (mergedView.textStorage?.attribute(.foregroundColor, at: $0.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic }
+          && (mergedView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor) == TranscriptPalette.traffic
+          && !mergedView.trafficBlocks.contains { NSIntersectionRange($0, typedRanges[0]).length > 0 || NSIntersectionRange($0, typedRanges[1]).length > 0 } && mergedView.trafficBlocks.count == 4,
+          "Only the switchboard parts are orange and shaded as traffic; the typed text keeps prompt styling")
+    check(mergedView.copyBlocks.filter { $0.role == "user" }.map(\.source) == [mergedText, mergedWithTell, mergedReply] && mergedSession.messages[0].text == mergedText,
+          "Copy Message and the archive keep the exact merged text")
+    check(mergedView.userBlocks.count == 3 && mergedView.messageLabels.map(\.number) == [1, 2, 3, 4], "A merged message is still one prompt block and one message number")
+    // A plain tell has no delivery block: invalid recorded parts must show
+    // the whole message expanded, never collapse it over the typed text.
+    let plainTell = "[Converse message from Fixture · session peer/three · delivery test · hop 1/100]\nStatus message"
+    let plainTyped = "MY TYPED PROMPT MUST STAY VISIBLE", plainMerged = plainTell + "\n\n" + plainTyped
+    let plainValid = TranscriptStyle.components(joining: [(plainTell, "traffic"), (plainTyped, "human")], into: plainMerged)
+    let plainSession = Session(entry: entry)
+    plainSession.messages = [Message(role: "user", text: plainMerged, components: [MessageComponent(offset: 0, length: (plainTell as NSString).length, kind: "traffic"), MessageComponent(offset: (plainMerged as NSString).length + 1, length: 1, kind: "human")]),
+                             Message(role: "user", text: plainMerged, components: plainValid), Message(role: "user", text: plainMerged)]
+    let plainView = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+    ScrollingConversation.Coordinator(plainSession).render(plainView)
+    let plainString = plainView.string as NSString
+    let plainBlocks = plainView.userBlocks.count == 3 ? plainView.userBlocks : Array(repeating: NSRange(location: 0, length: 0), count: 3)
+    let invalidBlock = plainBlocks[0], invalidTyped = plainString.range(of: plainTyped, range: plainBlocks[0]), validTyped = plainString.range(of: plainTyped, range: plainBlocks[1])
+    check(invalidTyped.location != NSNotFound && NSLocationInRange(invalidTyped.location, invalidBlock) && plainString.range(of: "[Converse message from Fixture").location == 0
+          && (plainView.textStorage?.attribute(.foregroundColor, at: invalidTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && (plainView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && !plainView.trafficBlocks.contains { NSIntersectionRange($0, invalidBlock).length > 0 },
+          "Invalid recorded parts render the whole merged message expanded: typed text visible, nothing orange or collapsed")
+    check(validTyped.location != NSNotFound && plainString.substring(with: plainBlocks[1]).hasPrefix("Received tell from Fixture · Status message\n")
+          && (plainView.textStorage?.attribute(.foregroundColor, at: validTyped.location, effectiveRange: nil) as? NSColor) != TranscriptPalette.traffic
+          && plainString.substring(with: plainBlocks[2]).hasPrefix("Received tell from Fixture") && !plainString.substring(with: plainBlocks[2]).contains("\n" + plainTyped)
+          && plainView.trafficBlocks.contains { NSIntersectionRange($0, plainBlocks[2]).length == plainBlocks[2].length },
+          "Valid parts keep the typed text visible; without parts the ambiguous old merge still collapses as before")
+    check(plainView.copyBlocks.map(\.source) == [plainMerged, plainMerged, plainMerged], "Copy Message keeps the exact merged text whatever the parts")
     let rulerBlocks = [NSRange(location: 0, length: 10), NSRange(location: 20, length: 10), NSRange(location: 40, length: 10)]
     let rulerLabels = [0, 18, 40, 60].enumerated().map { TranscriptMessageLabel(location: $0.element, number: $0.offset + 1, prompt: false) }
     check(Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 25, length: 10))) == [rulerBlocks[1]] && Array(MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 28, length: 15))) == Array(rulerBlocks[1...2]) && MessageNumberRuler.slice(rulerBlocks, overlapping: NSRange(location: 51, length: 5)).isEmpty,
@@ -4164,6 +4778,12 @@ func selfTest() {
     check(deleteDelegate.windows.count == 1 && Workspace.shared.placements[disposable.id] == nil, "Close Conversation keeps the window open and clears its pane")
     let restored = store.restoreDeleted()
     check(restored?.id == disposable.id && restored?.draft == "keep this draft", "Deleted conversations can be restored with their drafts")
+    performanceCaptureSelfTests(check)
+    performanceDebugSelfTests(check)
+    feedbackInvitationSelfTests(check)
+    feedbackInvitationControllerSelfTests(check)
+    sidebarSortSelfTests(check)
+    aboutSelfTests(check)
     parkingLotSelfTests(check)
     paneSizingSelfTests(check)
     sessionTeachingSelfTests(check)
@@ -4208,16 +4828,120 @@ if let at = CommandLine.arguments.firstIndex(of: "--probe-provider-status"), Com
         exit(0)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 }
+if CommandLine.arguments.contains("--gallery-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    MainActor.assumeIsolated {
+        agentAssessmentSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+        agentAssessmentRuntimeSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+        gallerySelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    }
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--scoreboard-focus-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     var failures = 0
     MainActor.assumeIsolated { agentScoreboardFocusSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } } }
     exit(failures == 0 ? 0 : 1)
 }
+if CommandLine.arguments.contains("--payload-fixture-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    transcriptPayloadFixtureSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--response-images-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    responseImageSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--group-switchboard-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    groupSwitchboardSelfTests { value, label in print((value ? "PASS: " : "FAIL: ") + label); if !value { failures += 1 } }
+    exit(failures == 0 ? 0 : 1)
+}
 if CommandLine.arguments.contains("--groups-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
     var failures = 0
     converseGroupSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    exit(failures == 0 ? 0 : 1)
+}
+// Focused run of the user-only lot Undo checks; the full suite also runs them.
+if CommandLine.arguments.contains("--lot-undo-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    parkingUserUndoSelfTests(check); parkingDropSelfTests(check)
+    exit(failures == 0 ? 0 : 1)
+}
+// Per-keystroke Parking Lot typing cost, by substage, on synthetic lots.
+if CommandLine.arguments.contains("--lot-typing-profile") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-typing-profile-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var failures = 0
+    let check: (Bool, String) -> Void = { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
+    for rows in [130, 500] {
+        let measurement = measureParkingLotTyping(rows: rows, keys: 120, folder: folder.appendingPathComponent("\(rows)"), check: check)
+        print(parkingLotTypingReport(measurement, label: "\(rows)-row lot"))
+    }
+    exit(failures == 0 ? 0 : 1)
+}
+if CommandLine.arguments.contains("--transcript-render-profile") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    _ = NSApplication.shared
+    let longHistory = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_LONG"] == "1"
+    let trafficHistory = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_TRAFFIC"] == "1"
+    let imagePath = ProcessInfo.processInfo.environment["CONVERSE_RENDER_PROFILE_IMAGE"]
+    if let imagePath, !FileManager.default.fileExists(atPath: imagePath) { fputs("Profile image does not exist\n", stderr); exit(2) }
+    for count in (longHistory ? [1200] : [100, 600, 1200]) {
+        let session = Session(entry: Entry(name: "Synthetic render profile", command: "/usr/bin/false", directory: "/tmp", engine: "claude"))
+        session.messages = (0..<count).map { index in
+            let role = index % 2 == 0 ? "user" : "assistant"
+            let body = "Message \(index): " + String(repeating: "Retained history with **formatting** and https://example.com/a. ", count: longHistory ? 32 : 8)
+            let source = trafficHistory && role == "user"
+                ? "[Converse message from Fixture · session 00000000-0000-0000-0000-000000000001 · delivery \(UUID().uuidString) · hop 1/100]\n" + body : body
+            let delays: [DelayMark]? = longHistory && role == "assistant" && index % 3 != 0
+                ? [DelayMark(offset: (source as NSString).length / 2, seconds: 3)] : nil
+            return Message(role: role, text: source, delays: delays)
+        }
+        let text = ConversationTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let coordinator = ScrollingConversation.Coordinator(session)
+        text.delegate = coordinator
+        print("CASE \(count) initial")
+        coordinator.render(text)
+        for update in 1...3 {
+            session.messages[session.messages.count - 1].text += " Streamed suffix."
+            print("CASE \(count) suffix \(update)")
+            coordinator.render(text)
+        }
+        if let imagePath {
+            session.messages.append(Message(role: "assistant", text: "New scoreboard image", images: [imagePath]))
+            print("CASE \(count) image-append-cold")
+            coordinator.render(text)
+            session.messages[session.messages.count - 1].text += " Caption update."
+            print("CASE \(count) image-caption-warm")
+            coordinator.render(text)
+        }
+        for update in 1...3 {
+            session.messages.append(Message(role: "user", text: "[Converse message from Fixture · session 00000000-0000-0000-0000-000000000001 · delivery \(UUID().uuidString) · hop 1/100]\nTraffic append \(update)"))
+            print("CASE \(count) traffic-append \(update)")
+            coordinator.render(text)
+        }
+        print("COUNTS preparedMessages=\(coordinator.messagePreparationCount) preparedImages=\(coordinator.imagePreparationCount) assembledMessages=\(coordinator.messageAssemblyCount)")
+    }
+    exit(0)
+}
+if CommandLine.arguments.contains("--fabric-self-test") {
+    guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
+          ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
+    var failures = 0
+    deviceFabricSelfTests { value, label in if value { print("PASS: " + label) } else { failures += 1; fputs("FAIL: " + label + "\n", stderr) } }
     exit(failures == 0 ? 0 : 1)
 }
 if CommandLine.arguments.contains("--conversation-layout-self-test") {
@@ -4241,7 +4965,19 @@ if CommandLine.arguments.contains("--pane-text-benchmark") {
 }
 if CommandLine.arguments.contains("--pane-sizing-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { exit(2) }
-    paneSizingSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }; exit(0)
+    let capture = PerformanceCapture.shared
+    if let path = ProcessInfo.processInfo.environment["CONVERSE_PANE_PROFILE"] {
+        capture.configure(folder: URL(fileURLWithPath: path), enabled: true, historySeconds: 600)
+    }
+    paneSizingSelfTests { value, label in if !value { fputs("FAIL: " + label + "\n", stderr); exit(1) }; print("PASS: " + label) }
+    if capture.enabled {
+        var exported = false
+        capture.prepareExport { file in print("Pane telemetry: " + (file?.path ?? "unavailable")); exported = true }
+        let deadline = Date().addingTimeInterval(5)
+        while !exported && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        if !exported { exit(1) }
+    }
+    exit(0)
 }
 if CommandLine.arguments.contains("--provider-self-test") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil, ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"] != nil else { fputs("Use test.sh --providers-only for isolated tests.\n", stderr); exit(2) }
@@ -4258,6 +4994,10 @@ if CommandLine.arguments.contains("--settings-self-test") {
     settingsSelfTests { passed, label in print((passed ? "PASS: " : "FAIL: ") + label); if !passed { exit(1) } }; exit(0)
 }
 if CommandLine.arguments.contains("--ipad-home-fixture") { runIPadHomeFixture(); exit(0) }
+if let option = CommandLine.arguments.firstIndex(of: "--core-command-interop") {
+    guard CommandLine.arguments.indices.contains(option + 2), let port = Int(CommandLine.arguments[option + 2]) else { exit(2) }
+    exit(runCoreCommandInterop(host: CommandLine.arguments[option + 1], port: port))
+}
 if let option = CommandLine.arguments.firstIndex(of: "--scoreboard-preview") {
     guard ProcessInfo.processInfo.environment["CONVERSE_TEST_COMMAND"] != nil,
           let directory = ProcessInfo.processInfo.environment["CONVERSE_DATA_DIR"],

@@ -45,7 +45,7 @@
                     Visibility="Collapsed" VerticalAlignment="Center" Margin="8,0"/>
             <Button x:Name="AgentActionsButton" Grid.Column="3" Content="⋯" Width="36" Height="32"
                     Visibility="Collapsed" VerticalAlignment="Center" Margin="6,0,0,0"
-                    AutomationProperties.Name="Agent actions" ToolTipService.ToolTip="Agent actions: setup, loop, run once and scoreboard">
+                    AutomationProperties.Name="Agent actions" ToolTipService.ToolTip="Agent actions: setup, loop, run once and assessment">
                 <Button.Flyout><MenuFlyout Opening="OnAgentActionsOpening"/></Button.Flyout>
             </Button>
             <!-- The Windows beachball: indeterminate ring while the session works. -->

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Folding is view state, never a document edit. Include hidden descendants so
@@ -40,9 +41,9 @@ struct ParkingOutline {
         var projected: [(ParkingLotRow, UUID?, Bool, Int, Int)] = []
         let hierarchy = (try? ParkingLotTree.nodes(rows)) ?? [:]
         let parents = Set(hierarchy.values.compactMap(\.parentID))
+        let numbers = ParkingLotTree.numbers(rows)
         var section: UUID?, sectionHidden = false, count = 0
         var hiddenByID: [UUID: Bool] = [:]
-        var counts: [UUID?: Int] = [:]
         func empty(_ heading: Bool, before: UUID?) {
             let key = heading ? "heading" : (section?.uuidString ?? "root")
             let cached = placeholders[key]
@@ -59,11 +60,10 @@ struct ParkingOutline {
                 projected.append((row, nil, false, 0, 0))
             } else {
                 let parent = hierarchy[row.id]?.parentID
-                counts[parent, default: 0] += 1
-                if parent == section { count = counts[parent] ?? count }
+                if parent == section, hierarchy[row.id]?.depth ?? 1 <= 1 { count = numbers[row.id] ?? count }
                 let hidden = parent.flatMap { hiddenByID[$0] } ?? false
                 hiddenByID[row.id] = hidden || collapsed.contains(row.id)
-                if !hidden { projected.append((row, nil, false, counts[parent] ?? 1, hierarchy[row.id]?.depth ?? 1)) }
+                if !hidden { projected.append((row, nil, false, numbers[row.id] ?? 1, hierarchy[row.id]?.depth ?? 1)) }
             }
         }
         if !sectionHidden && !projected.isEmpty { empty(false, before: nil) }
@@ -78,6 +78,28 @@ struct ParkingOutline {
         }
     }
     func index(at offset: Int) -> Int? { entries.lastIndex { $0.range.location <= offset } }
+    /// The rows that differ between two projections. Ranges include each changed
+    /// row's trailing separator; nil when no unchanged row follows them.
+    struct ChangedSpan { var entries: Range<Int>; var old: NSRange; var new: NSRange }
+    static func changedSpan(from old: ParkingOutline, to new: ParkingOutline) -> ChangedSpan? {
+        func same(_ a: Entry, _ b: Entry) -> Bool {
+            a.number == b.number && a.depth == b.depth && a.hasChildren == b.hasChildren && a.placeholder == b.placeholder && a.before == b.before && a.row == b.row
+        }
+        let limit = min(old.entries.count, new.entries.count)
+        var prefix = 0
+        while prefix < limit, same(old.entries[prefix], new.entries[prefix]) { prefix += 1 }
+        if prefix == old.entries.count, prefix == new.entries.count {
+            let end = (new.string as NSString).length
+            return ChangedSpan(entries: prefix..<prefix, old: NSRange(location: end, length: 0), new: NSRange(location: end, length: 0))
+        }
+        var suffix = 0
+        while suffix < limit - prefix, same(old.entries[old.entries.count - 1 - suffix], new.entries[new.entries.count - 1 - suffix]) { suffix += 1 }
+        guard suffix > 0 else { return nil }
+        let oldStart = old.entries[prefix].range.location, oldEnd = old.entries[old.entries.count - suffix].range.location
+        let newStart = new.entries[prefix].range.location, newEnd = new.entries[new.entries.count - suffix].range.location
+        return ChangedSpan(entries: prefix..<(new.entries.count - suffix),
+                           old: NSRange(location: oldStart, length: oldEnd - oldStart), new: NSRange(location: newStart, length: newEnd - newStart))
+    }
     struct Edit {
         var rows: [ParkingLotRow]
         var caretID: UUID
@@ -105,7 +127,8 @@ struct ParkingOutline {
         let firstParent = first.row.heading ? first.row.id : ((try? ParkingLotTree.nodes(rows))?[first.row.id]?.parentID ?? first.row.parentID)
         var insertedHeading: UUID?
         for (i, piece) in pieces.enumerated() {
-            var row = preserveSuffix ? (i == pieces.count - 1 ? first.row : ParkingLotRow(heading: false, text: "")) : (i == 0 ? base : ParkingLotRow(heading: false, text: ""))
+            // A row Return creates sits at the same level as the row it came from.
+            var row = preserveSuffix ? (i == pieces.count - 1 ? first.row : ParkingLotRow(heading: false, text: "")) : (i == 0 ? base : ParkingLotRow(heading: false, text: "", indent: first.row.heading ? nil : first.row.indent))
             row.text = piece.replacingOccurrences(of: "\u{2028}", with: "\n"); row.editedBy = nil
             // Plain text round trips through Markdown, keeping pasted headings and lists.
             if insertion.contains("\n") && (i > 0 || prefix.isEmpty) {
@@ -184,12 +207,13 @@ struct ParkingOutline {
 }
 
 struct ParkingLotEditor: NSViewRepresentable {
-    @ObservedObject var lot: ParkingLotStore
+    let lot: ParkingLotStore
     @Binding var collapsed: Set<UUID>
     var reorder: () -> Void
+    var finder = ParkingLotFinder()
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
+        let scroll = ParkingLotScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = true
         let text = ParkingOutlineText(frame: .zero)
         text.isRichText = false; text.allowsUndo = true; text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isAutomaticTextReplacementEnabled = false
@@ -201,13 +225,19 @@ struct ParkingLotEditor: NSViewRepresentable {
         text.setAccessibilityLabel("Parking Lot outline")
         text.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue, .cursor: NSCursor.pointingHand]
         scroll.documentView = text; context.coordinator.text = text; text.configureTextScaling(); context.coordinator.render()
+        context.coordinator.observeLot()
         return scroll
     }
     func updateNSView(_ view: NSScrollView, context: Context) {
         let changedLot = context.coordinator.parent.lot.id != lot.id
         context.coordinator.parent = self
-        if changedLot { context.coordinator.text?.configureTextScaling() }
+        finder.editor = context.coordinator
+        if changedLot { context.coordinator.text?.configureTextScaling(); context.coordinator.observeLot() }
+        // Find's published matches refresh after SwiftUI finishes this update.
+        context.coordinator.deferFindRefresh = true
         context.coordinator.render()
+        context.coordinator.deferFindRefresh = false
+        DispatchQueue.main.async { finder.editorRendered() }
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ParkingLotEditor
@@ -217,30 +247,90 @@ struct ParkingLotEditor: NSViewRepresentable {
         var displayed: ParkingLotDocument?
         var displayedCollapsed: Set<UUID> = []
         var rendering = false
-        init(_ parent: ParkingLotEditor) { self.parent = parent }
+        var deferFindRefresh = false
+        init(_ parent: ParkingLotEditor) { self.parent = parent; super.init(); parent.finder.editor = self }
+        private var lotObserver: AnyCancellable?
+        private var renderQueued = false
+        /// The pane refreshes from the lot here rather than through SwiftUI, which
+        /// would re-measure the surrounding stack for every saved keystroke.
+        func observeLot() {
+            lotObserver = parent.lot.objectWillChange.sink { [weak self] _ in
+                guard let self, !self.renderQueued else { return }
+                self.renderQueued = true
+                DispatchQueue.main.async { [weak self] in self?.renderQueued = false; self?.render() }
+            }
+        }
         var pointSize: CGFloat { text?.pointSize ?? 13 }
         var displayedWidth: CGFloat = 0
+        private var renderedPointSize: CGFloat = 0
+        /// Makes the next render rebuild every row, as a fresh pane would.
+        func discardDisplayedState() { displayed = nil; renderedPointSize = 0 }
         func render(caret: (UUID, Int)? = nil) {
             guard let text, !rendering else { return }
             // Image rows reserve space for their drawn height at the current
             // width, so a resize that changes the width must re-render too.
-            let width = min(ParkingOutlineText.lotImageWidth, (text.textContainer?.containerSize.width ?? 400) - 10)
+            let width = text.imageSlotWidth
             guard caret != nil || displayed != parent.lot.document || displayedCollapsed != parent.collapsed || displayedWidth != width else { return }
             let oldSelection = text.selectedRange()
             let oldAnchor = projection.index(at: oldSelection.location).map { (projection.entries[$0].row.id, oldSelection.location - projection.entries[$0].range.location) }
+            let capture = PerformanceCapture.shared, measurement = capture.begin()
+            defer { capture.end(.lotRender, measurement) }
             rendering = true; defer { rendering = false }
-            displayed = parent.lot.document; displayedCollapsed = parent.collapsed; displayedWidth = width
-            projection = ParkingOutline(rows: parent.lot.document.rows, collapsed: parent.collapsed, placeholders: &placeholders)
-            let body = NSMutableAttributedString(string: projection.string)
+            guard let storage = text.textStorage else { return }
+            highlightedMatches = nil
+            let previous = projection, previousLink = linkEditing, previousSettled = settled
+            // Attributes depend on the point size and image width, and marked text
+            // can leave the storage out of step; each of those needs a full build.
+            let spliceable = displayedWidth == width && renderedPointSize == pointSize && storage.mutableString.isEqual(to: previous.string)
+            displayed = parent.lot.document; displayedCollapsed = parent.collapsed; displayedWidth = width; renderedPointSize = pointSize
+            projection = capture.measure(.lotProjectionBuild) { ParkingOutline(rows: parent.lot.document.rows, collapsed: parent.collapsed, placeholders: &placeholders) }
+            let anchor = caret ?? oldAnchor
+            linkEditing = text.editingFocus ? anchor.flatMap { anchor in projection.entries.first { $0.row.id == anchor.0 }.map { (anchor.0, min(anchor.1, $0.range.length)) } } : nil
+            if let settled, !(linkEditing.map { $0 == settled } ?? false) { self.settled = nil }
             let standard = NSMutableParagraphStyle(); standard.paragraphSpacing = 5
+            if spliceable, let span = ParkingOutline.changedSpan(from: previous, to: projection) {
+                // Replacing only the changed rows keeps the layout of every other row.
+                let body = capture.measure(.lotAttributes) { styled(projection.entries[span.entries], in: span.new, width: width, standard: standard) }
+                capture.measure(.lotStorageApply) {
+                    storage.beginEditing()
+                    if span.old.length > 0 || span.new.length > 0 { storage.replaceCharacters(in: span.old, with: body) }
+                    // A row outside the splice may still have gained or lost the caret.
+                    let caretRows = Set([previousLink?.0, linkEditing?.0, previousSettled?.0, settled?.0].compactMap { $0 })
+                    if !caretRows.isEmpty {
+                        for (index, entry) in projection.entries.enumerated() where !span.entries.contains(index) && entry.range.length > 0 && caretRows.contains(entry.row.id) { styleLinks(storage, entry) }
+                    }
+                    storage.endEditing()
+                }
+            } else {
+                let body = capture.measure(.lotAttributes) { styled(projection.entries[...], in: NSRange(location: 0, length: (projection.string as NSString).length), width: width, standard: standard) }
+                capture.measure(.lotStorageApply) { storage.setAttributedString(body) }
+            }
+            text.typingAttributes = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
+            let selecting = capture.begin()
+            if let anchor, let entry = projection.entries.first(where: { $0.row.id == anchor.0 }) {
+                text.setSelectedRange(NSRange(location: entry.range.location + min(anchor.1, entry.range.length), length: caret == nil ? min(oldSelection.length, max(0, storage.length - entry.range.location - min(anchor.1, entry.range.length))) : 0))
+            } else { text.setSelectedRange(NSRange(location: min(oldSelection.location, storage.length), length: 0)) }
+            let selection = text.selectedRange(), allowed = snapped(selection, from: selection, mouse: false)
+            if allowed != selection { text.setSelectedRange(allowed) }
+            capture.end(.lotSelection, selecting)
+            text.updateCommentButtons()
+            text.needsDisplay = true
+            if caret != nil { capture.measure(.lotScrollVisible) { text.scrollRangeToVisible(text.selectedRange()) } }
+            if !deferFindRefresh { parent.finder.editorRendered() }
+        }
+        /// The styled text of `entries`, whose rows and separators fill `range` of the display.
+        private func styled(_ entries: ArraySlice<ParkingOutline.Entry>, in range: NSRange, width: CGFloat, standard: NSParagraphStyle) -> NSMutableAttributedString {
+            let body = NSMutableAttributedString(string: (projection.string as NSString).substring(with: range))
             body.addAttributes([.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.textColor, .paragraphStyle: standard], range: NSRange(location: 0, length: body.length))
-            for entry in projection.entries {
+            for var entry in entries {
+                entry.range.location -= range.location
                 let style = standard.mutableCopy() as! NSMutableParagraphStyle
-                let offset = CGFloat(max(0, entry.depth - 1)) * text.indentWidth
+                let offset = text?.textOffset(entry) ?? 0
                 style.firstLineHeadIndent = offset; style.headIndent = offset
+                style.tailIndent = -(text?.itemMargin ?? 0)
                 if entry.row.heading { style.paragraphSpacingBefore = 7 }
-                if let paths = entry.row.images, !paths.isEmpty {
-                    let sizes = text.lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 }
+                if let paths = entry.row.images, !paths.isEmpty, let text {
+                    let sizes = text.lotImageSizes(paths, width: max(40, width - text.nestOffset(entry.depth))).compactMap { $0 }
                     style.paragraphSpacing = ParkingOutlineText.lotImageSpacing(sizes)
                 }
                 let length = min(body.length - entry.range.location, max(1, entry.range.length))
@@ -249,25 +339,12 @@ struct ParkingLotEditor: NSViewRepresentable {
                     body.addAttribute(.paragraphStyle, value: style, range: range)
                     if entry.row.heading { body.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: pointSize), range: range) }
                 }
-            }
-            let anchor = caret ?? oldAnchor
-            linkEditing = text.editingFocus ? anchor.flatMap { anchor in projection.entries.first { $0.row.id == anchor.0 }.map { (anchor.0, min(anchor.1, $0.range.length)) } } : nil
-            if let settled, !(linkEditing.map { $0 == settled } ?? false) { self.settled = nil }
-            for entry in projection.entries where entry.range.length > 0 {
+                guard entry.range.length > 0 else { continue }
                 body.addAttribute(.foregroundColor, value: ParkingOutlineText.color(for: entry.row), range: entry.range)
                 if entry.row.isDone { body.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: entry.range) }
                 styleLinks(body, entry)
             }
-            text.textStorage?.setAttributedString(body)
-            text.typingAttributes = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.textColor, .paragraphStyle: standard]
-            if let anchor, let entry = projection.entries.first(where: { $0.row.id == anchor.0 }) {
-                text.setSelectedRange(NSRange(location: entry.range.location + min(anchor.1, entry.range.length), length: caret == nil ? min(oldSelection.length, max(0, body.length - entry.range.location - min(anchor.1, entry.range.length))) : 0))
-            } else { text.setSelectedRange(NSRange(location: min(oldSelection.location, body.length), length: 0)) }
-            let selection = text.selectedRange(), allowed = snapped(selection, from: selection, mouse: false)
-            if allowed != selection { text.setSelectedRange(allowed) }
-            text.updateCommentButtons()
-            text.needsDisplay = true
-            if caret != nil { text.scrollRangeToVisible(text.selectedRange()) }
+            return body
         }
         // A bare link being typed stays plain until a space or other boundary
         // follows it. Markdown links always show only their label.
@@ -278,7 +355,8 @@ struct ParkingLotEditor: NSViewRepresentable {
         static let hiddenFont = NSFont.systemFont(ofSize: 0.01)
         func styleLinks(_ storage: NSMutableAttributedString, _ entry: ParkingOutline.Entry) {
             let links = LotLinks.find(in: entry.row.text)
-            guard !links.isEmpty else { return }
+            let spans = TextSubstitutions.shared.enabled ? LotInline.spans(in: entry.row.text) : []
+            guard !links.isEmpty || !spans.isEmpty else { return }
             storage.addAttributes([.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize),
                                    .foregroundColor: ParkingOutlineText.color(for: entry.row)], range: entry.range)
             storage.removeAttribute(.link, range: entry.range); storage.removeAttribute(.toolTip, range: entry.range)
@@ -290,6 +368,22 @@ struct ParkingLotEditor: NSViewRepresentable {
                 guard link.isMarkdown else { continue }
                 let opening = NSRange(location: entry.range.location + link.range.location, length: 1)
                 let closing = NSRange(location: NSMaxRange(label), length: NSMaxRange(link.range) - link.label.location - link.label.length)
+                for syntax in [opening, closing] { storage.addAttributes([.font: Self.hiddenFont, .foregroundColor: NSColor.clear], range: syntax) }
+            }
+            // Like a bare link, finished emphasis converts once the caret is past
+            // its word and stays literal while the caret is inside it.
+            for span in spans {
+                if let caret, caret >= span.range.location, caret <= LotInline.tokenEnd(span, in: entry.row.text) { continue }
+                let content = NSRange(location: entry.range.location + span.content.location, length: span.content.length)
+                storage.enumerateAttribute(.font, in: content) { value, run, _ in
+                    guard let font = value as? NSFont, font.pointSize >= 1 else { return }
+                    var styled = font
+                    if span.bold { styled = NSFontManager.shared.convert(styled, toHaveTrait: .boldFontMask) }
+                    if span.italic { styled = NSFontManager.shared.convert(styled, toHaveTrait: .italicFontMask) }
+                    storage.addAttribute(.font, value: styled, range: run)
+                }
+                let opening = NSRange(location: entry.range.location + span.range.location, length: span.marker)
+                let closing = NSRange(location: NSMaxRange(content), length: span.marker)
                 for syntax in [opening, closing] { storage.addAttributes([.font: Self.hiddenFont, .foregroundColor: NSColor.clear], range: syntax) }
             }
         }
@@ -400,17 +494,102 @@ struct ParkingLotEditor: NSViewRepresentable {
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard !rendering, let replacementString, let displayed, let affectedCharRange = atomic(affectedCharRange, replacementString),
-                  let edit = projection.replacing(affectedCharRange, with: replacementString, rows: displayed.rows, mergeSeparator: text?.cutting != true) else { return false }
+                  let edit = PerformanceCapture.shared.measure(.lotProjectionEdit, {
+                      projection.replacing(affectedCharRange, with: replacementString, rows: displayed.rows, mergeSeparator: text?.cutting != true)
+                  }) else { return false }
             if replacementString.contains("\n"), let index = projection.index(at: affectedCharRange.location) {
                 parent.collapsed.remove(projection.entries[index].row.id)
             }
             save(edit.rows, expected: displayed, caret: (edit.caretID, edit.caretOffset)); return false
         }
-        func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil) {
+        /// Toggles emphasis on each selected row's text as one edit.
+        func toggleInline(_ style: LotInline.Style, in selection: NSRange) {
+            let document = parent.lot.document
+            guard canEditText, let textView = text else { NSSound.beep(); return }
+            let touched: [(entry: ParkingOutline.Entry, part: NSRange)] = projection.entries.compactMap { entry in
+                guard !entry.placeholder else { return nil }
+                if selection.length == 0 {
+                    guard selection.location >= entry.range.location, selection.location <= NSMaxRange(entry.range) else { return nil }
+                    return (entry, NSRange(location: selection.location - entry.range.location, length: 0))
+                }
+                let overlap = NSIntersectionRange(selection, entry.range)
+                return overlap.length > 0 ? (entry, NSRange(location: overlap.location - entry.range.location, length: overlap.length)) : nil
+            }
+            guard !touched.isEmpty else { NSSound.beep(); return }
+            let on = !touched.allSatisfy { LotInline.isActive(style, in: $0.entry.row.text, selection: $0.part) }
+            var rows = document.rows, caret: (UUID, Int)?, kept: NSRange?
+            for (entry, part) in touched {
+                guard let index = rows.firstIndex(where: { $0.id == entry.row.id }) else { continue }
+                let result = LotInline.toggling(style, in: rows[index].text, selection: part, on: on)
+                rows[index].text = result.text; rows[index].editedBy = nil
+                caret = (entry.row.id, result.selection.location)
+                if touched.count == 1, result.selection.length > 0 { kept = result.selection }
+            }
+            save(rows, expected: document, caret: caret, undoName: style == .bold ? "Bold" : "Italic")
+            if let kept, let id = caret?.0, let entry = projection.entries.first(where: { $0.row.id == id }) {
+                textView.setSelectedRange(NSRange(location: entry.range.location + kept.location, length: kept.length))
+            }
+        }
+        func save(_ rows: [ParkingLotRow], expected: ParkingLotDocument, caret: (UUID, Int)? = nil, undoName: String? = nil) {
             do {
-                try parent.lot.replaceUserRows(rows, revision: expected.revision)
+                try PerformanceCapture.shared.measure(.lotRowsCommit) { try parent.lot.replaceUserRows(rows, revision: expected.revision, undoName: undoName) }
                 render(caret: caret)
+            } catch let conflict as ParkingLotStore.StaleUserEdit {
+                parent.lot.notice = conflict.localizedDescription; render()
             } catch { parent.lot.error = error.localizedDescription; render() }
+        }
+        // Find bar. Replacements are ordinary saved row edits, so read-only lots
+        // and writers holding the lot elsewhere refuse them in the usual way.
+        var canEditText: Bool { !parent.lot.isReadOnly && text?.isEditable != false }
+        var selectedFindText: String? {
+            guard let text, text.selectedRange().length > 0 else { return nil }
+            let value = (text.string as NSString).substring(with: text.selectedRange())
+            return value.rangeOfCharacter(from: CharacterSet(charactersIn: "\n\u{2028}")) == nil ? value : nil
+        }
+        var findCaret: (UUID, Int)? {
+            guard let text, let index = projection.index(at: text.selectedRange().location) else { return nil }
+            let entry = projection.entries[index]
+            return (entry.row.id, max(0, text.selectedRange().location - entry.range.location))
+        }
+        @discardableResult func saveFindResult(_ rows: [ParkingLotRow], undoName: String, caret: (UUID, Int)?) -> Bool {
+            let document = parent.lot.document
+            guard canEditText, rows != document.rows else { return false }
+            let revision = document.revision
+            save(rows, expected: document, caret: caret, undoName: undoName)
+            return parent.lot.document.revision == revision + 1
+        }
+        /// Opens every collapsed ancestor, then selects the match in the text.
+        func showFindMatch(_ match: ParkingLotFind.Match) {
+            let hierarchy = (try? ParkingLotTree.nodes(parent.lot.document.rows)) ?? [:]
+            var ancestor = hierarchy[match.row]?.parentID, opened = false
+            while let id = ancestor {
+                if parent.collapsed.contains(id) { parent.collapsed.remove(id); opened = true }
+                ancestor = hierarchy[id]?.parentID
+            }
+            if opened { render() }
+            guard let text, let entry = projection.entries.first(where: { $0.row.id == match.row }) else { return }
+            let range = NSRange(location: entry.range.location + match.range.location, length: match.range.length)
+            text.setSelectedRange(range); text.scrollRangeToVisible(range); text.showFindIndicator(for: range)
+        }
+        private(set) var findHighlightPasses = 0
+        /// The matches drawn now. A render rewrites the text under them, so it forgets these.
+        private var highlightedMatches: [ParkingLotFind.Match]?
+        func applyFindHighlights() {
+            guard parent.finder.visible, highlightedMatches != parent.finder.matches, let text, let manager = text.layoutManager, let storage = text.textStorage else { return }
+            findHighlightPasses += 1
+            clearFindHighlights()
+            highlightedMatches = parent.finder.matches
+            let color = NSColor.systemYellow.withAlphaComponent(0.35)
+            let locations = Dictionary(uniqueKeysWithValues: projection.entries.map { ($0.row.id, $0.range.location) })
+            for match in parent.finder.matches {
+                guard let start = locations[match.row], NSMaxRange(match.range) + start <= storage.length else { continue }
+                manager.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: NSRange(location: start + match.range.location, length: match.range.length))
+            }
+        }
+        func clearFindHighlights() {
+            highlightedMatches = nil
+            guard let text, let manager = text.layoutManager else { return }
+            manager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: (text.string as NSString).length))
         }
         func restore(_ rows: [ParkingLotRow], replacing expected: [ParkingLotRow]) {
             guard parent.lot.document.rows == expected else { parent.lot.error = "Parking Lot changed since that edit. Undo was skipped to preserve newer changes."; return }
@@ -476,7 +655,7 @@ struct ParkingLotEditor: NSViewRepresentable {
                 parent.collapsed.remove(entry.row.id)
             } else { index = document.rows.count }
             if !heading && parentID == nil { parentID = ParkingLotTree.parentForInsertion(at: index, in: document.rows, heading: false) }
-            let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parentID)
+            let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parentID, indent: heading || entry?.row.heading != false ? nil : entry?.row.indent)
             var rows = document.rows; rows.insert(row, at: index)
             save(rows, expected: document, caret: (row.id, 0)); text?.window?.makeFirstResponder(text)
         }
@@ -502,6 +681,7 @@ struct ParkingLotEditor: NSViewRepresentable {
                 }
                 guard !entries.isEmpty else { NSSound.beep(); return }
                 let ids = Set(entries.map { $0.row.id })
+                if !deeper { parent.collapsed.subtract(ids) }
                 guard parent.lot.changeIndent(ids, deeper: deeper) else { NSSound.beep(); return }
                 render()
                 let moved = projection.entries.filter { ids.contains($0.row.id) }
@@ -514,6 +694,7 @@ struct ParkingLotEditor: NSViewRepresentable {
             let offset = projection.entries.first(where: { $0.row.id == id }).map { entry in
                 max(0, min(entry.range.length, (text?.selectedRange().location ?? entry.range.location) - entry.range.location))
             } ?? 0
+            if !deeper { parent.collapsed.remove(id) }
             if parent.lot.changeIndent(id, deeper: deeper) { render(caret: (id, offset)) }
             else { NSSound.beep() }
         }
@@ -525,6 +706,35 @@ final class ParkingOutlineText: NSTextView {
     var pointSize: CGFloat = 13
     var indentWidth: CGFloat { 20 * pointSize / 13 }
     var gutterWidth: CGFloat { 48 * pointSize / 13 }
+    /// Headings sit at the left margin, just right of their disclosure triangle;
+    /// items start after the number gutter. The text container is inset only by
+    /// the heading margin, and items indent by the rest of the gutter, reserving
+    /// the same width on the right for the comment buttons.
+    var headingMargin: CGFloat { 16 * pointSize / 13 }
+    var itemMargin: CGFloat { gutterWidth - headingMargin }
+    func nestOffset(_ depth: Int) -> CGFloat { CGFloat(max(0, depth - 1)) * indentWidth }
+    func textOffset(_ entry: ParkingOutline.Entry) -> CGFloat { entry.row.heading ? 0 : itemMargin + nestOffset(entry.depth) }
+    /// The disclosure triangle, centered on the entry's first line of text.
+    func disclosureRect(_ entry: ParkingOutline.Entry) -> NSRect {
+        let scale = pointSize / 13, size = 11 * scale
+        return NSRect(x: 3 * scale + nestOffset(entry.depth), y: firstLineMidY(entry) - size / 2, width: size, height: size)
+    }
+    /// A hit target wider and taller than the drawn triangle, reaching toward the numbers.
+    func disclosureHitRect(_ entry: ParkingOutline.Entry) -> NSRect {
+        let scale = pointSize / 13, height = max(22 * scale, rowRect(entry).height)
+        return NSRect(x: nestOffset(entry.depth), y: firstLineMidY(entry) - height / 2, width: 24 * scale, height: height)
+    }
+    func disclosureEntry(at point: NSPoint) -> ParkingOutline.Entry? {
+        owner?.projection.entries.lazy.filter { ($0.row.heading || $0.hasChildren) && !$0.placeholder }
+            .filter { self.disclosureHitRect($0).contains(point) }
+            .min { abs(self.firstLineMidY($0) - point.y) < abs(self.firstLineMidY($1) - point.y) }
+    }
+    func firstLineMidY(_ entry: ParkingOutline.Entry) -> CGFloat {
+        guard let manager = layoutManager, let container = textContainer, entry.range.location < (string as NSString).length else { return rowRect(entry).midY }
+        manager.ensureLayout(for: container)
+        let glyph = manager.glyphIndexForCharacter(at: entry.range.location)
+        return manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil).midY + textContainerOrigin.y
+    }
     static let headingColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 0.48, green: 0.75, blue: 1, alpha: 1)
@@ -536,6 +746,8 @@ final class ParkingOutlineText: NSTextView {
     private var commentButtons: [UUID: NSButton] = [:]
     func updateCommentButtons() {
         guard let owner else { return }
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotCommentButtons, measurement) }
         let entries = owner.projection.entries.filter { !($0.row.notes ?? []).isEmpty }
         let ids = Set(entries.map { $0.row.id })
         for id in Array(commentButtons.keys) where !ids.contains(id) { commentButtons.removeValue(forKey: id)?.removeFromSuperview() }
@@ -552,19 +764,62 @@ final class ParkingOutlineText: NSTextView {
                 commentButtons[entry.row.id] = button; addSubview(button)
             }
             let count = entry.row.notes!.count
-            button.title = "\(count)"
-            button.toolTip = "Show \(count) \(count == 1 ? "comment" : "comments")"
-            button.setAccessibilityLabel(button.toolTip)
+            if button.title != "\(count)" || button.toolTip == nil {
+                button.title = "\(count)"
+                button.toolTip = "Show \(count) \(count == 1 ? "comment" : "comments")"
+                button.setAccessibilityLabel(button.toolTip)
+            }
             let rect = rowRect(entry)
-            button.frame = NSRect(x: max(rect.minX, bounds.width - 38), y: rect.minY - 1, width: 34, height: max(18, rect.height))
+            let frame = NSRect(x: max(rect.minX, bounds.width - 38), y: rect.minY - 1, width: 34, height: max(18, rect.height))
+            if button.frame != frame { button.frame = frame }
         }
     }
     override func layout() {
-        super.layout(); updateCommentButtons()
-        // Resizes land here after the container tracks the new width, so
-        // image spacing follows live resizes. render()'s width guard keeps
-        // this a no-op when nothing changed.
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextLayout, measurement) }
+        super.layout()
+        // Resizes land here after the container tracks the new width. Only
+        // image rows depend on it, so re-reserve their spacing rather than
+        // rebuilding the outline; render() is then a no-op unless the lot changed.
+        if let owner, !owner.rendering, owner.displayedWidth != imageSlotWidth { updateImageSpacing() }
+        updateCommentButtons()
         owner?.render()
+    }
+    // The gutter numbers and comment column lie outside the text the layout
+    // manager invalidates, so a new width repaints and re-lays out the whole view.
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { widthSettled() }
+    }
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize(); widthSettled()
+    }
+    /// Called when the container reaches a new width, including when a
+    /// window resize releases frozen wrapping.
+    func widthSettled() { needsLayout = true; needsDisplay = true }
+    /// Lots up to this size reflow live while a window or pane resizes; larger
+    /// ones keep their wrapping until the resize ends, as transcripts do.
+    static let liveReflowLimit = 50_000
+    var reflowsDuringResize: Bool { (textStorage?.length ?? 0) <= Self.liveReflowLimit }
+    var imageSlotWidth: CGFloat { min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 2 * itemMargin - 10) }
+    /// Image rows reserve their drawn height at the current width. Updates only
+    /// those paragraphs, leaving the projection and text untouched.
+    func updateImageSpacing() {
+        guard let owner, let storage = textStorage else { return }
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotImageSpacing, measurement) }
+        let width = imageSlotWidth, length = storage.length
+        owner.displayedWidth = width
+        storage.beginEditing()
+        for entry in owner.projection.entries {
+            guard let paths = entry.row.images, !paths.isEmpty, entry.range.location < length,
+                  let old = storage.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle,
+                  let style = old.mutableCopy() as? NSMutableParagraphStyle else { continue }
+            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - nestOffset(entry.depth))).compactMap { $0 })
+            storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: min(length - entry.range.location, max(1, entry.range.length))))
+        }
+        storage.endEditing()
     }
     @objc private func openComments(_ sender: NSButton) {
         guard let value = sender.identifier?.rawValue, let id = UUID(uuidString: value) else { return }
@@ -598,7 +853,16 @@ final class ParkingOutlineText: NSTextView {
     }
     weak var owner: ParkingLotEditor.Coordinator?
     private var suppressSubstitutions = false
-    private var immediateSubstitution: ImmediateSubstitution?
+    /// The row and caret right after a substitution or file-link drop. Another
+    /// writer's save re-renders the pane, but an immediate Backspace still
+    /// belongs to the user's own substitution while this row and caret match.
+    private struct RowCaret: Equatable { let id: UUID; let text: String; let offset: Int }
+    private var immediateSubstitution: RowCaret?
+    private func rowCaret() -> RowCaret? {
+        guard let owner, selectedRange().length == 0, let index = owner.projection.index(at: selectedRange().location) else { return nil }
+        let entry = owner.projection.entries[index]
+        return entry.placeholder ? nil : RowCaret(id: entry.row.id, text: entry.row.text, offset: selectedRange().location - entry.range.location)
+    }
     override var undoManager: UndoManager? { owner?.parent.lot.undoManager }
     @objc func undo(_ sender: Any?) {
         let substituted = undoManager?.undoActionName == TextSubstitutions.undoName
@@ -607,10 +871,25 @@ final class ParkingOutlineText: NSTextView {
     }
     @objc func redo(_ sender: Any?) { immediateSubstitution = nil; undoManager?.redo(); owner?.render() }
     override func insertText(_ value: Any, replacementRange: NSRange) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextInsertion, measurement) }
         immediateSubstitution = nil
         let typedSpace = !suppressSubstitutions && !hasMarkedText() && (value as? String) == " " && selectedRange().length == 0
+        // A space finishing **markup** counts as a substitution for Undo and the feedback button.
+        if typedSpace, let owner, let index = owner.projection.index(at: selectedRange().location),
+           LotInline.completes(in: owner.projection.entries[index].row.text, at: selectedRange().location - owner.projection.entries[index].range.location) {
+            owner.parent.lot.substitutionFeedback.converted()
+            guard TextSubstitutions.shared.enabled else { super.insertText(value, replacementRange: replacementRange); return }
+            undoManager?.beginUndoGrouping()
+            super.insertText(value, replacementRange: replacementRange)
+            undoManager?.setActionName(TextSubstitutions.undoName)
+            undoManager?.endUndoGrouping()
+            immediateSubstitution = rowCaret()
+            owner.refreshLinks()
+            return
+        }
         super.insertText(value, replacementRange: replacementRange)
-        guard typedSpace, let owner, let match = TextSubstitutions.match(in: string, caret: selectedRange().location) else { return }
+        guard typedSpace, let owner, let match = PerformanceCapture.shared.measure(.lotSubstitution, { TextSubstitutions.match(in: string, caret: selectedRange().location) }) else { return }
         owner.parent.lot.substitutionFeedback.converted()
         guard TextSubstitutions.shared.enabled else { return }
         let revision = owner.parent.lot.document.revision
@@ -622,14 +901,24 @@ final class ParkingOutlineText: NSTextView {
         setSelectedRange(NSRange(location: caret + (match.replacement as NSString).length - match.range.length, length: 0))
         undoManager?.setActionName(TextSubstitutions.undoName)
         owner.parent.lot.substitutionFeedback.converted()
-        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+        immediateSubstitution = rowCaret()
     }
     override func deleteBackward(_ sender: Any?) {
-        if immediateSubstitution?.matches(self) == true, [TextSubstitutions.undoName, Self.fileLinkUndoName].contains(undoManager?.undoActionName ?? "") { undo(sender); return }
+        if immediateSubstitution != nil, immediateSubstitution == rowCaret(), [TextSubstitutions.undoName, Self.fileLinkUndoName].contains(undoManager?.undoActionName ?? "") { undo(sender); return }
         immediateSubstitution = nil
         if let owner, selectedRange().length == 0,
            let index = owner.projection.index(at: selectedRange().location) {
             let entry = owner.projection.entries[index]
+            // Backspace at a heading's start never merges it into the section
+            // above; the caret just moves to the end of the row before it.
+            if entry.row.heading, selectedRange().location == entry.range.location {
+                if index > 0 {
+                    let previous = owner.projection.entries[index - 1]
+                    setSelectedRange(NSRange(location: NSMaxRange(previous.range), length: 0))
+                    scrollRangeToVisible(selectedRange())
+                }
+                return
+            }
             if !entry.placeholder && !entry.row.heading && !entry.hasChildren && entry.row.text.isEmpty && (entry.row.images ?? []).isEmpty {
                 let document = owner.parent.lot.document
                 let previous = owner.projection.entries.prefix(index).last { !$0.placeholder }
@@ -640,9 +929,23 @@ final class ParkingOutlineText: NSTextView {
         }
         super.deleteBackward(sender)
     }
+    @objc func toggleBold(_ sender: Any?) { owner?.toggleInline(.bold, in: selectedRange()) }
+    @objc func toggleItalic(_ sender: Any?) { owner?.toggleInline(.italic, in: selectedRange()) }
+    override func performTextFinderAction(_ sender: Any?) {
+        let tag = (sender as? NSMenuItem)?.tag ?? (sender as? NSControl)?.tag ?? 0
+        guard let finder = owner?.parent.finder, let action = NSTextFinder.Action(rawValue: tag) else { return }
+        switch action {
+        case .showFindInterface: finder.open()
+        case .nextMatch: if finder.visible { finder.next() } else { finder.open() }
+        case .previousMatch: if finder.visible { finder.previous() } else { finder.open() }
+        case .hideFindInterface: finder.close()
+        default: break
+        }
+    }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        if item.action == #selector(performTextFinderAction(_:)) { return owner != nil }
         // Plain NSTextView validation rejects image-only clipboards before the
         // Edit menu can dispatch Command-V to our custom paste implementation.
         if item.action == #selector(paste(_:)),
@@ -652,6 +955,9 @@ final class ParkingOutlineText: NSTextView {
         return super.validateUserInterfaceItem(item)
     }
     override func keyDown(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .lotKeyDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotKeyHandling, measurement) }
         if event.keyCode == 48, !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option),
            let owner, let index = owner.projection.index(at: selectedRange().location) {
             let entry = owner.projection.entries[index]
@@ -666,8 +972,17 @@ final class ParkingOutlineText: NSTextView {
             }
             insertText(event.modifierFlags.contains(.command) ? "\u{2028}" : "\n", replacementRange: selectedRange()); return
         }
+        // NSTextView hides the cursor on every key with a synchronous WindowServer
+        // call (5-15 ms), yet it stays hidden until the mouse moves. Once hidden,
+        // send later keys straight to input handling.
+        let mouse = mouseLocation()
+        if cursorHiddenAt == mouse { interpretKeyEvents([event]); return }
+        cursorHiddenAt = mouse; cursorHides += 1
         super.keyDown(with: event)
     }
+    var mouseLocation: () -> NSPoint = { NSEvent.mouseLocation }
+    private var cursorHiddenAt: NSPoint?
+    private(set) var cursorHides = 0
     override func copy(_ sender: Any?) { copySelection(to: .general) }
     /// Other apps get link labels as plain text; a Parking Lot paste gets the Markdown back.
     func copySelection(to board: NSPasteboard) {
@@ -675,8 +990,50 @@ final class ParkingOutlineText: NSTextView {
         let markdown = owner.projection.markdown(selectedRange()), plain = Self.labels(markdown)
         board.clearContents(); board.setString(plain, forType: .string)
         if plain != markdown { board.setString(markdown, forType: Self.markdownType) }
+        if let rich = Self.richText(plain) { board.setData(rich, forType: .rtf) }
     }
     static let markdownType = NSPasteboard.PasteboardType("app.converse.parking-markdown")
+    /// RTF for pasting elsewhere, showing Markdown emphasis as real bold and
+    /// italic. Plain text keeps the Markdown; nil when there is no emphasis.
+    static func richText(_ markdown: String) -> Data? {
+        let spans = LotInline.spans(in: markdown)
+        guard !spans.isEmpty else { return nil }
+        let source = markdown as NSString, result = NSMutableAttributedString()
+        let body = NSFont.systemFont(ofSize: 13)
+        func add(_ text: String, _ font: NSFont) { result.append(NSAttributedString(string: text, attributes: [.font: font])) }
+        var cursor = 0
+        for span in spans {
+            add(source.substring(with: NSRange(location: cursor, length: span.range.location - cursor)), body)
+            var font = body
+            if span.bold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
+            if span.italic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
+            add(source.substring(with: span.content), font)
+            cursor = NSMaxRange(span.range)
+        }
+        add(source.substring(from: cursor), body)
+        return try? result.data(from: NSRange(location: 0, length: result.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+    /// Markdown for rich text pasted from another app; nil when it has no bold or italic.
+    static func markdown(fromRTF data: Data) -> String? {
+        guard let rich = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) else { return nil }
+        var output = "", found = false
+        rich.enumerateAttribute(.font, in: NSRange(location: 0, length: rich.length)) { value, range, _ in
+            let text = (rich.string as NSString).substring(with: range)
+            let traits = (value as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
+            let stars = (traits.contains(.boldFontMask) ? 2 : 0) + (traits.contains(.italicFontMask) ? 1 : 0)
+            guard stars > 0 else { output += text; return }
+            // Whitespace stays outside the markers, line by line.
+            output += text.components(separatedBy: "\n").map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return line }
+                found = true
+                let lead = String(line.prefix { $0 == " " }), tail = String(String(line.reversed()).prefix { $0 == " " })
+                let marker = String(repeating: "*", count: stars)
+                return lead + marker + trimmed + marker + tail
+            }.joined(separator: "\n")
+        }
+        return found ? output : nil
+    }
     static func labels(_ text: String) -> String {
         let source = NSMutableString(string: text)
         for link in LotLinks.find(in: text).reversed() where link.isMarkdown {
@@ -731,7 +1088,8 @@ final class ParkingOutlineText: NSTextView {
             } catch { owner.parent.lot.error = error.localizedDescription }
             return
         }
-        if let value = board.string(forType: Self.markdownType) ?? board.string(forType: .string) {
+        let imported = board.data(forType: .rtf).flatMap(Self.markdown(fromRTF:))
+        if let value = board.string(forType: Self.markdownType) ?? imported ?? board.string(forType: .string) {
             insertText(value, replacementRange: selectedRange())
             if !LotLinks.find(in: value).isEmpty { owner.refreshLinks(settle: true) }
         }
@@ -779,7 +1137,7 @@ final class ParkingOutlineText: NSTextView {
         guard owner.parent.lot.document.revision != revision else { return }
         setSelectedRange(NSRange(location: start + (linked as NSString).length, length: 0))
         undoManager?.setActionName(Self.fileLinkUndoName)
-        immediateSubstitution = ImmediateSubstitution(text: string, caret: selectedRange())
+        immediateSubstitution = rowCaret()
         owner.refreshLinks(settle: true)
     }
     func rowRect(_ entry: ParkingOutline.Entry) -> NSRect {
@@ -792,7 +1150,16 @@ final class ParkingOutlineText: NSTextView {
         let glyph = manager.glyphIndexForCharacter(at: entry.range.location)
         return manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
     }
+    /// Area marked for redisplay and gutter marker origins drawn since the
+    /// resize self-test last cleared them, to compare with the layout.
+    var invalidatedArea = NSRect.null
+    var paintedMarkers: [UUID: NSPoint] = [:]
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        invalidatedArea = invalidatedArea.union(invalidRect); super.setNeedsDisplay(invalidRect)
+    }
     override func draw(_ dirtyRect: NSRect) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotDraw, measurement) }
         // NSTextView narrows the graphics clip while drawing its text container.
         // Restore it before drawing the outline gutter outside that container.
         NSGraphicsContext.saveGraphicsState()
@@ -802,47 +1169,67 @@ final class ParkingOutlineText: NSTextView {
         if owner.projection.entries.isEmpty {
             ("Right-click to create a heading" as NSString).draw(at: NSPoint(x: 36, y: 8), withAttributes: [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
         }
+        // Images hang below their row's text, so a dirty rect can reach one whose row it misses.
+        if let manager = layoutManager, let container = textContainer { manager.ensureLayout(for: container) }
         for entry in owner.projection.entries {
-            let rect = rowRect(entry)
             if let manager = layoutManager, let container = textContainer, let paths = entry.row.images, !paths.isEmpty {
                 let end = max(entry.range.location, NSMaxRange(entry.range) - 1)
                 let glyph = manager.glyphIndexForCharacter(at: min(end, max(0, (string as NSString).length - 1)))
                 let line = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
-                let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-                let width = max(40, min(Self.lotImageWidth, container.containerSize.width - 10 - offset))
+                let nest = nestOffset(entry.depth)
+                let width = max(40, imageSlotWidth - nest)
                 var y = textContainerOrigin.y + line.maxY + Self.lotImageGap
                 for (path, size) in zip(paths, lotImageSizes(paths, width: width)) {
                     guard let size, let image = imageCache[path] else { continue }
-                    let dest = NSRect(x: textContainerOrigin.x + 5 + offset, y: y, width: size.width, height: size.height)
+                    let dest = NSRect(x: textContainerOrigin.x + 5 + textOffset(entry), y: y, width: size.width, height: size.height)
                     if dest.intersects(dirtyRect) {
                         image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     }
                     y += size.height + Self.lotImageGap
                 }
             }
+        }
+        let shown = charactersDrawn(in: dirtyRect)
+        for entry in owner.projection.entries where entry.range.location <= NSMaxRange(shown) && NSMaxRange(entry.range) >= shown.location {
+            let rect = rowRect(entry)
             guard rect.intersects(dirtyRect) else { continue }
-            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
+            let offset = nestOffset(entry.depth)
             let marker = entry.row.heading ? "" : ParkingLotTree.label(entry.number, depth: entry.depth) + "."
             let markerAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: pointSize), .foregroundColor: entry.row.tag?.color ?? NSColor.secondaryLabelColor]
             // Item labels are right-aligned against the text, so "iii." or "12." never overlaps it.
             let markerX = entry.row.heading ? gutterWidth / 3 + offset : max(2, gutterWidth - 4 + offset - (marker as NSString).size(withAttributes: markerAttributes).width)
             (marker as NSString).draw(at: NSPoint(x: markerX, y: rect.minY), withAttributes: markerAttributes)
+            paintedMarkers[entry.row.id] = NSPoint(x: markerX, y: rect.minY)
             if (entry.hasChildren || entry.row.heading) && !entry.placeholder {
-                let disclosure = owner.parent.collapsed.contains(entry.row.id) ? "▸" : "▾"
-                (disclosure as NSString).draw(at: NSPoint(x: 3 + offset, y: rect.minY), withAttributes: [.font: NSFont.systemFont(ofSize: pointSize, weight: .semibold), .foregroundColor: NSColor.labelColor])
+                let triangle = NSBezierPath(), box = disclosureRect(entry)
+                if owner.parent.collapsed.contains(entry.row.id) {
+                    triangle.move(to: NSPoint(x: box.minX + 1, y: box.minY)); triangle.line(to: NSPoint(x: box.maxX, y: box.midY)); triangle.line(to: NSPoint(x: box.minX + 1, y: box.maxY))
+                } else {
+                    triangle.move(to: NSPoint(x: box.minX, y: box.minY + 1)); triangle.line(to: NSPoint(x: box.maxX, y: box.minY + 1)); triangle.line(to: NSPoint(x: box.midX, y: box.maxY))
+                }
+                triangle.close(); triangle.lineJoinStyle = .round; triangle.lineWidth = 1
+                NSColor.secondaryLabelColor.setFill(); NSColor.secondaryLabelColor.setStroke(); triangle.fill(); triangle.stroke()
             }
             if entry.placeholder {
-                ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5, y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
+                ((entry.row.heading ? "New Heading…" : "New item…") as NSString).draw(at: NSPoint(x: rect.minX + 5 + textOffset(entry), y: rect.minY), withAttributes: [.font: entry.row.heading ? NSFont.boldSystemFont(ofSize: pointSize) : NSFont.systemFont(ofSize: pointSize), .foregroundColor: NSColor.placeholderTextColor])
             }
         }
     }
+    /// The characters laid out across `rect`'s height, for skipping rows it cannot show.
+    private func charactersDrawn(in rect: NSRect) -> NSRange {
+        let length = (string as NSString).length
+        guard let manager = layoutManager, let container = textContainer else { return NSRange(location: 0, length: length) }
+        manager.ensureLayout(for: container)
+        let band = NSRect(x: 0, y: rect.minY - textContainerOrigin.y, width: container.containerSize.width, height: rect.height)
+        let glyphs = manager.glyphRange(forBoundingRect: band, in: container)
+        guard glyphs.length > 0 else { return NSRange(location: length, length: 0) }
+        let characters = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        // The empty rows at the end sit on the extra line fragment, which has no glyphs.
+        return NSMaxRange(characters) >= length - 1 ? NSRange(location: characters.location, length: length - characters.location) : characters
+    }
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if let entry = owner?.projection.entries.first(where: { ($0.row.heading || $0.hasChildren) && rowRect($0).minY <= point.y && rowRect($0).maxY >= point.y }),
-           !entry.placeholder, point.x >= CGFloat(max(0, entry.depth - 1)) * indentWidth,
-           point.x < 22 * pointSize / 13 + CGFloat(max(0, entry.depth - 1)) * indentWidth {
-            owner?.toggle(entry.row.id); return
-        }
+        if let entry = disclosureEntry(at: point) { owner?.toggle(entry.row.id); return }
         // Clicking a link follows it instead of placing the caret for editing;
         // Option-click places the caret in a Markdown link's label instead.
         let modifiers = event.modifierFlags.intersection([.shift, .command, .option, .control])
@@ -865,11 +1252,13 @@ final class ParkingOutlineText: NSTextView {
     // The window records the new first responder after these return.
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
+        cursorHiddenAt = nil
         if result { DispatchQueue.main.async { [weak self] in self?.owner?.refreshLinks() } }
         return result
     }
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
+        cursorHiddenAt = nil
         if result { DispatchQueue.main.async { [weak self] in self?.owner?.refreshLinks() } }
         return result
     }
@@ -939,6 +1328,9 @@ final class ParkingOutlineText: NSTextView {
         item("New heading below", key: "\r", modifiers: .shift) { owner.add(heading: true, after: entry) }
         item("New item below", key: "\r") { owner.add(heading: false, after: entry) }
         menu.addItem(.separator())
+        if selectedRange().length > 0 {
+            item("Copy", key: "c", modifiers: .command) { self.copy(nil) }
+        }
         item(entry.row.heading ? "Copy Heading" : "Copy Item") { owner.copyEntry(entry.row.id, cut: false) }
         item(entry.row.heading ? "Cut Heading" : "Cut Item") { owner.copyEntry(entry.row.id, cut: true) }
         item("Paste") { self.paste(nil) }
@@ -1021,8 +1413,244 @@ private final class ParkingMenuAction: NSObject {
     @objc func run() { action() }
 }
 
+/// Headings start at the left margin, items after the numbers; triangles keep a real target.
+private func parkingHeadingLayoutSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-heading-layout-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let lot = ParkingLotStore(folder: folder, id: UUID())
+    let heading = ParkingLotRow(heading: true, text: "Videos to Make"), item = ParkingLotRow(heading: false, text: "First", parentID: heading.id)
+    let parent = ParkingLotRow(heading: false, text: "Parent", notes: [.init(author: "A", text: "n")], parentID: heading.id), child = ParkingLotRow(heading: false, text: "Child", parentID: parent.id)
+    lot.openStarter([heading, item, parent, child])
+    var collapsed: Set<UUID> = []
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: Binding(get: { collapsed }, set: { collapsed = $0 }), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+    text.isRichText = false; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    text.isVerticallyResizable = true; text.textContainerInset = NSSize(width: 36, height: 8); text.textContainer?.widthTracksTextView = true
+    window.contentView = text; text.configureTextScaling(); coordinator.render()
+    func entry(_ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func x(_ id: UUID) -> CGFloat {
+        text.layoutManager!.ensureLayout(for: text.textContainer!)
+        let glyph = text.layoutManager!.glyphIndexForCharacter(at: entry(id).range.location)
+        return text.layoutManager!.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minX + text.layoutManager!.location(forGlyphAt: glyph).x + text.textContainerOrigin.x
+    }
+    let padding = text.textContainer!.lineFragmentPadding
+    check(abs(x(heading.id) - padding - text.headingMargin) < 0.5 && abs(x(item.id) - padding - text.gutterWidth) < 0.5 && x(heading.id) < x(item.id) - 20,
+          "A heading starts at the left margin, outdented from its items (heading \(x(heading.id)), item \(x(item.id)))")
+    check(abs(x(child.id) - x(item.id) - text.indentWidth) < 0.5, "Nested items keep one indent per level after the gutter")
+    let label = NSAttributedString(string: ParkingLotTree.label(1, depth: 1) + ".", attributes: [.font: NSFont.systemFont(ofSize: text.pointSize)]).size().width
+    check(text.gutterWidth - 4 - label > text.headingMargin + padding - 0.5, "An item's number stays between the heading edge and the item text")
+    let parentButton = text.subviews.compactMap { $0 as? NSButton }.first
+    check(parentButton != nil && parentButton!.frame.minX >= text.bounds.width - 38, "Comment buttons stay in the right margin beyond the wrapped text")
+    let box = text.disclosureRect(entry(heading.id)), hit = text.disclosureHitRect(entry(heading.id))
+    check(box.width == 11 && box.height == 11 && hit.width >= 24 && hit.height >= 22 && hit.contains(NSPoint(x: box.midX, y: box.midY)),
+          "Disclosure triangles are larger and sit inside a hit target at least 24 by 22 points")
+    func click(_ point: NSPoint) {
+        text.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: text.convert(point, to: nil), modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+    }
+    let center = text.disclosureRect(entry(parent.id))
+    click(NSPoint(x: center.maxX + 8, y: center.midY)); coordinator.render()
+    check(collapsed == [parent.id] && !coordinator.projection.entries.contains { $0.row.id == child.id }, "Clicking beside the triangle, within its target, collapses the row")
+    click(NSPoint(x: center.midX, y: center.midY)); coordinator.render()
+    check(collapsed.isEmpty && coordinator.projection.entries.contains { $0.row.id == child.id }, "Clicking the triangle again expands it")
+    let beyond = text.disclosureHitRect(entry(parent.id))
+    check(text.disclosureEntry(at: NSPoint(x: beyond.maxX + 1, y: beyond.midY)) == nil, "A click just past the target edits text instead of toggling")
+    window.close()
+}
+
+/// Bold and italic: toggling, conversion, undo and clipboard flavors.
+private func parkingInlineSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-inline-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shared = TextSubstitutions.shared, wasEnabled = shared.enabled
+    defer { try? shared.setEnabled(wasEnabled) }
+    try? shared.setEnabled(true)
+    let lot = ParkingLotStore(folder: folder.appendingPathComponent("lot"), id: UUID())
+    let h = ParkingLotRow(heading: true, text: "Notes"), a = ParkingLotRow(heading: false, text: "alpha beta", parentID: h.id), b = ParkingLotRow(heading: false, text: "gamma", parentID: h.id)
+    lot.openStarter([h, a, b])
+    let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+    text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+    window.contentView = text; coordinator.render(); window.makeFirstResponder(text)
+    func entry(_ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func row(_ id: UUID) -> String { lot.document.rows.first { $0.id == id }!.text }
+    func place(_ id: UUID, _ offset: Int, _ length: Int = 0) { text.setSelectedRange(NSRange(location: entry(id).range.location + offset, length: length)) }
+    func font(_ id: UUID, _ offset: Int) -> NSFont? { text.textStorage?.attribute(.font, at: entry(id).range.location + offset, effectiveRange: nil) as? NSFont }
+    func hidden(_ id: UUID, _ offset: Int) -> Bool { (font(id, offset)?.pointSize ?? 13) < 1 }
+    func bold(_ id: UUID, _ offset: Int) -> Bool { font(id, offset).map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } ?? false }
+    func italic(_ id: UUID, _ offset: Int) -> Bool { font(id, offset).map { NSFontManager.shared.traits(of: $0).contains(.italicFontMask) } ?? false }
+    func matches(_ step: String) {
+        let incremental = ParkingLotRenderSignature(text, coordinator)
+        coordinator.discardDisplayedState(); coordinator.render()
+        check(incremental == ParkingLotRenderSignature(text, coordinator), "Incremental display equals a full render after: " + step)
+    }
+    place(a.id, 0, 5); text.toggleBold(nil)
+    check(row(a.id) == "**alpha** beta" && text.selectedRange() == NSRange(location: entry(a.id).range.location + 2, length: 5) && lot.undoManager.undoActionName == "Bold", "Command-B wraps the selection and keeps it selected")
+    matches("toggling bold")
+    place(b.id, 0); coordinator.refreshLinks()
+    check(hidden(a.id, 0) && bold(a.id, 2) && hidden(a.id, 7) && !bold(a.id, 10) && row(a.id) == "**alpha** beta", "Away from the caret, markers hide and the word is bold, with the text unchanged")
+    place(a.id, 9); coordinator.refreshLinks()
+    check(!hidden(a.id, 0) && !bold(a.id, 2), "With the caret touching the span it shows literally for editing")
+    place(a.id, 12); coordinator.refreshLinks()
+    check(hidden(a.id, 0) && bold(a.id, 2), "Past its word, the span converts again")
+    place(a.id, 12); text.toggleItalic(nil)
+    check(row(a.id) == "**alpha** *beta*" && text.selectedRange().length == 0, "Command-I at a caret styles the word and keeps a caret")
+    place(b.id, 0); coordinator.refreshLinks()
+    check(italic(a.id, 11) && !bold(a.id, 11), "Italic styles only its own word")
+    matches("toggling italic at a caret")
+    text.undo(nil); text.undo(nil)
+    check(row(a.id) == "alpha beta" && lot.undoManager.canRedo, "Undo reverses each style change")
+    text.redo(nil); text.redo(nil)
+    check(row(a.id) == "**alpha** *beta*", "Redo reapplies them")
+    text.undo(nil)
+    place(a.id, 2, 5); text.toggleBold(nil)
+    check(row(a.id) == "alpha beta", "Command-B on styled text removes the style")
+    text.undo(nil); text.undo(nil)
+    // Typing markup converts at the trailing space, with substitution feedback and Undo.
+    lot.update(b.id, text: "see "); coordinator.render(caret: (b.id, 4))
+    for key in "**done**" { text.insertText(String(key), replacementRange: text.selectedRange()) }
+    check(row(b.id) == "see **done**" && !hidden(b.id, 4) && !bold(b.id, 6), "Finished markup stays literal while the caret is at its end")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    check(row(b.id) == "see **done** " && hidden(b.id, 4) && bold(b.id, 6) && lot.substitutionFeedback.offersDisable(shared), "A trailing space converts the markup and offers the substitutions control")
+    check(lot.undoManager.undoActionName == TextSubstitutions.undoName, "The converting space is a Text Substitution step in Undo")
+    text.undo(nil)
+    check(row(b.id) == "see **done**" && !hidden(b.id, 4) && lot.substitutionFeedback.offersDisable(shared), "Undo removes the space and shows the markup literally again")
+    text.insertText(" ", replacementRange: text.selectedRange()); text.deleteBackward(nil)
+    check(row(b.id) == "see **done**", "Immediate Backspace undoes the conversion too")
+    text.insertText(" ", replacementRange: text.selectedRange())
+    try? shared.setEnabled(false); coordinator.discardDisplayedState(); coordinator.render()
+    check(!hidden(b.id, 4) && !bold(b.id, 6), "With substitutions off, markup stays literal")
+    try? shared.setEnabled(true); coordinator.discardDisplayedState(); coordinator.render()
+    // Clipboard: Markdown stays in plain text and the Lot; RTF carries real styling.
+    lot.update(b.id, text: "see **done** and *soon*"); coordinator.render(caret: (h.id, 0))
+    place(b.id, 0, (row(b.id) as NSString).length)
+    let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+    text.copySelection(to: board)
+    check(board.string(forType: .string) == "see **done** and *soon*" && board.data(forType: .rtf) != nil, "Copy keeps Markdown as plain text and adds rich text")
+    let rich = board.data(forType: .rtf).flatMap { try? NSAttributedString(data: $0, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) }
+    if let rich, let range = rich.string.range(of: "done") {
+        let at = NSRange(range, in: rich.string).location
+        check(rich.string == "see done and soon" && (rich.attribute(.font, at: at, effectiveRange: nil) as? NSFont).map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } == true, "Rich text shows real bold without markers")
+    } else { check(false, "Copied rich text decodes") }
+    check(ParkingOutlineText.markdown(fromRTF: board.data(forType: .rtf)!) == "see **done** and *soon*", "Rich text converts back to Markdown when pasted here")
+    let plainRich = NSAttributedString(string: "plain words", attributes: [.font: NSFont.systemFont(ofSize: 13)])
+    check(ParkingOutlineText.markdown(fromRTF: try! plainRich.data(from: NSRange(location: 0, length: 11), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])) == nil, "Rich text without emphasis pastes as its plain text")
+    place(b.id, (row(b.id) as NSString).length); text.paste(from: board)
+    check(row(b.id) == "see **done** and *soon*see **done** and *soon*", "Pasting copied emphasis back keeps it")
+    text.undo(nil)
+    let exported = ExportSession(lot: lot)
+    let html = try? TranscriptExport.html(sessions: [exported], order: .sequential, content: .prompts, lineNumbers: false)
+    check(html?.contains("<strong>done</strong>") == true && html?.contains("<em>soon</em>") == true, "HTML export renders bold and italic")
+    check(ParkingLotStore.markdown(lot.document.rows).contains("**done**"), "Markdown export keeps the markers")
+    check(ParkingLotFind.matches("done", in: lot.document.rows).count == 1 && ParkingLotFind.matches("**", in: lot.document.rows).isEmpty, "Find sees the words and never the hidden markers")
+    window.close()
+}
+
+/// Tab/Shift-Tab transitions and Backspace at a heading, in a native pane.
+private func parkingFlexibleNestingEditorSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-nesting-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    func fixture(_ name: String) -> (ParkingLotStore, ParkingLotEditor.Coordinator, ParkingOutlineText, UnsafeMutablePointer<Set<UUID>>, ParkingLotRow, ParkingLotRow, ParkingLotRow, ParkingLotRow, ParkingLotRow) {
+        let lot = ParkingLotStore(folder: folder.appendingPathComponent(name), id: UUID())
+        let h = ParkingLotRow(heading: true, text: "Work"), a = ParkingLotRow(heading: false, text: "Alpha", parentID: h.id)
+        let b = ParkingLotRow(heading: false, text: "Bravo", parentID: h.id), c = ParkingLotRow(heading: false, text: "Charlie", parentID: b.id)
+        let d = ParkingLotRow(heading: false, text: "Delta", parentID: h.id)
+        lot.openStarter([h, a, b, c, d])
+        let collapsed = UnsafeMutablePointer<Set<UUID>>.allocate(capacity: 1); collapsed.initialize(to: [])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: Binding(get: { collapsed.pointee }, set: { collapsed.pointee = $0 }), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+        text.isRichText = false; text.owner = coordinator; text.delegate = coordinator; coordinator.text = text; coordinator.render()
+        return (lot, coordinator, text, collapsed, h, a, b, c, d)
+    }
+    func tab(_ text: ParkingOutlineText, shift: Bool = false) {
+        text.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? .shift : [], timestamp: 0, windowNumber: 0, context: nil,
+                                            characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!)
+    }
+    func entry(_ coordinator: ParkingLotEditor.Coordinator, _ id: UUID) -> ParkingOutline.Entry { coordinator.projection.entries.first { $0.row.id == id }! }
+    func caret(_ text: ParkingOutlineText, _ coordinator: ParkingLotEditor.Coordinator, _ id: UUID, _ offset: Int? = nil) {
+        let found = entry(coordinator, id); text.setSelectedRange(NSRange(location: found.range.location + (offset ?? found.range.length), length: 0))
+    }
+    do {
+        // Tab on the first item, twice; Undo restores each step.
+        let (lot, coordinator, text, _, _, a, _, _, _) = fixture("tab")
+        let start = lot.document.rows
+        caret(text, coordinator, a.id); tab(text)
+        check(lot.document.rows[1].indent == 1 && entry(coordinator, a.id).depth == 2 && text.selectedRange().length == 0, "Tab on the first item in a section indents it deeper than its heading")
+        tab(text)
+        check(entry(coordinator, a.id).depth == 3, "A second Tab goes deeper again")
+        check(ParkingLotStore(folder: folder.appendingPathComponent("tab"), id: lot.id).document == lot.document && lot.document.schemaVersion == 4, "Flexible indents survive reload, stamped schema 4")
+        text.undo(nil); text.undo(nil)
+        check(lot.document.rows == start && lot.document.schemaVersion == 2, "Undo reverses each Tab and the lot returns to the old schema")
+        text.redo(nil)
+        check(lot.document.rows[1].indent == 1, "Redo repeats a flexible indent")
+    }
+    do {
+        // Shift-Tab on a top-level item becomes a heading; Undo and a collapsed row.
+        let (lot, coordinator, text, collapsed, _, _, b, c, d) = fixture("heading")
+        let start = lot.document.rows
+        collapsed.pointee = [b.id]; coordinator.render()
+        caret(text, coordinator, b.id, 2); tab(text, shift: true)
+        let converted = lot.document.rows.first { $0.id == b.id }!
+        check(converted.heading && converted.parentID == nil && lot.document.rows.first { $0.id == c.id }?.parentID == b.id && lot.document.rows.first { $0.id == d.id }?.parentID == b.id,
+              "Shift-Tab on a top-level item makes it a heading, adopting the items after it")
+        check(!collapsed.pointee.contains(b.id) && entry(coordinator, c.id).row.id == c.id && entry(coordinator, d.id).row.id == d.id && text.selectedRange().location == entry(coordinator, b.id).range.location + 2,
+              "The new heading opens so nothing disappears, and the caret stays in its text")
+        text.undo(nil)
+        check(lot.document.rows == start, "One Undo restores the item, its children and the adopted siblings")
+        text.redo(nil)
+        check(lot.document.rows.first { $0.id == b.id }?.heading == true, "Redo makes it a heading again")
+        let hidden = ParkingLotFolding(rows: lot.document.rows, collapsed: [b.id]).hiddenCount
+        check(hidden == 2, "A heading made from an item folds its adopted section")
+    }
+    do {
+        // Return on an indented row keeps its level; a selection outdents to headings together.
+        let (lot, coordinator, text, _, _, a, b, _, d) = fixture("return")
+        caret(text, coordinator, a.id); tab(text)
+        caret(text, coordinator, a.id); text.insertText("\n", replacementRange: text.selectedRange())
+        let created = lot.document.rows[2]
+        check(created.text.isEmpty && created.indent == 1 && created.parentID == lot.document.rows[0].id, "Return on an indented item creates its sibling at the same level")
+        text.undo(nil); caret(text, coordinator, a.id); tab(text, shift: true)
+        text.setSelectedRange(NSRange(location: entry(coordinator, b.id).range.location, length: NSMaxRange(entry(coordinator, d.id).range) - entry(coordinator, b.id).range.location))
+        tab(text, shift: true)
+        check(lot.document.rows.first { $0.id == b.id }?.heading == true && lot.document.rows.first { $0.id == d.id }?.heading == true && text.selectedRange().length > 0,
+              "Shift-Tab on several selected top-level items makes each a heading and keeps the selection")
+    }
+    do {
+        // Backspace at a heading only moves the caret.
+        let (lot, coordinator, text, _, h, a, _, _, d) = fixture("backspace")
+        let second = ParkingLotRow(heading: true, text: "Later")
+        let last = ParkingLotRow(heading: false, text: "After", parentID: second.id)
+        try lot.replaceUserRows(lot.document.rows + [second, last], revision: lot.document.revision); coordinator.render()
+        let before = lot.document
+        caret(text, coordinator, second.id, 0)
+        let ready = coordinator.projection.entries.last { $0.placeholder && !$0.row.heading && $0.before == second.id }!
+        text.deleteBackward(nil)
+        check(lot.document == before && text.selectedRange() == NSRange(location: ready.range.location, length: 0), "Backspace at a heading's start moves to the ever-present New item row above, changing nothing")
+        check(lot.undoManager.undoActionName != "Typing" || lot.document == before, "Moving the caret adds no Undo step")
+        try lot.replaceUserRows(lot.document.rows.filter { $0.id != d.id }, revision: lot.document.revision); coordinator.render()
+        let revised = lot.document
+        caret(text, coordinator, second.id, 0); text.deleteBackward(nil)
+        check(lot.document == revised && text.selectedRange().location == NSMaxRange(coordinator.projection.entries[coordinator.projection.entries.firstIndex { $0.row.id == second.id }! - 1].range), "Backspace at a heading always lands at the end of the entry above")
+        caret(text, coordinator, h.id, 0); text.deleteBackward(nil)
+        check(lot.document == revised && text.selectedRange().location == 0, "Backspace at the first heading does nothing")
+        caret(text, coordinator, h.id, 2); text.deleteBackward(nil)
+        check(lot.document.rows.first?.text == "Wrk", "Backspace elsewhere in a heading still deletes one character")
+        text.undo(nil)
+        // A selection reaching the start of a heading still deletes normally.
+        caret(text, coordinator, a.id); text.setSelectedRange(NSRange(location: entry(coordinator, a.id).range.location, length: 2)); text.deleteBackward(nil)
+        check(lot.document.rows.first { $0.id == a.id }?.text == "pha", "Backspace with a selection is ordinary deletion")
+    } catch { check(false, "Heading Backspace fixture: " + error.localizedDescription) }
+}
+
 func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
+    parkingFlexibleNestingEditorSelfTests(check)
+    parkingFindSelfTests(check)
+    parkingInlineSelfTests(check)
+    parkingHeadingLayoutSelfTests(check)
     parkingLotTextScalingSelfTests(check)
+    parkingLotResizeSelfTests(check)
     parkingMultiSelectionSelfTests(check)
     let heading = ParkingLotRow(heading: true, text: "Converse")
     let first = ParkingLotRow(heading: false, text: "Fix scrolling", notes: [.init(author: "Reviewer", text: "Keep this comment")])
@@ -1185,12 +1813,14 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     check(lot.document.rows == original.rows, "Native Undo restores a multi-row-capable outline transaction")
     text.redo(nil)
     check(lot.document.rows[0].text == "Fresh features", "Native Redo restores the edited outline")
-    lot.update(lot.document.rows[0].id, text: "Another writer")
-    text.undoManager?.undo()
-    check(lot.document.rows[0].text == "Fresh features", "Undo reverses the newest lot change before earlier text edits")
-    text.redo(nil)
-    check(lot.document.rows[0].text == "Another writer", "Redo restores the newest lot change before continuing edits")
-    lot.error = ""
+    do {
+        try lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "update", id: lot.document.rows[0].id, text: "Another writer")]), author: "Session")
+        check(!lot.undoManager.canRedo && lot.undoManager.undoActionName == "Typing", "A session save joins neither Undo nor Redo, and the user's Typing stays next")
+        text.undoManager?.undo()
+        check(lot.document.rows[0].text == "Another writer" && lot.notice == "Can't undo: Session changed this item since.",
+              "Undo of typing into a row a session changed since reports a conflict instead of restoring the old text")
+    } catch { check(false, "Native Undo session fixture: " + error.localizedDescription) }
+    lot.notice = ""
     lot.update(lot.document.rows[1].id, text: "Existing item"); coordinator.render()
     lot.setDone(lot.document.rows[1].id, true); coordinator.render()
     let doneRange = coordinator.projection.entries.first { $0.row.id == lot.document.rows[1].id }!.range
@@ -1251,7 +1881,7 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     wideBoard.releaseGlobally()
     let bothImages = imageLot.document.rows.first { $0.id == imageRow.id }!.images ?? []
     check(bothImages.count == 2, "A second pasted image attaches to the same item")
-    let slotWidth = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    let slotWidth = imageText.imageSlotWidth
     // 100x50 scales to the full 106pt height; 400x40 aspect-fits to 32pt.
     let tallHeight = 50 * min(slotWidth / 100, 106 / 50)
     let wideHeight = 40 * min(slotWidth / 400, 106 / 40)
@@ -1271,7 +1901,7 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
         layout.ensureLayout(for: container)
     }
     imageText.layout()
-    let liveWidth: CGFloat = min(320, (imageText.textContainer?.containerSize.width ?? 400) - 10)
+    let liveWidth: CGFloat = imageText.imageSlotWidth
     let liveScaleA: CGFloat = min(liveWidth / 100, 106 / 50)
     let liveScaleB: CGFloat = min(liveWidth / 400, 106 / 40)
     let liveExpected: CGFloat = 5 + 6 + (50 * liveScaleA + 6) + (40 * liveScaleB + 6)
@@ -1348,14 +1978,15 @@ func parkingOutlineSelfTests(_ check: (Bool, String) -> Void) {
     let beforeDirect = lot.document.rows
     let direct = store.parkingLotCommand(command, session: session, lot: lot, confirm: { _ in asked = true; return false }, requiresConfirmation: false)
     check(!asked && direct.contains("confirmation off") && !direct.contains("approved") && lot.document.rows[0].text == "Saved without review", "With confirmation off, session edits save without the review sheet")
+    let afterDirect = lot.document.rows
     lot.undoManager.undo()
-    check(lot.document.rows == beforeDirect, "Lot Undo reverses an edit saved without confirmation")
+    check(lot.document.rows == afterDirect && lot.notice.hasPrefix("Can't undo:"), "Lot Undo never reverses a session edit saved without confirmation")
     command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision - 1, operations: [.init(action: "update", id: id, text: "Stale direct")])
     let staleDirect = store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false)
-    check(staleDirect.contains("No changes applied") && lot.document.rows == beforeDirect, "With confirmation off, a stale revision still applies nothing")
+    check(staleDirect.contains("No changes applied") && lot.document.rows == afterDirect, "With confirmation off, a stale revision still applies nothing")
     session.supportAutonomous = true
     command.parkingLotEdits = ParkingLotEdits(revision: lot.document.revision, operations: [.init(action: "update", id: id, text: "Autonomous")])
-    check(store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false).contains("Nothing was read or changed") && lot.document.rows == beforeDirect, "Confirmation off never lets autonomous messages bypass scope")
+    check(store.parkingLotCommand(command, session: session, lot: lot, requiresConfirmation: false).contains("Nothing was read or changed") && lot.document.rows == afterDirect, "Confirmation off never lets autonomous messages bypass scope")
     session.supportAutonomous = false
     check(store.switchboardTeaching(session).contains("If a lot's confirmation is off"), "Session teaching explains lots with confirmation off")
     let newID = UUID(), target = lot.document.rows.last!.id
@@ -1544,6 +2175,19 @@ func parkingDropSelfTests(_ check: (Bool, String) -> Void) {
     check(drop(["https://y.com/z" as NSString]) && row() == "Dragged https://y.com/z" && linked(9) == URL(string: "https://y.com/z") && cleanDisplay(), "Dropped text is inserted and its links style immediately")
     text.undo(nil)
     check(row() == "Dragged ", "Undo removes dropped text")
+    // A session save between the drop and Backspace re-renders the pane but never joins the drop's Undo.
+    lot.update(item, text: "Logo is with "); coordinator.render(caret: (item, 13))
+    let heading = lot.document.rows[0].id
+    check(drop([plain as NSURL]), "Dropping a file before a session save inserts its link")
+    do {
+        try lot.apply(.init(revision: lot.document.revision, operations: [.init(action: "update", id: heading, text: "Session heading")]), author: "Session")
+        coordinator.render()
+        text.deleteBackward(nil)
+        check(row() == "Logo is with /Users/me/Desktop/converse.jpeg" && lot.document.rows[0].text == "Session heading",
+              "Backspace after a drop and a session save restores only the plain path, keeping the session change")
+        text.undo(nil)
+        check(row() == "Logo is with " && lot.document.rows[0].text == "Session heading", "Undo then removes only the user's drop")
+    } catch { check(false, "Drop with session save: " + error.localizedDescription) }
     window.close()
 }
 
@@ -1669,6 +2313,14 @@ func parkingAtomicLinkSelfTests(_ check: (Bool, String) -> Void) {
     check(linkRuns() == [NSRange(location: 3, length: 15)] && visible() == "go https://x.com/a", "Bare URLs style as before once the caret leaves them")
     let bareMenu = menu(at: 5)
     check(!bareMenu.contains("Remove Link") && bareMenu.contains("Edit Link…") && bareMenu.contains("Copy Link Address"), "Bare URLs offer Edit Link and Copy Link Address without Remove Link")
+    place(0, 2)
+    let selectionMenu = menu(at: 0)
+    check(text.selectedRange().length == 2, "Right-clicking inside selected text keeps the selection")
+    check(selectionMenu.contains("Copy"), "Right-clicking selected text offers a regular Copy")
+    check((selectionMenu.firstIndex(of: "Copy") ?? .max) < (selectionMenu.firstIndex(of: "Copy Item") ?? -1),
+          "Regular Copy comes before Copy Item in the right-click menu")
+    place(0, 0)
+    check(!menu(at: 1).contains("Copy"), "Right-clicking with no selection offers Copy Item without a regular Copy")
     window.close()
 }
 
@@ -1750,6 +2402,105 @@ func parkingLotTextScalingSelfTests(_ check: (Bool, String) -> Void) {
     print("Lot zoom measurement: 180 wrapped rows, \(String(format: "%.3f", elapsed)) seconds")
 }
 
+/// Dragging a lot window's edge, in an offscreen window with the same live-resize
+/// handling as a Converse window: text, gutter numbers, comment buttons and image
+/// spacing follow every width, and the end of the drag repaints the whole view.
+func parkingLotResizeSelfTests(_ check: (Bool, String) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lot-resize-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let imagePath = folder.appendingPathComponent("wide.png").path
+    let picture = NSImage(size: NSSize(width: 1200, height: 100), flipped: false) { rect in NSColor.orange.setFill(); rect.fill(); return true }
+    if let tiff = picture.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: imagePath))
+    }
+    for large in [false, true] {
+        let kind = large ? "A large lot" : "A lot"
+        let lot = ParkingLotStore(folder: folder.appendingPathComponent(large ? "large" : "small"))
+        let heading = ParkingLotRow(heading: true, text: "Bugs")
+        var rows = [heading]
+        for i in 0..<(large ? 420 : 16) {
+            var row = ParkingLotRow(heading: false, text: "Item \(i): a long line that wraps differently at every window width, so stale layout would leave rows and numbers out of line.", parentID: heading.id)
+            if i % 3 == 0 { row.notes = [.init(author: "Reviewer", text: "Comment \(i)")] }
+            rows.append(row)
+            if i == 4 { rows.append(ParkingLotRow(heading: false, text: "Child with a screenshot", images: [imagePath], parentID: row.id)) }
+        }
+        lot.openStarter(rows)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let panes = WindowPaneLayout(window: window)
+        let scroll = ParkingLotScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        scroll.hasVerticalScroller = true; scroll.autoresizingMask = [.width, .height]
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
+        text.isRichText = false; text.isVerticallyResizable = true; text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]; text.textContainerInset = NSSize(width: 36, height: 8)
+        text.textContainer?.widthTracksTextView = true
+        text.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        text.minSize = .zero; text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        // Layer-backed like a Converse window, where AppKit does not repaint a
+        // resized view wholesale.
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500)); content.wantsLayer = true
+        content.addSubview(scroll); window.contentView = content
+        scroll.documentView = text; text.configureTextScaling(); coordinator.render()
+        check(text.reflowsDuringResize != large, "\(kind) \(large ? "keeps its wrapping" : "reflows live") during a window resize (\(text.textStorage!.length) characters)")
+        func settle() { content.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.05)); content.layoutSubtreeIfNeeded() }
+        func consistent(_ moment: String, invalidated: NSRect?) {
+            guard let manager = text.layoutManager, let container = text.textContainer else { return }
+            manager.ensureLayout(for: container)
+            let tracked = text.bounds.width - 2 * text.textContainerInset.width
+            var overflow: CGFloat = 0
+            manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) { _, used, _, _, _ in overflow = max(overflow, used.maxX - container.containerSize.width) }
+            check(abs(container.containerSize.width - tracked) < 0.5 && overflow <= 0.5,
+                  "\(kind) \(moment) wraps at the visible width (container \(container.containerSize.width), view \(tracked), overflow \(overflow))")
+            check(text.frame.height + 0.5 >= manager.usedRect(for: container).maxY + text.textContainerOrigin.y, "\(kind) \(moment) grows to hold its rewrapped rows")
+            let commented = coordinator.projection.entries.filter { !($0.row.notes ?? []).isEmpty }
+            let buttons = text.subviews.compactMap { $0 as? NSButton }
+            check(buttons.count == commented.count && commented.allSatisfy { entry in
+                buttons.first { $0.identifier?.rawValue == entry.row.id.uuidString }.map {
+                    text.bounds.contains($0.frame) && abs($0.frame.minY - (text.rowRect(entry).minY - 1)) < 0.5
+                } ?? false
+            }, "\(kind) \(moment) keeps comment buttons inside the view beside their rows")
+            if let entry = coordinator.projection.entries.first(where: { $0.row.images != nil }) {
+                let style = text.textStorage?.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle
+                let expected = ParkingOutlineText.lotImageSpacing(text.lotImageSizes([imagePath], width: max(40, text.imageSlotWidth - text.nestOffset(entry.depth))).compactMap { $0 })
+                check(abs((style?.paragraphSpacing ?? 0) - expected) < 0.5, "\(kind) \(moment) reserves image space for the current width (\(style?.paragraphSpacing ?? 0) vs \(expected))")
+            }
+            let visible = scroll.contentView.documentVisibleRect
+            if let invalidated {
+                check(invalidated.contains(visible), "\(kind) \(moment) repaints the whole visible view, gutter included (\(invalidated) vs \(visible))")
+            }
+            text.paintedMarkers = [:]
+            if let rep = text.bitmapImageRepForCachingDisplay(in: visible) { text.cacheDisplay(in: visible, to: rep) }
+            let shown = coordinator.projection.entries.filter { !$0.row.heading && text.rowRect($0).intersects(visible) }
+            check(!shown.isEmpty && shown.allSatisfy { entry in text.paintedMarkers[entry.row.id].map { abs($0.y - text.rowRect(entry).minY) < 0.5 } ?? false },
+                  "\(kind) \(moment) draws gutter numbers level with their rows' first lines")
+        }
+        settle(); consistent("at first", invalidated: nil)
+        for width: CGFloat in [340, 900, 520] {
+            // The large lot relies on the window's end-of-resize thaw alone.
+            NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+            if !large { text.viewWillStartLiveResize() }
+            let start = content.frame.width
+            for step in 1...4 {
+                text.invalidatedArea = .null
+                window.setContentSize(NSSize(width: start + (width - start) * CGFloat(step) / 4, height: 500)); settle()
+                if !large { consistent("while dragging toward \(Int(width))pt", invalidated: text.invalidatedArea) }
+            }
+            text.invalidatedArea = .null
+            if !large { text.viewDidEndLiveResize() }
+            NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+            settle(); consistent("after a drag to \(Int(width))pt", invalidated: text.invalidatedArea)
+        }
+        // A pane divider changes the width without a window live resize.
+        text.invalidatedArea = .null
+        scroll.setFrameSize(NSSize(width: 460, height: 500)); settle()
+        consistent("after a pane divider resize", invalidated: text.invalidatedArea)
+        withExtendedLifetime(panes) { window.close() }
+    }
+}
+
 extension ParkingOutlineText: PaneTextScalable {
     func configureTextScaling() {
         pointSize = 13
@@ -1757,7 +2508,7 @@ extension ParkingOutlineText: PaneTextScalable {
            let stored = UserDefaults.standard.object(forKey: ParkingLotTextScaling.key(id)) as? Double {
             pointSize = CGFloat(PaneTextSize.clamp(stored))
         }
-        textContainerInset.width = gutterWidth
+        textContainerInset.width = headingMargin
         ParkingLotTextScaling.register(self)
     }
 
@@ -1798,7 +2549,7 @@ extension ParkingOutlineText: PaneTextScalable {
         owner.rendering = true
         defer { owner.rendering = false }
         pointSize = next
-        textContainerInset.width = gutterWidth
+        textContainerInset.width = headingMargin
         storage.beginEditing()
         storage.enumerateAttribute(.font, in: NSRange(location: 0, length: length)) { value, range, _ in
             // Markdown delimiters use a tiny hidden font; never enlarge them.
@@ -1807,21 +2558,13 @@ extension ParkingOutlineText: PaneTextScalable {
         }
         storage.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: length)) { value, range, _ in
             guard let old = value as? NSParagraphStyle, let style = old.mutableCopy() as? NSMutableParagraphStyle else { return }
-            style.headIndent *= factor; style.firstLineHeadIndent *= factor
+            style.headIndent *= factor; style.firstLineHeadIndent *= factor; style.tailIndent *= factor
             storage.addAttribute(.paragraphStyle, value: style, range: range)
         }
-        let width = min(Self.lotImageWidth, (textContainer?.containerSize.width ?? 400) - 10)
-        for entry in owner.projection.entries {
-            guard let paths = entry.row.images, !paths.isEmpty, entry.range.location < length,
-                  let old = storage.attribute(.paragraphStyle, at: entry.range.location, effectiveRange: nil) as? NSParagraphStyle,
-                  let style = old.mutableCopy() as? NSMutableParagraphStyle else { continue }
-            let offset = CGFloat(max(0, entry.depth - 1)) * indentWidth
-            style.paragraphSpacing = Self.lotImageSpacing(lotImageSizes(paths, width: max(40, width - offset)).compactMap { $0 })
-            storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: entry.range.location, length: min(length - entry.range.location, max(1, entry.range.length))))
-        }
+        // The projection and text did not change: recording the width here
+        // keeps layout from rebuilding either.
+        updateImageSpacing()
         storage.endEditing()
-        // The projection and text did not change: do not rebuild either during layout.
-        owner.displayedWidth = width
         typingAttributes[.font] = NSFont.systemFont(ofSize: pointSize)
         setSelectedRange(selection)
         if let clip, let manager = layoutManager, let container = textContainer {
@@ -1854,8 +2597,8 @@ func renderLotDisclosurePreview(to output: URL) throws {
     let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([child.id, other.id]), reorder: {}))
     let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 620, height: 280))
     text.owner = coordinator; text.delegate = coordinator; coordinator.text = text
-    text.isRichText = false; text.textContainerInset = NSSize(width: text.gutterWidth, height: 10)
-    text.textContainer?.containerSize = NSSize(width: 620 - 2 * text.gutterWidth, height: 280)
+    text.isRichText = false; text.textContainerInset = NSSize(width: text.headingMargin, height: 10)
+    text.textContainer?.containerSize = NSSize(width: 620 - 2 * text.headingMargin, height: 280)
     coordinator.render()
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     for name in [NSAppearance.Name.aqua, .darkAqua] {
@@ -1870,4 +2613,275 @@ func renderLotDisclosurePreview(to output: URL) throws {
         guard let data else { throw ParkingLotError.message("Could not render disclosure fixture.") }
         try data.write(to: output.appendingPathComponent("lot-partial-collapse-" + name.rawValue + ".png"))
     }
+}
+
+final class ParkingLotScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        PerformanceCapture.shared.delivery(since: event.timestamp, operation: .lotScrollDelivery)
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotScrollHandling, measurement) }
+        super.scrollWheel(with: event)
+    }
+}
+
+// Native Undo affects only the user's own edits. Session, agent and device
+// saves stay out of the history and survive Undo/Redo of earlier user edits.
+func parkingUserUndoSelfTests(_ check: (Bool, String) -> Void) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("parking-user-undo-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    struct Fixture {
+        let lot: ParkingLotStore, coordinator: ParkingLotEditor.Coordinator, text: ParkingOutlineText
+        let heading: ParkingLotRow, a: ParkingLotRow, b: ParkingLotRow, c: ParkingLotRow
+        func row(_ id: UUID) -> ParkingLotRow? { lot.document.rows.first { $0.id == id } }
+        /// One insertion at the end of a row; `keys` types character by character.
+        func type(_ value: String, into id: UUID, keys: Bool = false) {
+            coordinator.render()  // SwiftUI refreshes the pane after each save.
+            let entry = coordinator.projection.entries.first { $0.row.id == id }!
+            text.setSelectedRange(NSRange(location: NSMaxRange(entry.range), length: 0))
+            for piece in keys ? value.map(String.init) : [value] { text.insertText(piece, replacementRange: text.selectedRange()) }
+        }
+        func session(_ operations: [ParkingLotEdits.Operation], author: String = "Session") throws {
+            try lot.apply(.init(revision: lot.document.revision, operations: operations), author: author)
+        }
+    }
+    func fixture(_ name: String) -> Fixture {
+        let lot = ParkingLotStore(folder: root.appendingPathComponent(name), id: UUID(), name: name)
+        let heading = ParkingLotRow(heading: true, text: "Work")
+        let a = ParkingLotRow(heading: false, text: "Alpha", parentID: heading.id)
+        let b = ParkingLotRow(heading: false, text: "Bravo", parentID: heading.id)
+        let c = ParkingLotRow(heading: false, text: "Charlie", parentID: heading.id)
+        lot.openStarter([heading, a, b, c])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        text.isRichText = false; text.allowsUndo = true; text.owner = coordinator; text.delegate = coordinator
+        coordinator.text = text; coordinator.render()
+        return Fixture(lot: lot, coordinator: coordinator, text: text, heading: heading, a: a, b: b, c: c)
+    }
+    do {
+        // The incident shape: a session transaction lands after typing, then ⌘Z.
+        let f = fixture("transaction")
+        f.type(" mine", into: f.a.id)
+        check(f.lot.undoManager.undoActionName == "Typing", "Native typing registers a Typing Undo")
+        let added = UUID(), child = UUID()
+        try f.session([
+            .init(action: "update", id: f.b.id, text: "Session B"), .init(action: "update", id: f.c.id, done: true),
+            .init(action: "comment", id: f.c.id, text: "Checked"), .init(action: "add", id: added, text: "SESSION OUTPUT", heading: true),
+            .init(action: "add", id: child, text: "Session addition", parentID: added), .init(action: "update", id: added, tag: "blue"),
+            .init(action: "update", id: child, text: "Session addition, revised")
+        ])
+        f.coordinator.render()
+        let external = f.lot.document
+        f.text.undo(nil)
+        check(f.row(f.a.id)?.text == "Alpha" && f.row(f.b.id)?.text == "Session B" && f.row(f.c.id)?.isDone == true
+              && f.row(f.c.id)?.notes?.count == 1 && f.row(added)?.tag == .blue && f.row(child)?.text == "Session addition, revised"
+              && f.lot.document.rows.count == external.rows.count && f.lot.document.revision == external.revision + 1,
+              "⌘Z after a session transaction undoes the user's typing and keeps all seven session edits")
+        check(f.lot.notice.isEmpty && f.lot.error.isEmpty && f.coordinator.displayed == f.lot.document, "Undo across a session transaction saves cleanly and refreshes the pane")
+        check(ParkingLotStore(folder: root.appendingPathComponent("transaction"), id: f.lot.id).document == f.lot.document, "The merged Undo result is what is saved on disk")
+        // Redo after Undo, with another session change in between.
+        try f.session([.init(action: "update", id: f.heading.id, text: "Session heading")])
+        f.text.redo(nil)
+        check(f.row(f.a.id)?.text == "Alpha mine" && f.row(f.heading.id)?.text == "Session heading" && f.row(f.b.id)?.text == "Session B",
+              "Redo after an intervening session change repeats only the user's typing")
+        f.text.undo(nil)
+        try f.session([.init(action: "update", id: f.a.id, text: "Session Alpha")])
+        f.text.redo(nil)
+        check(f.row(f.a.id)?.text == "Session Alpha" && f.lot.notice == "Can't redo: Session changed this item since." && !f.lot.undoManager.canRedo,
+              "Redo of a row a session changed since reports a conflict and drops the entry")
+    } catch { check(false, "User Undo transaction fixture: " + error.localizedDescription) }
+    do {
+        // Different rows: a user tag change, a session text change on another row.
+        let f = fixture("different")
+        f.lot.setTag(f.a.id, .red)
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+        check(f.lot.undoManager.undoActionName == "Color Tag", "A session save leaves the user's own action name on Undo")
+        f.lot.undoManager.undo()
+        check(f.row(f.a.id)?.tag == nil && f.row(f.b.id)?.text == "Session B", "Undo of a user tag keeps a session edit to a different row")
+        f.lot.undoManager.redo()
+        check(f.row(f.a.id)?.tag == .red && f.row(f.b.id)?.text == "Session B", "Redo of the tag keeps the session edit")
+        // Same row: no clobber, a named conflict, and other writers are not blocked.
+        f.type("!", into: f.c.id)
+        let typed = f.lot.document.rows
+        try f.session([.init(action: "update", id: f.c.id, text: "Session Charlie")], author: "Planner")
+        let changed = f.lot.document
+        f.text.undo(nil)
+        check(f.lot.document == changed && f.lot.notice == "Can't undo: Planner changed this item since." && f.lot.error.isEmpty,
+              "Undo of typing into a row a session changed since shows a conflict and saves nothing")
+        check(!f.lot.undoManager.canRedo && typed != changed.rows, "A conflicting Undo is dropped rather than retried over newer work")
+        try f.session([.init(action: "comment", id: f.b.id, text: "Still writable")], author: "Planner")
+        check(f.row(f.b.id)?.notes?.count == 1, "An Undo conflict notice never blocks session edits")
+        f.lot.undoManager.undo()
+        check(f.row(f.a.id)?.tag == nil && f.row(f.c.id)?.text == "Session Charlie", "Older user entries still undo independently after a conflict")
+        f.type("x", into: f.b.id)
+        check(f.lot.notice.isEmpty, "The next user edit clears the Undo notice")
+    } catch { check(false, "User Undo row fixture: " + error.localizedDescription) }
+    do {
+        // External additions, deletions and structure changes.
+        let f = fixture("structure")
+        f.lot.delete(f.b.id)
+        check(f.lot.undoManager.undoActionName == "Delete", "Deleting an item registers Delete")
+        let note = UUID()
+        try f.session([.init(action: "add", id: note, text: "Session note", before: f.c.id, parentID: f.heading.id),
+                       .init(action: "add", text: "Session child", parentID: f.a.id)])
+        f.lot.undoManager.undo()
+        let ids = f.lot.document.rows.map(\.id)
+        check(f.row(f.b.id) == f.b && ids.firstIndex(of: f.b.id)! < ids.firstIndex(of: note)! && f.lot.document.rows.count == 6
+              && (try? ParkingLotTree.normalized(f.lot.document.rows)) == f.lot.document.rows,
+              "Undo restores a deleted item in place, keeping session additions around it")
+        f.lot.undoManager.redo()
+        check(f.row(f.b.id) == nil && f.row(note) != nil, "Redo deletes the item again and keeps session additions")
+        f.lot.undoManager.undo()
+        // A session nests a new row under the user's new item: removing it would orphan the child.
+        let mine = f.lot.insert(text: "Mine", after: f.c.id)
+        try f.session([.init(action: "add", text: "Under yours", parentID: mine)], author: "Planner")
+        let nested = f.lot.document
+        f.lot.undoManager.undo()
+        check(f.lot.document == nested && f.lot.notice == "Can't undo: Planner changed this item since.", "Undo of an insertion a session nested under is a conflict")
+        // The user indents C; a session moves A. Undo outdents C and keeps the session's move.
+        f.lot.changeIndent(f.c.id, deeper: true)
+        let indentedUnder = f.row(f.c.id)?.parentID
+        try f.session([.init(action: "move", id: f.a.id, before: nil, parentID: f.heading.id)])
+        f.lot.undoManager.undo()
+        check(indentedUnder != f.heading.id && f.row(f.c.id)?.parentID == f.heading.id && f.lot.document.rows.last(where: { $0.parentID == f.heading.id })?.id == f.a.id,
+              "Undo of an indent keeps a session move of another row")
+        // A session deletes the section the user's deleted item belonged to.
+        f.lot.delete(f.c.id)
+        try f.session([.init(action: "delete", id: f.heading.id)])
+        let gone = f.lot.document
+        f.lot.undoManager.undo()
+        check(f.lot.document == gone && f.lot.notice == "Can't undo: another writer deleted this item since.", "Undo cannot restore an item into a section a session deleted")
+    } catch { check(false, "User Undo structure fixture: " + error.localizedDescription) }
+    do {
+        // A user move, then a session edit in another section.
+        let f = fixture("move")
+        let other = ParkingLotRow(heading: true, text: "Later")
+        try f.session([.init(action: "add", id: other.id, text: other.text, heading: true)])
+        f.lot.undoManager.removeAllActions()
+        check(f.lot.moveToSection(f.a.id, heading: other.id) && f.lot.undoManager.undoActionName == "Move", "Move registers a Move Undo")
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B"), .init(action: "add", text: "Late idea", parentID: other.id)])
+        f.lot.undoManager.undo()
+        check(ParkingLotStore.section(of: f.a.id, in: f.lot.document.rows) == f.heading.id && f.lot.document.rows[1].id == f.a.id
+              && f.row(f.b.id)?.text == "Session B" && f.lot.document.rows.last?.text == "Late idea",
+              "Undo of a move puts the item back and keeps session edits")
+    } catch { check(false, "User Undo move fixture: " + error.localizedDescription) }
+    do {
+        // Substitution, then a session save, then Backspace: only the substitution reverts.
+        for refresh in [false, true] {
+            let f = fixture(refresh ? "substitution-refreshed" : "substitution-stale")
+            f.type(" :-) ", into: f.a.id, keys: true)
+            guard f.row(f.a.id)?.text == "Alpha 🙂 " else { check(false, "Substitution fixture converts"); continue }
+            try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+            if refresh { f.coordinator.render() }
+            f.text.deleteBackward(nil)
+            check(f.row(f.a.id)?.text == "Alpha :-) " && f.row(f.b.id)?.text == "Session B",
+                  "Backspace after a substitution and a session save (\(refresh ? "refreshed" : "stale") pane) reverts only the substitution")
+        }
+        // A session save while the user's substitution Undo group is open never joins it.
+        let f = fixture("open-group")
+        f.lot.undoManager.beginUndoGrouping()
+        try f.session([.init(action: "update", id: f.b.id, text: "Session B")])
+        f.coordinator.render(); f.type("!", into: f.a.id)
+        f.lot.undoManager.setActionName(TextSubstitutions.undoName)
+        f.lot.undoManager.endUndoGrouping()
+        f.text.undo(nil)
+        check(f.row(f.a.id)?.text == "Alpha" && f.row(f.b.id)?.text == "Session B" && !f.lot.undoManager.canUndo,
+              "A session save inside an open native Undo group is not part of the user's Undo")
+        // Same-row session change: Backspace stays an ordinary Backspace; Undo reports the conflict.
+        let g = fixture("substitution-overlap")
+        g.type(" :-) ", into: g.a.id, keys: true)
+        try g.session([.init(action: "update", id: g.a.id, text: "Session Alpha 🙂 ")])
+        g.coordinator.render()
+        let caret = g.coordinator.projection.entries.first { $0.row.id == g.a.id }!.range
+        g.text.setSelectedRange(NSRange(location: NSMaxRange(caret), length: 0))
+        g.text.deleteBackward(nil)
+        check(g.row(g.a.id)?.text == "Session Alpha 🙂", "Backspace after a session rewrote the substituted row deletes one character, never the session's text")
+    } catch { check(false, "User Undo substitution fixture: " + error.localizedDescription) }
+    // Converse Development's interleaving probe (codex/lot-concurrent-edit-repro), now with no rollback.
+    for refresh in [false, true] {
+        let home = root.appendingPathComponent(refresh ? "refreshed" : "stale")
+        let lot = ParkingLotStore(folder: home, id: UUID(), name: "Synthetic concurrent edits")
+        let heading = ParkingLotRow(heading: true, text: "Fixture")
+        let human = ParkingLotRow(heading: false, text: "Human A", parentID: heading.id)
+        let other = ParkingLotRow(heading: false, text: "Original B", parentID: heading.id)
+        lot.openStarter([heading, human, other])
+        let coordinator = ParkingLotEditor.Coordinator(ParkingLotEditor(lot: lot, collapsed: .constant([]), reorder: {}))
+        let text = ParkingOutlineText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        text.isRichText = false; text.owner = coordinator; text.delegate = coordinator
+        coordinator.text = text; coordinator.render()
+        func type(_ suffix: String) {
+            let entry = coordinator.projection.entries.first { $0.row.id == human.id }!
+            text.setSelectedRange(NSRange(location: NSMaxRange(entry.range), length: 0))
+            text.insertText(suffix, replacementRange: text.selectedRange())
+        }
+        type(" before")
+        let addedHeading = UUID(), addedItem = UUID()
+        do {
+            try lot.apply(.init(revision: lot.document.revision, operations: [
+                .init(action: "update", id: other.id, text: "Session updated B"),
+                .init(action: "add", id: addedHeading, text: "SESSION OUTPUT", heading: true),
+                .init(action: "add", id: addedItem, text: "Session addition", parentID: addedHeading)
+            ]), author: "Synthetic session")
+        } catch { check(false, "Concurrent fixture session transaction: " + error.localizedDescription); continue }
+        let external = lot.document
+        if refresh { coordinator.render() }
+        type(" after")
+        let label = refresh ? "refreshed" : "stale"
+        func sessionIntact() -> Bool {
+            lot.document.rows.first { $0.id == other.id }?.text == "Session updated B"
+                && lot.document.rows.contains { $0.id == addedHeading } && lot.document.rows.contains { $0.id == addedItem }
+        }
+        check(sessionIntact(), "\(label) native pane typing preserves the session update and added subtree")
+        if refresh {
+            check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before after" && lot.error.isEmpty,
+                  "Refreshed native pane appends the human keystroke to current rows")
+        } else {
+            check(lot.document == external && lot.error.isEmpty && lot.notice.contains("changed"),
+                  "Stale native pane rejects the stale keystroke and reports a revision conflict")
+            check(coordinator.displayed == external && text.string.contains("Session updated B"),
+                  "Rejected stale edit refreshes the native pane to the saved session transaction")
+            do {
+                try lot.apply(.init(revision: lot.document.revision, operations: [
+                    .init(action: "comment", id: other.id, text: "Agent remains writable")
+                ]), author: "Synthetic session")
+                check(lot.document.rows.first { $0.id == other.id }?.notes?.last?.text == "Agent remains writable",
+                      "A rejected stale user edit does not block the next current-revision agent transaction")
+            } catch { check(false, "Agent edit after stale user rejection: " + error.localizedDescription) }
+            coordinator.render()
+            type(" retry")
+            check(lot.notice.isEmpty, "Successful typing clears the stale-edit notice")
+            check(lot.document.rows.first { $0.id == human.id }?.text == "Human A before retry" && sessionIntact(),
+                  "Typing again after stale rejection preserves both authors' saved changes")
+        }
+        text.undo(nil); text.undo(nil)
+        check(lot.document.rows.first { $0.id == human.id }?.text == "Human A" && sessionIntact() && !lot.undoManager.canUndo,
+              "\(label) pane: Undo reverses only the human's typing and never rolls back the session transaction")
+        let reloaded = ParkingLotStore(folder: home, id: lot.id)
+        check(reloaded.document == lot.document, "\(label) native interleave persists the same complete document on disk")
+    }
+    do {
+        let f = fixture("save-failure")
+        let before = f.lot.document
+        f.lot.snapshotCheck = { _ in throw AgentFailure.message("Synthetic save failure") }
+        f.type(" unsaved", into: f.a.id)
+        check(f.lot.document == before && f.lot.error.contains("Synthetic save failure"),
+              "A real save failure remains a blocking error and preserves the document")
+        f.lot.snapshotCheck = nil
+        do {
+            try f.session([.init(action: "update", id: f.b.id, text: "Must not save")])
+            check(false, "Agent edits must remain blocked after a real save failure")
+        } catch { check(f.lot.document == before, "A real save error still blocks agents until recovered") }
+    }
+    let undoLot = ParkingLotStore(folder: root.appendingPathComponent("undo"), id: UUID())
+    let human = ParkingLotRow(heading: false, text: "Human work already present")
+    let other = ParkingLotRow(heading: false, text: "Original B")
+    undoLot.openStarter([human, other])
+    do {
+        try undoLot.apply(.init(revision: undoLot.document.revision, operations: [
+            .init(action: "update", id: other.id, text: "Session B"), .init(action: "add", id: UUID(), text: "Session output", heading: true)
+        ]), author: "Synthetic session")
+        let applied = undoLot.document
+        check(!undoLot.undoManager.canUndo, "A session transaction never appears on the user's Undo stack")
+        undoLot.undoManager.undo()
+        check(undoLot.document == applied, "Undo immediately after a session transaction leaves it in place")
+    } catch { check(false, "Session-only Undo fixture: " + error.localizedDescription) }
 }

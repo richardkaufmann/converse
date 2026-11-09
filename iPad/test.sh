@@ -11,6 +11,7 @@ fixture=""
 fixture_pid=""
 lot_editing=0
 test_selection=()
+test_action=test
 if [[ "${1:-}" == --lot-editing ]]; then
     lot_editing=1
     test_selection=(-only-testing:ConverseTests/LotEditingTests -only-testing:ConverseTests/ConverseTests/testLotImageReceiptsAreScopedToLotAndAuthority -only-testing:ConverseTests/ConverseTests/testEditableLotTakeSaveAndPhonePadLayouts -only-testing:ConverseTests/ConverseTests/testEditableLotAcrossMacAndTwoMobileHolders)
@@ -23,6 +24,14 @@ trap cleanup EXIT INT TERM
 if [[ "${1:-}" == --interop || "$lot_editing" == 1 ]]; then
     app="${CONVERSE_APP_OUTPUT:-$PWD/.build/PinAndHelp/Converse.app}"
     if [[ ! -x "$app/Contents/MacOS/Converse" ]]; then print -u2 'Build the isolated Mac app first. Set CONVERSE_APP_OUTPUT to its bundle.'; exit 2; fi
+    # A cold simulator build can exceed the Mac fixture's three-minute
+    # lifetime. Compile first so its bounded lifetime covers the actual
+    # network tests. The test invocation below supplies the fresh ports.
+    xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
+        -destination "platform=iOS Simulator,id=$simulator" \
+        -derivedDataPath .build/iPad CODE_SIGN_IDENTITY=- \
+        "${test_selection[@]}" build-for-testing
+    test_action=test-without-building
     fixture=$(mktemp -d /tmp/converse-ipad-interop.XXXXXX)
     mkdir -p "$fixture/data"
     CONVERSE_LOT_EDIT_INTEROP="$lot_editing" CONVERSE_TEST_COMMAND=isolated-fixture CONVERSE_DATA_DIR="$fixture/data" "$app/Contents/MacOS/Converse" --ipad-home-fixture > "$fixture/home.log" 2>&1 &
@@ -38,4 +47,4 @@ fi
 TEST_RUNNER_CONVERSE_LOT_EDIT_INTEROP="$lot_editing" TEST_RUNNER_CONVERSE_GROUP_PORT="$group_port" TEST_RUNNER_CONVERSE_INTEROP_PORT="$interop_port" TEST_RUNNER_CONVERSE_TEST_COMMAND=isolated-tests xcodebuild -project iPad/Converse.xcodeproj -scheme Converse \
     -destination "platform=iOS Simulator,id=$simulator" \
     -derivedDataPath .build/iPad CODE_SIGN_IDENTITY=- \
-    CONVERSE_INTEROP_PORT="$interop_port" "${test_selection[@]}" test
+    CONVERSE_INTEROP_PORT="$interop_port" "${test_selection[@]}" "$test_action"

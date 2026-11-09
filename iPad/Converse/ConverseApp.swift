@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import UIKit.UIGestureRecognizerSubclass
 import UniformTypeIdentifiers
 
 @main
@@ -8,7 +9,7 @@ struct ConversePadApp: App {
     @Environment(\.scenePhase) private var phase
     var body: some Scene {
         WindowGroup {
-            PadRoot(model: model).onAppear { model.foreground() }
+            PadRoot(model: model).background { PadTouchWatcher { model.service.noteHumanInput() } }.onAppear { model.foreground() }
                 .onChange(of: phase) { _, value in
                     if value == .background { model.background() }
                     else if value == .active { model.foreground() }
@@ -47,10 +48,34 @@ struct ConversePadApp: App {
             CommandGroup(replacing: .help) {
                 Button("Converse Help…") { model.helpShown = true }.keyboardShortcut("?")
                 Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
-                Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+                Link("GitHub README", destination: ConverseAbout.readme)
             }
         }
     }
+}
+
+// Sees every touch in the window without taking part in gesture handling.
+// The keyboard is outside the window; PadModel.edit covers typing.
+struct PadTouchWatcher: UIViewRepresentable {
+    var touched: () -> Void
+    final class Recognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+        var touched: () -> Void = {}
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) { touched(); state = .failed }
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+    final class Host: UIView {
+        let recognizer = Recognizer(target: nil, action: nil)
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            recognizer.cancelsTouchesInView = false; recognizer.delaysTouchesBegan = false; recognizer.delaysTouchesEnded = false
+            recognizer.delegate = recognizer
+            recognizer.view?.removeGestureRecognizer(recognizer)
+            window?.addGestureRecognizer(recognizer)
+        }
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+    }
+    func makeUIView(context: Context) -> Host { let host = Host(); host.recognizer.touched = touched; return host }
+    func updateUIView(_ view: Host, context: Context) { view.recognizer.touched = touched }
 }
 
 struct PadAgentTarget: Identifiable { var id = UUID(); var home: String; var target: String? }
@@ -66,6 +91,7 @@ struct PadRoot: View {
     @State private var phoneSessionsShown = false
     @State private var phoneDestination: String?
     @State private var keyboardShown = false
+    @AppStorage("sidebarSort") private var sidebarSort = SidebarSort.alphabetical.rawValue
     @GestureState private var resizingText = false
     @ObservedObject private var phoneKeyboard: PhoneKeyboardController
     private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
@@ -95,7 +121,7 @@ struct PadRoot: View {
                             Divider()
                             Button("About Converse…") { model.aboutShown = true }
                             Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
-                            Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+                            Link("GitHub README", destination: ConverseAbout.readme)
                             Toggle("Line numbers", isOn: $model.lineNumbers)
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Converse menu")
                     }.padding(10)
@@ -257,7 +283,7 @@ struct PadRoot: View {
     }
     var sidebar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Converse Groups") }.padding(6)
+            HStack(spacing: 4) { pin; Text("Conversation").font(.caption).foregroundStyle(.secondary); Spacer(); PadSortMenu(sort: $sidebarSort); Button { model.connectShown = true } label: { Image(systemName: "network") }.accessibilityLabel("Converse Groups") }.padding(6)
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
@@ -278,12 +304,12 @@ struct PadRoot: View {
                                         }
                                     }
                                     if service.canHostAgent(home.deviceID) { Button("New agent…") { agentTarget = PadAgentTarget(home: home.deviceID, target: nil) } }
-                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.caption2) } }
+                                } label: { Image(systemName: "plus") }
                                 .accessibilityLabel("Create session on " + home.deviceName)
                             }
                         }.padding(.top, 10)
                         if home.rows.isEmpty { Text("No sessions available.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
-                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                        ForEach(SidebarSort.rows(home.rows, by: SidebarSort(rawValue: sidebarSort) ?? .alphabetical)) { row in
                             let pane = model.state.placements.firstIndex(of: row.globalID)
                             let attention = !(row.attention ?? "").isEmpty || (row.status.hasPrefix("Waiting") && pane == nil)
                             let markers = service.remoteMarkers(row)
@@ -327,6 +353,7 @@ struct PhoneSessionPicker: View {
     @ObservedObject var model: PadModel
     @ObservedObject private var service: DeviceSyncService
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("sidebarSort") private var sidebarSort = SidebarSort.alphabetical.rawValue
     var open: (String) -> Void
     init(model: PadModel, open: @escaping (String) -> Void) { self.model = model; self.service = model.service; self.open = open }
     var body: some View {
@@ -337,7 +364,7 @@ struct PhoneSessionPicker: View {
                 }
                 ForEach(Array(service.homes.values).sorted { $0.deviceName < $1.deviceName }, id: \.deviceID) { home in
                     Section {
-                        ForEach(home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }) { row in
+                        ForEach(SidebarSort.rows(home.rows, by: SidebarSort(rawValue: sidebarSort) ?? .alphabetical)) { row in
                             let selected = model.state.placements.contains(row.globalID)
                             let markers = service.remoteMarkers(row)
                             Button { model.togglePhoneSession(row.globalID) } label: {
@@ -381,7 +408,7 @@ struct PhoneSessionPicker: View {
                     Button("About Converse…") { open("about") }
                     Toggle("Message numbers", isOn: $model.lineNumbers)
                     Link("Report a Bug on GitHub…", destination: ConverseAbout.bugReports)
-                    Link("GitHub README (sign-in required)", destination: ConverseAbout.readme)
+                    Link("GitHub README", destination: ConverseAbout.readme)
                 }
             }.navigationTitle("Sessions")
                 .navigationBarTitleDisplayMode(.inline)
@@ -391,6 +418,19 @@ struct PhoneSessionPicker: View {
 }
 
 // Turn state comes from the home, including turns producing no text yet.
+/// The ˯ beside the sidebar title: session order, shared with the iPhone picker.
+struct PadSortMenu: View {
+    @Binding var sort: String
+    var body: some View {
+        Menu {
+            Picker("Sort sessions", selection: $sort) {
+                ForEach([SidebarSort.alphabetical, .recent], id: \.self) { Text($0.title).tag($0.rawValue) }
+            }
+        } label: { Image(systemName: "chevron.down").frame(width: 30, height: 30) }
+            .accessibilityLabel("Sort sessions")
+    }
+}
+
 struct PadSessionActivity: View {
     let id: String
     @ObservedObject var service: DeviceSyncService
@@ -465,26 +505,20 @@ struct PadPane: View {
                 }.padding(8).background(Color.yellow.opacity(0.3))
             }
             if let widget = snapshot?.agentWidget {
-                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
+                DisclosureGroup("Agent assessment", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = UIImage(contentsOfFile: file.path) { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
-                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        if let line = widget.assessmentLine { Text(line).font(.caption.bold()) }
                         Text(widget.summary).font(.caption).textSelection(.enabled)
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
                     }
                 }.padding(8)
                 if !widget.attention.isEmpty { Label(widget.attention, systemImage: "exclamationmark.triangle.fill").padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.yellow).foregroundStyle(.black) }
             }
             if let request = snapshot?.requests.first { PadRequest(id: id, request: request).disabled(!model.canControl(id)) }
             if let snapshot, !snapshot.pending.isEmpty {
-                VStack(spacing: 4) {
-                    HStack {
-                        Text("\(snapshot.pending.count) queued"); Spacer()
-                        Button(snapshot.queuePaused ? "Resume" : "Pause") { command(snapshot.queuePaused ? "resumeQueue" : "pauseQueue") }
-                        if snapshot.pending.count > 1 { Button("Inject all") { command("injectAll") } }
-                        Button("Clear") { command("clearQueue") }
-                    }
-                    ForEach(snapshot.pending) { item in HStack { Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1); Spacer(); Button("Inject now") { service.sendRemoteCommand(globalID: id, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) } } }
-                }.font(.caption).padding(8).background(Color.blue.opacity(0.06)).disabled(!model.canControl(id))
+                PadQueue(pending: snapshot.pending, paused: snapshot.queuePaused, canRemove: service.canRemoveQueuedRemote(id)) { service.sendRemoteCommand(globalID: id, command: $0) }
+                    .disabled(!model.canControl(id))
             }
             if let conflict = service.draftConflicts[id] {
                 Text(conflict).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.15))
@@ -543,7 +577,6 @@ struct PadPane: View {
                 if !model.draft(id).hashes.isEmpty {
                     Button { imageToolsHash = nil; imageTools = true } label: { Image(systemName: "wand.and.stars") }.accessibilityLabel("Image tools")
                     Text("\(model.draft(id).hashes.count) images").font(.caption)
-                    Button("Clear images") { model.clearImages(id) }.font(.caption)
                 }
                 Spacer()
                 if snapshot?.busy == true { Button("Stop") { command("stop") } }
@@ -627,6 +660,41 @@ struct PadPane: View {
 
 }
 
+// Queued input on the home. Per-item Remove appears only when the home
+// advertises queue-remove-v1; older homes keep Clear all. Inline buttons,
+// not a context menu: the queue updates live under the pointer.
+struct PadQueue: View {
+    struct Action: Identifiable { let label: String; let command: DeviceCommandPayload; var id: String { label } }
+    static let clearAll = "Clear all"
+    let pending: [DevicePendingDTO]
+    let paused: Bool
+    let canRemove: Bool
+    let send: (DeviceCommandPayload) -> Void
+    var bulkActions: [Action] {
+        [Action(label: paused ? "Resume" : "Pause", command: DeviceCommandPayload(action: paused ? "resumeQueue" : "pauseQueue"))]
+            + (pending.count > 1 ? [Action(label: "Inject all", command: DeviceCommandPayload(action: "injectAll"))] : [])
+            + [Action(label: Self.clearAll, command: DeviceCommandPayload(action: "clearQueue"))]
+    }
+    func itemActions(_ item: DevicePendingDTO) -> [Action] {
+        [Action(label: "Inject now", command: DeviceCommandPayload(action: "inject", pendingID: item.id))]
+            + (canRemove ? [Action(label: "Remove", command: DeviceCommandPayload(action: "removeQueued", pendingID: item.id))] : [])
+    }
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text("\(pending.count) queued"); Spacer()
+                ForEach(bulkActions) { action in Button(action.label) { send(action.command) } }
+            }
+            ForEach(pending) { item in
+                HStack {
+                    Text(TranscriptStyle.queueSummary(item.text, components: item.components) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text, components: item.components) != nil ? Color(uiColor: PadPalette.traffic) : Color.primary).lineLimit(1)
+                    Spacer()
+                    ForEach(itemActions(item)) { action in Button(action.label, role: action.command.action == "removeQueued" ? .destructive : nil) { send(action.command) } }
+                }
+            }
+        }.font(.caption).padding(8).background(Color.blue.opacity(0.06))
+    }
+}
 
 // A snapshot-backed sheet keeps actions stationary while sidebar/status updates
 // arrive. Native context menus rebuilt from live row text can move under a pointer.
@@ -655,7 +723,7 @@ struct PadSessionActions: View {
                     if isAgent {
                         Button("Agent Setup / Loop…") { agentSetupShown = true }.disabled(!service.canHostAgent(home))
                         Button("Run once") { runAgent() }.disabled(running || service.remoteRow(globalID: row.globalID)?.busy == true || !service.canHostAgent(home))
-                        Button("Scoreboard") { showScoreboard?(); dismiss() }.disabled(showScoreboard == nil)
+                        Button("Assessment") { showScoreboard?(); dismiss() }.disabled(showScoreboard == nil)
                     }
                     Button("Park") { park(); dismiss() }
                 }

@@ -56,7 +56,7 @@ final class RemoteComposer: ObservableObject {
     }
     func updateEditor(transcript: DeviceTranscriptPayload?, cache: [String: URL]) {
         editor.messages = (transcript?.messages ?? []).map { message in
-            Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: message.createdAt)
+            Message(id: message.id, role: message.role, text: message.text, images: message.imageHashes.compactMap { cache[$0]?.path }, createdAt: message.createdAt, components: message.components)
         }
         editor.messageNumbers = (transcript?.messages ?? []).reduce(into: [UUID: Int]()) { numbers, message in
             if let number = message.messageNumber, number > 0 { numbers[message.id] = number }
@@ -101,8 +101,8 @@ struct DeviceSidebarSection: View {
                                         }
                                     }
                                     if service.canHostAgent(home.deviceID) { Button("New agent") { create(home.deviceID, provider: nil) } }
-                                } label: { HStack(spacing: 2) { Image(systemName: "plus"); Image(systemName: "chevron.down").font(.system(size: 8)) } }
-                                    .menuStyle(.borderlessButton).fixedSize().disabled(creating.contains(home.deviceID))
+                                } label: { Image(systemName: "plus") }
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(creating.contains(home.deviceID))
                                     .help("Create a session on " + home.deviceName + " using its local login")
                             }
                         }.padding(.horizontal, 4).frame(height: 28)
@@ -110,12 +110,15 @@ struct DeviceSidebarSection: View {
                             .contextMenu { Button("Rename device…") { renameDeviceDisplay(service, id: home.deviceID) }.disabled(!service.canRenameDevice(home.deviceID)) }
                         }
                         if home.online {
-                            let rowIDs = home.rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.map(\.globalID)
-                            ForEach(order.ordered(rowIDs, scope: home.deviceID), id: \.self) { id in
+                            let rows = home.rows.map { (id: $0.globalID, title: $0.title, changedAt: $0.lastResponseAt) }
+                            let rowIDs = SidebarSort.arranged(rows, by: .alphabetical, title: \.title, changedAt: \.changedAt).map(\.id)
+                            ForEach(order.arranged(rows, scope: home.deviceID, window: state.id.uuidString), id: \.self) { id in
                               if let row = home.rows.first(where: { $0.globalID == id }) {
                                 SidebarReorderRow(scope: home.deviceID, id: id, available: rowIDs) {
                                 RemoteSidebarRow(row: row, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), online: true, showsModel: showsModel, markers: service.remoteMarkers(row),
                                                  localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id),
+                                                 location: workspace.placements[service.placementID(forGlobal: row.globalID)],
+                                                 windowName: workspace.placements[service.placementID(forGlobal: row.globalID)].flatMap { workspace.names[$0.windowID] },
                                                  freePanes: Set((1...3).filter { workspace.paneIsAvailable($0, for: service.placementID(forGlobal: row.globalID), in: state.id) }),
                                                  elsewhere: ShownElsewhere.resolve(localPane: workspace.pane(for: service.placementID(forGlobal: row.globalID), in: state.id), window: ShownElsewhere.window(workspace.placements[service.placementID(forGlobal: row.globalID)], here: state.id, names: workspace.names),
                                                                            device: ShownElsewhere.remoteDevice(row, home: home.deviceID, homeName: service.displayName(for: home.deviceID, fallback: home.deviceName), me: service.identity?.deviceID) { service.displayName(for: $0) }),
@@ -152,6 +155,8 @@ struct RemoteSidebarRow: View {
     var showsModel = true
     var markers = RemoteRowMarkers()
     let localPane: Int?
+    var location: PaneLocation? = nil
+    var windowName: String? = nil
     // Panes in this window that taking the session would not evict anyone from.
     var freePanes: Set<Int> = []
     // Another window here or another device shows it; P and X turn red on hover.
@@ -164,8 +169,10 @@ struct RemoteSidebarRow: View {
     @State private var closeError: String?
     @State private var renaming = false
     @State private var renameText = ""
+    var placement: PanePlacement { PanePlacement(localPane: localPane, elsewhere: elsewhere, free: freePanes, closing: confirmingClose) }
     var helpText: String {
         var text = row.title + "\nRemote device: " + homeName + "\nModel: " + row.model + "\nState: " + row.status
+        if location != nil { text = row.title + "\nClicking will bring its window forward.\n" + text.dropFirst(row.title.count + 1) }
         if let account = row.accountName { text += "\nAccount: " + account }
         if let reason = markers.pausedReason { text = "LOOP PAUSED — " + reason + "\n" + text }
         if markers.unseen { text = "UNSEEN RESPONSE — take with 1, 2 or 3 to read it.\n" + text }
@@ -188,6 +195,7 @@ struct RemoteSidebarRow: View {
                 ConversationActivity(busy: online && row.busy, status: row.status, waiting: row.engine != "agent" && row.status.hasPrefix("Waiting"), unread: markers.unseen)
                     .help(online ? (row.busy ? row.status : (markers.unseen ? "Unseen response: take with 1, 2 or 3 to read it." : "Idle")) : "Home offline")
             }
+            SidebarRevealName(location: location, windowName: windowName, deviceName: elsewhere.device) {
             VStack(alignment: .leading, spacing: 0) {
                 SessionName(title: row.title, isAgent: row.isAgentRow, isParkingLot: row.engine == "parking", isPaused: markers.paused, unread: markers.unseen).frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 if let reason = markers.pausedReason {
@@ -196,19 +204,21 @@ struct RemoteSidebarRow: View {
                         .help(reason).accessibilityLabel("Paused: " + reason)
                 }
             }
+            }.layoutPriority(-1)
             if showsModel {
                 ProviderLogo(engine: row.engine == "agent" ? "muse" : row.engine).frame(width: 24).help(row.engine == "parking" ? "Parking Lot" : row.model)
             }
             if row.engine != "agent" && row.status == "Waiting for approval" && localPane == nil { Text("!").fontWeight(.bold).foregroundStyle(.orange).help("Needs approval") }
             PaneButtonGroup(hover: hover) {
-                PaneButton(label: "P", selected: localPane == nil, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { park() }.accessibilityLabel("Park " + row.title).help(elsewhere.help("Park this session: hide its pane here and release control. Its work continues on its home."))
+                let shown = placement, canClose = !closing && DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? "")
+                PaneButton(label: "P", look: shown.look(.park, stripHovered: hover.overButtons, rowHovered: hover.inside, enabled: online)) { park() }.accessibilityLabel(shown.parkLabel(row.title)).help(shown.parkHelp("Park this session: hide its pane here and release control. Its work continues on its home."))
                 ForEach(1...3, id: \.self) { pane in
-                    PaneButton(label: String(pane), selected: localPane == pane, available: freePanes.contains(pane), stripHovered: hover.overButtons) { assign(pane) }
-                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").help("Take this session into pane " + String(pane) + " here, moving it from its current display.")
+                    PaneButton(label: String(pane), look: shown.look(.pane(pane), stripHovered: hover.overButtons, enabled: online)) { assign(pane) }
+                        .accessibilityLabel("Move " + row.title + " to pane " + String(pane) + " here").accessibilityValue(shown.paneValue(pane)).help(shown.paneHelp(pane, item: "this session"))
                 }
                 if row.engine == "parking" { Color.clear.frame(width: 18, height: 20) } else {
-                PaneButton(label: "X", selected: confirmingClose, destructive: true, shownElsewhere: elsewhere.isShown, rowHovered: hover.inside) { confirmingClose = true }
-                    .disabled(closing || !DeviceSyncService.shared.canCloseRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
+                PaneButton(label: "X", look: shown.look(.close, stripHovered: hover.overButtons, rowHovered: hover.inside, enabled: online && canClose)) { confirmingClose = true }
+                    .disabled(!canClose)
                     .help(elsewhere.help("Close this session on its home and remove it from every viewer. The home must support remote closing."))
                 }
             }.disabled(!online)
@@ -219,9 +229,6 @@ struct RemoteSidebarRow: View {
                 if row.engine != "parking" {
                 Button("Rename…") { renameText = row.title; renaming = true }
                     .disabled(!online || !DeviceSyncService.shared.canRenameRemote(DeviceGlobalID(row.globalID)?.home ?? ""))
-                Button("Change Assistant or Login…") {
-                    let alert = NSAlert(); alert.messageText = "Change it on " + homeName; alert.informativeText = ProviderHandoff.remoteRefusal; alert.runModal()
-                }
                 Button("Teach Session To Talk To Other Sessions") { DeviceSyncService.shared.sendRemoteCommand(globalID: row.globalID, command: DeviceCommandPayload(action: "teachSwitchboard")) }
                     .disabled(!DeviceSyncService.shared.canTeachRemote(row.globalID))
                 }
@@ -291,16 +298,16 @@ struct RemotePane: View {
                     Menu {
                         Button("Agent Setup / Loop…") { AgentWindows.shared.remoteSetup(globalID) }
                         Button("Run once") { runAgentOnce() }.disabled(agentActionBusy || transcript?.busy == true)
-                        Button("Scoreboard") { scoreboardExpanded = true }.disabled(transcript?.agentWidget == nil)
+                        Button("Assessment") { scoreboardExpanded = true }.disabled(transcript?.agentWidget == nil)
                     } label: { Image(systemName: "ellipsis").frame(width: 28, height: 24) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                        .accessibilityLabel("Agent actions").help("Agent actions: setup, loop, run once and scoreboard")
+                        .accessibilityLabel("Agent actions").help("Agent actions: setup, loop, run once and assessment")
                         .disabled(offline)
                         .alert("Agent action failed", isPresented: Binding(get: { agentActionError != nil }, set: { if !$0 { agentActionError = nil } })) {
                             Button("OK", role: .cancel) { agentActionError = nil }
                         } message: { Text(agentActionError ?? "") }
                 }
-                PaneButton(label: "P", selected: false) { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
+                PaneButton(label: "P") { service.releaseRemote(globalID: globalID); workspace.park(placement) }.help("Park this conversation")
             }.padding(.leading, leadingInset).padding(.horizontal, 8).padding(.vertical, 4)
             Divider()
             HStack {
@@ -319,11 +326,12 @@ struct RemotePane: View {
             }.padding(.horizontal, 10).padding(.vertical, 5)
             Divider()
             if let widget = transcript?.agentWidget {
-                DisclosureGroup("Agent scoreboard", isExpanded: $scoreboardExpanded) {
+                DisclosureGroup("Agent assessment", isExpanded: $scoreboardExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let hash = widget.artHash, let file = service.blobCache[hash], let image = NSImage(contentsOf: file) { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 160) }
-                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
+                        if let line = widget.assessmentLine { Text(line).font(.caption.bold()) }
                         Text(widget.summary).font(.caption).textSelection(.enabled)
+                        Text(widget.metrics.map { $0.label + ": " + $0.value }.joined(separator: " · ")).font(.caption).textSelection(.enabled)
                     }
                 }.padding(8)
                 if let status = widget.loopStatus { Text(status).font(.caption).padding(6) }
@@ -350,13 +358,16 @@ struct RemotePane: View {
                     }
                     ForEach(pending) { item in
                         HStack {
-                            Text(TranscriptStyle.trafficSummary(item.text, queued: true) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.isTraffic(item.text) ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
+                            Text(TranscriptStyle.queueSummary(item.text, components: item.components) ?? item.text).help(item.text).foregroundStyle(TranscriptStyle.queueSummary(item.text, components: item.components) != nil ? Color(nsColor: TranscriptPalette.traffic) : Color.primary).lineLimit(1)
                             Spacer()
                             if pending.count == 1 {
                                 Button(transcript?.queuePaused == true ? "Resume queue" : "Pause queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: transcript?.queuePaused == true ? "resumeQueue" : "pauseQueue")) }
                                 Button("Clear queue") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "clearQueue")) }
                             }
-                            Button(queueBusy && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) }
+                            Button(queueBusy && queueRecord?.payload.action == "inject" && queueRecord?.payload.pendingID == item.id ? "Injecting…" : "Inject now") { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "inject", pendingID: item.id)) }
+                            if service.canRemoveQueuedRemote(globalID) {
+                                Button { service.sendRemoteCommand(globalID: globalID, command: DeviceCommandPayload(action: "removeQueued", pendingID: item.id)) } label: { Image(systemName: "xmark") }.help("Remove this queued message")
+                            }
                         }
                     }
                 }.font(.caption).padding(8).background(Color.accentColor.opacity(0.06)).disabled(offline || !hasLease || queueBusy)

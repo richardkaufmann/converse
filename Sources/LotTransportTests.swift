@@ -173,5 +173,32 @@ func lotTransportSelfTests(_ check: (Bool, String) -> Void) {
         check(batchLot.document.rows == initialBatch.document.rows, "One mobile Undo restores the complete batch")
         let forged = LotOperation(kind: .batch, operations: [LotOperation(kind: .replaceRows, rows: [])])
         check(try sendBatch(forged, snapshot: undoAck.snapshot, sequence: 3).contains { $0.kind == "lot.rejected" } && batchLot.document == undoAck.snapshot.document, "Home rejects batch-wrapped arbitrary replacement without changing saved data")
+
+        // A large reply crosses several encrypted transport chunks. Count one
+        // turnaround per edit/retry, and never count the retry as another save.
+        let timingLot = try home.parkingLibrary.create(name: "Timing fixture")
+        let timingRows = (0..<8).map { _ in ParkingLotRow(heading: false, text: String(repeating: "x", count: 10_000)) }
+        try timingLot.replaceUserRows(timingRows, revision: timingLot.document.revision)
+        let timingID = DeviceGlobalID(home: home.identity!.deviceID, session: timingLot.id).string
+        let (timingPeer, timingFrames) = try peer("Timing phone")
+        home.handleEnvelope(timingPeer, DeviceEnvelope(kind: "lease.acquire", sessionID: timingID))
+        let timingSnapshot = try JSONDecoder().decode(LotSnapshot.self, from: timingFrames().first { $0.kind == "lot.snapshot" }!.payload!)
+        let timingEdit = try LotEdit(snapshot: timingSnapshot, sequence: 1, operation: LotOperation(kind: .setDone, rowID: timingRows[0].id, done: true))
+        let timingEnvelope = DeviceEnvelope(kind: "lot.edit", boot: timingSnapshot.homeBoot, sessionID: timingID,
+            epoch: timingSnapshot.leaseEpoch, payload: try LotEditing.encoded(timingEdit))
+        let capture = PerformanceCapture.shared
+        capture.configure(folder: root.appendingPathComponent("timings"), enabled: true, sampleMainQueue: false)
+        defer { capture.configure(folder: root.appendingPathComponent("timings"), enabled: false, sampleMainQueue: false); capture.flushForTesting() }
+        home.handleEnvelope(timingPeer, timingEnvelope)
+        let timingAck = try timingFrames().first { $0.kind == "lot.edit.ack" }
+        check((try timingAck.map(DeviceFrame.encode)?.count ?? 0) > 60_000, "Lot timing fixture acknowledgment crosses encrypted chunks")
+        home.handleEnvelope(timingPeer, timingEnvelope)
+        check(try timingFrames().contains { $0.kind == "lot.edit.ack" }, "Timed duplicate edit still returns its saved acknowledgment")
+        capture.flushForTesting()
+        let timingDecoder = JSONDecoder(); timingDecoder.dateDecodingStrategy = .iso8601
+        let measured = try timingDecoder.decode(PerformanceCapture.Snapshot.self, from: Data(contentsOf: capture.file!))
+        check(measured.summaries["lotEditToAckProcessed"]?.count == 2 && measured.summaries["lotEditHandling"]?.count == 2
+              && measured.summaries["lotAckEncodeQueue"]?.count == 2 && measured.summaries["lotEditCommit"]?.count == 1,
+              "Lot timings count one completion per multi-chunk reply and one commit across a retry")
     } catch { check(false, "Lot transport fixture: " + error.localizedDescription) }
 }

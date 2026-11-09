@@ -7,6 +7,44 @@ enum BugReportPrivacy {
     static func summary(version: String, os: String, grouped: Bool, peers: Int, online: Int, sessions: Int, busy: Int) -> String {
         "\n\nDiagnostic summary (names and identifiers omitted):\nConverse: \(version)\nOS: \(os)\nIn a Group: \(grouped ? "yes" : "no")\nKnown peers: \(peers); online: \(online)\nLocal sessions: \(sessions); busy: \(busy)"
     }
+    struct ConfigurationSize: Codable {
+        let kind: String
+        let textBytes: Int
+        let imageCount: Int
+        let imageBytes: Int
+        let unavailableImageCount: Int
+    }
+    static func configurationSummary(_ items: [ConfigurationSize]) -> String {
+        let rows = Dictionary(uniqueKeysWithValues: items.enumerated().map { ("Item \($0.offset + 1)", $0.element) })
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let json = (try? encoder.encode(rows)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        return "\n\nInformation about the size of your configuration\nText sizes are UTF-8 bytes of retained message text, or lot text and comments. Images are unique files per item; missing sizes are counted separately. Names, paths, identifiers, drafts and contents are omitted. You can edit or remove this section.\n\n```json\n" + json + "\n```"
+    }
+    @MainActor static func configurationSummary(store: Store) -> String {
+        var sizes: [String: Int] = [:]
+        func item(_ kind: String, _ textBytes: Int, _ paths: [String]) -> ConfigurationSize {
+            var bytes = 0, missing = 0
+            let unique = Set(paths)
+            for path in unique {
+                let size: Int
+                if let cached = sizes[path] { size = cached }
+                else {
+                    size = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+                    sizes[path] = size
+                }
+                if size < 0 { missing += 1 } else { bytes += size }
+            }
+            return ConfigurationSize(kind: kind, textBytes: textBytes, imageCount: unique.count, imageBytes: bytes, unavailableImageCount: missing)
+        }
+        var items = store.sessions.map { session in
+            item(session.agent == nil ? "session" : "agent", session.messages.reduce(0) { $0 + $1.text.utf8.count }, session.messages.flatMap(\.images))
+        }
+        for lot in ParkingLotLibrary.shared.lots {
+            let rows = lot.document.rows
+            items.append(item("lot", rows.reduce(0) { $0 + $1.text.utf8.count + ($1.notes ?? []).reduce(0) { $0 + $1.text.utf8.count } }, rows.flatMap { $0.images ?? [] }))
+        }
+        return configurationSummary(items)
+    }
     static func scrub(_ text: String) -> String {
         let patterns = [
             #"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"#,
@@ -77,7 +115,9 @@ struct GitHubBugReport {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 570), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init()
         window.title = "Report a Converse bug · GitHub"; window.isReleasedWhenClosed = false; window.delegate = self
-        window.contentView = NSHostingView(rootView: BugReportView(report: report, completion: completion))
+        var draft = report
+        draft.body += BugReportPrivacy.configurationSummary(store: .shared)
+        window.contentView = NSHostingView(rootView: BugReportView(report: draft, completion: completion))
         window.center()
     }
     static func show(id: UUID = UUID(), report: GitHubBugReport, completion: @escaping (String) -> Void = { _ in }) {
@@ -104,17 +144,6 @@ private struct BugReportView: View {
             TextField("Title", text: $report.title).textFieldStyle(.roundedBorder).disabled(sending || receipt != nil)
             TextEditor(text: $report.body).font(.body).border(.secondary.opacity(0.3)).disabled(sending || receipt != nil)
             Text("Review what you’re sharing. No logs, attachments or other conversations are added automatically.").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Button("Add diagnostic summary") {
-                    let store = Store.shared, homes = Store.shared.participantService.participantHomes
-                    report.body += BugReportPrivacy.summary(version: ConverseAbout.versionBuild, os: ProcessInfo.processInfo.operatingSystemVersionString, grouped: store.participantService.currentGroup != nil, peers: homes.count, online: homes.filter { $0.online }.count, sessions: store.sessions.count, busy: store.sessions.filter { $0.busy }.count)
-                    status = "Added only versions and counts. Review below before submitting."
-                }.disabled(sending || receipt != nil)
-                Button("Remove likely secrets") {
-                    report.title = BugReportPrivacy.scrub(report.title); report.body = BugReportPrivacy.scrub(report.body)
-                    status = "Common secrets, email addresses, home paths and IPv4 addresses removed locally. This cannot guarantee anonymity; review the entire report."
-                }.disabled(sending || receipt != nil)
-            }
             Text(hasToken ? "GitHub token saved. Submit reports directly from Converse." : "Recommended: save a GitHub token once, then submit reports here.").font(.callout)
             HStack {
                 SecureField(hasToken ? "Replace GitHub token (optional)" : "Paste GitHub token", text: $tokenInput)
@@ -154,6 +183,7 @@ private struct BugReportView: View {
                                 defer { sending = false }
                                 do {
                                     let url = try await report.submit(token: token, api: AgentAPI()); receipt = url
+                                    FeedbackInvitation.shared.feedbackWasGiven()
                                     status = "Filed on GitHub."; completion("Bug report filed: " + url.absoluteString)
                                 } catch { status = error.localizedDescription; completion(status) }
                             }

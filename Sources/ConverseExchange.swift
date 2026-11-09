@@ -22,11 +22,17 @@ enum ConverseExchange {
     struct Scrub: Codable, Equatable { var applied: Bool; var counts: [String: Int] }
     struct MessageRecord: Codable, Equatable {
         var role: String; var text: String; var createdAt: String?; var images: [String]
-        init(role: String, text: String, createdAt: String?, images: [String]) { self.role = role; self.text = text; self.createdAt = createdAt; self.images = images }
+        /// Inject all parts (UTF-16 ranges of `text`). Optional: absent in
+        /// older files and for unmerged messages; older importers ignore it.
+        var components: [MessageComponent]? = nil
+        init(role: String, text: String, createdAt: String?, images: [String], components: [MessageComponent]? = nil) {
+            self.role = role; self.text = text; self.createdAt = createdAt; self.images = images; self.components = components
+        }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             role = try c.decode(String.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
             createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt); images = try c.decodeIfPresent([String].self, forKey: .images) ?? []
+            components = c.decodeComponents(forKey: .components)
         }
     }
     struct SessionRecord: Codable, Equatable {
@@ -92,7 +98,7 @@ enum ConverseExchange {
                     return row
                 }
                 // Untagged lots stay schema 2 so older importers still accept them.
-                lots.append(LotRecord(exportID: UUID(), name: clean(session.title), document: { var lotDocument = ParkingLotDocument(revision: document.revision, rows: rows); lotDocument.schemaVersion = rows.contains { $0.tag != nil } ? 3 : 2; return lotDocument }()))
+                lots.append(LotRecord(exportID: UUID(), name: clean(session.title), document: { var lotDocument = ParkingLotDocument(revision: document.revision, rows: rows); lotDocument.schemaVersion = ParkingLotDocument.schemaVersion(for: rows); return lotDocument }()))
                 continue
             }
             var messages: [MessageRecord] = []
@@ -101,7 +107,14 @@ enum ConverseExchange {
                 let text = Store.visibleText(message.text)
                 let images = message.images.compactMap(attach)
                 guard !text.isEmpty || !images.isEmpty else { continue }
-                messages.append(MessageRecord(role: message.role, text: clean(text), createdAt: message.createdAt.map(dateFormatter.string), images: images))
+                let exported = clean(text)
+                // Parts follow the scrubbed text; a scratch copy keeps the counts honest.
+                var probe = scrubber
+                let components = TranscriptStyle.components(message.components, from: message.text, to: exported) { piece in
+                    let visible = Store.visibleText(piece)
+                    return probe == nil ? visible : probe!.scrub(visible)
+                }
+                messages.append(MessageRecord(role: message.role, text: exported, createdAt: message.createdAt.map(dateFormatter.string), images: images, components: components))
             }
             records.append(SessionRecord(exportID: UUID(), title: clean(session.title), provider: clean(session.provider), engine: session.engine,
                                          kind: session.isAgent ? "agent" : "session", messages: messages, handoff: ProviderHandoff.noteText(session.handoff).map(clean)))
@@ -176,9 +189,33 @@ enum ConverseExchange {
     }
     /// Local image embeds in imported text become ordinary links, so Converse
     /// never copies a file from this Mac into the imported conversation.
+    /// Matches start only at a run's first `!` and never backtrack into it, so
+    /// a whole run (`!![x](/a.png)`) goes at once in one linear scan. Any line
+    /// the capture parser would still take (nested `![![x](/a.png)`, relative
+    /// file URLs) then loses every image marker, which no later pass can undo
+    /// because the parser needs `![` and references never span lines.
     static func neutralizeLocalImages(_ text: String) -> String {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
-        return expression.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
+        let embed = try! NSRegularExpression(pattern: #"(?<!!)!++\[([^\[\]\r\n]{0,512}+)\]\(\s*(<?\s*(?:file:|/|~))"#, options: [.caseInsensitive])
+        let marker = try! NSRegularExpression(pattern: #"(?<!!)!++\["#)
+        let result = embed.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "[$1]($2")
+        let remaining = TranscriptStyle.localImageReferences(result)
+        guard !remaining.isEmpty else { return result }
+        // Pick lines from the whole-text scan, which knows code fences; a line
+        // parsed alone would lose that context and edit code examples.
+        var lineStart = 0, affected = Set<Int>()
+        let lines = result.components(separatedBy: "\n")
+        var starts: [Int] = []
+        for line in lines { starts.append(lineStart); lineStart += (line as NSString).length + 1 }
+        for reference in remaining {
+            var low = 0, high = starts.count - 1
+            while low < high { let mid = (low + high + 1) / 2; if starts[mid] <= reference.range.location { low = mid } else { high = mid - 1 } }
+            affected.insert(low)
+        }
+        let neutral = lines.enumerated().map { index, line in
+            affected.contains(index) ? marker.stringByReplacingMatches(in: line, range: NSRange(location: 0, length: (line as NSString).length), withTemplate: "[") : line
+        }.joined(separator: "\n")
+        assert(TranscriptStyle.localImageReferences(neutral).isEmpty)
+        return neutral
     }
     static func unique(_ name: String, among taken: Set<String>, limit: Int) -> String {
         guard taken.contains(name) else { return name }
@@ -244,7 +281,9 @@ extension Store {
                     let images = try message.images.prefix(ConverseExchange.maxImagesPerMessage).compactMap { try writeImage($0, to: directory) }
                     let text = ConverseExchange.neutralizeLocalImages(message.text)
                     guard !text.isEmpty || !images.isEmpty else { return nil }
-                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt))
+                    // Imported parts are untrusted: ranges that do not tile the text render it all.
+                    let components = TranscriptStyle.components(message.components, from: message.text, to: text, rewrite: ConverseExchange.neutralizeLocalImages)
+                    return Message(role: message.role, text: text, images: images, createdAt: ConverseExchange.date(message.createdAt), imported: true, components: components)
                 }
                 if let note = ProviderHandoff.noteText(record.handoff) {
                     // The exported note travels as a record, so the late-bound provider starts from it.

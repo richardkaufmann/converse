@@ -47,7 +47,7 @@ installation. We need honest blockers, not invented setup steps.
 
 ## Known implementation boundaries for the primary reviewer
 
-- Repository remains private; no public release/TestFlight access is promised.
+- As of this October 31 review, the repository was not yet public and no public release/TestFlight access was promised.
 - Mac App Support onboarding ships; Windows onboarding is isolated-preview only.
 - Agent reasoning can use CLI logins or Meta API. CLI agent runs have native web
   and shell tools disabled. GitHub/session evidence is supplied by Converse.
@@ -58,7 +58,7 @@ installation. We need honest blockers, not invented setup steps.
   coalesce overdue intervals into one check, then wait the next interval. It is
   not installed in production yet. Paused queues/loops stay paused.
 - Help's topic IDs are native link targets. The first-session/first-agent/Group,
-  security, agents-and-project-scoreboards, jolly-mac and accounts IDs remain.
+  security, agents-assessments-and-portraits, jolly-mac and accounts IDs remain.
 
 ## Review received and revisions
 

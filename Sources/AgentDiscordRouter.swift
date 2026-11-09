@@ -256,7 +256,7 @@ struct DiscordMentionJournal: Codable {
                 var reply = request.reply ?? "Request ended without a reply."
                 if let hash = request.imageHash {
                     if targets.first(where: { $0.id == request.sessionID })?.agent?.discordShareScoreboard != true {
-                        reply = "Scoreboard sharing was turned off before delivery. No image was sent."
+                        reply = "Portrait sharing was turned off before delivery. No image was sent."
                     } else {
                         guard hash.count == 64, hash.allSatisfy({ $0.isHexDigit }) else { throw AgentFailure.message("Invalid saved Discord image.") }
                         let file = Self.file(store).deletingLastPathComponent().appendingPathComponent("Images/" + hash + ".png")

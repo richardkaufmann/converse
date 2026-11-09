@@ -74,10 +74,34 @@ class HelpContentTests(unittest.TestCase):
         self.assertIn('Actual help.', book['topics'][0]['markdown'])
 
     def test_source_commit_without_git_is_unknown(self):
-        with mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
-            self.assertEqual(generator.source_commit(root), 'unknown')
-        with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
-            self.assertEqual(generator.source_commit(root), 'unknown')
+        # A temporary folder has no stamp; a source archive's root would.
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
+                self.assertEqual(generator.source_commit(folder), 'unknown')
+            with mock.patch.object(generator.subprocess, 'run', side_effect=PermissionError('git')):
+                self.assertEqual(generator.source_commit(folder), 'unknown')
+
+    def test_source_archive_without_git_uses_stamped_commit(self):
+        stamped = 'a' * 40
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(generator.subprocess, 'run', side_effect=FileNotFoundError('git')):
+            Path(folder, 'SOURCE_COMMIT').write_text(stamped + '\n')
+            self.assertEqual(generator.source_commit(folder), stamped)
+            Path(folder, 'SOURCE_COMMIT').write_text('$Format:%H$\n')
+            self.assertEqual(generator.source_commit(folder), 'unknown', 'An unexpanded placeholder is not a commit')
+            Path(folder, 'SOURCE_COMMIT').write_text('not-a-commit\n')
+            self.assertEqual(generator.source_commit(folder), 'unknown')
+
+    def test_git_archive_stamps_source_commit(self):
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, capture_output=True)
+        if head.returncode != 0:
+            self.skipTest('not a git checkout')
+        archived = subprocess.run(['git', 'archive', 'HEAD', 'SOURCE_COMMIT'], cwd=root, capture_output=True)
+        self.assertEqual(archived.returncode, 0)
+        import io, tarfile
+        with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as tar:
+            content = tar.extractfile('SOURCE_COMMIT').read().decode().strip()
+        self.assertEqual(content, head.stdout.strip(), 'Source archives carry the commit they were made from')
 
     def test_readme_scoreboard_and_caption_are_excluded_from_help(self):
         source = (root / 'README.md').read_text()
@@ -91,6 +115,32 @@ class HelpContentTests(unittest.TestCase):
             self.assertNotIn('readme-only:', rendered)
             self.assertIn('It talks to the outside world.', rendered)
             self.assertIn('It has polish.', rendered)
+
+    def test_current_docs_and_menus_use_assessments_and_portraits(self):
+        readme = (root / 'README.md').read_text()
+        self.assertNotIn('## Agents and project scoreboards', readme)
+        self.assertIn('## Agents, assessments and portraits', readme)
+        self.assertNotIn('Numbers and scoreboards stay out of the art', readme)
+        ipad = (root / 'iPad/README.md').read_text()
+        self.assertNotIn('scoreboard cadence', ipad)
+        self.assertNotIn('flexible scoreboard', ipad)
+        self.assertNotIn('Text = "Scoreboard"',
+                         (root / 'windows/src/Converse.Windows/ConversationPane.xaml.cs').read_text())
+        self.assertNotIn('run once and scoreboard',
+                         (root / 'windows/src/Converse.Windows/ConversationPane.xaml').read_text())
+        self.assertNotIn('filename="scoreboard.png"', (root / 'Sources/AgentDiscord.swift').read_text())
+        self.assertNotIn('filename=\\"scoreboard.png\\"', (root / 'Sources/AgentDiscord.swift').read_text())
+        self.assertNotIn('optional scoreboard stay on the chosen home',
+                         (root / 'Sources/AgentUI.swift').read_text())
+
+    def test_removed_change_assistant_menu_name_stays_removed(self):
+        for relative in ('Sources/Workspace.swift', 'Sources/DeviceUI.swift',
+                         'README.md', 'docs/converse-export.md', 'docs/desktop-reference.md'):
+            with self.subTest(file=relative):
+                self.assertNotIn('Change Assistant or Login', (root / relative).read_text())
+        workspace = (root / 'Sources/Workspace.swift').read_text()
+        self.assertGreaterEqual(workspace.count('Button("Configure…")'), 2,
+                                'Agent and non-agent sidebar menus both keep a Configure route')
 
     def test_readme_only_blocks_preserve_surrounding_prose_and_code_examples(self):
         source = '# App\nBefore\n<!-- readme-only:start -->\n![Art](docs/art.jpg)\n\n*Caption*\n<!-- readme-only:end -->\nAfter\n```html\n<!-- readme-only:start -->\nExample\n<!-- readme-only:end -->\n```\n'
@@ -115,6 +165,106 @@ class HelpContentTests(unittest.TestCase):
             book = json.loads(output.read_text())
             self.assertEqual(book['sourceCommit'], 'unknown')
             self.assertEqual([topic['id'] for topic in book['topics']], ['overview', 'sending'])
+
+    def video_manifest(self):
+        return json.loads((root / 'docs/videos.json').read_text())
+
+    def test_video_manifest_schema(self):
+        manifest = self.video_manifest()
+        self.assertEqual(generator.video_errors(manifest), [])
+        videos = manifest['videos']
+        self.assertTrue(videos)
+        self.assertEqual(len({video['id'] for video in videos}), len(videos))
+        for video in videos:
+            with self.subTest(video=video['id']):
+                self.assertGreater(video['durationSeconds'], 0)
+                self.assertRegex(video['sha256'], r'^[0-9a-f]{64}$')
+                for key in ('mediaURL', 'posterURL'):
+                    self.assertTrue(video[key].startswith(generator.VIDEO_PREFIX))
+                    self.assertRegex(video[key].rsplit('/', 1)[1], r'-v[0-9]+\.[a-z0-9]+$')
+
+    def test_video_manifest_rejects_unsafe_entries(self):
+        good = self.video_manifest()['videos'][0]
+        cases = {
+            'duplicate id': [good, dict(good, mediaURL=good['mediaURL'].replace('-v1', '-v2'))],
+            'unversioned file': [dict(good, mediaURL=generator.VIDEO_PREFIX + 'converse-first-run.mp4')],
+            'other release': [dict(good, mediaURL=good['mediaURL'].replace('/help-videos/', '/v0.7.10/'))],
+            'signed redirect': [dict(good, mediaURL='https://objects.githubusercontent.com/converse-first-run-v1.mp4')],
+            'short hash': [dict(good, sha256='abc')],
+            'no duration': [dict(good, durationSeconds=0)],
+            'boolean duration': [dict(good, durationSeconds=True)],
+            'missing title': [{k: v for k, v in good.items() if k != 'title'}],
+            'insecure watch page': [dict(good, watchURL='http://example.com/watch')],
+        }
+        for name, videos in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(generator.video_errors({'schemaVersion': 1, 'videos': videos}))
+        self.assertTrue(generator.video_errors({'schemaVersion': 2, 'videos': []}))
+
+    def test_help_json_carries_videos_and_a_videos_topic(self):
+        videos = self.video_manifest()['videos']
+        book = generator.build_book((root / 'README.md').read_text(), videos=videos)
+        self.assertEqual(book['schemaVersion'], 1)
+        self.assertEqual(book['videos'], videos)
+        topics = {topic['id']: topic for topic in book['topics']}
+        self.assertEqual(len(topics), len(book['topics']))
+        topic = topics['videos']
+        self.assertEqual(topic['title'], 'Videos')
+        for video in videos:
+            with self.subTest(video=video['id']):
+                link = '[' + generator.watch_label(video) + '](' + video['mediaURL'] + ')'
+                self.assertIn(link, topic['markdown'])
+                self.assertIn(video['description'], topic['plainText'])
+                self.assertIn(video['helpTopic'], topics)
+                # The inline README link stays in the topic it belongs beside.
+                self.assertIn(link, topics[video['helpTopic']]['markdown'])
+        self.assertIn('work offline', topic['markdown'])
+        self.assertEqual(book['topics'][:-1], generator.build_book((root / 'README.md').read_text())['topics'])
+        self.assertNotIn('videos', generator.build_book('# App\nIntro.\n'))
+
+    def test_video_help_topic_must_exist(self):
+        video = dict(self.video_manifest()['videos'][0], helpTopic='missing-topic')
+        with self.assertRaises(SystemExit):
+            generator.build_book('# App\nIntro.\n', videos=[video])
+
+    def test_readme_video_links_match_the_manifest(self):
+        source = (root / 'README.md').read_text()
+        videos = {video['mediaURL']: video for video in self.video_manifest()['videos']}
+        links = re.findall(r'\[([^\]]+)\]\((' + re.escape(generator.VIDEO_PREFIX) + r'[^)\s]+)\)', source)
+        self.assertTrue(links)
+        for label, url in links:
+            with self.subTest(url=url):
+                self.assertIn(url, videos)
+                self.assertEqual(label, generator.watch_label(videos[url]))
+        self.assertIn(('\u25b6 Watch: First launch (25 s)', next(url for url, video in videos.items() if video['id'] == 'first-run')), links)
+        self.assertEqual(generator.duration_label(125.4), '2 min 5 s')
+
+    def test_build_reads_the_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'Content.json'
+            result = subprocess.run([sys.executable, str(root / 'scripts/build-help.py'), str(root / 'README.md'), '--out', str(output)],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            book = json.loads(output.read_text())
+            self.assertEqual([video['id'] for video in book['videos']], [video['id'] for video in self.video_manifest()['videos']])
+            self.assertEqual(book['topics'][-1]['id'], 'videos')
+
+    def test_help_does_not_describe_the_public_repository_as_private(self):
+        # "If the repository is private" in App Support's research prompt is about
+        # whichever repository is being read, so only this wording is stale.
+        stale = re.compile(r'sign-in required|this repository is private|sign into github with an authorized|private github readme|repository remains private', re.I)
+        generated = {'bin', 'obj', 'build', '.build', 'DerivedData'}
+        files = [root / 'README.md']
+        for folder in ('Sources', 'iPad', 'windows', 'linux', 'scripts', 'docs'):
+            files += [path for path in (root / folder).rglob('*')
+                      if path.suffix in {'.swift', '.cs', '.xaml', '.py', '.md', '.json', '.strings', '.xcstrings', '.html'}
+                      and path.is_file() and not generated.intersection(path.relative_to(root).parts)]
+        self.assertGreater(len(files), 100)
+        for path in files:
+            with self.subTest(path=str(path.relative_to(root))):
+                self.assertIsNone(stale.search(path.read_text(errors='ignore')))
+        for name in ('SetupHelp.swift', 'ConverseApp.swift'):
+            self.assertIn('Link("GitHub README", destination: ConverseAbout.readme)', (root / 'iPad/Converse' / name).read_text())
 
 
 if __name__ == '__main__':

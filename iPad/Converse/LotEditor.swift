@@ -39,6 +39,7 @@ struct EditableLotPane: View {
     @State private var exporting = false
     @State private var focus: UUID?
     @State private var caretRequest: (UUID, Int)?
+    @State private var editActivity: UInt64 = 0
     init(id: String, pane: Int, model: PadModel, initialSelection: Set<UUID> = []) {
         self.id = id; self.pane = pane; self.model = model; service = model.service
         _selected = State(initialValue: initialSelection); _selecting = State(initialValue: !initialSelection.isEmpty)
@@ -49,11 +50,10 @@ struct EditableLotPane: View {
     private var hierarchy: [UUID: ParkingLotTree.Node] { (try? ParkingLotTree.nodes(rows)) ?? [:] }
     private var labels: [UUID: String] {
         let nodes = hierarchy
-        var counts: [UUID?: Int] = [:], result: [UUID: String] = [:]
+        let numbers = ParkingLotTree.numbers(rows)
+        var result: [UUID: String] = [:]
         for row in rows where !row.heading {
-            let parent = nodes[row.id]?.parentID
-            counts[parent, default: 0] += 1
-            result[row.id] = ParkingLotTree.label(counts[parent]!, depth: nodes[row.id]?.depth ?? 1) + "."
+            result[row.id] = ParkingLotTree.label(numbers[row.id] ?? 1, depth: nodes[row.id]?.depth ?? 1) + "."
         }
         return result
     }
@@ -187,8 +187,10 @@ struct EditableLotPane: View {
                         Button("Take again") { service.releaseRemote(globalID: id); service.acquireRemote(globalID: id) }
                     }
                 } else if editor.draining { Label("Finishing saves…", systemImage: "pause.circle") }
-                else if editor.unconfirmedCount > 0 { Text("Saving \(editor.unconfirmedCount) change(s)… · home saved revision \(editor.saved.document.revision)") }
-                else { Label("Saved on home · revision \(editor.saved.document.revision)", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
+                else {
+                    LotSaveGauge(saved: editor.saved.document.rows, projected: editor.projected.rows,
+                        activity: editActivity, pending: editor.unconfirmedCount > 0)
+                }
             }
             if let notice = service.lotNotices[id] { Text(notice).foregroundStyle(.orange) }
             if let recovery = service.lotRecovery[id] {
@@ -225,7 +227,7 @@ struct EditableLotPane: View {
         HStack(alignment: .top, spacing: 5) {
             if expandable {
                 Button { model.toggleLotHeading(id, heading: row.id) } label: {
-                    Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").frame(width: 30, height: 44)
+                    Image(systemName: collapsed.contains(row.id) ? "chevron.right" : "chevron.down").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 44)
                 }.accessibilityLabel("Collapse or expand entry")
             } else { Color.clear.frame(width: 30, height: 1).accessibilityHidden(true) }
             VStack(alignment: .leading, spacing: 8) {
@@ -251,6 +253,11 @@ struct EditableLotPane: View {
                         },
                         returned: { range in splitEntry(row.id, at: range) },
                         emptyBackspace: { removeEmptyEntry(row.id) })
+                        // UIViewRepresentable otherwise supplies its bottom edge as the
+                        // baseline: an empty native editor then sits below its number.
+                        .alignmentGuide(.firstTextBaseline) { _ in
+                            UIFont.systemFont(ofSize: model.textSize(pane), weight: row.heading ? .semibold : .regular).ascender
+                        }
                 }
                 }
                 if !(row.images ?? []).isEmpty { LotThumbnailStrip(hashes: row.images ?? [], images: service.blobCache, open: { fullImage = $0 }) }
@@ -349,6 +356,7 @@ struct EditableLotPane: View {
         })
     }
     @discardableResult private func perform(_ operation: LotOperation, history: Bool = true) -> Bool {
+        editActivity &+= 1
         do {
             let before = rows
             let coalescing = operation.kind == .setText && editor?.pending.last?.kind == .setText && editor?.pending.last?.rowID == operation.rowID
@@ -655,7 +663,8 @@ enum LotEntryEditing {
             }
         }
         if !heading && parent == nil { parent = ParkingLotTree.parentForInsertion(at: index, in: rows, heading: false) }
-        let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parent)
+        let anchorRow = anchor.flatMap { id in rows.first { $0.id == id } }
+        let row = ParkingLotRow(heading: heading, text: "", parentID: heading ? nil : parent, indent: heading || anchorRow?.heading != false ? nil : anchorRow?.indent)
         rows.insert(row, at: index)
         _ = try ParkingLotTree.nodes(rows)
         let before = index + 1 < rows.count && (heading ? rows[index + 1].heading : tree[rows[index + 1].id]?.parentID == parent) ? rows[index + 1].id : nil
@@ -671,13 +680,13 @@ enum LotEntryEditing {
         let prefix = text.substring(to: selection.location), suffix = text.substring(from: NSMaxRange(selection))
         let parent = original.heading ? original.id : original.parentID
         if selection.length == 0 && selection.location == 0 && !text.isEqual(to: "") && !original.heading {
-            let blank = ParkingLotRow(heading: false, text: "", parentID: original.parentID)
+            let blank = ParkingLotRow(heading: false, text: "", parentID: original.parentID, indent: original.indent)
             rows.insert(blank, at: index)
             return Result(rows: rows, focus: original.id, operation: LotOperation(kind: .insert, row: blank, before: original.id, parentID: blank.parentID))
         }
         let destination = original.heading ? index + 1 : (ParkingLotTree.range(id, in: rows)?.upperBound ?? index + 1)
         rows[index].text = prefix
-        let next = ParkingLotRow(heading: false, text: suffix, parentID: parent)
+        let next = ParkingLotRow(heading: false, text: suffix, parentID: parent, indent: original.heading ? nil : original.indent)
         rows.insert(next, at: destination)
         _ = try ParkingLotTree.nodes(rows)
         let tree = try ParkingLotTree.nodes(rows)
@@ -686,6 +695,63 @@ enum LotEntryEditing {
         if prefix != original.text { operations.append(LotOperation(kind: .setText, rowID: id, text: prefix)) }
         operations.append(LotOperation(kind: .insert, row: next, before: before, parentID: parent))
         return Result(rows: rows, focus: next.id, operation: LotOperation(kind: .batch, operations: operations))
+    }
+}
+
+/// Net text still different from the acknowledged home copy, in user-visible
+/// characters. Replacements count the larger span; deletes count too. Structural
+/// changes are not represented as characters, and failures have their own notice.
+enum LotTextBacklog {
+    static func count(saved: [ParkingLotRow], projected: [ParkingLotRow]) -> Int {
+        var previous = Dictionary(uniqueKeysWithValues: saved.map { ($0.id, $0.text) })
+        var count = 0
+        for row in projected {
+            count += difference(previous.removeValue(forKey: row.id) ?? "", row.text)
+        }
+        return count + previous.values.reduce(0) { $0 + $1.count }
+    }
+    static func difference(_ before: String, _ after: String) -> Int {
+        guard before != after else { return 0 }
+        let a = Array(before), b = Array(after)
+        var prefix = 0, suffix = 0
+        while prefix < min(a.count, b.count), a[prefix] == b[prefix] { prefix += 1 }
+        while suffix < min(a.count, b.count) - prefix,
+              a[a.count - suffix - 1] == b[b.count - suffix - 1] { suffix += 1 }
+        return max(a.count, b.count) - prefix - suffix
+    }
+}
+
+struct LotSaveGauge: View {
+    let saved: [ParkingLotRow]
+    let projected: [ParkingLotRow]
+    let activity: UInt64
+    let pending: Bool
+    @State private var quietActivity: UInt64?
+    private var characters: Int { pending ? LotTextBacklog.count(saved: saved, projected: projected) : 0 }
+    var body: some View {
+        // Do not scan lot text on keystrokes while the gauge is hidden.
+        let count = quietActivity == activity ? characters : 0
+        // Reserve a small, fixed rail so acknowledgements never move the text.
+        HStack(spacing: 0) {
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.12))
+                Capsule().fill(Color.secondary.opacity(0.55))
+                    .frame(width: 4 + 52 * min(1, Double(count) / 100))
+            }
+            .frame(width: 56, height: 4)
+            .opacity(quietActivity == activity && count > 10 ? 1 : 0)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(count) characters waiting to save")
+            .accessibilityHidden(quietActivity != activity || count <= 10)
+            .accessibilityIdentifier("lot-save-backlog")
+            Spacer(minLength: 0)
+        }.frame(height: 6)
+        .task(id: activity) {
+            do { try await Task.sleep(for: .milliseconds(350)) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            quietActivity = activity
+        }
     }
 }
 
@@ -713,6 +779,8 @@ struct LotEntryText: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: LotEntryTextView, context: Context) {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextUpdate, measurement) }
         context.coordinator.parent = self
         view.accessibilityIdentifier = identifier; view.isEditable = editable; view.isSelectable = editable
         view.onEmptyBackspace = emptyBackspace
@@ -733,6 +801,8 @@ struct LotEntryText: UIViewRepresentable {
         if !view.wantsFocus && view.isFirstResponder { view.resignFirstResponder() }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: LotEntryTextView, context: Context) -> CGSize? {
+        let measurement = PerformanceCapture.shared.begin()
+        defer { PerformanceCapture.shared.end(.lotTextLayout, measurement) }
         guard let width = proposal.width, width > 0 else { return nil }
         return CGSize(width: width, height: max(font.lineHeight, uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height))
     }
@@ -741,17 +811,24 @@ struct LotEntryText: UIViewRepresentable {
         init(_ parent: LotEntryText) { self.parent = parent }
         func textViewDidBeginEditing(_ textView: UITextView) { parent.focusChanged(true) }
         func textViewDidEndEditing(_ textView: UITextView) { parent.focusChanged(false) }
-        func textViewDidChange(_ textView: UITextView) { parent.changed(textView.text); textView.invalidateIntrinsicContentSize() }
+        func textViewDidChange(_ textView: UITextView) {
+            if let view = textView as? LotEntryTextView {
+                PerformanceCapture.shared.end(.lotInputToChange, view.inputMeasurement); view.inputMeasurement = nil
+            }
+            parent.changed(textView.text); textView.invalidateIntrinsicContentSize()
+        }
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             guard parent.editable else { return false }
             if text == "\n", (textView as? LotEntryTextView)?.softReturn != true, textView.markedTextRange == nil {
                 parent.returned(range); return false
             }
+            (textView as? LotEntryTextView)?.inputMeasurement = PerformanceCapture.shared.begin()
             return true
         }
     }
 }
 final class LotEntryTextView: UITextView {
+    var inputMeasurement: PerformanceCapture.Span?
     var wantsFocus = false
     var softReturn = false
     var onEmptyBackspace: (() -> Void)?
