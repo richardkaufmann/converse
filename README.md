@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/converse-icon.png" width="160" alt="Converse robot logo">
+  <img src="docs/converse-banner.png" width="1200" alt="Converse robots and agents collaborate across Windows, Linux and Mac islands, with a Parking Lot, Checkboard, phone and tablet">
 </p>
 
 # Converse
