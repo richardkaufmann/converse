@@ -6,6 +6,8 @@
 
 Converse is one app for multiple, simultaneous conversations with the providers **Muse, Claude Code, and Codex**. From one pane of glass you can orchestrate projects across multiple systems (Mac, Linux, Windows) with a set of agents overseeing progress.
 
+Two organizing tools allow Converse to manage complex projects, from ideation through deployment and support: parking lots and checkboards.  Parking lots are where outlines of bugs, roadmaps and future ideas are set.  Checkboards (portmanteau of checklists and whiteboards) are used to automate implementation, test, and build processes.  Humans and AI tools actively read and edit both parking lots and checkboards.
+
 [▶ Watch: Converse in action (5 min 38 s)](https://github.com/richardkaufmann/converse/releases/download/help-videos/converse-overview-v1.mp4) — from your first conversation to a team building a project. The full walkthrough includes the new assessments and portraits. The [original three-minute hackathon demo](https://youtu.be/bSWs7vsioNI) is still available.
 
 **Try it:** [download the Mac release](https://github.com/richardkaufmann/converse/releases/latest) or [build from source](#build-and-run), open Converse, and your first “app control” session—**Converse App Support**—will ask you to pick **Meta Muse**, **OpenAI Codex** or **Anthropic Claude** as your first provider.
